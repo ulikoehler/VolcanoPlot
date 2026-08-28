@@ -1,0 +1,43 @@
+# Build artifacts
+/build/
+/build-*/
+/bin/
+/lib/
+
+# IDE / editor
+.cache/
+.vscode/
+.idea/
+*.swp
+*~
+compile_commands.json
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Vulkan-Hpp / VMA fetched
+dependencies/Vulkan-Hpp/
+dependencies/VulkanMemoryAllocator/
+dependencies/googletest/
+
+# Generated shaders (SPIR-V)
+shaders/*.spv
+shaders/**/*.spv
+
+# Output images
+*.png
+*.webp
+*.jpg
+*.exr
+!docs/**/*.png
+!tests/data/**/*.png
+
+# OS
+.DS_Store
+Thumbs.db
