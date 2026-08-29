@@ -95,61 +95,68 @@ if(PkgConfig_FOUND)
 endif()
 
 # -----------------------------------------------------------------------------
-# FetchContent: Vulkan-Hpp (C++ bindings), VMA, GoogleTest
+# FetchContent: only for deps not available as system packages.
+# Vulkan-Hpp is shipped with the Vulkan SDK / libvulkan-dev headers.
+# GoogleTest is available as libgtest-dev on Debian/Ubuntu.
+# VMA is pulled as a git submodule under dependencies/VulkanMemoryAllocator.
 # -----------------------------------------------------------------------------
 include(FetchContent)
 
-# Vulkan-Hpp — modern C++ bindings for Vulkan. Use the version matching the
-# installed Vulkan headers where possible; we pin a recent release.
-if(NOT TARGET Vulkan::Headers_only)
-    FetchContent_Declare(
-        VulkanHpp
-        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Hpp.git
-        GIT_TAG        v1.4.309
-        GIT_SHALLOW    TRUE
-    )
-    # Vulkan-Hpp is header-only for our purposes; we just need the include dir.
-    FetchContent_MakeAvailable(VulkanHpp)
+# VulkanMemoryAllocator (VMA) — git submodule
+set(VMA_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/VulkanMemoryAllocator")
+if(NOT EXISTS "${VMA_PATH}/include/vk_mem_alloc.h")
+    message(FATAL_ERROR
+        "Git submodule 'VulkanMemoryAllocator' is not initialized.\n"
+        "Please run: git submodule update --init")
 endif()
 
-# VulkanMemoryAllocator (VMA) — GPU memory allocation
-FetchContent_Declare(
-    VulkanMemoryAllocator
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDK/VulkanMemoryAllocator.git
-    GIT_TAG        v3.1.0
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(VulkanMemoryAllocator)
-
-# GoogleTest — for tests
+# GoogleTest — prefer system package, fall back to FetchContent.
 if(VOLCANO_BUILD_TESTS)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.15.2
-        GIT_SHALLOW    TRUE
-    )
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
+        # Try manual detection (libgtest-dev ships headers + .so but no config)
+        find_path(GTEST_INCLUDE_DIR NAMES gtest/gtest.h)
+        find_library(GTEST_LIBRARY NAMES gtest)
+        find_library(GTEST_MAIN_LIBRARY NAMES gtest_main)
+        if(GTEST_INCLUDE_DIR AND GTEST_LIBRARY AND GTEST_MAIN_LIBRARY)
+            add_library(GTest::gtest UNKNOWN IMPORTED)
+            set_target_properties(GTest::gtest PROPERTIES
+                IMPORTED_LOCATION "${GTEST_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
+            add_library(GTest::gtest_main UNKNOWN IMPORTED)
+            set_target_properties(GTest::gtest_main PROPERTIES
+                IMPORTED_LOCATION "${GTEST_MAIN_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
+            set(GTest_FOUND TRUE)
+        endif()
+    endif()
+    if(NOT GTest_FOUND)
+        message(STATUS "GTest not found on system; FetchContent'ing GoogleTest")
+        FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.15.2
+            GIT_SHALLOW    TRUE
+        )
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+    endif()
     enable_testing()
     include(GoogleTest)
 endif()
 
-# -----------------------------------------------------------------------------
-# Common include directories
-# -----------------------------------------------------------------------------
+# Use the dynamic dispatch loader so extension functions (debug messenger,
+# swapchain, etc.) are resolved at runtime via vkGet*ProcAddr.
+add_compile_definitions(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+# The storage for the dynamic dispatcher must be defined in exactly one TU.
+# We define it in Instance.cpp via VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE.
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/volcano
 )
 
-# VMA include
-include_directories(${vulkanmemoryallocator_SOURCE_DIR}/include)
-
-# Vulkan-Hpp include (from FetchContent)
-if(vulkanhpp_SOURCE_DIR)
-    include_directories(${vulkanhpp_SOURCE_DIR})
-endif()
+# VMA include (from submodule)
+include_directories(${VMA_PATH}/include)
 
 # -----------------------------------------------------------------------------
 # Component helper

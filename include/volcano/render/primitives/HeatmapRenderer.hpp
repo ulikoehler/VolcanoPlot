@@ -1,6 +1,7 @@
 // volcano/render/primitives/HeatmapRenderer.hpp — heatmap/KDE renderer (stub)
 #pragma once
 #include <volcano/core/Buffer.hpp>
+#include <volcano/plot/Transform.hpp>
 #include <volcano/core/Image.hpp>
 #include <volcano/plot/DataSeries.hpp>
 #include <volcano/plot/Colormap.hpp>

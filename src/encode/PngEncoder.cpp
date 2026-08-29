@@ -12,6 +12,13 @@ namespace volcano::encode {
 
 #ifdef VOLCANO_HAS_LIBPNG
 
+namespace {
+void pngWriteCb(png_structp png, png_bytep data, png_size_t len) {
+    auto* v = static_cast<std::vector<uint8_t>*>(png_get_io_ptr(png));
+    v->insert(v->end(), data, data + len);
+}
+} // namespace
+
 EncodeResult CpuPngEncoder::encode(std::span<const uint8_t> rgba, uint32_t width, uint32_t height) {
     EncodeResult res;
     png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
@@ -20,10 +27,9 @@ EncodeResult CpuPngEncoder::encode(std::span<const uint8_t> rgba, uint32_t width
     if (!info) { png_destroy_write_struct(&png, nullptr); res.error = "png_create_info_struct failed"; return res; }
 
     std::vector<uint8_t> out;
-    png_set_write_fn(png, &out, [](png_voidp io, png_bytep data, png_size_t len) {
-        auto* v = static_cast<std::vector<uint8_t>*>(io);
-        v->insert(v->end(), data, data + len);
-    }, nullptr);
+    png_set_write_fn(png, &out, pngWriteCb, nullptr);
+    // Suppress the warning about unused 'out' if libpng doesn't write
+    (void)out;
 
     if (setjmp(png_jmpbuf(png))) {
         png_destroy_write_struct(&png, &info);

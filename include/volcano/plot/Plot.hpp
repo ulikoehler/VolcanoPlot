@@ -30,6 +30,8 @@ public:
 };
 
 /// A Figure holds one or more Axes arranged in a grid.
+struct AxesPlacement { std::unique_ptr<Axes> axes; uint32_t r, c, rs, cs; };
+
 class Figure {
 public:
     Figure() = default;
@@ -47,8 +49,6 @@ public:
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
 
     void setTitle(std::string t) { style_.title.text = std::move(t); }
-
-    struct AxesPlacement { std::unique_ptr<Axes> axes; uint32_t r, c, rs, cs; };
 
 private:
     uint32_t rows_ = 1, cols_ = 1;

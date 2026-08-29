@@ -44,7 +44,7 @@ TEST(Figure, AddAxes) {
     Figure f(2, 2);
     auto* a = f.addAxes(0, 0);
     EXPECT_NE(a, nullptr);
-    f.layout(plot::Extent2D{800, 600});
+    f.layout(Extent2D{800, 600});
     EXPECT_GT(a->rect.width, 0u);
 }
 

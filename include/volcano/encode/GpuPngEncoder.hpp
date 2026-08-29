@@ -3,6 +3,8 @@
 
 #include "volcano/encode/ImageEncoder.hpp"
 
+#include <vk_mem_alloc.h>
+
 namespace volcano::encode {
 
 /// GPU PNG encoder. Performs PNG filtering (None/Sub/Up/Average/Paeth) on the

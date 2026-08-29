@@ -4,7 +4,7 @@
 #include <volcano/core/Allocator.hpp>
 
 #include <vulkan/vulkan.hpp>
-#include <vk_mem_alloc.hpp>
+#include <vk_mem_alloc.h>
 
 #include <cstddef>
 #include <span>

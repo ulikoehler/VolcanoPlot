@@ -31,7 +31,7 @@ vk::PresentModeKHR pickPresentMode(const std::vector<vk::PresentModeKHR>& modes)
 vk::Extent2D pickExtent(const vk::SurfaceCapabilitiesKHR& caps, SDL_Window* win) {
     if (caps.currentExtent.width != UINT32_MAX) return caps.currentExtent;
     int w, h;
-    SDL_Vulkan_GetDrawableSize(win, &w, &h);
+    SDL_GetWindowSizeInPixels(win, &w, &h);
     vk::Extent2D extent;
     extent.width = std::clamp<uint32_t>(w, caps.minImageExtent.width, caps.maxImageExtent.width);
     extent.height = std::clamp<uint32_t>(h, caps.minImageExtent.height, caps.maxImageExtent.height);

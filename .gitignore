@@ -21,9 +21,8 @@ CTestTestfile.cmake
 .ninja_deps
 .ninja_log
 
-# Vulkan-Hpp / VMA fetched
+# Vulkan-Hpp / VMA fetched (submodules are tracked by git)
 dependencies/Vulkan-Hpp/
-dependencies/VulkanMemoryAllocator/
 dependencies/googletest/
 
 # Generated shaders (SPIR-V)

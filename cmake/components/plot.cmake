@@ -22,5 +22,6 @@ set(VOLCANO_PLOT_SOURCES
 volcano_add_component(volcano_plot
     SOURCES ${VOLCANO_PLOT_SOURCES}
     PUBLIC_LINK volcano_core
+    PRIVATE_LINK volcano_render
     PUBLIC_INC include/volcano/plot
 )

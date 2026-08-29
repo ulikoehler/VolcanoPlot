@@ -1,5 +1,6 @@
 // volcano/render/GridRenderer.cpp
 #include "volcano/render/GridRenderer.hpp"
+#include <volcano/core/PipelineCache.hpp>
 #include <stdexcept>
 
 namespace volcano::render {
@@ -91,7 +92,7 @@ void GridRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vk::VertexInputBindingDescription bind{0, sizeof(float)*2, vk::VertexInputRate::eVertex};
     vk::VertexInputAttributeDescription attr{0, 0, vk::Format::eR32G32Sfloat, 0};
     vk::PipelineVertexInputStateCreateInfo visci;
-    visci.setVertexBindingStates(bind).setVertexAttributeStates(attr);
+    visci.setVertexBindingDescriptions(bind).setVertexAttributeDescriptions(attr);
 
     vk::PipelineInputAssemblyStateCreateInfo iaci;
     iaci.setTopology(vk::PrimitiveTopology::eTriangleList);

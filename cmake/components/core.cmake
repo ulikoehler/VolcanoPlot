@@ -21,7 +21,6 @@ volcano_add_component(volcano_core
     PUBLIC_LINK Vulkan::Vulkan
     PRIVATE_LINK
     PUBLIC_INC include/volcano/core
-    PRIVATE_INC ${vulkanmemoryallocator_SOURCE_DIR}/include
     PUBLIC_DEFS
         $<$<CONFIG:Debug>:$<$<BOOL:${VOLCANO_ENABLE_VALIDATION}>:VOLCANO_ENABLE_VALIDATION_LAYERS=1>>
 )

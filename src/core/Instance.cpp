@@ -5,7 +5,8 @@
 #include <format>
 #include <iostream>
 
-VULKAN_HPP_DEFAULT_DISPATCH_LOADER_CPP_STORAGE
+// Define the storage for the dynamic dispatcher in this TU.
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace volcano::core {
 
@@ -29,7 +30,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
 } // namespace
 
 Instance::Instance(const InstanceDesc& desc) {
-    // Loader — Vulkan-Hpp dynamic dispatcher.
+    // Initialize the dynamic dispatcher with the loader's vkGetInstanceProcAddr.
     VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
 
     uint32_t apiVersion = VK_API_VERSION_1_3;
@@ -103,10 +104,14 @@ Instance::Instance(const InstanceDesc& desc) {
         mci.setMessageSeverity(Sev::eError | Sev::eWarning | Sev::eInfo)
            .setMessageType(Type::eGeneral | Type::eValidation | Type::ePerformance)
            .setPfnUserCallback(debugCallback);
-        messenger_ = instance_.createDebugUtilsMessengerEXTUnique(mci);
+        messenger_ = instance_.get().createDebugUtilsMessengerEXT(mci);
     }
 }
 
-Instance::~Instance() = default;
+Instance::~Instance() {
+    if (messenger_ && instance_) {
+        instance_.get().destroyDebugUtilsMessengerEXT(messenger_);
+    }
+}
 
 } // namespace volcano::core

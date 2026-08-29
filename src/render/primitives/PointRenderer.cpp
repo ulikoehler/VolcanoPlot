@@ -104,7 +104,7 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
     };
 
     vk::PipelineVertexInputStateCreateInfo visci{};
-    visci.setVertexBindingStates(bindings).setVertexAttributeStates(attrs);
+    visci.setVertexBindingDescriptions(bindings).setVertexAttributeDescriptions(attrs);
 
     vk::PipelineInputAssemblyStateCreateInfo iaci{};
     iaci.setTopology(vk::PrimitiveTopology::ePointList);

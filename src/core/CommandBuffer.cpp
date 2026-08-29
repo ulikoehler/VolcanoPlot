@@ -33,8 +33,9 @@ OneTimeCommands::OneTimeCommands(vk::Device device, vk::CommandPool pool, vk::Qu
 
 OneTimeCommands::~OneTimeCommands() {
     cb_.end();
+    vk::CommandBuffer cmd = cb_.handle();
     vk::SubmitInfo si{};
-    si.setCommandBuffers(cb_.handle());
+    si.setCommandBuffers(cmd);
     queue_.submit(si);
     queue_.waitIdle();
 }

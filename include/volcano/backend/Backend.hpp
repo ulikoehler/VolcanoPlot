@@ -1,6 +1,7 @@
 // volcano/backend/Backend.hpp — backend interface + factory
 #pragma once
 
+#include <volcano/core/Instance.hpp>
 #include <volcano/core/Device.hpp>
 #include <volcano/core/Allocator.hpp>
 #include <volcano/core/CommandPool.hpp>

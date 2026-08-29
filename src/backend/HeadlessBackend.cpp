@@ -1,6 +1,7 @@
 // volcano/backend/HeadlessBackend.cpp
 #include "volcano/backend/HeadlessBackend.hpp"
 
+#include <volcano/core/Buffer.hpp>
 #include <volcano/core/CommandBuffer.hpp>
 
 #include <stdexcept>

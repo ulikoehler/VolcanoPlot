@@ -1,8 +1,8 @@
 // volcano/encode/ImageEncoder.hpp — image encoding interface
 #pragma once
 
-#include <vk_mem_alloc.h>
 #include <vulkan/vulkan.hpp>
+#include <vk_mem_alloc.h>
 
 #include <cstdint>
 #include <filesystem>

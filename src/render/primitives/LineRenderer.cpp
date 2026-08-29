@@ -1,5 +1,6 @@
 // volcano/render/primitives/LineRenderer.cpp
 #include "volcano/render/primitives/LineRenderer.hpp"
+#include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <stdexcept>
 
@@ -64,7 +65,7 @@ void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vk::VertexInputBindingDescription bind{0, sizeof(plot::Point2D), vk::VertexInputRate::eVertex};
     vk::VertexInputAttributeDescription attr{0, 0, vk::Format::eR32G32Sfloat, 0};
     vk::PipelineVertexInputStateCreateInfo visci;
-    visci.setVertexBindingStates(bind).setVertexAttributeStates(attr);
+    visci.setVertexBindingDescriptions(bind).setVertexAttributeDescriptions(attr);
 
     vk::PipelineInputAssemblyStateCreateInfo iaci;
     iaci.setTopology(vk::PrimitiveTopology::eLineStrip);

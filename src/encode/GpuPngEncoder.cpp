@@ -1,5 +1,6 @@
 // volcano/encode/GpuPngEncoder.cpp
 #include "volcano/encode/GpuPngEncoder.hpp"
+#include "volcano/encode/PngEncoder.hpp"
 
 #include <fstream>
 

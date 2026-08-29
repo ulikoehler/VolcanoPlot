@@ -1,4 +1,5 @@
 // volcano/core/Allocator.cpp
+#define VMA_IMPLEMENTATION
 #include "volcano/core/Allocator.hpp"
 
 namespace volcano::core {

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <volcano/core/Buffer.hpp>
+#include <volcano/plot/Transform.hpp>
 #include <volcano/core/ShaderModule.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/plot/DataSeries.hpp>

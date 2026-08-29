@@ -41,7 +41,7 @@ public:
 
 private:
     vk::UniqueInstance instance_;
-    vk::UniqueDebugUtilsMessengerEXT messenger_;
+    vk::DebugUtilsMessengerEXT messenger_;  // raw handle, destroyed manually
     bool validation_ = false;
     std::vector<std::string> enabledExtensions_;
 };

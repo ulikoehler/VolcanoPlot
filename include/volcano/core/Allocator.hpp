@@ -2,12 +2,7 @@
 #pragma once
 
 #include <vulkan/vulkan.hpp>
-
-// VMA defines implement_stb in a single TU; we set it here.
-#define VMA_IMPLEMENTATION
-#include <vk_mem_alloc.hpp>
-
-#include <memory>
+#include <vk_mem_alloc.h>
 
 namespace volcano::core {
 

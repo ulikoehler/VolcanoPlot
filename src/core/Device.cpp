@@ -50,10 +50,14 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc)
         queueCis.push_back(qci);
     }
 
+    // Convert layer names to const char*
+    std::vector<const char*> layers;
+    for (const auto& l : desc.layers) layers.push_back(l.c_str());
+
     vk::DeviceCreateInfo ci{};
     ci.setQueueCreateInfos(queueCis)
        .setPEnabledExtensionNames(exts)
-       .setPEnabledLayerNames(desc.layers);
+       .setPEnabledLayerNames(layers);
 
     // Use Features2 chain if provided, else basic features.
     if (desc.pNextChain) {
