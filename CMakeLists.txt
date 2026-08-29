@@ -125,6 +125,31 @@ else()
     message(WARNING "FreeType not found — text rendering disabled")
 endif()
 
+# HarfBuzz — text shaping for glyb-based text rendering
+if(PkgConfig_FOUND)
+    pkg_check_modules(HARFBUZZ IMPORTED_TARGET harfbuzz QUIET)
+endif()
+if(NOT HARFBUZZ_FOUND)
+    find_path(HARFBUZZ_INCLUDE_DIR NAMES hb.h)
+    find_library(HARFBUZZ_LIBRARY NAMES harfbuzz)
+    if(HARFBUZZ_INCLUDE_DIR AND HARFBUZZ_LIBRARY)
+        set(HARFBUZZ_FOUND TRUE)
+    endif()
+endif()
+if(HARFBUZZ_FOUND)
+    set(VOLCANO_HAS_HARFBUZZ ON)
+    if(TARGET PkgConfig::HARFBUZZ)
+        set(VOLCANO_HARFBUZZ_LINK PkgConfig::HARFBUZZ)
+    else()
+        set(VOLCANO_HARFBUZZ_LINK ${HARFBUZZ_LIBRARY})
+    endif()
+    message(STATUS "HarfBuzz found — glyb text shaping enabled")
+else()
+    set(VOLCANO_HAS_HARFBUZZ OFF)
+    set(VOLCANO_HARFBUZZ_LINK "")
+    message(WARNING "HarfBuzz not found — glyb text shaping disabled")
+endif()
+
 # -----------------------------------------------------------------------------
 # FetchContent: only for deps not available as system packages.
 # Vulkan-Hpp is shipped with the Vulkan SDK / libvulkan-dev headers.
@@ -189,6 +214,19 @@ include_directories(
 # VMA include (from submodule)
 include_directories(${VMA_PATH}/include)
 
+# glyb — git submodule (text rendering library)
+set(GLYB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glyb")
+if(NOT EXISTS "${GLYB_PATH}/src/glyph.h")
+    message(FATAL_ERROR
+        "Git submodule 'glyb' is not initialized.\n"
+        "Please run: git submodule update --init")
+endif()
+if(NOT EXISTS "${GLYB_PATH}/third_party/glm/glm/glm.hpp")
+    message(FATAL_ERROR
+        "Git submodule 'glyb/third_party/glm' is not initialized.\n"
+        "Please run: git submodule update --init --recursive dependencies/glyb")
+endif()
+
 # -----------------------------------------------------------------------------
 # Component helper
 # -----------------------------------------------------------------------------
@@ -205,6 +243,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/backend.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/render.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/encode.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
 
 # -----------------------------------------------------------------------------

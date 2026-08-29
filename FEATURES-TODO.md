@@ -168,7 +168,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ---
 
 ## 5. Text and Annotations
-- [x] `title`, `suptitle`, `figtext`, `xlabel`, `ylabel` (data model: [x], rendering: [x] — vectorized)
+- [x] `title`, `suptitle`, `figtext`, `xlabel`, `ylabel` (data model: [x], rendering: [x] — glyb bitmap atlas)
 - [ ] `text`, `figtext`, `annotate`
 - [x] `tick_params`, `set_xticklabels`, `set_yticklabels` (auto tick labels: [x])
 - [ ] `Annotation` with `arrowprops` / `FancyArrowPatch`
@@ -179,10 +179,11 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Font properties: family, weight, style, size, color (FontProperties struct)
 - [ ] Font properties: rotation, alignment
 
-### 5.1 Text Rendering Limitations (current vectorized implementation)
-- [-] Hole bridging for glyphs with holes (O, A, B, etc.) — currently each
-      contour is ear-clipped independently, so holes are filled. Need to
-      bridge holes into the outer contour with degenerate edges.
+### 5.1 Text Rendering (glyb bitmap atlas)
+- [x] Hole bridging for glyphs with holes (O, A, B, etc.) — resolved by
+      switching from vectorized triangulation to glyb's FreeType span
+      rasterizer, which correctly handles the even-odd fill rule.
+- [x] HarfBuzz text shaping (kerning, ligatures, RTL/CJK ready)
 - [-] Y-axis label rotation — currently drawn horizontally to the left of
       the axes. Need 90° rotation (either via vertex transform or per-glyph
       rotation in the vertex builder).
@@ -193,7 +194,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [ ] Text layout engine (word wrap, justified text for legends/annotations)
 - [ ] Subpixel positioning (currently snapped to integer pixel coords)
 - [ ] Font subsetting for large character sets (currently loads all ASCII)
-- [ ] CJK / RTL text shaping (requires HarfBuzz integration)
+- [ ] CJK / RTL text shaping (HarfBuzz integrated, needs testing with CJK fonts)
 
 ---
 

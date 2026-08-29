@@ -42,7 +42,7 @@ sudo apt-get install -y libvulkan-dev libsdl3-dev libshaderc-dev glslang-dev \
     libpng-dev libwebp-dev
 ```
 
-Optional: `libfreetype-dev` (for text rendering).
+Optional: `libfreetype-dev` and `libharfbuzz-dev` (for text rendering via glyb).
 
 ## Architecture
 
@@ -53,7 +53,7 @@ Optional: `libfreetype-dev` (for text rendering).
 - `volcano_render` — Render passes, pipelines, MSAA, primitive renderers
 - `volcano_plot` — Plot data model, axes, transforms, styles, plot types
 - `volcano_encode` — GPU-side image encoding (PNG/WebP via compute) + CPU fallback
-- `volcano_text` — Vectorized text rendering (FreeType outline decomposition → triangulated meshes)
+- `volcano_text` — Bitmap atlas text rendering via glyb (FreeType + HarfBuzz)
 
 ### Key Design Patterns
 
@@ -87,36 +87,36 @@ Optional: `libfreetype-dev` (for text rendering).
 - **GPU-side KDE** — stream samples to GPU, evaluate kernel density into grid
 - **GPU-side image encoding** — PNG filtering via compute shader
 
-### Text Rendering (Vectorized)
+### Text Rendering (glyb Bitmap Atlas)
 
-Text is rendered as **filled triangle meshes** (not rasterized bitmaps):
-glyphs scale perfectly at any resolution with no pixelation.
+Text is rendered using the [glyb](https://github.com/larkmjc/glyb) library,
+which uses FreeType for glyph rasterization and HarfBuzz for text shaping.
+Glyphs are rasterized on-demand into a bitmap font atlas (grayscale, 1024x1024),
+uploaded to a Vulkan texture, and rendered as textured quads.
 
-1. **Font loading** — FreeType loads TTF/OTF files. `findSystemFont()`
-   searches common Linux font directories, preferring regular variants.
-2. **Outline decomposition** — FreeType's `FT_Outline_Decompose` walks
-   the glyph outline, calling `move_to`/`line_to`/`conic_to`/`cubic_to`
-   callbacks. Bezier curves are flattened to line segments (8 steps for
-   quadratic, 12 for cubic).
-3. **Triangulation** — Ear-clipping algorithm converts contour polylines
-   to triangle fans. Holes (CW contours) are reversed to CCW.
-   TODO: proper hole bridging for glyphs like O, A, B.
-4. **GPU rendering** — `TextRenderer` builds a vertex buffer of all glyph
-   triangles for a string, offset to the screen position, and draws them
-   as a single `vkCmdDraw` call. Uses a ring-buffer scratch VB to avoid
-   per-frame allocation.
+1. **Font loading** — glyb's `font_manager_ft` loads TTF/OTF files via FreeType.
+   `findSystemFontFile()` searches common Linux font directories for DejaVu Sans.
+2. **Text shaping** — HarfBuzz (`text_shaper_hb`) shapes text segments, producing
+   glyph indices and positions (kerning, ligatures, etc.).
+3. **Glyph rasterization** — FreeType's `FT_Outline_Render` with span callbacks
+   rasterizes each glyph into the font atlas bitmap. This correctly handles
+   glyph holes (o, 0, A, etc.) via the even-odd fill rule.
+4. **Atlas upload** — `prepareAtlas()` pre-renders all ASCII glyphs and uploads
+   the atlas bitmap to a Vulkan R8_UNORM texture using a one-time command buffer
+   (outside any render pass).
+5. **GPU rendering** — `TextRenderer::draw()` shapes and renders text into a
+   `draw_list`, converts glyb vertices to Vulkan vertices (pos, uv, color),
+   uploads to scratch VB/IB, and draws as textured quads with alpha blending.
 
 **Key files:**
-- `include/volcano/text/Font.hpp` — Font class, GlyphInfo/GlyphMesh structs
-- `src/text/Font.cpp` — FreeType outline decomposition + ear-clip triangulation
-- `include/volcano/text/GlyphAtlas.hpp` — Stores triangulated glyphs by codepoint
-- `src/text/GlyphAtlas.cpp` — Builds atlas from Font
-- `include/volcano/text/TextRenderer.hpp` — GPU pipeline + scratch VB
-- `src/text/TextRenderer.cpp` — Vertex generation, push constants, draw calls
+- `include/volcano/text/TextRenderer.hpp` — GPU pipeline, atlas texture, draw API
+- `src/text/TextRenderer.cpp` — glyb integration, vertex conversion, Vulkan draw
+- `src/text/glyb_msdf_stub.cpp` — Stub for unused MSDF renderer vtable
+- `cmake/components/glyb.cmake` — Builds glyb core as static library
+- `dependencies/glyb/` — glyb git submodule (with glm submodule)
 
-**Coordinate mapping:** Font-space is Y-up (origin at baseline). Screen-space
-is Y-down (top-left origin). Mapping: `screenX = penX + vx * scale`,
-`screenY = penY - vy * scale`.
+**Coordinate mapping:** glyb uses pixel coordinates with Y-down (top-left origin).
+The vertex shader converts pixel coords to Vulkan NDC: `ndc = pos / resolution * 2 - 1`.
 
 **Tick computation:** `Renderer::drawText()` uses a nice-number auto-locator
 (1/2/5 × 10^k steps) and auto-formatter (%.0f, %.1f, %.2f, %.1e). Tick

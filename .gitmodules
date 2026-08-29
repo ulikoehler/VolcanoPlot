@@ -1,3 +1,6 @@
 [submodule "dependencies/VulkanMemoryAllocator"]
 	path = dependencies/VulkanMemoryAllocator
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "dependencies/glyb"]
+	path = dependencies/glyb
+	url = https://github.com/larkmjc/glyb.git

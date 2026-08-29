@@ -7,8 +7,6 @@
 #include <volcano/render/GridRenderer.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
-#include <volcano/text/GlyphAtlas.hpp>
-#include <volcano/text/Font.hpp>
 
 #include <volcano/plot/Plot.hpp>
 
@@ -41,16 +39,11 @@ private:
     GridRenderer gridRenderer_;
     primitives::SpineRenderer spineRenderer_;
     text::TextRenderer textRenderer_;
-    std::shared_ptr<text::GlyphAtlas> glyphAtlas_;
-    text::Font font_;
     bool gridInited_ = false;
     bool textInited_ = false;
     bool spineInited_ = false;
-    bool atlasBuilt_ = false;
+    bool textReady_ = false;
     bool prepared_ = false;
-
-    /// Build the glyph atlas with ASCII + common characters.
-    void buildGlyphAtlas();
 
     /// Draw axis labels, tick labels, and title for one axes.
     void drawText(vk::CommandBuffer cmd, const plot::Axes& axes,

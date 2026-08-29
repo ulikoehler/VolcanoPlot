@@ -14,3 +14,8 @@ add_executable(example_volcano_plot volcano_plot.cpp)
 target_link_libraries(example_volcano_plot PRIVATE
     volcano_backend volcano_render volcano_plot volcano_text volcano_encode
 )
+
+add_executable(example_showcase showcase.cpp)
+target_link_libraries(example_showcase PRIVATE
+    volcano_backend volcano_render volcano_plot volcano_text volcano_encode
+)

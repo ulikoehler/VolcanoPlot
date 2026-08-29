@@ -45,17 +45,6 @@ std::string formatTick(float v) {
     return std::format("{:.2f}", v);
 }
 
-/// ASCII printable characters + common Unicode for tick labels.
-/// We include basic ASCII (32–126) which covers all digits, letters,
-/// punctuation, and symbols needed for axis labels.
-std::u32string asciiCodepoints() {
-    std::u32string cps;
-    for (char32_t c = 32; c <= 126; ++c) {
-        cps.push_back(c);
-    }
-    return cps;
-}
-
 } // namespace
 
 Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {
@@ -72,26 +61,6 @@ Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {
 }
 
 Renderer::~Renderer() = default;
-
-void Renderer::buildGlyphAtlas() {
-    if (atlasBuilt_) return;
-    // Load a system font.
-    auto path = text::findSystemFont("DejaVuSans");
-    if (path.empty()) {
-        // Fallback: try any TTF in common directories.
-        path = text::findSystemFont("DejaVu");
-    }
-    if (path.empty()) {
-        return;  // No font available — text rendering disabled.
-    }
-    font_ = text::Font(path, 16.0f);
-    if (!font_.valid()) return;
-
-    glyphAtlas_ = std::make_shared<text::GlyphAtlas>();
-    glyphAtlas_->build(font_, asciiCodepoints());
-    textRenderer_.setAtlas(glyphAtlas_);
-    atlasBuilt_ = true;
-}
 
 void Renderer::prepare(plot::Figure& figure) {
     auto& ctx = backend_.context();
@@ -110,6 +79,10 @@ void Renderer::prepare(plot::Figure& figure) {
                            backend_.renderPass(), backend_.sampleCount(),
                            *pipelineCache_, *descriptorPool_);
         textInited_ = true;
+        // Pre-render ASCII glyphs and upload atlas texture.
+        textRenderer_.prepareAtlas(ctx.device.graphicsQueue(),
+                                   ctx.graphicsPool.handle());
+        textReady_ = true;
     }
     // Init spine renderer once.
     if (!spineInited_) {
@@ -118,7 +91,6 @@ void Renderer::prepare(plot::Figure& figure) {
                             *pipelineCache_, *descriptorPool_);
         spineInited_ = true;
     }
-    buildGlyphAtlas();
 
     for (auto& p : figure.placements()) {
         p.axes->autoscale();
@@ -131,7 +103,7 @@ void Renderer::prepare(plot::Figure& figure) {
 
 void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                         plot::Rect2D rect) {
-    if (!atlasBuilt_) return;
+    if (!textReady_) return;
 
     const auto& style = axes.style();
     // Skip text rendering if axes are not visible (e.g. flat test style).
@@ -235,7 +207,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
 
 void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                           plot::Rect2D rect) {
-    if (!spineInited_ || !atlasBuilt_) return;
+    if (!spineInited_ || !textReady_) return;
     const auto& style = axes.style();
     if (!style.legend.visible) return;
 
@@ -331,7 +303,7 @@ void Renderer::renderFrame(plot::Figure& figure) {
         drawSpines(cmd, *p.axes, rect);
 
         // Draw text (axis labels, tick labels, title).
-        if (textInited_ && atlasBuilt_) {
+        if (textInited_ && textReady_) {
             drawText(cmd, *p.axes, rect);
         }
 
@@ -346,7 +318,7 @@ void Renderer::renderFrame(plot::Figure& figure) {
 
 void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                             plot::Rect2D rect) {
-    if (!spineInited_ || !atlasBuilt_) return;
+    if (!spineInited_ || !textReady_) return;
     const auto& style = axes.style();
     if (!style.colorbar.visible) return;
 
