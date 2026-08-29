@@ -24,6 +24,8 @@ int main() {
     auto* axes = figure.addAxes();
     axes->setStyle(plot::styles::seabornStyle());
     axes->setTitle("Headless Scatter Demo");
+    axes->style().xAxis.label = "X Axis";
+    axes->style().yAxis.label = "Y Axis";
 
     std::mt19937 rng(42);
     std::normal_distribution<float> dist(0, 1);

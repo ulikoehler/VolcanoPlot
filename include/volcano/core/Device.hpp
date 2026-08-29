@@ -15,6 +15,7 @@ struct DeviceDesc {
     std::vector<std::string> layers;
     vk::PhysicalDeviceFeatures2 features{};
     void* pNextChain = nullptr; // for feature chains (Vulkan 1.2+)
+    bool hasSurface = true;     // if false, don't auto-add swapchain extension
 };
 
 class Device {

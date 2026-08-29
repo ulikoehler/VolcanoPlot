@@ -20,6 +20,7 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
+    [[nodiscard]] Color legendColor() const override { return color_; }
 
     /// Re-evaluate the function on the GPU for the current viewport.
     /// Called when the viewport changes (infinite zoom).

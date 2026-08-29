@@ -35,6 +35,7 @@ HeadlessBackend::HeadlessBackend(const BackendDesc& desc) : desc_(desc) {
     }
 
     core::DeviceDesc ddesc{};
+    ddesc.hasSurface = false;
     ctx_.device = core::Device(ctx_.physical, ddesc);
     ctx_.allocator = core::Allocator(ctx_.instance.handle(), ctx_.physical.handle(), ctx_.device.handle());
     ctx_.graphicsPool = core::CommandPool(ctx_.device.handle(), ctx_.device.graphicsFamily(),
@@ -54,6 +55,8 @@ HeadlessBackend::~HeadlessBackend() {
 
 void HeadlessBackend::createRenderPass() {
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
+    depthFormat_ = findDepthFormat(ctx_.physical.handle());
+
     vk::AttachmentDescription colorAtt{};
     colorAtt.setFormat(colorFormat_)
         .setSamples(samples_)
@@ -74,29 +77,55 @@ void HeadlessBackend::createRenderPass() {
         .setInitialLayout(vk::ImageLayout::eUndefined)
         .setFinalLayout(vk::ImageLayout::eTransferSrcOptimal);
 
+    vk::AttachmentDescription depthAtt{};
+    depthAtt.setFormat(depthFormat_)
+        .setSamples(samples_)
+        .setLoadOp(vk::AttachmentLoadOp::eClear)
+        .setStoreOp(vk::AttachmentStoreOp::eDontCare)
+        .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+        .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+        .setInitialLayout(vk::ImageLayout::eUndefined)
+        .setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
     vk::AttachmentReference colorRef{};
     colorRef.setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
     vk::AttachmentReference resolveRef{};
     resolveRef.setAttachment(1).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
 
+    // Depth attachment reference index depends on whether resolve is present.
+    uint32_t depthIdx = msaa ? 2 : 1;
+    vk::AttachmentReference depthRef{};
+    depthRef.setAttachment(depthIdx).setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
     vk::SubpassDescription sub{};
     sub.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-       .setColorAttachments(colorRef);
+       .setColorAttachments(colorRef)
+       .setPDepthStencilAttachment(&depthRef);
     if (msaa) sub.setResolveAttachments(resolveRef);
 
-    vk::SubpassDependency dep{};
-    dep.setSrcSubpass(VK_SUBPASS_EXTERNAL)
+    vk::SubpassDependency deps[2];
+    deps[0].setSrcSubpass(VK_SUBPASS_EXTERNAL)
        .setDstSubpass(0)
-       .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
-       .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+       .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput
+                      | vk::PipelineStageFlagBits::eEarlyFragmentTests)
+       .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput
+                      | vk::PipelineStageFlagBits::eEarlyFragmentTests)
        .setSrcAccessMask(vk::AccessFlagBits::eNone)
-       .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite);
+       .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite
+                       | vk::AccessFlagBits::eDepthStencilAttachmentWrite);
+    deps[1].setSrcSubpass(0)
+       .setDstSubpass(VK_SUBPASS_EXTERNAL)
+       .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+       .setDstStageMask(vk::PipelineStageFlagBits::eTransfer)
+       .setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
+       .setDstAccessMask(vk::AccessFlagBits::eTransferRead);
 
     std::vector<vk::AttachmentDescription> atts = { colorAtt };
     if (msaa) atts.push_back(resolveAtt);
+    atts.push_back(depthAtt);
 
     vk::RenderPassCreateInfo ci{};
-    ci.setAttachments(atts).setSubpasses(sub).setDependencies(dep);
+    ci.setAttachments(atts).setSubpasses(sub).setDependencies(deps);
     renderPass_ = ctx_.device.handle().createRenderPassUnique(ci);
 }
 
@@ -139,9 +168,29 @@ void HeadlessBackend::createFramebuffer() {
         msaaView_ = ctx_.device.handle().createImageViewUnique(mvi);
     }
 
+    // Depth image (matches sample count for MSAA).
+    if (depthFormat_ != vk::Format::eUndefined) {
+        core::ImageDesc ddesc{};
+        ddesc.format = depthFormat_;
+        ddesc.extent = extent_;
+        ddesc.samples = samples_;
+        ddesc.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        depthImage_ = core::Image(ctx_.allocator.handle(), ddesc);
+        vk::ImageViewCreateInfo dvi{};
+        dvi.setImage(depthImage_.handle())
+           .setViewType(vk::ImageViewType::e2D)
+           .setFormat(depthFormat_)
+           .setSubresourceRange(vk::ImageSubresourceRange{}
+               .setAspectMask(vk::ImageAspectFlagBits::eDepth)
+               .setBaseMipLevel(0).setLevelCount(1)
+               .setBaseArrayLayer(0).setLayerCount(1));
+        depthView_ = ctx_.device.handle().createImageViewUnique(dvi);
+    }
+
     std::vector<vk::ImageView> attachments;
     if (msaa) attachments = { msaaView_.get(), colorView_.get() };
     else      attachments = { colorView_.get() };
+    if (depthView_) attachments.push_back(depthView_.get());
 
     vk::FramebufferCreateInfo ci{};
     ci.setRenderPass(renderPass_.get())
@@ -168,8 +217,9 @@ vk::CommandBuffer HeadlessBackend::beginFrame() {
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cb.begin(bi);
 
-    std::array<vk::ClearValue, 1> clears{};
+    std::array<vk::ClearValue, 2> clears{};
     clears[0].color.setFloat32({1.0f, 1.0f, 1.0f, 1.0f});
+    clears[1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPass_.get())
        .setFramebuffer(framebuffer_.get())
@@ -198,9 +248,6 @@ std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
     auto queue = ctx_.device.graphicsQueue();
     auto pool = ctx_.graphicsPool.handle();
 
-    // Transition color image to transfer src.
-    // (Already in eTransferSrcOptimal per render pass final layout.)
-
     // Create a host-visible staging buffer.
     vk::DeviceSize size = vk::DeviceSize(extent_.width) * extent_.height * 4;
     core::BufferDesc bdesc{};
@@ -211,19 +258,41 @@ std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
     core::Buffer staging(ctx_.allocator.handle(), bdesc);
 
     // Copy image → buffer via a one-time command buffer.
-    core::OneTimeCommands cmd(dev, pool, queue);
-    vk::BufferImageCopy region{};
-    region.setBufferOffset(0)
-          .setBufferRowLength(extent_.width)
-          .setBufferImageHeight(extent_.height)
-          .setImageSubresource(vk::ImageSubresourceLayers{}
-              .setAspectMask(vk::ImageAspectFlagBits::eColor)
-              .setMipLevel(0).setBaseArrayLayer(0).setLayerCount(1))
-          .setImageOffset({0,0,0})
-          .setImageExtent({extent_.width, extent_.height, 1});
-    cmd.handle().copyImageToBuffer(colorImage_.handle(),
-                                   vk::ImageLayout::eTransferSrcOptimal,
-                                   staging.handle(), region);
+    // The color image is already in eTransferSrcOptimal (render pass final layout).
+    {
+        core::OneTimeCommands cmd(dev, pool, queue);
+
+        // Ensure render pass writes are visible to the transfer read.
+        vk::ImageMemoryBarrier barrier{};
+        barrier.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
+               .setDstAccessMask(vk::AccessFlagBits::eTransferRead)
+               .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
+               .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
+               .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+               .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+               .setImage(colorImage_.handle())
+               .setSubresourceRange(vk::ImageSubresourceRange{}
+                   .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                   .setBaseMipLevel(0).setLevelCount(1)
+                   .setBaseArrayLayer(0).setLayerCount(1));
+        cmd.handle().pipelineBarrier(
+            vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            vk::PipelineStageFlagBits::eTransfer,
+            {}, {}, {}, barrier);
+
+        vk::BufferImageCopy region{};
+        region.setBufferOffset(0)
+              .setBufferRowLength(extent_.width)
+              .setBufferImageHeight(extent_.height)
+              .setImageSubresource(vk::ImageSubresourceLayers{}
+                  .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                  .setMipLevel(0).setBaseArrayLayer(0).setLayerCount(1))
+              .setImageOffset({0,0,0})
+              .setImageExtent({extent_.width, extent_.height, 1});
+        cmd.handle().copyImageToBuffer(colorImage_.handle(),
+                                       vk::ImageLayout::eTransferSrcOptimal,
+                                       staging.handle(), region);
+    } // ~OneTimeCommands submits and waits for completion.
 
     // Map and copy out.
     std::vector<uint8_t> out(size);

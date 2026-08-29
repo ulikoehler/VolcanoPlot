@@ -10,10 +10,6 @@ Allocator::Allocator(vk::Instance instance, vk::PhysicalDevice physical, vk::Dev
     ci.physicalDevice = physical;
     ci.device = device;
     ci.vulkanApiVersion = VK_API_VERSION_1_3;
-    VmaVulkanFunctions fns{};
-    fns.vkGetInstanceProcAddr = &vkGetInstanceProcAddr;
-    fns.vkGetDeviceProcAddr = &vkGetDeviceProcAddr;
-    ci.pVulkanFunctions = &fns;
     vmaCreateAllocator(&ci, &allocator_);
 }
 

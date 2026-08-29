@@ -29,6 +29,7 @@ public:
     [[nodiscard]] vk::Format colorFormat() const noexcept override { return colorFormat_; }
     [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept override { return samples_; }
     [[nodiscard]] vk::RenderPass renderPass() const noexcept override { return renderPass_.get(); }
+    [[nodiscard]] vk::Format depthFormat() const noexcept override { return depthFormat_; }
 
 private:
     void createSurface();
@@ -53,9 +54,12 @@ private:
     std::vector<vk::UniqueImageView> swapchainViews_;
     std::vector<vk::UniqueFramebuffer> framebuffers_;
 
-    // MSAA resolve target + depth (optional)
+    // MSAA resolve target + depth
     core::Image msaaColor_;
     vk::UniqueImageView msaaView_;
+    core::Image depthImage_;
+    vk::UniqueImageView depthView_;
+    vk::Format depthFormat_ = vk::Format::eUndefined;
 
     // Per-frame command buffers + sync
     std::vector<vk::UniqueCommandBuffer> commandBuffers_;

@@ -32,6 +32,8 @@ private:
     vk::UniquePipelineLayout pipelineLayout_;
     vk::UniquePipeline pipeline_;
     core::Buffer pointBuffer_;
+    plot::Color color_;
+    float width_ = 1.0f;
     bool inited_ = false;
 };
 

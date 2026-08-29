@@ -193,6 +193,8 @@ void ScreenBackend::createSwapchain() {
 
 void ScreenBackend::createRenderPass() {
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
+    depthFormat_ = findDepthFormat(ctx_.physical.handle());
+
     vk::AttachmentDescription colorAtt{};
     colorAtt.setFormat(colorFormat_)
         .setSamples(samples_)
@@ -213,26 +215,45 @@ void ScreenBackend::createRenderPass() {
         .setInitialLayout(vk::ImageLayout::eUndefined)
         .setFinalLayout(vk::ImageLayout::ePresentSrcKHR);
 
+    vk::AttachmentDescription depthAtt{};
+    depthAtt.setFormat(depthFormat_)
+        .setSamples(samples_)
+        .setLoadOp(vk::AttachmentLoadOp::eClear)
+        .setStoreOp(vk::AttachmentStoreOp::eDontCare)
+        .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+        .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+        .setInitialLayout(vk::ImageLayout::eUndefined)
+        .setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
     vk::AttachmentReference colorRef{};
     colorRef.setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
     vk::AttachmentReference resolveRef{};
     resolveRef.setAttachment(1).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
 
+    uint32_t depthIdx = msaa ? 2 : 1;
+    vk::AttachmentReference depthRef{};
+    depthRef.setAttachment(depthIdx).setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
     vk::SubpassDescription sub{};
     sub.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-       .setColorAttachments(colorRef);
+       .setColorAttachments(colorRef)
+       .setPDepthStencilAttachment(&depthRef);
     if (msaa) sub.setResolveAttachments(resolveRef);
 
     vk::SubpassDependency dep{};
     dep.setSrcSubpass(VK_SUBPASS_EXTERNAL)
        .setDstSubpass(0)
-       .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
-       .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+       .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput
+                      | vk::PipelineStageFlagBits::eEarlyFragmentTests)
+       .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput
+                      | vk::PipelineStageFlagBits::eEarlyFragmentTests)
        .setSrcAccessMask(vk::AccessFlagBits::eNone)
-       .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite);
+       .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite
+                       | vk::AccessFlagBits::eDepthStencilAttachmentWrite);
 
     std::vector<vk::AttachmentDescription> atts = { colorAtt };
     if (msaa) atts.push_back(resolveAtt);
+    atts.push_back(depthAtt);
 
     vk::RenderPassCreateInfo ci{};
     ci.setAttachments(atts).setSubpasses(sub).setDependencies(dep);
@@ -242,6 +263,26 @@ void ScreenBackend::createRenderPass() {
 void ScreenBackend::createFramebuffers() {
     framebuffers_.clear();
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
+
+    // Depth image (recreated with swapchain).
+    if (depthFormat_ != vk::Format::eUndefined) {
+        core::ImageDesc ddesc{};
+        ddesc.format = depthFormat_;
+        ddesc.extent = extent_;
+        ddesc.samples = samples_;
+        ddesc.usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
+        depthImage_ = core::Image(ctx_.allocator.handle(), ddesc);
+        vk::ImageViewCreateInfo dvi{};
+        dvi.setImage(depthImage_.handle())
+           .setViewType(vk::ImageViewType::e2D)
+           .setFormat(depthFormat_)
+           .setSubresourceRange(vk::ImageSubresourceRange{}
+               .setAspectMask(vk::ImageAspectFlagBits::eDepth)
+               .setBaseMipLevel(0).setLevelCount(1)
+               .setBaseArrayLayer(0).setLayerCount(1));
+        depthView_ = ctx_.device.handle().createImageViewUnique(dvi);
+    }
+
     for (auto& view : swapchainViews_) {
         std::vector<vk::ImageView> attachments;
         if (msaa) {
@@ -249,6 +290,7 @@ void ScreenBackend::createFramebuffers() {
         } else {
             attachments = { view.get() };
         }
+        if (depthView_) attachments.push_back(depthView_.get());
         vk::FramebufferCreateInfo ci{};
         ci.setRenderPass(renderPass_.get())
            .setAttachments(attachments)
@@ -297,8 +339,9 @@ vk::CommandBuffer ScreenBackend::beginFrame() {
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cb.begin(bi);
 
-    std::array<vk::ClearValue, 1> clears{};
+    std::array<vk::ClearValue, 2> clears{};
     clears[0].color.setFloat32({0.95f, 0.95f, 0.95f, 1.0f});
+    clears[1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPass_.get())
        .setFramebuffer(framebuffers_[imageIndex_].get())

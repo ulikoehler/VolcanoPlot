@@ -27,6 +27,8 @@ public:
     virtual void contributeToAutoscale(Viewport& v) const = 0;
     /// Legend label.
     [[nodiscard]] virtual std::string label() const { return {}; }
+    /// Legend marker color.
+    [[nodiscard]] virtual Color legendColor() const { return Color::black(); }
 };
 
 /// A Figure holds one or more Axes arranged in a grid.

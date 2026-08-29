@@ -21,9 +21,13 @@ public:
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               const plot::Transform2D& transform) const;
 private:
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
     vk::UniquePipelineLayout pipelineLayout_;
     vk::UniquePipeline pipeline_;
-    core::Buffer vertexBuffer_;
+    core::Buffer posBuffer_;
+    core::Buffer colorBuffer_;
     uint32_t vertexCount_ = 0;
     bool inited_ = false;
 };

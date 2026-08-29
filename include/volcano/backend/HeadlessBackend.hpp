@@ -26,6 +26,7 @@ public:
     [[nodiscard]] vk::Format colorFormat() const noexcept override { return colorFormat_; }
     [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept override { return samples_; }
     [[nodiscard]] vk::RenderPass renderPass() const noexcept override { return renderPass_.get(); }
+    [[nodiscard]] vk::Format depthFormat() const noexcept override { return depthFormat_; }
 
 private:
     void createRenderPass();
@@ -43,6 +44,9 @@ private:
     vk::UniqueImageView colorView_;
     core::Image msaaImage_;
     vk::UniqueImageView msaaView_;
+    core::Image depthImage_;
+    vk::UniqueImageView depthView_;
+    vk::Format depthFormat_ = vk::Format::eUndefined;
     vk::UniqueFramebuffer framebuffer_;
 
     vk::UniqueCommandBuffer commandBuffer_;

@@ -28,4 +28,19 @@ std::unique_ptr<IBackend> createHeadlessBackend(const BackendDesc& desc) {
 #endif
 }
 
+vk::Format findDepthFormat(vk::PhysicalDevice phys) {
+    const vk::Format candidates[] = {
+        vk::Format::eD32Sfloat,
+        vk::Format::eD32SfloatS8Uint,
+        vk::Format::eD24UnormS8Uint,
+    };
+    for (auto fmt : candidates) {
+        auto props = phys.getFormatProperties(fmt);
+        if (props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment) {
+            return fmt;
+        }
+    }
+    return vk::Format::eUndefined;
+}
+
 } // namespace volcano::backend

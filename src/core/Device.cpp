@@ -29,7 +29,8 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc)
 
     // Always request swapchain if surface present.
     std::vector<std::string> wanted = desc.extensions;
-    if (std::ranges::find(wanted, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == wanted.end()) {
+    if (desc.hasSurface &&
+        std::ranges::find(wanted, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == wanted.end()) {
         wanted.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
     auto exts = filterExtensions(wanted, availExts);

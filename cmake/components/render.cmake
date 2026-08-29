@@ -11,11 +11,12 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/primitives/PieRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/HeatmapRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SurfaceRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/SpineRenderer.cpp
     ${VOLCANO_ROOT}/src/render/GridRenderer.cpp
 )
 
 volcano_add_component(volcano_render
     SOURCES ${VOLCANO_RENDER_SOURCES}
-    PUBLIC_LINK volcano_core volcano_plot
+    PUBLIC_LINK volcano_core volcano_plot volcano_text
     PUBLIC_INC include/volcano/render
 )

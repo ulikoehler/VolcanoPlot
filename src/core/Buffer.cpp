@@ -14,7 +14,7 @@ vk::BufferUsageFlags usageToFlags(BufferUsage u) {
         case BufferUsage::Index:    return vk::BufferUsageFlagBits::eIndexBuffer  | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Storage:  return vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Uniform:  return vk::BufferUsageFlagBits::eUniformBuffer;
-        case BufferUsage::Staging:  return vk::BufferUsageFlagBits::eTransferSrc;
+        case BufferUsage::Staging:  return vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Indirect: return vk::BufferUsageFlagBits::eIndirectBuffer | vk::BufferUsageFlagBits::eTransferDst;
     }
     return {};
@@ -33,9 +33,15 @@ Buffer::Buffer(VmaAllocator allocator, const BufferDesc& desc)
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO;
     if (desc.hostVisible) {
-        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                    VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        if (desc.hostCached) aci.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+        if (desc.hostCached) {
+            // Readback: random access, cached
+            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        } else {
+            // Upload: sequential write, write-combined
+            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        }
     }
 
     VkBuffer buf{};

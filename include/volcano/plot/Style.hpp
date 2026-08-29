@@ -59,6 +59,17 @@ struct LegendStyle {
     float frameAlpha = 0.8f;
 };
 
+/// Colorbar configuration.
+struct ColorbarStyle {
+    bool visible = false;
+    std::string colormap = "viridis";
+    Color edgeColor = Color::black();
+    float width = 20.0f;       // pixel width of the color strip
+    float padding = 10.0f;     // padding from the axes rect
+    FontProperties labelFont;
+    Color labelColor = Color::black();
+};
+
 /// Title configuration.
 struct TitleStyle {
     std::string text;
@@ -75,6 +86,7 @@ struct FigureStyle {
     std::string styleName = "default"; // ggplot, seaborn, default, ...
     TitleStyle title;
     LegendStyle legend;
+    ColorbarStyle colorbar;
     AxisStyle xAxis;
     AxisStyle yAxis;
     AxisStyle zAxis; // for 3D

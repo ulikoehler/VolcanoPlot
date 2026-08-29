@@ -1,6 +1,7 @@
 // volcano/render/GridRenderer.cpp
 #include "volcano/render/GridRenderer.hpp"
 #include <volcano/core/PipelineCache.hpp>
+#include <array>
 #include <stdexcept>
 
 namespace volcano::render {
@@ -71,11 +72,21 @@ void main() {
 } // namespace
 
 void GridRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                        vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
+                        vk::SampleCountFlagBits samples, core::PipelineCache& cache,
+                        VmaAllocator allocator, vk::Queue queue, vk::CommandPool pool) {
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
     vert_ = core::ShaderModule(device, v);
     frag_ = core::ShaderModule(device, f);
+
+    // Fullscreen triangle vertex buffer (NDC coords).
+    static const float verts[] = { -1,-1, 3,-1, -1,3 };
+    core::BufferDesc bdesc{};
+    bdesc.size = sizeof(verts);
+    bdesc.usage = core::BufferUsage::Vertex;
+    fullscreenBuffer_ = core::Buffer(allocator, bdesc);
+    fullscreenBuffer_.upload(device, queue, pool,
+                              std::as_bytes(std::span{verts, 3}));
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
@@ -100,16 +111,22 @@ void GridRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vk::PipelineViewportStateCreateInfo vsci;
     vsci.setViewportCount(1).setScissorCount(1);
 
-    vk::PipelineRasterizationStateCreateInfo rsci;
-    rsci.setPolygonMode(vk::PolygonMode::eFill).setCullMode(vk::CullModeFlagBits::eNone);
+    vk::PipelineRasterizationStateCreateInfo rsci{};
+    rsci.setLineWidth(1.0f).setPolygonMode(vk::PolygonMode::eFill).setCullMode(vk::CullModeFlagBits::eNone);
 
     vk::PipelineMultisampleStateCreateInfo msci;
     msci.setRasterizationSamples(samples);
+
+    // Depth testing disabled (2D overlay).
+    vk::PipelineDepthStencilStateCreateInfo depthState{};
+    depthState.setDepthTestEnable(false).setDepthWriteEnable(false);
 
     vk::PipelineColorBlendAttachmentState att;
     att.setBlendEnable(true)
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
+       .setSrcAlphaBlendFactor(vk::BlendFactor::eZero)
+       .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
        .setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
                           vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
     vk::PipelineColorBlendStateCreateInfo cbsci;
@@ -122,6 +139,7 @@ void GridRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vk::GraphicsPipelineCreateInfo gpci;
     gpci.setStages(stages).setPVertexInputState(&visci).setPInputAssemblyState(&iaci)
         .setPViewportState(&vsci).setPRasterizationState(&rsci).setPMultisampleState(&msci)
+        .setPDepthStencilState(&depthState)
         .setPColorBlendState(&cbsci).setPDynamicState(&dsci)
         .setLayout(pipelineLayout_.get()).setRenderPass(renderPass).setSubpass(0);
 
@@ -174,10 +192,11 @@ void GridRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
     cmd.setScissor(0, rect);
-    // TODO: bind static fullscreen vertex buffer.
-    // For now, draw with no VBO using a static buffer created in init().
-    // cmd.draw(3, 1, 0, 0);
-    (void)verts;
+
+    std::array<vk::Buffer, 1> buf = { fullscreenBuffer_.handle() };
+    std::array<vk::DeviceSize, 1> off = {0};
+    cmd.bindVertexBuffers(0, buf, off);
+    cmd.draw(3, 1, 0, 0);
 }
 
 } // namespace volcano::render

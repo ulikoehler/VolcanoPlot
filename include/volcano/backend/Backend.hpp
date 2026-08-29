@@ -56,6 +56,7 @@ public:
     [[nodiscard]] virtual vk::Format colorFormat() const noexcept = 0;
     [[nodiscard]] virtual vk::SampleCountFlagBits sampleCount() const noexcept = 0;
     [[nodiscard]] virtual vk::RenderPass renderPass() const noexcept = 0;
+    [[nodiscard]] virtual vk::Format depthFormat() const noexcept = 0;
 
     /// For headless: read back the rendered color image as RGBA8.
     /// For screen: returns empty (no readback).
@@ -67,5 +68,9 @@ std::unique_ptr<IBackend> createScreenBackend(const BackendDesc& desc);
 
 /// Factory: create a headless offscreen backend.
 std::unique_ptr<IBackend> createHeadlessBackend(const BackendDesc& desc);
+
+/// Find a supported depth format for the given physical device.
+/// Tries D32Sfloat, D32SfloatS8Uint, D24UnormS8Uint in order.
+[[nodiscard]] vk::Format findDepthFormat(vk::PhysicalDevice phys);
 
 } // namespace volcano::backend

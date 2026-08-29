@@ -10,5 +10,8 @@ set(VOLCANO_TEXT_SOURCES
 volcano_add_component(volcano_text
     SOURCES ${VOLCANO_TEXT_SOURCES}
     PUBLIC_LINK volcano_core
+    PRIVATE_LINK ${VOLCANO_FREETYPE_LINK}
     PUBLIC_INC include/volcano/text
+    PUBLIC_DEFS
+        $<$<BOOL:${VOLCANO_HAS_FREETYPE}>:VOLCANO_HAS_FREETYPE=1>
 )

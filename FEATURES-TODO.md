@@ -159,6 +159,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [ ] `make_axes_locatable`
 - [ ] `constrained_layout`, `tight_layout`, `subplots_adjust`
 - [ ] `colorbar` (inset and standalone)
+- [x] `colorbar` (vertical color strip + tick labels, right of axes)
 - [ ] Projections: `rectilinear`, `polar`, `aitoff`, `hammer`, `lambert`, `mollweide`, `3d`
 - [ ] Scales: `linear`, `log`, `symlog`, `logit`, `asinh`, `function`, `functionlog`, `mercator`
 - [ ] Polar: `set_rgrids`, `set_thetagrids`, `set_theta_offset`, `set_theta_direction`
@@ -167,9 +168,9 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ---
 
 ## 5. Text and Annotations
-- [ ] `title`, `suptitle`, `figtext`, `xlabel`, `ylabel` (data model: [x], rendering: [ ])
+- [x] `title`, `suptitle`, `figtext`, `xlabel`, `ylabel` (data model: [x], rendering: [x] — vectorized)
 - [ ] `text`, `figtext`, `annotate`
-- [ ] `tick_params`, `set_xticklabels`, `set_yticklabels`
+- [x] `tick_params`, `set_xticklabels`, `set_yticklabels` (auto tick labels: [x])
 - [ ] `Annotation` with `arrowprops` / `FancyArrowPatch`
 - [ ] Coordinate systems: `data`, `axes`, `figure`, `display`, `offset points`
 - [ ] MathText (TeX-like subset): sub/sup, fractions, radicals, Greek, accents, calligraphic, etc.
@@ -177,6 +178,22 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [ ] `text.usetex` full LaTeX rendering (requires external TeX)
 - [x] Font properties: family, weight, style, size, color (FontProperties struct)
 - [ ] Font properties: rotation, alignment
+
+### 5.1 Text Rendering Limitations (current vectorized implementation)
+- [-] Hole bridging for glyphs with holes (O, A, B, etc.) — currently each
+      contour is ear-clipped independently, so holes are filled. Need to
+      bridge holes into the outer contour with degenerate edges.
+- [-] Y-axis label rotation — currently drawn horizontally to the left of
+      the axes. Need 90° rotation (either via vertex transform or per-glyph
+      rotation in the vertex builder).
+- [ ] Font rotation and alignment properties (FontProperties::rotation,
+      horizontal/vertical alignment)
+- [ ] Text clipping to axes rect for `text()` / `annotate()` (data-space text)
+- [ ] Multi-line text (newline support)
+- [ ] Text layout engine (word wrap, justified text for legends/annotations)
+- [ ] Subpixel positioning (currently snapped to integer pixel coords)
+- [ ] Font subsetting for large character sets (currently loads all ASCII)
+- [ ] CJK / RTL text shaping (requires HarfBuzz integration)
 
 ---
 
@@ -221,6 +238,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ## 8. Legend Features
 - [x] `legend` with auto or explicit `handles`/`labels` (data model: LegendStyle struct)
+- [x] Legend rendering (colored markers + text labels, semi-transparent background + border)
 - [x] Locations: `best`, `upper right`, `upper left`, `lower left`, `lower right`, `right`, `center left`, `center right`, `lower center`, `upper center`, `center` (location string field)
 - [ ] `loc`, `bbox_to_anchor`, `bbox_transform`
 - [ ] `ncols` / `ncol`, `nrows`
@@ -237,19 +255,21 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ### 9.1 Ticks
 - [ ] Major and minor ticks (TickConfig::minor field)
-- [x] `ax.grid` (major/minor, x/y/both, color, linestyle, linewidth) (AxisStyle fields + GridRenderer stub)
-- [ ] `tick_params`
+- [x] `ax.grid` (major/minor, x/y/both, color, linestyle, linewidth) (AxisStyle fields + GridRenderer)
+- [x] `tick_params` (auto tick label rendering: [x])
+- [x] Auto tick computation (nice-number locator, tick label formatting)
 
 ### 9.2 Locators
-- [x] `AutoLocator`, `MaxNLocator` (TickConfig::nbins — framework only)
+- [x] `AutoLocator`, `MaxNLocator` (nice-number algorithm, TickConfig::nbins)
 - [ ] `LinearLocator`, `MultipleLocator`, `FixedLocator`, `IndexLocator`
 - [ ] `LogLocator`, `LogitLocator`, `AutoMinorLocator`
 - [ ] `NullLocator`, `SymmetricalLogLocator`
 
 ### 9.3 Formatters
+- [x] `ScalarFormatter` (basic: auto-format with %.0f, %.1f, %.2f, %.1e)
 - [ ] `NullFormatter`, `FixedFormatter`
 - [ ] `FuncFormatter`, `StrMethodFormatter`, `FormatStrFormatter`
-- [ ] `ScalarFormatter`, `LogFormatter`, `LogFormatterExponent`, `LogFormatterMathtext`, `LogFormatterSciNotation`
+- [ ] `LogFormatter`, `LogFormatterExponent`, `LogFormatterMathtext`, `LogFormatterSciNotation`
 - [ ] `LogitFormatter`, `EngFormatter`, `PercentFormatter`
 - [ ] `ticklabel_format` (scilimits, useMathText, useOffset)
 
@@ -340,7 +360,9 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ## 16. Additional Matplotlib Capabilities (cross-cutting)
 - [ ] Colorbars with `extend` arrows and custom norms
+- [x] Colorbar rendering (vertical color strip with viridis colormap + tick labels)
 - [ ] Spines / axis styling (hide individual spines, `spines.set_visible`)
+- [x] Spines / axis border rendering (rectangle border + tick marks around axes rect)
 - [ ] `zorder` compositing
 - [ ] Picking / hit testing
 - [ ] Rasterization (`rasterized=True`) for vector backends
@@ -357,22 +379,26 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ### Core (must-have for v0.1)
 - Line plots with MSAA ✓ (pipeline done)
 - Scatter plots with markers ✓ (pipeline done)
-- Bar charts (stub — needs pipeline)
-- Heatmap/imshow (stub — needs pipeline)
+- Bar charts ✓ (pipeline done + regression tests)
+- Heatmap/imshow ✓ (pipeline done + regression tests)
 - PNG export (CPU ✓, GPU stub)
 - ggplot style ✓
-- Basic grid (stub — needs static VBO)
-- Axis labels (data model ✓, rendering TODO)
+- Basic grid ✓ (fwidth-based GridRenderer)
+- Axis labels ✓ (vectorized text rendering with FreeType outline decomposition)
+- Tick labels ✓ (auto-locator + auto-formatter)
+- Title ✓ (vectorized text rendering)
 
 ### Advanced (v0.2+)
 - GPU-side function evaluation (compute shader)
 - GPU autoscale (parallel reduce)
 - Infinite zoom interaction
 - KDE on GPU
-- 3D surface plot
+- 3D surface plot (depth attachment + depth testing ✓)
 - Volcano plot per-point coloring
 - Text rendering (SDF atlas)
-- Legend rendering
+- Legend rendering ✓ (colored markers + text labels)
+- Axis spines ✓ (border + tick marks)
+- Colorbar rendering ✓ (color strip + tick labels)
 
 ### Long-term
 - Full matplotlib style sheet parser

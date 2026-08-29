@@ -9,15 +9,23 @@
 
 namespace volcano::text {
 
+/// A 2D point in font units (26.6 fixed-point converted to float pixels).
+struct FontPoint { float x; float y; };
+
+/// Triangulated glyph mesh: a list of triangles (3 vertices each) in font-space.
+/// Font-space: origin at glyph baseline, Y-up, units in pixels at the font's
+/// rasterized size. The mesh covers the glyph's filled area.
+struct GlyphMesh {
+    std::vector<FontPoint> vertices;  // 3N vertices = N triangles
+    float minX = 0, minY = 0, maxX = 0, maxY = 0;  // bounding box
+};
+
 struct GlyphInfo {
     uint32_t codepoint = 0;
-    uint32_t atlasX = 0;     // position in atlas
-    uint32_t atlasY = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    int32_t bearingX = 0;
-    int32_t bearingY = 0;
-    int32_t advance = 0;
+    int32_t bearingX = 0;    // left bearing in pixels
+    int32_t bearingY = 0;    // top bearing in pixels (Y-up: distance from baseline to top)
+    int32_t advance = 0;     // advance width in pixels
+    GlyphMesh mesh;          // triangulated outline
 };
 
 class Font {
@@ -35,12 +43,13 @@ public:
     [[nodiscard]] float size() const noexcept { return size_; }
     [[nodiscard]] bool valid() const noexcept { return valid_; }
 
-    /// Rasterize a set of glyphs into a grayscale bitmap atlas.
-    /// Returns the atlas bitmap (width*height bytes) and glyph metadata.
-    void rasterizeAtlas(std::u32string_view codepoints,
-                        std::vector<uint8_t>& atlasBits,
-                        uint32_t& atlasW, uint32_t& atlasH,
-                        std::vector<GlyphInfo>& glyphs);
+    /// Decompose a glyph outline into a triangulated mesh.
+    /// Returns false if the glyph has no outline (e.g. space).
+    [[nodiscard]] GlyphInfo outlineGlyph(uint32_t codepoint) const;
+
+    /// Decompose multiple glyphs and return their metadata + meshes.
+    void outlineAtlas(std::u32string_view codepoints,
+                      std::vector<GlyphInfo>& glyphs) const;
 
 private:
     void* face_ = nullptr; // FT_Face, opaque

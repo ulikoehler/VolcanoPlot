@@ -5,6 +5,7 @@
 
 #include <volcano/plot/Transform.hpp>
 
+#include <array>
 #include <stdexcept>
 
 namespace volcano::render::primitives {
@@ -15,7 +16,6 @@ namespace {
 // otherwise loaded from precompiled .spv files).
 constexpr const char* kVertGlsl = R"(
 #version 460
-#extension GL_KHR_shader_subgroup_basic : enable
 
 layout(location = 0) in vec2 a_pos;       // data coords
 layout(location = 1) in vec4 a_color;     // RGBA
@@ -23,7 +23,7 @@ layout(location = 2) in float a_size;     // pixel size
 
 layout(push_constant) uniform PC {
     vec4 u_viewMinSpan;   // xy = min, zw = span
-    vec4 u_rect;          // xy = offset, zw = extent
+    vec4 u_rect;          // xy = offset, zw = extent (for point size scaling)
     vec2 u_log;           // x = logX, y = logY
 };
 
@@ -38,13 +38,10 @@ vec2 applyLog(vec2 p) {
 
 void main() {
     vec2 p = applyLog(a_pos);
-    vec2 ndc = (p - u_viewMinSpan.xy) / u_viewMinSpan.zw;
-    // Map NDC [-1,1] to rect in framebuffer coords.
-    vec2 fb = u_rect.xy + (ndc * 0.5 + 0.5) * u_rect.zw;
-    // Convert to Vulkan clip space.
-    vec2 clip = vec2(fb.x / u_rect.zw * 2.0 - 1.0,
-                     fb.y / u_rect.w * -2.0 + 1.0);
-    gl_Position = vec4(clip, 0.0, 1.0);
+    // Map data coords to NDC [-1,1] — viewport handles pixel mapping.
+    vec2 ndc = (p - u_viewMinSpan.xy) / u_viewMinSpan.zw * 2.0 - 1.0;
+    // Vulkan Y is down, flip to conventional math Y-up.
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     gl_PointSize = a_size;
     v_color = a_color;
     v_size = a_size;
@@ -122,6 +119,10 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
     msci.setRasterizationSamples(samples)
         .setSampleShadingEnable(false);
 
+    // Depth testing disabled (2D overlay).
+    vk::PipelineDepthStencilStateCreateInfo depthState{};
+    depthState.setDepthTestEnable(false).setDepthWriteEnable(false);
+
     vk::PipelineColorBlendAttachmentState att{};
     att.setBlendEnable(true)
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
@@ -147,6 +148,7 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
         .setPViewportState(&vsci)
         .setPRasterizationState(&rsci)
         .setPMultisampleState(&msci)
+        .setPDepthStencilState(&depthState)
         .setPColorBlendState(&cbsci)
         .setPDynamicState(&dsci)
         .setLayout(pipelineLayout_.get())
@@ -216,9 +218,9 @@ void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     cmd.setViewport(0, vp);
     cmd.setScissor(0, rect);
 
-    vk::Buffer buffers[3] = { pointBuffer_.handle(), colorBuffer_.handle(), sizeBuffer_.handle() };
-    vk::DeviceSize offsets[3] = {0,0,0};
-    cmd.bindVertexBuffers(0, 3, buffers, offsets);
+    std::array<vk::Buffer, 3> buffers = { pointBuffer_.handle(), colorBuffer_.handle(), sizeBuffer_.handle() };
+    std::array<vk::DeviceSize, 3> offsets = {0,0,0};
+    cmd.bindVertexBuffers(0, buffers, offsets);
     cmd.draw(pointCount, 1, 0, 0);
 }
 

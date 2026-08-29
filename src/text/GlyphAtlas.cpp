@@ -1,10 +1,22 @@
 // volcano/text/GlyphAtlas.cpp
 #include "volcano/text/GlyphAtlas.hpp"
+
 namespace volcano::text {
-void GlyphAtlas::build(vk::Device, vk::Queue, vk::CommandPool, VmaAllocator,
-                       const Font&, std::u32string_view) {
-    // TODO: rasterize atlas, upload as R8 image, create view.
+
+void GlyphAtlas::build(const Font& font, std::u32string_view codepoints) {
+    std::vector<GlyphInfo> glyphList;
+    font.outlineAtlas(codepoints, glyphList);
+    glyphs_.clear();
+    totalTriangles_ = 0;
+    for (auto& g : glyphList) {
+        totalTriangles_ += g.mesh.vertices.size() / 3;
+        glyphs_[g.codepoint] = std::move(g);
+    }
 }
-const GlyphInfo* GlyphAtlas::glyph(uint32_t) const { return nullptr; }
-vk::ImageView GlyphAtlas::view() const noexcept { return {}; }
+
+const GlyphInfo* GlyphAtlas::glyph(uint32_t codepoint) const {
+    auto it = glyphs_.find(codepoint);
+    return it == glyphs_.end() ? nullptr : &it->second;
+}
+
 } // namespace volcano::text

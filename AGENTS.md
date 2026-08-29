@@ -29,6 +29,9 @@ cmake --build build -j4
 
 # Run headless export
 ./build/bin/volcano_headless output.png
+
+# Run headless scatter example (writes headless_scatter.png)
+./build/examples/example_headless_scatter
 ```
 
 ## Dependencies (system)
@@ -50,7 +53,7 @@ Optional: `libfreetype-dev` (for text rendering).
 - `volcano_render` — Render passes, pipelines, MSAA, primitive renderers
 - `volcano_plot` — Plot data model, axes, transforms, styles, plot types
 - `volcano_encode` — GPU-side image encoding (PNG/WebP via compute) + CPU fallback
-- `volcano_text` — SDF glyph atlas text rendering
+- `volcano_text` — Vectorized text rendering (FreeType outline decomposition → triangulated meshes)
 
 ### Key Design Patterns
 
@@ -83,6 +86,182 @@ Optional: `libfreetype-dev` (for text rendering).
   to avoid f32 quantization at deep zoom (chirp plots)
 - **GPU-side KDE** — stream samples to GPU, evaluate kernel density into grid
 - **GPU-side image encoding** — PNG filtering via compute shader
+
+### Text Rendering (Vectorized)
+
+Text is rendered as **filled triangle meshes** (not rasterized bitmaps):
+glyphs scale perfectly at any resolution with no pixelation.
+
+1. **Font loading** — FreeType loads TTF/OTF files. `findSystemFont()`
+   searches common Linux font directories, preferring regular variants.
+2. **Outline decomposition** — FreeType's `FT_Outline_Decompose` walks
+   the glyph outline, calling `move_to`/`line_to`/`conic_to`/`cubic_to`
+   callbacks. Bezier curves are flattened to line segments (8 steps for
+   quadratic, 12 for cubic).
+3. **Triangulation** — Ear-clipping algorithm converts contour polylines
+   to triangle fans. Holes (CW contours) are reversed to CCW.
+   TODO: proper hole bridging for glyphs like O, A, B.
+4. **GPU rendering** — `TextRenderer` builds a vertex buffer of all glyph
+   triangles for a string, offset to the screen position, and draws them
+   as a single `vkCmdDraw` call. Uses a ring-buffer scratch VB to avoid
+   per-frame allocation.
+
+**Key files:**
+- `include/volcano/text/Font.hpp` — Font class, GlyphInfo/GlyphMesh structs
+- `src/text/Font.cpp` — FreeType outline decomposition + ear-clip triangulation
+- `include/volcano/text/GlyphAtlas.hpp` — Stores triangulated glyphs by codepoint
+- `src/text/GlyphAtlas.cpp` — Builds atlas from Font
+- `include/volcano/text/TextRenderer.hpp` — GPU pipeline + scratch VB
+- `src/text/TextRenderer.cpp` — Vertex generation, push constants, draw calls
+
+**Coordinate mapping:** Font-space is Y-up (origin at baseline). Screen-space
+is Y-down (top-left origin). Mapping: `screenX = penX + vx * scale`,
+`screenY = penY - vy * scale`.
+
+**Tick computation:** `Renderer::drawText()` uses a nice-number auto-locator
+(1/2/5 × 10^k steps) and auto-formatter (%.0f, %.1f, %.2f, %.1e). Tick
+labels are rendered below the axes (X) and to the left (Y).
+
+### Depth Attachment and 3D Rendering
+
+Both `HeadlessBackend` and `ScreenBackend` now create a depth attachment
+(`vk::Format::eD32Sfloat` or fallback) alongside the color attachment.
+The render pass clears depth to 1.0 and uses `eDepthStencilAttachmentOptimal`
+layout. All 2D overlay pipelines (Point, Line, Bar, Pie, Heatmap, Grid, Text,
+Spine) have depth testing disabled. The `SurfaceRenderer` pipeline has depth
+testing and writing enabled (`eLess` compare), enabling correct 3D surface
+occlusion.
+
+**Key additions:**
+- `backend::findDepthFormat()` — picks a supported depth format
+- `IBackend::depthFormat()` — exposes the chosen format
+- All pipelines set `pDepthStencilState` (required when render pass has depth)
+
+### Axis Spines, Legend, and Colorbar
+
+**SpineRenderer** (`src/render/primitives/SpineRenderer.cpp`) draws:
+- Axis border rectangles (line strip pipeline)
+- Filled rectangles for legend backgrounds and markers (triangle list pipeline)
+- Tick marks along axes
+
+Both pipelines use a shared host-visible scratch vertex buffer (ring-buffered,
+reset per frame via `resetScratch()`).
+
+**Legend rendering** (`Renderer::drawLegend()`):
+- Collects labels and colors from all `IPlot` layers via `label()` and `legendColor()`
+- Draws a semi-transparent background box, border, colored marker squares, and text labels
+- Positioned in the upper-right of the axes rect by default
+- Controlled by `LegendStyle::visible`
+
+**Colorbar rendering** (`Renderer::drawColorbar()`):
+- Draws a vertical color strip to the right of the axes rect
+- Samples colors from a named colormap (e.g., "viridis") across 64 segments
+- Draws tick labels along the strip
+- Uses the z-axis viewport range for value mapping
+- Controlled by `ColorbarStyle::visible`
+
+## Regression Test System
+
+The project includes a pixel-level regression test system that renders plots
+headlessly and verifies the output framebuffer. Tests are in
+`tests/test_render_regression.cpp` with helpers in `tests/PlotTestHarness.hpp`.
+
+### Running regression tests
+
+```bash
+# Run all tests (including regression)
+./build/tests/volcano_tests
+
+# Run only render regression tests
+./build/tests/volcano_tests --gtest_filter='*Regression.*'
+
+# Run a specific test suite
+./build/tests/volcano_tests --gtest_filter='ScatterRegression.*'
+```
+
+On failure, test images are saved to `/tmp/volcano_test_<Suite>_<Test>.png`
+for manual inspection.
+
+### Test harness API
+
+`PlotTestHarness` (in `tests/PlotTestHarness.hpp`) provides:
+
+- **`Image`** — RGBA8 pixel buffer with analysis methods:
+  - `countColor(pixel, tolerance)` — count matching pixels
+  - `countColorInRegion(...)` — count in a sub-rectangle
+  - `boundingBox(pixel, tolerance)` — find bbox of matching pixels
+  - `centroid(pixel, tolerance)` — mean (x,y) of matching pixels
+  - `averageRegion(...)` — average color in a region
+  - `countIf(predicate)` — count with custom predicate
+  - `save(path)` — save as PNG (or PPM fallback)
+- **`PlotTestHarness`** — renders a `Figure` headlessly and returns an `Image`
+- **GTest macros**: `EXPECT_PIXEL_AT`, `EXPECT_PIXEL_COUNT`,
+  `EXPECT_REGION_UNIFORM`, `EXPECT_FULLY_OPAQUE`
+
+### Crafted-plot design strategies
+
+Tests use **crafted plots** designed for deterministic verification:
+
+1. **Flat background, no grid, no axes** — `flatTestStyle()` produces a
+   constant white background so background pixels are predictable. Grid lines
+   and axes would interfere with pixel assertions.
+
+2. **Small canvas (64–256px)** — each pixel is meaningful, tests run fast
+   (~0.8s per test including Vulkan init).
+
+3. **No MSAA for pixel-exact tests** — `vk::SampleCountFlagBits::e1` makes
+   pixel assertions deterministic. MSAA is tested separately in
+   `MSAaRegression` which checks for anti-aliased edge pixels.
+
+4. **Saturated primary colors** — pure red `(255,0,0)`, green `(0,255,0)`,
+   blue `(0,0,255)` with tolerance ~40 for robust color matching against
+   blending and rasterization differences.
+
+5. **Known data coordinates** — points placed at `(0,0)`, `(0.5,0.5)`,
+   `(1,1)` etc. so expected pixel positions can be computed analytically.
+   The renderer uses **Y-up math convention** (flips Y in the vertex shader),
+   so data `(x, y)` maps to pixel `(W*x, H*(1-y))`.
+
+6. **Centroid-based assertions** — for points at canvas corners, the centroid
+   is shifted inward because only the visible portion of the marker
+   contributes. Use wider tolerances (±25–30px) for corner points.
+
+7. **Bounding-box assertions** — for lines, check that the bbox spans the
+   expected canvas extent (e.g., horizontal line should span x=[0, 255]).
+
+8. **Area-ratio assertions** — for pie charts, check that slice areas are
+   roughly proportional to their values (within 2× ratio for 50/50 splits).
+
+9. **Uniformity assertions** — for heatmaps with uniform data, check that
+   the center region has a single constant color (within tolerance 20).
+
+### Bugs found by regression tests
+
+The regression test system has found and verified fixes for:
+
+- **Blend state alpha overwrite** — all blended renderers replaced the
+  framebuffer alpha with source alpha, causing transparent pixels in the
+  output PNG. Fixed by setting `srcAlphaBlendFactor=eZero, dstAlphaBlendFactor=eOne`.
+- **Staging buffer missing eTransferDst** — `BufferUsage::Staging` only had
+  `eTransferSrc`, so `copyImageToBuffer` (readback) silently did nothing.
+- **OneTimeCommands race** — readback copied mapped memory before the
+  copy command was submitted (destructor ran too late).
+- **LineRenderer missing color/width** — `upload()` ignored color and width
+  parameters; push constant struct didn't set them in `draw()`.
+- **LineRenderer push constant layout mismatch** — GLSL std140 padding
+  between `vec2` and `vec4` didn't match the C++ struct layout. Fixed by
+  rearranging fields to put all `vec4`s before `vec2`/`float`.
+- **LineRenderer lineWidth=0** — `vk::PipelineRasterizationStateCreateInfo`
+  defaults `lineWidth` to 0.0f (not 1.0f); all renderers needed explicit
+  `setLineWidth(1.0f)`.
+- **PieRenderer NDC calculation** — `ndc = center/halfExtent + a_pos` shifted
+  the pie off-screen. Fixed to `ndc = a_pos` (viewport handles pixel mapping).
+- **HeatmapRenderer grid range mixing** — shader mixed x and y ranges
+  (`u_gridRange.xy` was `(xMin, xMax)` but used as `(xMin, yMin)`). Fixed
+  to use explicit `.x`, `.y`, `.z`, `.w` components.
+- **HeatmapRenderer quad upload** — `std::span{kQuad, 6}` uploaded 6 floats
+  (3 vertices) instead of 12 floats (6 vertices), so only one triangle of
+  the fullscreen quad rendered.
 
 ## See Also
 

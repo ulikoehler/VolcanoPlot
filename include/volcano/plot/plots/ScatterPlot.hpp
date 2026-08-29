@@ -16,6 +16,7 @@ public:
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return series_.label; }
+    [[nodiscard]] Color legendColor() const override { return series_.color; }
 
     Series2D& series() noexcept { return series_; }
 

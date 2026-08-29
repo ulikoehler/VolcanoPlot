@@ -14,8 +14,15 @@ public:
     Allocator(vk::Instance instance, vk::PhysicalDevice physical, vk::Device device);
     ~Allocator();
 
-    Allocator(Allocator&&) noexcept = default;
-    Allocator& operator=(Allocator&&) noexcept = default;
+    Allocator(Allocator&& o) noexcept : allocator_(o.allocator_) { o.allocator_ = VK_NULL_HANDLE; }
+    Allocator& operator=(Allocator&& o) noexcept {
+        if (this != &o) {
+            if (allocator_) vmaDestroyAllocator(allocator_);
+            allocator_ = o.allocator_;
+            o.allocator_ = VK_NULL_HANDLE;
+        }
+        return *this;
+    }
     Allocator(const Allocator&) = delete;
     Allocator& operator=(const Allocator&) = delete;
 
