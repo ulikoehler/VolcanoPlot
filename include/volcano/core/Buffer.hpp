@@ -15,6 +15,8 @@ class Allocator;
 
 enum class BufferUsage {
     Vertex,
+    /// Vertex buffer also usable as a storage buffer (e.g. for compute reads).
+    VertexStorage,
     Index,
     Storage,
     Uniform,

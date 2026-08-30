@@ -12,6 +12,8 @@
 
 namespace volcano::render { class Renderer; }
 
+namespace volcano::render::primitives { class ReduceRenderer; }
+
 namespace volcano::plot {
 
 /// Interface implemented by all plot types (scatter, line, bar, pie, ...).
@@ -25,6 +27,12 @@ public:
                       const Axes& axes, Rect2D rect) = 0;
     /// Contribute to autoscale (extend the viewport).
     virtual void contributeToAutoscale(Viewport& v) const = 0;
+    /// GPU-side autoscale contribution. Runs a parallel min/max reduce over
+    /// the plot's uploaded GPU buffers when available. The default
+    /// implementation falls back to the CPU `contributeToAutoscale`.
+    /// Called only after `prepare()` has uploaded GPU resources.
+    virtual void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
+                                          Viewport& v) const;
     /// Legend label.
     [[nodiscard]] virtual std::string label() const { return {}; }
     /// Legend marker color.

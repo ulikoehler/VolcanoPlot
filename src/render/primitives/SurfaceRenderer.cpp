@@ -24,7 +24,7 @@ layout(location = 0) out float v_height;
 void main() {
     // Normalize z to [0,1] for color.
     v_height = (a_pos.z - pc.u_valueRange.x) / max(pc.u_valueRange.y - pc.u_valueRange.x, 1e-30);
-    gl_Position = u_vp * vec4(a_pos, 1.0);
+    gl_Position = pc.u_vp * vec4(a_pos, 1.0);
 }
 )";
 

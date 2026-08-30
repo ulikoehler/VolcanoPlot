@@ -709,6 +709,48 @@ TEST(TextRegression, FlatStyleHasNoText) {
     EXPECT_EQ(img.countColor(Pixel::white(), 0), size_t(64 * 64));
 }
 
+TEST(TextRegression, YAxisLabelIsRotated) {
+    // The Y-axis label should be rotated 90° (vertical, reading bottom-to-top).
+    // Verify by checking that the dark pixels in the left margin form a
+    // bounding box that is taller than wide (vertical orientation).
+    CraftedFigure cf(256);
+    cf.axes->style().xAxis.visible = true;
+    cf.axes->style().yAxis.visible = true;
+    cf.axes->style().yAxis.label = "YLabel";  // long enough to measure
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+
+    // Find dark pixels in the left margin (x < 25, excluding tick labels
+    // which are at x ~5-20). The Y label is rotated and positioned at
+    // roughly x = rect.x - fontSize - 10 ≈ 20 - 16 - 10 = -6... but with
+    // the default layout margin (~8%), rect.x ≈ 20, so the label is around
+    // x ≈ 0-5. Use a wider scan to capture it.
+    // Actually, let's scan the far-left strip where only the rotated label
+    // would be (x < 15), and compute the bounding box of dark pixels.
+    uint32_t minX = 256, minY = 256, maxX = 0, maxY = 0;
+    size_t darkCount = 0;
+    for (uint32_t y = 0; y < 256; ++y) {
+        for (uint32_t x = 0; x < 15; ++x) {
+            Pixel p = img.get(x, y);
+            if (p.r < 100 && p.g < 100 && p.b < 100) {
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+                ++darkCount;
+            }
+        }
+    }
+    EXPECT_GT(darkCount, 5u) << "Y axis label should render dark pixels in left margin";
+
+    // The rotated label should be taller than wide (vertical orientation).
+    // A horizontal label "YLabel" would be ~40px wide × ~16px tall.
+    // A rotated label should be ~16px wide × ~40px tall.
+    uint32_t bbW = maxX - minX + 1;
+    uint32_t bbH = maxY - minY + 1;
+    EXPECT_GT(bbH, bbW) << "Y axis label bounding box should be taller than wide (rotated)";
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Axis spines / border tests
 // ═══════════════════════════════════════════════════════════════════════════

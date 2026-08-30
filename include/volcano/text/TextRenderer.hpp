@@ -50,9 +50,12 @@ public:
 
     /// Draw a UTF-8 string at (x, y) in pixel coords with the given color.
     /// (x, y) is the baseline position (top-left of the text block).
+    /// `rotation` is in radians (clockwise in screen space, Y-down).
+    /// The text is rotated around the (x, y) origin point.
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               std::string_view text, float x, float y,
-              plot::Color color, float scale = 1.0f);
+              plot::Color color, float scale = 1.0f,
+              float rotation = 0.0f);
 
 private:
     vk::Device device_ = VK_NULL_HANDLE;

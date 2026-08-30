@@ -25,6 +25,11 @@ public:
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               const plot::Transform2D& transform, uint32_t pointCount) const;
 
+    /// GPU handle to the uploaded point buffer (vec2 data), for GPU autoscale.
+    [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
+    /// Number of uploaded points (0 until upload() is called).
+    [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
+
 private:
     vk::Device device_;
     core::ShaderModule vert_;
@@ -34,6 +39,7 @@ private:
     core::Buffer pointBuffer_;
     plot::Color color_;
     float width_ = 1.0f;
+    uint32_t count_ = 0;
     bool inited_ = false;
 };
 

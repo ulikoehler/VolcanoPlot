@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <stdexcept>
 
 namespace volcano::plot {
@@ -140,23 +141,163 @@ const Colormap& seismic() {
 
 } // namespace colormaps
 
+namespace {
+
+/// Lookup table mapping colormap names to their factory functions.
+struct NameEntry {
+    const char* name;
+    const Colormap& (*fn)();
+};
+
+const std::vector<NameEntry>& colormapTable() {
+    static const std::vector<NameEntry> table = {
+        // Perceptually uniform + misc (already existed)
+        {"viridis",  colormaps::viridis},
+        {"plasma",   colormaps::plasma},
+        {"inferno",  colormaps::inferno},
+        {"magma",    colormaps::magma},
+        {"cividis",  colormaps::cividis},
+        {"turbo",    colormaps::turbo},
+        {"jet",      colormaps::jet},
+        {"coolwarm", colormaps::coolwarm},
+        {"RdBu",     colormaps::RdBu},
+        {"seismic",  colormaps::seismic},
+        {"grayscale",colormaps::grayscale},
+        // Sequential (§3.2)
+        {"Greys",    colormaps::Greys},
+        {"Purples",  colormaps::Purples},
+        {"Blues",    colormaps::Blues},
+        {"Greens",   colormaps::Greens},
+        {"Oranges",  colormaps::Oranges},
+        {"Reds",     colormaps::Reds},
+        {"YlOrBr",   colormaps::YlOrBr},
+        {"YlOrRd",   colormaps::YlOrRd},
+        {"OrRd",     colormaps::OrRd},
+        {"PuRd",     colormaps::PuRd},
+        {"RdPu",     colormaps::RdPu},
+        {"BuPu",     colormaps::BuPu},
+        {"GnBu",     colormaps::GnBu},
+        {"PuBu",     colormaps::PuBu},
+        {"YlGnBu",   colormaps::YlGnBu},
+        {"PuBuGn",   colormaps::PuBuGn},
+        {"BuGn",     colormaps::BuGn},
+        {"YlGn",     colormaps::YlGn},
+        {"gray",     colormaps::gray},
+        {"bone",     colormaps::bone},
+        {"pink",     colormaps::pink},
+        {"spring",   colormaps::spring},
+        {"summer",   colormaps::summer},
+        {"autumn",   colormaps::autumn},
+        {"winter",   colormaps::winter},
+        {"cool",     colormaps::cool},
+        {"Wistia",   colormaps::Wistia},
+        {"hot",      colormaps::hot},
+        {"afmhot",   colormaps::afmhot},
+        {"gist_heat",colormaps::gist_heat},
+        {"copper",   colormaps::copper},
+        // Diverging (§3.3)
+        {"PiYG",     colormaps::PiYG},
+        {"PRGn",     colormaps::PRGn},
+        {"BrBG",     colormaps::BrBG},
+        {"PuOr",     colormaps::PuOr},
+        {"RdGy",     colormaps::RdGy},
+        {"RdYlBu",   colormaps::RdYlBu},
+        {"RdYlGn",   colormaps::RdYlGn},
+        {"Spectral", colormaps::Spectral},
+        {"bwr",      colormaps::bwr},
+        // Cyclic (§3.4)
+        {"twilight",         colormaps::twilight},
+        {"twilight_shifted", colormaps::twilight_shifted},
+        {"hsv",              colormaps::hsv},
+        // Qualitative (§3.5)
+        {"Pastel1",  colormaps::Pastel1},
+        {"Pastel2",  colormaps::Pastel2},
+        {"Paired",   colormaps::Paired},
+        {"Accent",   colormaps::Accent},
+        {"Dark2",    colormaps::Dark2},
+        {"Set1",     colormaps::Set1},
+        {"Set2",     colormaps::Set2},
+        {"Set3",     colormaps::Set3},
+        {"tab10",    colormaps::tab10},
+        {"tab20",    colormaps::tab20},
+        {"tab20b",   colormaps::tab20b},
+        {"tab20c",   colormaps::tab20c},
+        // Miscellaneous (§3.6)
+        {"flag",          colormaps::flag},
+        {"prism",         colormaps::prism},
+        {"ocean",         colormaps::ocean},
+        {"gist_earth",    colormaps::gist_earth},
+        {"terrain",       colormaps::terrain},
+        {"gist_stern",    colormaps::gist_stern},
+        {"gnuplot",       colormaps::gnuplot},
+        {"gnuplot2",      colormaps::gnuplot2},
+        {"CMRmap",        colormaps::CMRmap},
+        {"cubehelix",     colormaps::cubehelix},
+        {"brg",           colormaps::brg},
+        {"gist_rainbow",  colormaps::gist_rainbow},
+        {"rainbow",       colormaps::rainbow},
+        {"nipy_spectral", colormaps::nipy_spectral},
+        {"gist_ncar",     colormaps::gist_ncar},
+    };
+    return table;
+}
+
+/// Cache of reversed colormaps, created on first lookup.
+/// Key: colormap name (without "_r" suffix).
+/// Returns a reference to the cached reversed colormap.
+const Colormap& getReversed(std::string_view baseName) {
+    // Find the base colormap.
+    const auto& table = colormapTable();
+    const Colormap* base = nullptr;
+    for (const auto& entry : table) {
+        if (entry.name == baseName) {
+            base = &entry.fn();
+            break;
+        }
+    }
+    if (!base) return colormaps::grayscale();
+
+    // Use a static map keyed by name to cache reversed colormaps.
+    // This is thread-safe in C++11+ for static local initialization,
+    // but the map itself needs protection. Since VolcanoPlot is
+    // single-threaded for rendering, this is fine.
+    static std::map<std::string, Colormap, std::less<>> cache;
+    std::string key(baseName);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    // Create the reversed colormap.
+    Colormap rev;
+    rev.name = std::string(baseName) + "_r";
+    rev.stops.reserve(base->stops.size());
+    for (auto it2 = base->stops.rbegin(); it2 != base->stops.rend(); ++it2)
+        rev.stops.push_back(*it2);
+    auto [inserted, _] = cache.emplace(std::move(key), std::move(rev));
+    return inserted->second;
+}
+
+} // namespace
+
 const Colormap& Colormap::byName(std::string_view name) {
-    if (name == "viridis")  return colormaps::viridis();
-    if (name == "plasma")   return colormaps::plasma();
-    if (name == "inferno")  return colormaps::inferno();
-    if (name == "magma")    return colormaps::magma();
-    if (name == "cividis")  return colormaps::cividis();
-    if (name == "turbo")    return colormaps::turbo();
-    if (name == "jet")      return colormaps::jet();
-    if (name == "coolwarm") return colormaps::coolwarm();
-    if (name == "RdBu")     return colormaps::RdBu();
-    if (name == "seismic")  return colormaps::seismic();
+    // Check for reversed variant: name ends with "_r"
+    if (name.size() > 2 && name.substr(name.size() - 2) == "_r") {
+        return getReversed(name.substr(0, name.size() - 2));
+    }
+
+    const auto& table = colormapTable();
+    for (const auto& entry : table) {
+        if (entry.name == name) return entry.fn();
+    }
     return colormaps::grayscale();
 }
 
 std::vector<std::string> Colormap::availableNames() {
-    return { "viridis","plasma","inferno","magma","cividis","turbo","jet",
-             "coolwarm","RdBu","seismic","grayscale" };
+    const auto& table = colormapTable();
+    std::vector<std::string> names;
+    names.reserve(table.size());
+    for (const auto& entry : table)
+        names.emplace_back(entry.name);
+    return names;
 }
 
 } // namespace volcano::plot

@@ -1,6 +1,7 @@
 // volcano/plot/plots/LinePlot.cpp
 #include "volcano/plot/plots/LinePlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 namespace volcano::plot {
@@ -24,5 +25,12 @@ void LinePlot::contributeToAutoscale(Viewport& v) const {
         v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
         v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
     }
+}
+void LinePlot::contributeToAutoscaleGpu(
+    render::primitives::ReduceRenderer& reducer, Viewport& v) const {
+    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(), renderer_.pointCount());
+    if (!r) { contributeToAutoscale(v); return; }
+    v.x.min = std::min(v.x.min, r->minX); v.x.max = std::max(v.x.max, r->maxX);
+    v.y.min = std::min(v.y.min, r->minY); v.y.max = std::max(v.y.max, r->maxY);
 }
 } // namespace volcano::plot

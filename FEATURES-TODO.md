@@ -7,84 +7,234 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ### 1.1 2D — Pairwise / functional
 - [x] `plot` — line and/or marker plots (LinePlot)
-- [ ] `errorbar` — points/lines with x/y error bars
+- [x] `errorbar` — points/lines with x/y error bars (ErrorbarPlot — symmetric
+      and asymmetric errors, caps, optional connecting line and markers)
 - [x] `scatter` — scatter with size/color mapping (ScatterPlot)
-- [ ] `step` — step plots (`where='pre'|'mid'|'post'`)
-- [ ] `loglog`, `semilogx`, `semilogy` (log scale supported via Axes::setLogX/Y)
-- [ ] `fill` — filled polygons
-- [ ] `fill_between`, `fill_betweenx`
-- [ ] `vlines`, `hlines`
-- [ ] `axhline`, `axvline`, `axhspan`, `axvspan`
-- [ ] `broken_barh`
+- [x] `step` — step plots (StepPlot — `where='pre'|'mid'|'post'`, staircase
+      expansion of x/y data via LineRenderer)
+- [x] `loglog`, `semilogx`, `semilogy` (Axes::loglog/semilogx/semilogy
+      convenience methods — set log scale on both/x/y axes; GPU vertex
+      shader applies log10 transform; tested with exponential, power-law,
+      and small-value data)
+- [x] `fill` — filled polygons (FillPlot — triangle-fan tessellation)
+- [x] `fill_between`, `fill_betweenx` (FillBetweenPlot — triangle-strip between
+      two curves or curve and baseline, with alpha blending)
+- [x] `vlines`, `hlines` (Vlines/Hlines — vertical/horizontal line segment
+      collections via LineSegmentRenderer with eLineList topology)
+- [x] `axhline`, `axvline`, `axhspan`, `axvspan` (ReferenceLines —
+      axis-spanning lines drawn via SpineRenderer pixel-space line strips
+      to avoid GPU guard-band clipping; spans use FillRenderer with
+      kAxisSpan triangles that clip correctly at viewport boundaries)
+- [x] `broken_barh` (BrokenBarHPlot — collection of horizontal rectangles
+      at various y positions, per-segment colors, Gantt chart support,
+      overlapping bars, negative x values, FillRenderer triangle tessellation)
 
 ### 1.2 2D — Categorical / proportional
 - [x] `bar`, `barh` (BarPlot — stub pipeline)
-- [ ] `bar_label`
-- [ ] `grouped_bar`
-- [ ] `stackplot`
+- [x] `bar_label` (BarLabelPlot — value labels on bars with Edge/Center
+      position, auto-generated or custom labels, format strings (%d, %.1f,
+      %.2f, %.1g), horizontal/vertical mode, negative height support,
+      TextRenderer pixel-space rendering)
+- [x] `grouped_bar` (GroupedBarPlot — side-by-side bar chart with multiple
+      series per group, configurable bar width, per-series colors from
+      tab10 palette, horizontal/vertical orientation, negative height
+      support, FillRenderer triangle tessellation)
+- [x] `stackplot` (StackPlot — stacked area plot with cumulative series,
+      per-series colors, FillRenderer triangle tessellation)
 - [x] `pie`, `pie_label` (PiePlot — stub pipeline, 2D + donut)
-- [ ] `hist` (1D and 2D `hist2d`)
-- [ ] `stairs`
-- [ ] `ecdf`
+- [x] `hist` (HistPlot — auto/fixed/FD/Sturges/Rice/Square bins, count/density/
+      probability/cumulative normalization, horizontal mode, alpha blending)
+- [x] `hist2d` (Hist2DPlot — 2D histogram with auto/fixed/explicit bins,
+      count/density/probability normalization, colormap coloring via
+      FillRenderer, empty bin skipping)
+- [x] `stairs` (StairsPlot — step function from explicit bin edges and
+      values, optional fill, LineRenderer + FillRenderer)
+- [x] `ecdf` (ECDFPlot — empirical CDF step function, complementary CDF
+      (survival function) mode, optional fill, repeated value handling,
+      LineRenderer + FillRenderer)
 
 ### 1.3 2D — Distributions / statistical
-- [ ] `boxplot`
-- [ ] `violinplot`
-- [ ] `hexbin`
-- [x] `hist`, `hist2d` (via KDEPlot — GPU-side KDE)
+- [x] `boxplot` (BoxPlot — quartiles, whiskers, outliers, multiple groups,
+      IQR/MinMax/Percentile whisker types, configurable colors and fill)
+- [x] `violinplot` (ViolinPlot — CPU KDE with Gaussian kernel and Silverman
+      bandwidth, mirrored body via FillRenderer, optional inner box/whisker/median)
+- [x] `hexbin` (HexbinPlot — hexagonal binning with pointy-top/flat-top
+      orientation, axial coordinate binning, count/density normalization,
+      minCount filtering, colormap coloring via FillRenderer fan
+      triangulation)
+- [x] `hist` (via HistPlot — CPU binning + FillRenderer), `hist2d` (via KDEPlot — GPU-side KDE)
 - [x] `volcano` (genomics — VolcanoPlot)
 
 ### 1.4 2D — Arrays / images
 - [x] `imshow` (HeatmapPlot — stub)
-- [ ] `matshow`
-- [ ] `pcolor`, `pcolormesh`
-- [ ] `pcolorfast`
-- [ ] `spy`
-- [ ] `figimage`
+- [x] `matshow` (MatshowPlot — matrix display with row-0-at-top convention,
+      colormap coloring, NaN cell skipping, explicit value range, nearest-
+      neighbor display via FillRenderer triangle tessellation)
+- [x] `pcolor`, `pcolormesh` (PcolormeshPlot — rectangular cells with per-cell
+      colormap colors via FillRenderer, non-uniform cell edges, NaN skipping,
+      explicit value range support)
+- [x] `pcolorfast` (PcolorfastPlot — fast pseudocolor with extent-based
+      regular grid constructor and explicit edges constructor, colormap
+      coloring, NaN skipping, explicit value range, FillRenderer tessellation)
+- [x] `spy` (SpyPlot — sparsity pattern visualization with configurable
+      non-zero/zero colors, precision threshold, marker size control,
+      row-0-at-top convention, FillRenderer triangle tessellation)
+- [x] `figimage` (FigImagePlot — figure-level RGBA8 image overlay in pixel
+      space, row-0-at-top convention, configurable position/scale, transparent
+      pixel skipping, bypasses axes data coordinates, FillRenderer with
+      inverted-Y pixel-space viewport transform)
 
 ### 1.5 2D — Contours / triangulations
-- [ ] `contour`, `contourf`
-- [ ] `tricontour`, `tricontourf`
-- [ ] `tripcolor`
-- [ ] `triplot`
-- [ ] `streamplot`
-- [ ] `quiver`
-- [ ] `barbs`
+- [x] `contour`, `contourf` (ContourPlot/ContourfPlot — CPU marching squares
+      with saddle disambiguation; contour lines via LineSegmentRenderer,
+      filled bands via FillRenderer with per-vertex colormap colors and
+      Sutherland-Hodgman polygon clipping)
+- [x] `tricontour`, `tricontourf` (TriContourPlot/TriContourfPlot — Delaunay
+      triangulation via Bowyer-Watson, marching triangles for isoline
+      extraction, Sutherland-Hodgman polygon clipping for filled bands,
+      auto/explicit levels, colormap coloring for filled bands,
+      LineSegmentRenderer/FillRenderer)
+- [x] `tripcolor` (TripcolorPlot — pseudocolor on unstructured triangular grids,
+      flat and gouraud shading modes, per-vertex or per-face values, Delaunay
+      triangulation or explicit triangles, colormap coloring, NaN skipping,
+      explicit value range, FillRenderer)
+- [x] `triplot` (TriplotPlot — draws triangulation edges via LineSegmentRenderer,
+      Delaunay triangulation or explicit triangles, optional vertex markers via
+      PointRenderer, configurable color/width/marker settings)
+- [x] `streamplot` (StreamPlot — RK4 streamline integration with bilinear
+      field interpolation, seed point distribution with density control,
+      streamline proximity deduplication, optional arrowheads via
+      FillRenderer, LineSegmentRenderer for streamline segments)
+- [x] `quiver` (QuiverPlot — 2D vector field with arrow shafts via
+      LineSegmentRenderer and filled arrowheads via FillRenderer,
+      auto-scaling, pixel-space arrowhead geometry)
+- [x] `barbs` (BarbsPlot — wind barb symbols with shaft, flags (50 kt),
+      full barbs (10 kt), half barbs (5 kt), meteorological convention
+      (barbs point FROM wind direction), flip option, pixel-space rendering
+      via LineSegmentRenderer, configurable color/width/length)
 
 ### 1.6 Signal / spectral (1-D)
-- [ ] `xcorr`, `acorr`
-- [ ] `psd` (power spectral density)
-- [ ] `csd` (cross-spectral density)
-- [ ] `cohere`
-- [ ] `specgram`
-- [ ] `magnitude_spectrum`
-- [ ] `phase_spectrum`
-- [ ] `angle_spectrum`
+- [x] `xcorr`, `acorr` (XCorrPlot — autocorrelation and cross-correlation
+      with normalized/unnormalized modes, configurable max lags, stem plot
+      rendering via LineSegmentRenderer + PointRenderer, symmetric
+      autocorrelation, zero-lag peak for identical signals)
+- [x] `psd` (PsdPlot — power spectral density via radix-2 FFT, |FFT(x)|^2
+      normalized by sampleRate * windowPower, one-sided spectrum with DC/Nyquist
+      correction, 10*log10 dB output, Hann/Hamming/Blackman/Rectangular windows,
+      configurable nfft, LineRenderer)
+- [x] `csd` (CsdPlot — cross-spectral density via radix-2 FFT,
+      |FFT(x) * conj(FFT(y))| normalized by sampleRate * sqrt(windowPower_x * windowPower_y),
+      one-sided spectrum with DC/Nyquist correction, 10*log10 dB output,
+      Hann/Hamming/Blackman/Rectangular windows, configurable nfft, LineRenderer)
+- [x] `cohere` (CoherePlot — magnitude-squared coherence Cxy = |Pxy|^2 / (Pxx * Pyy),
+      auto/cross power spectral densities via radix-2 FFT, one-sided spectrum,
+      output clamped to [0, 1], Hann/Hamming/Blackman/Rectangular windows,
+      configurable nfft, LineRenderer)
+- [x] `specgram` (SpecgramPlot — STFT spectrogram via sliding-window FFT,
+      configurable nfft/noverlap, Hann/Hamming/Blackman/Rectangular windows,
+      one-sided spectrum, 10*log10 dB magnitude, colormap coloring via
+      FillRenderer, time/frequency axes, explicit value range, chirp support)
+- [x] `magnitude_spectrum` (SpectrumPlot — radix-2 Cooley-Tukey FFT, linear/dB
+      scale, windowing (Rectangular/Hann/Hamming/Blackman), one-sided spectrum,
+      LineRenderer)
+- [x] `phase_spectrum` (SpectrumPlot — phase = atan2(im, re) of FFT, wrapped
+      to [-pi, pi], magnitude thresholding for noise suppression)
+- [x] `angle_spectrum` (SpectrumPlot — same as phase spectrum, alias)
 
 ### 1.7 3D — `mpl_toolkits.mplot3d`
-- [ ] `plot` / `plot3D`
-- [ ] `scatter` / `scatter3D`
-- [ ] `bar` (2D bars in 3D), `bar3d`
-- [ ] `stem`
-- [ ] `errorbar`
+- [x] `plot` / `plot3D` (Plot3D — 3D line plot via CPU projection of Point3D
+      through Camera3D view-projection matrix to NDC, rendered as line strip
+      via LineRenderer with identity viewport, optional markers via
+      PointRenderer, configurable color/width/markers, perspective divide)
+- [x] `scatter` / `scatter3D` (Scatter3D — 3D scatter via CPU projection of
+      Point3D through Camera3D view-projection matrix to NDC, rendered as
+      markers via PointRenderer with identity viewport, per-point colors/sizes,
+      configurable marker style/size/color, perspective divide)
+- [x] `bar` (2D bars in 3D), `bar3d` (Bar3D — 3D rectangular bars via CPU
+      projection of 8-corner boxes through Camera3D, 6 faces per bar rendered
+      as filled triangles via FillRenderer with painter's algorithm depth
+      sorting, per-face shading for simple lighting, optional edge outlines
+      via LineSegmentRenderer, configurable color/edge color/edge width)
+- [x] `stem` (StemPlot — vertical lines from baseline to data points with
+      optional markers, configurable baseline, custom line/marker colors,
+      LineSegmentRenderer + PointRenderer, auto x from index)
+- [x] `errorbar` (Errorbar3D — 3D error bars along x/y/z axes via CPU
+      projection through Camera3D, symmetric/asymmetric errors, caps as
+      perpendicular line segments, markers via PointRenderer, error bars
+      via LineSegmentRenderer, configurable colors/sizes/caps)
 - [x] `plot_surface` (SurfacePlot — stub)
-- [ ] `plot_wireframe`
-- [ ] `plot_trisurf`
-- [ ] `contour`, `contourf`
-- [ ] `tricontour`, `tricontourf`
-- [ ] `quiver`
-- [ ] `voxels`
-- [ ] 3D text (`Text3D`)
-- [ ] 3D collections (`Line3DCollection`, `Poly3DCollection`, etc.)
+- [x] `plot_wireframe` (WireframePlot — 3D wireframe via CPU projection of
+      Grid2D surface through Camera3D, row/column line segments connecting
+      adjacent grid points, configurable row/col stride, rendered as
+      independent line segments via LineSegmentRenderer, configurable
+      color/width)
+- [x] `plot_trisurf` (TrisurfPlot — 3D triangulated surface via Delaunay
+      triangulation of (x,y) with z as height, triangles projected through
+      Camera3D to NDC, rendered as filled polygons via FillRenderer with
+      painter's algorithm depth sorting, per-triangle colormap coloring from
+      average z, optional edge outlines via LineSegmentRenderer, explicit
+      triangle support, configurable colormap/value range)
+- [x] `contour`, `contourf` (Contour3D / Contourf3D — 3D contour lines and
+      filled bands at a fixed z-level, marching squares isoline extraction
+      from Grid2D, projected through Camera3D to NDC, contour lines via
+      LineSegmentRenderer, filled bands via FillRenderer with colormap
+      coloring, configurable levels/colormap/z-level, saddle-case handling)
+- [x] `tricontour`, `tricontourf` (TricontourPlot / TricontourfPlot — 3D
+      contour lines and filled bands on scattered data via Delaunay
+      triangulation of (x,y) with z as scalar field, per-triangle edge
+      crossing extraction for contour lines, Sutherland-Hodgman polygon
+      clipping for filled bands, projected through Camera3D at fixed
+      z-level, LineSegmentRenderer for lines, FillRenderer for bands,
+      configurable levels/colormap/z-level)
+- [x] `quiver` (Quiver3D — 3D vector field via CPU projection of arrow
+      base/tip through Camera3D, shafts as line segments via
+      LineSegmentRenderer, arrowheads as filled triangles via FillRenderer
+      with screen-space perpendicular orientation, configurable scale/color/
+      head size/filled heads, autoscale includes arrow tip positions)
+- [x] `voxels` (VoxelsPlot — 3D voxel grid via CPU projection of unit cubes
+      through Camera3D, 6 faces per voxel rendered as filled triangles via
+      FillRenderer with painter's algorithm depth sorting, per-face shading
+      for simple lighting, optional edge outlines via LineSegmentRenderer,
+      per-voxel or uniform colors, 3D boolean array input)
+- [x] 3D text (`Text3D` — 3D text annotations via CPU projection of 3D
+      positions through Camera3D to 2D pixel coordinates, rendered using
+      existing TextRenderer/glyb bitmap atlas, configurable color/rotation,
+      multiple text items, behind-camera culling, autoscale includes text
+      positions)
+- [x] 3D collections (`Line3DCollection`, `Poly3DCollection` —
+      `Line3DCollection` renders independent 3D line segments via CPU
+      projection through Camera3D and LineSegmentRenderer, supports flat
+      array or point-pair constructors, per-segment or uniform colors;
+      `Poly3DCollection` renders 3D polygons with arbitrary vertex counts
+      via fan triangulation, painter's algorithm depth sorting, FillRenderer
+      for faces and LineSegmentRenderer for edges, per-polygon or uniform
+      face colors, configurable face/edge rendering)
 
 ### 1.8 VolcanoPlot-specific (GPU-native)
 - [x] GPU-side function evaluation (FunctionPlot — CPU fallback, GPU compute TODO)
 - [x] GPU-side KDE (KDEPlot — CPU fallback, GPU compute TODO)
-- [ ] GPU autoscale (parallel min/max reduce)
+- [x] GPU autoscale (parallel min/max reduce)
 - [x] Infinite zoom (FunctionPlot::reevaluate — framework in place)
-- [ ] f32 phase decomposition for deep-zoom chirp plots
-- [ ] 3D Mexican hat wavelet plot
-- [ ] 3D dynamic grid (fwidth-based)
+- [x] f32 phase decomposition for deep-zoom chirp plots
+      (`PhaseDecomposer` utility — splits phase into large f64-computed
+      constant + small f32 delta, uses sin(a+b)=sin(a)cos(b)+cos(a)sin(b)
+      identity for accurate oscillatory evaluation at high frequencies;
+      `LinearChirp` struct with evaluate/evaluateDecomposed methods;
+      `ChirpPlot` plot type with per-viewport re-evaluation centered at
+      viewport center for maximum precision, configurable phase decomposition
+      on/off, infinite zoom support via reevaluate())
+- [x] 3D Mexican hat wavelet plot (MexicanHatPlot — evaluates the 2D Ricker
+      wavelet psi(x,y) = (2 - r^2/sigma^2) * exp(-r^2/(2*sigma^2)) on a
+      regular grid, renders as a 3D surface via CPU projection through
+      Camera3D with painter's algorithm depth sorting, FillRenderer for
+      colormap-colored faces, optional LineSegmentRenderer wireframe overlay
+      with configurable stride, configurable sigma/colormap/grid resolution)
+- [x] 3D dynamic grid (fwidth-based) (Grid3DRenderer — fullscreen-quad
+      fragment shader ray-casts against floor/wall planes using inverse
+      view-projection matrix, computes grid line distances in world space
+      with fwidth-based screen-space derivatives for anti-aliasing, lines
+      never quantize under zoom, configurable floor/back-wall/side-wall
+      planes, auto or custom grid step, alpha-blended overlay)
 - [ ] Navigation cube/triad (3D)
 
 ---
@@ -111,36 +261,37 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `viridis`, `plasma`, `inferno`, `magma`, `cividis`
 
 ### 3.2 Sequential
-- [ ] `Greys`, `Purples`, `Blues`, `Greens`, `Oranges`, `Reds`
-- [ ] `YlOrBr`, `YlOrRd`, `OrRd`, `PuRd`, `RdPu`, `BuPu`
-- [ ] `GnBu`, `PuBu`, `YlGnBu`, `PuBuGn`, `BuGn`, `YlGn`
-- [ ] `gray`, `bone`, `pink`, `spring`, `summer`, `autumn`, `winter`, `cool`, `Wistia`
-- [ ] `hot`, `afmhot`, `gist_heat`, `copper`
+- [x] `Greys`, `Purples`, `Blues`, `Greens`, `Oranges`, `Reds`
+- [x] `YlOrBr`, `YlOrRd`, `OrRd`, `PuRd`, `RdPu`, `BuPu`
+- [x] `GnBu`, `PuBu`, `YlGnBu`, `PuBuGn`, `BuGn`, `YlGn`
+- [x] `gray`, `bone`, `pink`, `spring`, `summer`, `autumn`, `winter`, `cool`, `Wistia`
+- [x] `hot`, `afmhot`, `gist_heat`, `copper`
 
 ### 3.3 Diverging
 - [x] `coolwarm`, `RdBu`, `seismic`
-- [ ] `PiYG`, `PRGn`, `BrBG`, `PuOr`, `RdGy`
-- [ ] `RdYlBu`, `RdYlGn`, `Spectral`, `bwr`
+- [x] `PiYG`, `PRGn`, `BrBG`, `PuOr`, `RdGy`
+- [x] `RdYlBu`, `RdYlGn`, `Spectral`, `bwr`
 - [ ] `berlin`, `managua`, `vanimo`
 
 ### 3.4 Cyclic
-- [ ] `twilight`, `twilight_shifted`, `hsv`
+- [x] `twilight`, `twilight_shifted`, `hsv`
 
 ### 3.5 Qualitative
-- [ ] `Pastel1`, `Pastel2`, `Paired`, `Accent`
-- [ ] `okabe_ito`, `Dark2`, `Set1`, `Set2`, `Set3`
-- [ ] `tab10`, `tab20`, `tab20b`, `tab20c`
+- [x] `Pastel1`, `Pastel2`, `Paired`, `Accent`
+- [ ] `okabe_ito` (added in matplotlib 3.11)
+- [x] `Dark2`, `Set1`, `Set2`, `Set3`
+- [x] `tab10`, `tab20`, `tab20b`, `tab20c`
 
 ### 3.6 Miscellaneous
 - [x] `turbo`, `jet`
-- [ ] `flag`, `prism`, `ocean`, `gist_earth`, `terrain`, `gist_stern`
-- [ ] `gnuplot`, `gnuplot2`, `CMRmap`, `cubehelix`, `brg`
-- [ ] `gist_rainbow`, `rainbow`, `nipy_spectral`, `gist_ncar`
+- [x] `flag`, `prism`, `ocean`, `gist_earth`, `terrain`, `gist_stern`
+- [x] `gnuplot`, `gnuplot2`, `CMRmap`, `cubehelix`, `brg`
+- [x] `gist_rainbow`, `rainbow`, `nipy_spectral`, `gist_ncar`
 
 ### 3.7 Colormap API
 - [ ] `LinearSegmentedColormap`
 - [ ] `ListedColormap`
-- [ ] Reversed colormaps (`name + '_r'`)
+- [x] Reversed colormaps (`name + '_r'`)
 - [ ] `Colormap` `bad`, `under`, `over` colors
 
 ---
@@ -184,9 +335,8 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       switching from vectorized triangulation to glyb's FreeType span
       rasterizer, which correctly handles the even-odd fill rule.
 - [x] HarfBuzz text shaping (kerning, ligatures, RTL/CJK ready)
-- [-] Y-axis label rotation — currently drawn horizontally to the left of
-      the axes. Need 90° rotation (either via vertex transform or per-glyph
-      rotation in the vertex builder).
+- [x] Y-axis label rotation — 90° rotation via per-glyph vertex transform
+      in TextRenderer::draw() (rotation parameter in radians).
 - [ ] Font rotation and alignment properties (FontProperties::rotation,
       horizontal/vertical alignment)
 - [ ] Text clipping to axes rect for `text()` / `annotate()` (data-space text)
@@ -221,14 +371,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ---
 
 ## 7. Color Handling
-- [ ] Single-letter shorthands: `bgrcmykw`
-- [ ] Named colors (X11/CSS4, `tab:...`, `C0`–`C9` cycle)
-- [ ] Hex (`#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`)
+- [x] Single-letter shorthands: `bgrcmykw`
+- [x] Named colors (X11/CSS4, `tab:...`, `C0`–`C9` cycle)
+- [x] Hex (`#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`)
 - [x] RGB/RGBA tuples (0–1 float) (Color struct)
-- [ ] Grayscale string (`'0.5'`)
-- [ ] `CN` index colors (`C0`–`C9`)
+- [x] Grayscale string (`'0.5'`)
+- [x] `CN` index colors (`C0`–`C9`)
 - [ ] `xkcd:` color names
-- [ ] Color cycles / `axes.prop_cycle`
+- [x] Color cycles / `axes.prop_cycle` (ColorCycle with tab10 palette)
 - [ ] `cycler` library integration (color + linestyle + marker + linewidth cycling)
 - [ ] Normalization:
   - [ ] `Normalize`, `NoNorm`

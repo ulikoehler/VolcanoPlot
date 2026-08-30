@@ -166,10 +166,11 @@ void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool p
                            std::span<const plot::Color> colors, std::span<const float> sizes) {
     core::BufferDesc pdesc{};
     pdesc.size = points.size_bytes();
-    pdesc.usage = core::BufferUsage::Vertex;
+    pdesc.usage = core::BufferUsage::VertexStorage;
     pointBuffer_ = core::Buffer(allocator, pdesc);
     pointBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{points.data(), points.size()}));
+    count_ = static_cast<uint32_t>(points.size());
 
     core::BufferDesc cdesc{};
     cdesc.size = colors.size_bytes();

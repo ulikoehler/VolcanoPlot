@@ -124,12 +124,13 @@ void LineRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool po
                           plot::Color color, float width) {
     core::BufferDesc d;
     d.size = points.size_bytes();
-    d.usage = core::BufferUsage::Vertex;
+    d.usage = core::BufferUsage::VertexStorage;
     pointBuffer_ = core::Buffer(allocator, d);
     pointBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{points.data(), points.size()}));
     color_ = color;
     width_ = width;
+    count_ = static_cast<uint32_t>(points.size());
 }
 
 void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,

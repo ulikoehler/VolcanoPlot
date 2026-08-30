@@ -32,6 +32,9 @@ cmake --build build -j4
 
 # Run headless scatter example (writes headless_scatter.png)
 ./build/examples/example_headless_scatter
+
+# Generate side-by-side matplotlib vs VolcanoPlot gallery
+./scripts/generate_gallery.sh gallery
 ```
 
 ## Dependencies (system)
@@ -86,6 +89,14 @@ Optional: `libfreetype-dev` and `libharfbuzz-dev` (for text rendering via glyb).
   to avoid f32 quantization at deep zoom (chirp plots)
 - **GPU-side KDE** — stream samples to GPU, evaluate kernel density into grid
 - **GPU-side image encoding** — PNG filtering via compute shader
+- **GPU autoscale** — parallel min/max reduce over uploaded point buffers
+  (`ReduceRenderer`) computes the data-space viewport on the GPU via a
+  multi-pass workgroup-shared-memory reduce (256 threads/workgroup). Plot
+  layers opt in via `IPlot::contributeToAutoscaleGpu()`; the default
+  implementation falls back to CPU `contributeToAutoscale()`. `Renderer::prepare()`
+  uploads all plot GPU resources first, then calls `Axes::autoscaleGpu()`.
+  Point/line vertex buffers use `BufferUsage::VertexStorage` so the compute
+  shader can read them as storage buffers.
 
 ### Text Rendering (glyb Bitmap Atlas)
 

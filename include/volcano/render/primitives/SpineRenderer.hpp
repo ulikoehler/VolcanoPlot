@@ -41,6 +41,13 @@ public:
                    plot::Color color, float tickLength,
                    bool yAxis, float dataMin, float dataMax);
 
+    /// Draw a line strip from the given pixel-space points.
+    /// Used by reference line plots (AxhLine, AxvLine) that need to draw
+    /// lines spanning the axes in pixel coordinates.
+    void drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
+                       std::span<const plot::Point2D> points,
+                       plot::Color color, float width);
+
 private:
     vk::Device device_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -57,11 +64,6 @@ private:
     size_t scratchOffset_ = 0;
 
     void ensureScratch(size_t byteCount);
-
-    /// Draw a line strip from the given pixel-space points.
-    void drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
-                       std::span<const plot::Point2D> points,
-                       plot::Color color, float width);
 };
 
 } // namespace volcano::render::primitives

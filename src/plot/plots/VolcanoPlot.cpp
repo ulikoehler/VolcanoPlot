@@ -37,4 +37,9 @@ void VolcanoPlot::contributeToAutoscale(Viewport& v) const {
     scatter_.contributeToAutoscale(v);
 }
 
+void VolcanoPlot::contributeToAutoscaleGpu(
+    render::primitives::ReduceRenderer& reducer, Viewport& v) const {
+    scatter_.contributeToAutoscaleGpu(reducer, v);
+}
+
 } // namespace volcano::plot

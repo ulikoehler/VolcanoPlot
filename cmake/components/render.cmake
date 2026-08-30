@@ -8,11 +8,15 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/primitives/PointRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/LineRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/BarRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/FillRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/LineSegmentRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/PieRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/HeatmapRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SurfaceRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SpineRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/ReduceRenderer.cpp
     ${VOLCANO_ROOT}/src/render/GridRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/Grid3DRenderer.cpp
 )
 
 volcano_add_component(volcano_render

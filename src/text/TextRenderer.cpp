@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -413,7 +414,7 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
 
 void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                         std::string_view text, float x, float y,
-                        plot::Color color, float scale) {
+                        plot::Color color, float scale, float rotation) {
     if (!inited_ || !fontFace_ || text.empty()) return;
 
     // Font size in 26.6 fixed-point (glyb convention).
@@ -449,12 +450,19 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     size_t idxBytes = idxCount * sizeof(uint32_t);
     ensureScratch(vertBytes, idxBytes);
 
-    // Convert vertices.
+    // Convert vertices, applying rotation around the text origin (x, y).
     auto* dstVerts = static_cast<TextVertex*>(scratchVB_.mappedData());
+    float cosR = std::cos(rotation);
+    float sinR = std::sin(rotation);
     for (size_t i = 0; i < vertCount; ++i) {
         const auto& sv = batch->vertices[i];
-        dstVerts[i].x = sv.pos[0];
-        dstVerts[i].y = sv.pos[1];
+        float px = sv.pos[0];
+        float py = sv.pos[1];
+        // Rotate (px, py) around origin (x, y).
+        float dx = px - x;
+        float dy = py - y;
+        dstVerts[i].x = x + dx * cosR - dy * sinR;
+        dstVerts[i].y = y + dx * sinR + dy * cosR;
         dstVerts[i].u = sv.uv[0];
         dstVerts[i].v = sv.uv[1];
         // glyb color is RGBA8 packed as uint32.

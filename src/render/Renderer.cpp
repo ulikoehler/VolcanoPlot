@@ -91,12 +91,25 @@ void Renderer::prepare(plot::Figure& figure) {
                             *pipelineCache_, *descriptorPool_);
         spineInited_ = true;
     }
+    // Init GPU autoscale reduce pipeline once.
+    if (!reduceInited_) {
+        reduceRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
+                             ctx.device.computeQueue(),
+                             ctx.computePool.handle());
+        reduceInited_ = true;
+    }
 
+    // Upload all plot GPU resources first, so the GPU autoscale reduce can
+    // operate on the uploaded point buffers.
     for (auto& p : figure.placements()) {
-        p.axes->autoscale();
         for (auto& plot : p.axes->plots()) {
             plot->prepare(*this);
         }
+    }
+    // Compute viewports via GPU parallel min/max reduce (per-layer CPU
+    // fallback for plot types without GPU buffers).
+    for (auto& p : figure.placements()) {
+        p.axes->autoscaleGpu(reduceRenderer_);
     }
     prepared_ = true;
 }
@@ -131,12 +144,19 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
 
     // --- Y axis label ---
     if (style.yAxis.visible && !style.yAxis.label.empty()) {
-        // TODO: implement proper rotation (90°).
+        // Rotate 90° counterclockwise (in math convention) so the label
+        // reads bottom-to-top. In screen space (Y-down), this is -90°
+        // (i.e. -π/2 radians clockwise). The rotation origin is the text
+        // baseline (x, y); we position it at the left-center of the axes.
         float textWidth = style.yAxis.label.size() * fontSize * 0.5f;
-        float cx = rect.x - textWidth - 10.0f;
-        float cy = rect.y + rect.height / 2.0f;
+        float textHeight = fontSize;
+        // Origin: left of the axes, vertically centered.
+        // After rotation, the text extends upward from the origin.
+        float ox = rect.x - textHeight - 10.0f;
+        float oy = rect.y + rect.height / 2.0f + textWidth / 2.0f;
+        constexpr float kRotMinus90 = -1.5707963267948966f; // -π/2
         textRenderer_.draw(cmd, fullRect,
-            style.yAxis.label, cx, cy, labelColor, scale);
+            style.yAxis.label, ox, oy, labelColor, scale, kRotMinus90);
     }
 
     // --- Title ---

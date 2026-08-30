@@ -10,7 +10,8 @@ namespace {
 
 vk::BufferUsageFlags usageToFlags(BufferUsage u) {
     switch (u) {
-        case BufferUsage::Vertex:   return vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst;
+        case BufferUsage::Vertex:        return vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst;
+        case BufferUsage::VertexStorage: return vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Index:    return vk::BufferUsageFlagBits::eIndexBuffer  | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Storage:  return vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst;
         case BufferUsage::Uniform:  return vk::BufferUsageFlagBits::eUniformBuffer;

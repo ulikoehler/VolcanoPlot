@@ -1,0 +1,96 @@
+name: Gallery
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'examples/gallery.cpp'
+      - 'scripts/matplotlib_gallery.py'
+      - 'scripts/generate_gallery.sh'
+      - '.github/workflows/gallery.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'examples/gallery.cpp'
+      - 'scripts/matplotlib_gallery.py'
+      - 'scripts/generate_gallery.sh'
+      - '.github/workflows/gallery.yml'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  generate-gallery:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan-dev \
+            libsdl3-dev \
+            libshaderc-dev \
+            glslang-dev \
+            spirv-tools \
+            vulkan-validationlayers \
+            vulkan-utility-libraries-dev \
+            libpng-dev \
+            libwebp-dev \
+            libfreetype-dev \
+            libharfbuzz-dev \
+            imagemagick
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install matplotlib numpy scipy Pillow
+
+      - name: Install Vulkan SDK
+        run: |
+          # Install the LunarG Vulkan SDK for a known-good vulkan loader.
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-1.4.noble.list \
+            https://packages.lunarg.com/vulkan/1.4/lunarg-vulkan-1.4-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Configure VolcanoPlot
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DVOLCANO_BUILD_EXAMPLES=ON
+
+      - name: Build VolcanoPlot
+        run: cmake --build build -j4
+
+      - name: Run tests
+        run: ./build/tests/volcano_tests
+
+      - name: Generate gallery
+        run: ./scripts/generate_gallery.sh gallery
+
+      - name: Upload VolcanoPlot PNGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: volcano-gallery
+          path: gallery/volcano/
+          if-no-files-found: error
+
+      - name: Upload matplotlib PNGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: matplotlib-gallery
+          path: gallery/matplotlib/
+          if-no-files-found: error
+
+      - name: Upload comparison PNGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-gallery
+          path: gallery/comparison/
+          if-no-files-found: warn

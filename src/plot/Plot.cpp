@@ -3,6 +3,13 @@
 
 namespace volcano::plot {
 
+void IPlot::contributeToAutoscaleGpu(
+    [[maybe_unused]] render::primitives::ReduceRenderer& reducer,
+    Viewport& v) const {
+    // Default: fall back to the CPU autoscale contribution.
+    contributeToAutoscale(v);
+}
+
 Figure::Figure(uint32_t rows, uint32_t cols) : rows_(rows), cols_(cols) {}
 
 Axes* Figure::addAxes(uint32_t row, uint32_t col, uint32_t rowSpan, uint32_t colSpan) {

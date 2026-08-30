@@ -6,6 +6,7 @@
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/render/GridRenderer.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
+#include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
 
 #include <volcano/plot/Plot.hpp>
@@ -31,6 +32,8 @@ public:
     [[nodiscard]] core::PipelineCache& pipelineCache() noexcept { return *pipelineCache_; }
     [[nodiscard]] core::DescriptorPool& descriptorPool() noexcept { return *descriptorPool_; }
     [[nodiscard]] text::TextRenderer& textRenderer() noexcept { return textRenderer_; }
+    [[nodiscard]] primitives::ReduceRenderer& reduceRenderer() noexcept { return reduceRenderer_; }
+    [[nodiscard]] primitives::SpineRenderer& spineRenderer() noexcept { return spineRenderer_; }
 
 private:
     backend::IBackend& backend_;
@@ -38,10 +41,12 @@ private:
     std::unique_ptr<core::DescriptorPool> descriptorPool_;
     GridRenderer gridRenderer_;
     primitives::SpineRenderer spineRenderer_;
+    primitives::ReduceRenderer reduceRenderer_;
     text::TextRenderer textRenderer_;
     bool gridInited_ = false;
     bool textInited_ = false;
     bool spineInited_ = false;
+    bool reduceInited_ = false;
     bool textReady_ = false;
     bool prepared_ = false;
 

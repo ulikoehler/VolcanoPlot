@@ -2,7 +2,9 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace volcano::plot {
@@ -29,6 +31,28 @@ struct Color {
     static constexpr Color fromRgba8(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
         return {r/255.0f, g/255.0f, b/255.0f, a/255.0f};
     }
+
+    /// Parse a matplotlib-style color string. Supports:
+    ///   - Single-letter shorthands: "b", "g", "r", "c", "m", "y", "k", "w"
+    ///   - Hex: "#RGB", "#RRGGBB", "#RGBA", "#RRGGBBAA"
+    ///   - Named CSS4 colors: "red", "blue", "lightblue", etc.
+    ///   - CN cycle colors: "C0"–"C9" (uses the default color cycle)
+    ///   - Grayscale: "0.0"–"1.0" (string of a float in [0,1])
+    /// Returns nullopt on parse failure.
+    static std::optional<Color> parse(std::string_view s);
+
+    /// Same as parse(), but returns black on failure (for convenience).
+    static Color parseOr(std::string_view s, Color fallback = black());
+};
+
+/// Default color cycle (matplotlib's "tab10" palette).
+/// Used by "C0"–"C9" color strings and for automatic plot coloring.
+class ColorCycle {
+public:
+    /// Get the color at index i (wraps around modulo 10).
+    [[nodiscard]] static Color at(size_t i);
+    /// Number of colors in the default cycle.
+    static constexpr size_t size() { return 10; }
 };
 
 /// Axis range in data coordinates.
