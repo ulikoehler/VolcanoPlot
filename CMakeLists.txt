@@ -38,7 +38,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 # Options
 # -----------------------------------------------------------------------------
-option(VOLCANO_BUILD_SHARED_LIBS "Build shared library variants" ON)
+# NOTE: volcano_render and volcano_plot have a circular dependency
+# (renderers use plot types like Camera3D/Transform2D; plots use renderers
+# like LineRenderer/FillRenderer). CMake only allows cyclic dependencies
+# among static libraries, so shared libs are OFF by default.
+option(VOLCANO_BUILD_SHARED_LIBS "Build shared library variants (disabled by default due to render<->plot cycle)" OFF)
 option(VOLCANO_BUILD_STATIC_LIBS "Build static library variants" ON)
 option(VOLCANO_BUILD_SCREEN_BACKEND "Build SDL3 screen backend" ON)
 option(VOLCANO_BUILD_HEADLESS_BACKEND "Build headless offscreen backend" ON)
@@ -51,6 +55,18 @@ option(VOLCANO_GPU_ENCODE "Enable GPU-side image encoding (compute shaders)" ON)
 # Parallelism guard — match Tether convention to avoid OOM on limited-RAM machines.
 if(NOT DEFINED VOLCANO_BUILD_PARALLELISM)
     set(VOLCANO_BUILD_PARALLELISM 4)
+endif()
+
+# Guard: shared libs can't handle the render<->plot circular dependency.
+if(VOLCANO_BUILD_SHARED_LIBS AND NOT VOLCANO_BUILD_STATIC_LIBS)
+    message(FATAL_ERROR
+        "VOLCANO_BUILD_SHARED_LIBS=ON is not supported because volcano_render "
+        "and volcano_plot have a circular dependency (renderers use plot types "
+        "like Camera3D/Transform2D; plots use renderers like LineRenderer/"
+        "FillRenderer). CMake only allows cyclic dependencies among static "
+        "libraries.\n\n"
+        "Use: cmake -B build -DVOLCANO_BUILD_STATIC_LIBS=ON "
+        "-DVOLCANO_BUILD_SHARED_LIBS=OFF")
 endif()
 
 # -----------------------------------------------------------------------------
