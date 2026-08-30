@@ -58,15 +58,19 @@ if(NOT DEFINED VOLCANO_BUILD_PARALLELISM)
 endif()
 
 # Guard: shared libs can't handle the render<->plot circular dependency.
-if(VOLCANO_BUILD_SHARED_LIBS AND NOT VOLCANO_BUILD_STATIC_LIBS)
+# The cycle exists among the shared variants regardless of whether static
+# libs are also enabled, so we must block shared libs entirely.
+if(VOLCANO_BUILD_SHARED_LIBS)
     message(FATAL_ERROR
         "VOLCANO_BUILD_SHARED_LIBS=ON is not supported because volcano_render "
         "and volcano_plot have a circular dependency (renderers use plot types "
         "like Camera3D/Transform2D; plots use renderers like LineRenderer/"
         "FillRenderer). CMake only allows cyclic dependencies among static "
         "libraries.\n\n"
-        "Use: cmake -B build -DVOLCANO_BUILD_STATIC_LIBS=ON "
-        "-DVOLCANO_BUILD_SHARED_LIBS=OFF")
+        "Re-configure with shared libs disabled:\n"
+        "  cmake -B build -DVOLCANO_BUILD_SHARED_LIBS=OFF\n"
+        "If you have a stale cache from a previous configure, remove it first:\n"
+        "  rm CMakeCache.txt  (in-source)  or  rm -rf build/  (out-of-source)")
 endif()
 
 # -----------------------------------------------------------------------------
