@@ -163,7 +163,7 @@ set(VMA_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/VulkanMemoryAllocator")
 if(NOT EXISTS "${VMA_PATH}/include/vk_mem_alloc.h")
     message(FATAL_ERROR
         "Git submodule 'VulkanMemoryAllocator' is not initialized.\n"
-        "Please run: git submodule update --init")
+        "Please run: git submodule update --init --recursive")
 endif()
 
 # GoogleTest — prefer system package, fall back to FetchContent.
@@ -219,7 +219,7 @@ set(GLYB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glyb")
 if(NOT EXISTS "${GLYB_PATH}/src/glyph.h")
     message(FATAL_ERROR
         "Git submodule 'glyb' is not initialized.\n"
-        "Please run: git submodule update --init")
+        "Please run: git submodule update --init --recursive")
 endif()
 if(NOT EXISTS "${GLYB_PATH}/third_party/glm/glm/glm.hpp")
     message(FATAL_ERROR
