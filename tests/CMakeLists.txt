@@ -10,6 +10,10 @@ target_link_libraries(volcano_tests PRIVATE
     GTest::gtest_main
     volcano_backend volcano_render volcano_plot volcano_text volcano_encode
 )
+# Link MPI if it was detected (some system libs transitively require -lmpi_cxx).
+if(MPI_FOUND AND TARGET MPI::MPI_CXX)
+    target_link_libraries(volcano_tests PRIVATE MPI::MPI_CXX)
+endif()
 target_include_directories(volcano_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 gtest_discover_tests(volcano_tests)

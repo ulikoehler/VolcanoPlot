@@ -206,6 +206,13 @@ if(VOLCANO_BUILD_TESTS)
             set(GTest_FOUND TRUE)
         endif()
     endif()
+    # Some system GTest/Vulkan/shaderc packages are built with MPI support
+    # and transitively require -lmpi_cxx at link time. Detect and link MPI
+    # if available so the linker can resolve those transitive dependencies.
+    find_package(MPI QUIET)
+    if(MPI_FOUND AND TARGET MPI::MPI_CXX)
+        message(STATUS "MPI found — linking MPI::MPI_CXX to tests (transitive dep)")
+    endif()
     if(NOT GTest_FOUND)
         message(STATUS "GTest not found on system; FetchContent'ing GoogleTest")
         FetchContent_Declare(
