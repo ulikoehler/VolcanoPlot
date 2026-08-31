@@ -98,6 +98,8 @@ Axes* setupAxes(Figure& fig, std::string_view title) {
     ax->setTitle(std::string(title));
     ax->style().xAxis.visible = true;
     ax->style().yAxis.visible = true;
+    ax->style().xAxis.label = "X";
+    ax->style().yAxis.label = "Y";
     return ax;
 }
 

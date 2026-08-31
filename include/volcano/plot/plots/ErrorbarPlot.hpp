@@ -50,6 +50,7 @@ public:
                                   Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return cfg_.label; }
     [[nodiscard]] Color legendColor() const override { return cfg_.color; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Circle; }
 
 private:
     std::vector<float> x_, y_;

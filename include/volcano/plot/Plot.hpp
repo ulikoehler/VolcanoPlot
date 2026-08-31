@@ -16,6 +16,13 @@ namespace volcano::render::primitives { class ReduceRenderer; }
 
 namespace volcano::plot {
 
+/// Legend marker shape for a plot layer.
+enum class LegendMarker {
+    Square,   ///< Filled square (bar, fill, histogram, ...)
+    Line,     ///< Horizontal line segment (line, step, stem, function, ...)
+    Circle,   ///< Filled circle (scatter, scatter3d, ...)
+};
+
 /// Interface implemented by all plot types (scatter, line, bar, pie, ...).
 class IPlot {
 public:
@@ -37,6 +44,8 @@ public:
     [[nodiscard]] virtual std::string label() const { return {}; }
     /// Legend marker color.
     [[nodiscard]] virtual Color legendColor() const { return Color::black(); }
+    /// Legend marker shape (default: filled square).
+    [[nodiscard]] virtual LegendMarker legendMarker() const { return LegendMarker::Square; }
 };
 
 /// A Figure holds one or more Axes arranged in a grid.

@@ -95,7 +95,10 @@ void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vk::PipelineColorBlendStateCreateInfo cbsci;
     cbsci.setAttachments(att);
 
-    std::vector<vk::DynamicState> dyn = { vk::DynamicState::eViewport, vk::DynamicState::eScissor };
+    std::vector<vk::DynamicState> dyn = {
+        vk::DynamicState::eViewport, vk::DynamicState::eScissor,
+        vk::DynamicState::eLineWidth,
+    };
     vk::PipelineDynamicStateCreateInfo dsci;
     dsci.setDynamicStates(dyn);
 
@@ -157,6 +160,7 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.width = width_;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
+    cmd.setLineWidth(std::max(width_, 1.0f));
     cmd.pushConstants(pipelineLayout_.get(),
                       vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
                       0, sizeof(PC), &pc);

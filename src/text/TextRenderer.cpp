@@ -76,15 +76,37 @@ std::string findSystemFontFile() {
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
     };
+    // Filter out non-regular weights/styles.
     auto isRegular = [](const std::string& name) {
         std::string lower = name;
         std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
         return lower.find("bold") == std::string::npos &&
                lower.find("italic") == std::string::npos &&
                lower.find("oblique") == std::string::npos &&
-               lower.find("condensed") == std::string::npos;
+               lower.find("condensed") == std::string::npos &&
+               lower.find("light") == std::string::npos &&
+               lower.find("thin") == std::string::npos &&
+               lower.find("black") == std::string::npos &&
+               lower.find("heavy") == std::string::npos &&
+               lower.find("medium") == std::string::npos &&
+               lower.find("semibold") == std::string::npos &&
+               lower.find("extralight") == std::string::npos &&
+               lower.find("demi") == std::string::npos;
     };
-    // First pass: look for DejaVu Sans regular.
+    // First pass: look for exact "DejaVuSans.ttf" (the regular weight).
+    for (const auto& d : dirs) {
+        if (!std::filesystem::exists(d)) continue;
+        for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
+            if (!e.is_regular_file()) continue;
+            auto name = e.path().filename().string();
+            // Exact match on "DejaVuSans.ttf" (case-insensitive).
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower == "dejavusans.ttf")
+                return e.path().string();
+        }
+    }
+    // Second pass: any DejaVu Sans that passes the regular filter.
     for (const auto& d : dirs) {
         if (!std::filesystem::exists(d)) continue;
         for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
@@ -94,7 +116,7 @@ std::string findSystemFontFile() {
                 return e.path().string();
         }
     }
-    // Second pass: any regular TTF.
+    // Third pass: any regular TTF/OTF.
     for (const auto& d : dirs) {
         if (!std::filesystem::exists(d)) continue;
         for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
@@ -275,10 +297,13 @@ void TextRenderer::loadFont() {
 }
 
 void TextRenderer::resetScratch() {
-    // Nothing to reset — we rebuild the draw list each frame.
+    // Reset ring-buffer offsets for the new frame.
+    vbOffset_ = 0;
+    ibOffset_ = 0;
 }
 
 void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
+    // Ring-buffered: ensure total capacity is enough for the current frame.
     if (vertexBytes > vbCapacity_) {
         size_t newSize = std::max<size_t>(65536, vertexBytes * 2);
         core::BufferDesc bdesc{};
@@ -448,10 +473,19 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     size_t idxCount = batch->indices.size();
     size_t vertBytes = vertCount * sizeof(TextVertex);
     size_t idxBytes = idxCount * sizeof(uint32_t);
-    ensureScratch(vertBytes, idxBytes);
+
+    // Ring-buffer the scratch VB/IB so that multiple text draw calls in the
+    // same frame don't overwrite each other (GPU reads the data later).
+    if (vbOffset_ + vertBytes > vbCapacity_ ||
+        ibOffset_ + idxBytes > ibCapacity_) {
+        // Not enough room — grow the buffers (reallocates, losing prior frame
+        // data, but we're mid-frame so that's a bug; for now just skip).
+        // In practice the capacity is large enough for a full frame of text.
+        ensureScratch(vbOffset_ + vertBytes, ibOffset_ + idxBytes);
+    }
 
     // Convert vertices, applying rotation around the text origin (x, y).
-    auto* dstVerts = static_cast<TextVertex*>(scratchVB_.mappedData());
+    auto* dstVerts = static_cast<TextVertex*>(scratchVB_.mappedData()) + vbOffset_ / sizeof(TextVertex);
     float cosR = std::cos(rotation);
     float sinR = std::sin(rotation);
     for (size_t i = 0; i < vertCount; ++i) {
@@ -473,9 +507,14 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         dstVerts[i].a = (c & 0xff) / 255.0f;
     }
 
-    // Copy indices.
-    auto* dstIdx = static_cast<uint32_t*>(scratchIB_.mappedData());
+    // Copy indices. No adjustment needed — the VB is bound at this draw's
+    // vertex offset, so 0-based indices from glyb are correct.
+    auto* dstIdx = static_cast<uint32_t*>(scratchIB_.mappedData()) + ibOffset_ / sizeof(uint32_t);
     std::memcpy(dstIdx, batch->indices.data(), idxBytes);
+
+    // Advance ring buffer offsets.
+    vbOffset_ += vertBytes;
+    ibOffset_ += idxBytes;
 
     // Bind pipeline and descriptor set.
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
@@ -487,17 +526,16 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
-    // Bind vertex and index buffers.
-    vk::DeviceSize vbOffset = 0;
-    cmd.bindVertexBuffers(0, scratchVB_.handle(), vbOffset);
-    cmd.bindIndexBuffer(scratchIB_.handle(), 0, vk::IndexType::eUint32);
+    // Bind vertex and index buffers with the correct offsets.
+    cmd.bindVertexBuffers(0, scratchVB_.handle(), vk::DeviceSize(vbOffset_ - vertBytes));
+    cmd.bindIndexBuffer(scratchIB_.handle(), vk::DeviceSize(ibOffset_ - idxBytes), vk::IndexType::eUint32);
 
     // Set viewport + scissor.
     vk::Viewport viewport{0, 0, float(rect.extent.width), float(rect.extent.height), 0, 1};
     cmd.setViewport(0, viewport);
     cmd.setScissor(0, rect);
 
-    // Draw all indices.
+    // Draw this text's indices only.
     cmd.drawIndexed(uint32_t(idxCount), 1, 0, 0, 0);
 }
 

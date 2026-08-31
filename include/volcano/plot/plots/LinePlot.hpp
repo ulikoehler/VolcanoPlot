@@ -14,6 +14,7 @@ public:
                                   Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return series_.label; }
     [[nodiscard]] Color legendColor() const override { return series_.color; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     Series2D& series() noexcept { return series_; }
 private:
     Series2D series_;

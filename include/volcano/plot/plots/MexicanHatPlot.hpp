@@ -61,6 +61,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return Color::blue(); }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
 
 private:
     float sigma_;

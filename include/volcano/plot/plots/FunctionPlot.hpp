@@ -21,6 +21,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
 
     /// Re-evaluate the function on the GPU for the current viewport.
     /// Called when the viewport changes (infinite zoom).

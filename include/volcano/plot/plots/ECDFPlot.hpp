@@ -47,6 +47,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.color; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
 
     /// Access computed sorted unique values (valid after prepare()).
     [[nodiscard]] const std::vector<float>& values() const { return values_; }

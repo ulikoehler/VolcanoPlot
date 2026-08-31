@@ -55,6 +55,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.markerColor; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
 
 private:
     std::vector<float> x_, y_;

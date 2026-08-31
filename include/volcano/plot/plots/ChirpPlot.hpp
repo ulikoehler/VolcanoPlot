@@ -49,6 +49,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.color; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
 
     /// Re-evaluate the chirp for a new viewport (infinite zoom support).
     /// Centers the phase decomposition at the viewport center.

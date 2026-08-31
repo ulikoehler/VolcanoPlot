@@ -265,31 +265,37 @@ std::optional<MinMax2D> ReduceRenderer::reduceMinMax2D(vk::Buffer pointBuffer,
         return std::nullopt;
     }
 
-    core::OneTimeCommands cmd(device_, computePool_, computeQueue_);
-    auto cb = cmd.handle();
+    // Record and submit all compute passes, then wait for completion.
+    // The OneTimeCommands must be destroyed (submitting + waiting) BEFORE
+    // we read the host-visible output buffer, otherwise we read stale data
+    // from the previous reduce call.
+    {
+        core::OneTimeCommands cmd(device_, computePool_, computeQueue_);
+        auto cb = cmd.handle();
 
-    vk::Buffer curIn = pointBuffer;
-    uint32_t curCount = count;
-    bool vec2Input = true;
-    bool which = false; // false -> write A, true -> write B
-    uint32_t setIdx = 0;
+        vk::Buffer curIn = pointBuffer;
+        uint32_t curCount = count;
+        bool vec2Input = true;
+        bool which = false; // false -> write A, true -> write B
+        uint32_t setIdx = 0;
 
-    while (curCount > kWorkgroup) {
-        vk::Buffer outBuf = which ? intermediateB_.handle() : intermediateA_.handle();
-        recordPass(cb, descSets_[setIdx++], curIn, curCount, outBuf,
-                   /*isFinal=*/false, vec2Input);
-        curIn = outBuf;
-        curCount = divRoundUp(curCount, kWorkgroup);
-        vec2Input = false;
-        which = !which;
+        while (curCount > kWorkgroup) {
+            vk::Buffer outBuf = which ? intermediateB_.handle() : intermediateA_.handle();
+            recordPass(cb, descSets_[setIdx++], curIn, curCount, outBuf,
+                       /*isFinal=*/false, vec2Input);
+            curIn = outBuf;
+            curCount = divRoundUp(curCount, kWorkgroup);
+            vec2Input = false;
+            which = !which;
+        }
+
+        // Final pass: single workgroup -> host-visible output[0].
+        recordPass(cb, descSets_[setIdx++], curIn, curCount, output_.handle(),
+                   /*isFinal=*/true, vec2Input);
+        // cmd destructor ends, submits, and waits on the compute queue here.
     }
 
-    // Final pass: single workgroup -> host-visible output[0].
-    recordPass(cb, descSets_[setIdx++], curIn, curCount, output_.handle(),
-               /*isFinal=*/true, vec2Input);
-    // OneTimeCommands destructor ends, submits, and waits on the compute queue.
-    // The waitIdle provides host visibility for the device-written output.
-
+    // Now safe to read the device-written output.
     auto* out = static_cast<const float*>(output_.mappedData());
     if (!out) return std::nullopt;
     MinMax2D r;

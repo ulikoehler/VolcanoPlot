@@ -35,6 +35,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:
@@ -62,6 +63,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:
@@ -88,6 +90,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:
@@ -114,6 +117,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:
@@ -142,6 +146,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:
@@ -173,6 +178,7 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
 
 private:

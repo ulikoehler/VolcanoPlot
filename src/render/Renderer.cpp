@@ -13,36 +13,72 @@ namespace {
 
 /// Simple "nice number" tick locator (matplotlib MaxNLocator style).
 /// Returns ~nbins tick positions within [vmin, vmax].
+/// matplotlib's MaxNLocator with default steps=[1,2,5,10] picks the
+/// nice step that gives at most nbins ticks.
 std::vector<float> autoTicks(float vmin, float vmax, int nbins) {
     if (vmin >= vmax) return {};
     float range = vmax - vmin;
+    // matplotlib's MaxNLocator uses rawStep = range / (nbins * 1.05)
+    // to bias toward fewer ticks. We use range / nbins with rounding
+    // thresholds that match matplotlib's 'auto' behavior.
     float rawStep = range / nbins;
-    // Round step to a "nice" number: 1, 2, 5 × 10^k.
     float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
     float norm = rawStep / mag;
     float niceStep;
+    // matplotlib thresholds: <1.5->1, <3->2, <6->5, else->10
     if (norm < 1.5f)       niceStep = 1.0f * mag;
     else if (norm < 3.0f)  niceStep = 2.0f * mag;
-    else if (norm < 7.0f)  niceStep = 5.0f * mag;
+    else if (norm < 6.0f)  niceStep = 5.0f * mag;
     else                   niceStep = 10.0f * mag;
 
     float start = std::ceil(vmin / niceStep) * niceStep;
     std::vector<float> ticks;
     for (float v = start; v <= vmax + niceStep * 0.001f; v += niceStep) {
-        ticks.push_back(v);
+        // Round to avoid floating-point drift accumulating.
+        float k = std::round(v / niceStep);
+        ticks.push_back(k * niceStep);
     }
     return ticks;
 }
 
-/// Format a tick value as a short string.
-std::string formatTick(float v) {
-    if (std::abs(v) < 1e-10f) return "0";
-    if (std::abs(v) >= 10000.0f || std::abs(v) < 0.001f) {
+/// Format a tick value as a short string, using the step size to determine
+/// the appropriate number of decimal places (matching matplotlib's ScalarFormatter).
+std::string formatTick(float v, float step) {
+    // Normalize -0.0f to 0.0f to avoid "-0.0" in output.
+    if (v == 0.0f) v = std::abs(v);
+    // Very large or very small ranges use scientific notation.
+    if (std::abs(v) >= 10000.0f || (std::abs(v) < 0.001f && step < 0.001f)) {
         return std::format("{:.1e}", v);
     }
-    if (std::abs(v) >= 100.0f) return std::format("{:.0f}", v);
-    if (std::abs(v) >= 10.0f)  return std::format("{:.1f}", v);
-    return std::format("{:.2f}", v);
+    // Determine decimal places from the step size.
+    float stepMag = std::abs(step);
+    if (stepMag >= 1.0f) {
+        // Integer steps: no decimal places.
+        return std::format("{:.0f}", v);
+    } else if (stepMag >= 0.1f) {
+        // 0.1–0.9 steps: 1 decimal place.
+        return std::format("{:.1f}", v);
+    } else if (stepMag >= 0.01f) {
+        // 0.01–0.09 steps: 2 decimal places.
+        return std::format("{:.2f}", v);
+    } else if (stepMag >= 0.001f) {
+        // 0.001–0.009 steps: 3 decimal places.
+        return std::format("{:.3f}", v);
+    }
+    return std::format("{:.1e}", v);
+}
+
+/// Compute the nice step size used by autoTicks.
+float autoTickStep(float vmin, float vmax, int nbins) {
+    if (vmin >= vmax) return 1.0f;
+    float range = vmax - vmin;
+    float rawStep = range / nbins;
+    float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
+    float norm = rawStep / mag;
+    if (norm < 1.5f)       return 1.0f * mag;
+    else if (norm < 3.0f)  return 2.0f * mag;
+    else if (norm < 6.0f)  return 5.0f * mag;
+    else                   return 10.0f * mag;
 }
 
 } // namespace
@@ -172,10 +208,11 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
         auto xTicks = autoTicks(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
+        float xStep = autoTickStep(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
         for (float tick : xTicks) {
             float px = rect.x + (tick - vp.x.min) / vp.x.span() * rect.width;
             if (px < rect.x || px > rect.x + rect.width) continue;
-            auto label = formatTick(tick);
+            auto label = formatTick(tick, xStep);
             float lw = label.size() * fontSize * 0.3f;
             textRenderer_.draw(cmd, fullRect,
                 label, px - lw, rect.y + rect.height + 5.0f, labelColor, scale);
@@ -184,10 +221,11 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
 
     if (style.yAxis.visible) {
         auto yTicks = autoTicks(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
+        float yStep = autoTickStep(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
         for (float tick : yTicks) {
             float py = rect.y + rect.height - (tick - vp.y.min) / vp.y.span() * rect.height;
             if (py < rect.y || py > rect.y + rect.height) continue;
-            auto label = formatTick(tick);
+            auto label = formatTick(tick, yStep);
             float lw = label.size() * fontSize * 0.3f;
             textRenderer_.draw(cmd, fullRect,
                 label, rect.x - lw - 5.0f, py, labelColor, scale);
@@ -231,13 +269,13 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     const auto& style = axes.style();
     if (!style.legend.visible) return;
 
-    // Collect legend entries (label + color) from all plot layers.
-    struct LegendEntry { std::string label; plot::Color color; };
+    // Collect legend entries (label + color + marker) from all plot layers.
+    struct LegendEntry { std::string label; plot::Color color; plot::LegendMarker marker; };
     std::vector<LegendEntry> entries;
     for (auto& plot : axes.plots()) {
         auto lbl = plot->label();
         if (lbl.empty()) continue;
-        entries.push_back({std::move(lbl), plot->legendColor()});
+        entries.push_back({std::move(lbl), plot->legendColor(), plot->legendMarker()});
     }
     if (entries.empty()) return;
 
@@ -279,10 +317,18 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     for (size_t i = 0; i < entries.size(); ++i) {
         float y = boxY + padding + i * rowHeight;
         float markerX = boxX + padding;
-        // Draw a filled square as the marker.
-        spineRenderer_.drawFilledRect(cmd, fullRect,
-            {int32_t(markerX), int32_t(y), uint32_t(markerSize), uint32_t(markerSize)},
-            entries[i].color);
+        // Draw the marker based on the plot type.
+        if (entries[i].marker == plot::LegendMarker::Line) {
+            // Horizontal line segment spanning the marker width.
+            float midY = y + markerSize / 2.0f;
+            plot::Point2D pts[] = {{markerX, midY}, {markerX + markerSize, midY}};
+            spineRenderer_.drawLineStrip(cmd, fullRect, pts, entries[i].color, 2.0f);
+        } else {
+            // Filled square (default for Square and Circle markers).
+            spineRenderer_.drawFilledRect(cmd, fullRect,
+                {int32_t(markerX), int32_t(y), uint32_t(markerSize), uint32_t(markerSize)},
+                entries[i].color);
+        }
         // Draw the label text.
         float textX = markerX + markerSize + textGap;
         float textY = y + fontSize;  // baseline at bottom of marker
@@ -384,6 +430,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
 
     // Draw tick labels.
     auto ticks = autoTicks(valueMin, valueMax, 8);
+    float cbStep = autoTickStep(valueMin, valueMax, 8);
     for (float tick : ticks) {
         float t = (tick - valueMin) / (valueMax - valueMin);
         float y = stripY + (1.0f - t) * stripH;  // top = max, bottom = min
@@ -393,7 +440,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             {stripX + stripW + 4.0f, y},
         };
         // Draw label.
-        std::string label = formatTick(tick);
+        std::string label = formatTick(tick, cbStep);
         textRenderer_.draw(cmd, fullRect, label,
                            stripX + stripW + 8.0f, y + 6.0f,
                            style.colorbar.labelColor);

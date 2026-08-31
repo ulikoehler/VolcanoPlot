@@ -81,11 +81,13 @@ private:
     int atlasWidth_ = 0;
     int atlasHeight_ = 0;
 
-    // Scratch buffers for vertices and indices
+    // Scratch buffers for vertices and indices (ring-buffered per frame)
     core::Buffer scratchVB_;
     core::Buffer scratchIB_;
     size_t vbCapacity_ = 0;
     size_t ibCapacity_ = 0;
+    size_t vbOffset_ = 0;   // current write offset within scratchVB_
+    size_t ibOffset_ = 0;   // current write offset within scratchIB_
 
     // glyb draw list (reused per draw call, allocated in init)
     // Stored as void* to avoid pulling glyb headers into this header.

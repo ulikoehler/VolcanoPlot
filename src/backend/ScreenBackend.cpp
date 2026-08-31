@@ -72,6 +72,7 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
     ctx_.physical = core::PhysicalDevice(ctx_.instance.handle(), surface_);
     core::DeviceDesc ddesc{};
     ddesc.extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    ddesc.features.features.wideLines = VK_TRUE;
     ctx_.device = core::Device(ctx_.physical, ddesc);
 
     // Allocator

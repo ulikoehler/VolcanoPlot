@@ -36,6 +36,7 @@ HeadlessBackend::HeadlessBackend(const BackendDesc& desc) : desc_(desc) {
 
     core::DeviceDesc ddesc{};
     ddesc.hasSurface = false;
+    ddesc.features.features.wideLines = VK_TRUE;
     ctx_.device = core::Device(ctx_.physical, ddesc);
     ctx_.allocator = core::Allocator(ctx_.instance.handle(), ctx_.physical.handle(), ctx_.device.handle());
     ctx_.graphicsPool = core::CommandPool(ctx_.device.handle(), ctx_.device.graphicsFamily(),
