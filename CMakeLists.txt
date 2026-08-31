@@ -207,11 +207,76 @@ if(VOLCANO_BUILD_TESTS)
         endif()
     endif()
     # Some system GTest/Vulkan/shaderc packages are built with MPI support
-    # and transitively require -lmpi_cxx at link time. Detect and link MPI
-    # if available so the linker can resolve those transitive dependencies.
-    find_package(MPI QUIET)
-    if(MPI_FOUND AND TARGET MPI::MPI_CXX)
-        message(STATUS "MPI found — linking MPI::MPI_CXX to tests (transitive dep)")
+    # and transitively require -lmpi_cxx at link time. Detect whether any
+    # of our dependencies reference MPI, and if so, require MPI to be installed.
+    set(_mpi_required FALSE)
+    set(_mpi_referring_lib "")
+    # Collect all library file paths we depend on.
+    set(_check_libs "")
+    foreach(_var
+            GTEST_LIBRARY GTEST_MAIN_LIBRARY
+            Vulkan_LIBRARY SHADERC_LIBRARY
+            PNG_LIBRARY WEBP_LIBRARY
+            FREETYPE_LIBRARY HARFBUZZ_LIBRARY)
+        if(DEFINED ${_var} AND EXISTS "${${_var}}")
+            list(APPEND _check_libs "${${_var}}")
+        endif()
+    endforeach()
+    # Also resolve pkg-config imported targets to actual file paths.
+    foreach(_tgt PkgConfig::FREETYPE PkgConfig::HARFBUZZ PkgConfig::WEBP PkgConfig::SHADERC)
+        if(TARGET ${_tgt})
+            get_target_property(_implib ${_tgt} IMPORTED_LOCATION)
+            if(_implib AND EXISTS "${_implib}")
+                list(APPEND _check_libs "${_implib}")
+            endif()
+        endif()
+    endforeach()
+    foreach(_lib IN LISTS _check_libs)
+        if(NOT EXISTS "${_lib}")
+            continue()
+        endif()
+        # Shared libraries: check NEEDED entries via readelf -d.
+        execute_process(
+            COMMAND readelf -d "${_lib}"
+            OUTPUT_VARIABLE _readelf_out
+            ERROR_QUIET
+            RESULT_VARIABLE _readelf_rc
+        )
+        if(_readelf_out MATCHES "mpi")
+            set(_mpi_required TRUE)
+            set(_mpi_referring_lib "${_lib}")
+            break()
+        endif()
+        # Static libraries (.a): check for undefined MPI symbols via nm.
+        if(_lib MATCHES "\\.a$")
+            execute_process(
+                COMMAND nm "${_lib}"
+                OUTPUT_VARIABLE _nm_out
+                ERROR_QUIET
+                RESULT_VARIABLE _nm_rc
+            )
+            if(_nm_out MATCHES "MPI_|mpi_cxx|PMPI_|MPIX_")
+                set(_mpi_required TRUE)
+                set(_mpi_referring_lib "${_lib}")
+                break()
+            endif()
+        endif()
+    endforeach()
+    if(_mpi_required)
+        find_package(MPI QUIET)
+        if(NOT MPI_FOUND OR NOT TARGET MPI::MPI_CXX)
+            message(FATAL_ERROR
+                "A system library (${_mpi_referring_lib}) transitively requires "
+                "MPI (-lmpi_cxx), but MPI is not installed.\n\n"
+                "Install MPI development packages:\n"
+                "  Debian/Ubuntu:  sudo apt-get install libopenmpi-dev\n"
+                "  Fedora/RHEL:    sudo dnf install openmpi-devel\n"
+                "  macOS (Homebrew): brew install openmpi\n\n"
+                "Alternatively, use FetchContent GTest instead of system GTest:\n"
+                "  cmake -B build -DGTEST_LIBRARY='' -DGTEST_MAIN_LIBRARY=''\n"
+                "  (this forces FetchContent which doesn't link MPI)")
+        endif()
+        message(STATUS "MPI required by ${_mpi_referring_lib} — linking MPI::MPI_CXX")
     endif()
     if(NOT GTest_FOUND)
         message(STATUS "GTest not found on system; FetchContent'ing GoogleTest")
