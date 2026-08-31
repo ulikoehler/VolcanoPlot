@@ -79,7 +79,7 @@ void LineSegmentRenderer::init(vk::Device device, vk::RenderPass renderPass,
     vsci.setViewportCount(1).setScissorCount(1);
 
     vk::PipelineRasterizationStateCreateInfo rsci{};
-    rsci.lineWidth = 1.0f;
+    rsci.lineWidth = 2.0f;
     rsci.polygonMode = vk::PolygonMode::eFill;
     rsci.cullMode = vk::CullModeFlagBits::eNone;
 

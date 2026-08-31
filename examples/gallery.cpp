@@ -260,6 +260,9 @@ void plotViolin(GalleryCtx& ctx) {
     }
     ViolinConfig cfg;
     cfg.labels = {"G1", "G2", "G3", "G4"};
+    // Set categorical X-axis tick labels at violin centers (x=1,2,3,4).
+    ax->style().xAxis.ticks.positions = {1.0f, 2.0f, 3.0f, 4.0f};
+    ax->style().xAxis.ticks.labels = {"G1", "G2", "G3", "G4"};
     ax->addPlot(std::make_unique<ViolinPlot>(std::move(groups), cfg));
     ctx.render(fig, "violin");
 }

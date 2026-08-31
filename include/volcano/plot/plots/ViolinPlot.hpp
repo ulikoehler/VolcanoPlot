@@ -11,17 +11,19 @@ namespace volcano::plot {
 
 /// Configuration for ViolinPlot.
 struct ViolinConfig {
-    float width = 0.8f;       ///< violin width in data units (x-axis)
+    float width = 0.5f;       ///< violin width in data units (matplotlib default)
     float bandwidth = 0.0f;  ///< KDE bandwidth (0 = auto, Silverman's rule)
     uint32_t numPoints = 128; ///< number of KDE evaluation points per side
-    bool showBox = true;      ///< draw inner box (IQR + median)
+    bool showBox = false;     ///< draw inner IQR box + median (matplotlib: off by default)
+    bool showExtrema = true;  ///< draw whisker bar + caps at min/max
+    bool showMean = true;     ///< draw horizontal mean line
     bool showPoints = false;  ///< draw individual data points
-    Color bodyColor = Color::fromRgba8(31, 119, 180, 128);  ///< violin fill
+    Color bodyColor = Color::fromRgba8(31, 119, 180, 77);  ///< violin fill (alpha=0.3)
     Color edgeColor = Color::fromRgba8(31, 119, 180, 255);  ///< violin edge
-    Color medianColor = Color::fromRgba8(255, 127, 14, 255); ///< median line
-    Color whiskerColor = Color::black();   ///< whisker line color
-    float lineWidth = 1.0f;   ///< edge/whisker line width
-    float medianWidth = 2.0f; ///< median line width
+    Color meanColor = Color::fromRgba8(31, 119, 180, 255);  ///< mean line color
+    Color whiskerColor = Color::fromRgba8(31, 119, 180, 255); ///< whisker line color
+    float lineWidth = 1.5f;   ///< edge/whisker line width
+    float meanWidth = 1.5f;  ///< mean line width
     std::vector<std::string> labels; ///< per-group labels
     std::string label;       ///< overall legend label
 };

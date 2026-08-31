@@ -85,10 +85,10 @@ TEST(ViolinRegression, ViolinAutoscaleMatchesData) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    // X: group at x=1, width 0.8, so [0.6, 1.4] with 5% padding.
-    // span=0.8, pad=0.04, so [0.56, 1.44].
-    EXPECT_NEAR(av.x.min, 0.56f, 0.1f);
-    EXPECT_NEAR(av.x.max, 1.44f, 0.1f);
+    // X: group at x=1, width 0.5 (matplotlib default), so [0.75, 1.25] with 5% padding.
+    // span=0.5, pad=0.025, so [0.725, 1.275].
+    EXPECT_NEAR(av.x.min, 0.725f, 0.1f);
+    EXPECT_NEAR(av.x.max, 1.275f, 0.1f);
     // Y: data range ~[2, 8] with 5% padding.
     EXPECT_LT(av.y.min, 3.0f);
     EXPECT_GT(av.y.max, 7.0f);

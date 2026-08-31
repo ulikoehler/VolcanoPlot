@@ -10,8 +10,9 @@ namespace volcano::plot {
 
 namespace {
 
-/// Silverman's rule of thumb for KDE bandwidth.
-float silvermanBandwidth(const std::vector<float>& data) {
+/// Scott's rule for KDE bandwidth (matplotlib's default).
+/// h = n^(-1/(d+4)) * sigma, where d=1 for 1D data.
+float scottBandwidth(const std::vector<float>& data) {
     if (data.size() < 2) return 1.0f;
     float mean = 0.0f;
     for (float v : data) mean += v;
@@ -20,7 +21,7 @@ float silvermanBandwidth(const std::vector<float>& data) {
     for (float v : data) { float d = v - mean; var += d * d; }
     var /= (data.size() - 1);
     float sigma = std::sqrt(var);
-    return 0.9f * sigma * std::pow(data.size(), -0.2f);
+    return std::pow(static_cast<float>(data.size()), -0.2f) * sigma;
 }
 
 /// Gaussian kernel.
@@ -33,7 +34,7 @@ float gaussianKernel(float x) {
 std::pair<std::vector<float>, std::vector<float>>
 ViolinPlot::computeKde(const std::vector<float>& data) const {
     if (data.empty()) return {};
-    float bw = cfg_.bandwidth > 0.0f ? cfg_.bandwidth : silvermanBandwidth(data);
+    float bw = cfg_.bandwidth > 0.0f ? cfg_.bandwidth : scottBandwidth(data);
     if (bw <= 0.0f) bw = 1.0f;
 
     // Evaluation range: data range ± 3*bw.
@@ -88,58 +89,87 @@ void ViolinPlot::buildGeometry() {
         float maxD = *std::max_element(density.begin(), density.end());
         if (maxD <= 0.0f) maxD = 1.0f;
 
-        // Build violin body as a closed polygon: right side up, left side down.
+        // Build violin body as left/right contour points.
         // Right side: (centerX + w*d[i], yEval[i]) for i=0..n-1
-        // Left side:  (centerX - w*d[i], yEval[i]) for i=n-1..0
-        std::vector<Point2D> polygon;
-        polygon.reserve(yEval.size() * 2);
-        for (size_t i = 0; i < yEval.size(); ++i) {
+        // Left side:  (centerX - w*d[i], yEval[i]) for i=0..n-1
+        size_t n = yEval.size();
+        std::vector<Point2D> rightSide(n), leftSide(n);
+        for (size_t i = 0; i < n; ++i) {
             float w = halfW * density[i] / maxD;
-            polygon.push_back({centerX + w, yEval[i]});
-        }
-        for (size_t i = yEval.size(); i > 0; --i) {
-            float w = halfW * density[i - 1] / maxD;
-            polygon.push_back({centerX - w, yEval[i - 1]});
+            rightSide[i] = {centerX + w, yEval[i]};
+            leftSide[i]  = {centerX - w, yEval[i]};
         }
 
-        // Fan-triangulate the polygon for fill.
-        for (size_t i = 1; i + 1 < polygon.size(); ++i) {
-            bodyFillPos_.push_back(polygon[0]);
-            bodyFillPos_.push_back(polygon[i]);
-            bodyFillPos_.push_back(polygon[i + 1]);
-            for (int j = 0; j < 3; ++j) bodyFillColors_.push_back(cfg_.bodyColor);
+        // Strip-triangulate: for each pair of adjacent y values, create
+        // a quad (two triangles) connecting right[i]→right[i+1]→left[i+1]→left[i].
+        // This avoids the crossing artifacts that fan triangulation produces.
+        for (size_t i = 0; i + 1 < n; ++i) {
+            bodyFillPos_.push_back(rightSide[i]);
+            bodyFillPos_.push_back(rightSide[i + 1]);
+            bodyFillPos_.push_back(leftSide[i + 1]);
+            bodyFillPos_.push_back(rightSide[i]);
+            bodyFillPos_.push_back(leftSide[i + 1]);
+            bodyFillPos_.push_back(leftSide[i]);
+            for (int j = 0; j < 6; ++j) bodyFillColors_.push_back(cfg_.bodyColor);
         }
 
-        // Edge as line segments (closed loop).
-        for (size_t i = 0; i < polygon.size(); ++i) {
-            bodyEdgeSegs_.push_back(polygon[i]);
-            bodyEdgeSegs_.push_back(polygon[(i + 1) % polygon.size()]);
+        // Edge as line segments: right side top→bottom, bottom across,
+        // left side bottom→top, top across (closed loop).
+        for (size_t i = 0; i + 1 < n; ++i) {
+            bodyEdgeSegs_.push_back(rightSide[i]);
+            bodyEdgeSegs_.push_back(rightSide[i + 1]);
         }
+        // Bottom cap: right[n-1] → left[n-1]
+        bodyEdgeSegs_.push_back(rightSide[n - 1]);
+        bodyEdgeSegs_.push_back(leftSide[n - 1]);
+        for (size_t i = n - 1; i > 0; --i) {
+            bodyEdgeSegs_.push_back(leftSide[i]);
+            bodyEdgeSegs_.push_back(leftSide[i - 1]);
+        }
+        // Top cap: left[0] → right[0]
+        bodyEdgeSegs_.push_back(leftSide[0]);
+        bodyEdgeSegs_.push_back(rightSide[0]);
 
-        // Inner box + whisker + median.
-        if (cfg_.showBox) {
-            auto st = computeStats(groups_[g]);
-            float boxHalfW = halfW * 0.1f;  // narrow inner box
+        // Inner elements: match matplotlib's violinplot defaults.
+        //   showextrema=True: vertical whisker bar (min→max) + horizontal caps
+        //   showmean=True:    horizontal line at the mean
+        //   showbox=False:    no IQR box (off by default)
+        auto st = computeStats(groups_[g]);
+        float mean = 0.0f;
+        for (float v : groups_[g]) mean += v;
+        mean /= static_cast<float>(groups_[g].size());
 
-            // Whisker (vertical line from min to max).
+        float capHalfW = cfg_.width * 0.25f;  // matplotlib: cap half-width = width * 0.25
+
+        if (cfg_.showExtrema) {
+            // Vertical whisker bar from min to max.
             innerSegs_.push_back({centerX, st.min});
             innerSegs_.push_back({centerX, st.max});
+            // Horizontal caps at min and max.
+            innerSegs_.push_back({centerX - capHalfW, st.min});
+            innerSegs_.push_back({centerX + capHalfW, st.min});
+            innerSegs_.push_back({centerX - capHalfW, st.max});
+            innerSegs_.push_back({centerX + capHalfW, st.max});
+        }
 
-            // Box edges (vertical lines at ±boxHalfW from q1 to q3).
+        if (cfg_.showMean) {
+            // Horizontal mean line (same width as caps in matplotlib).
+            float meanHalfW = cfg_.width * 0.25f;
+            innerSegs_.push_back({centerX - meanHalfW, mean});
+            innerSegs_.push_back({centerX + meanHalfW, mean});
+        }
+
+        if (cfg_.showBox) {
+            // Optional IQR box + median (matplotlib: off by default).
+            float boxHalfW = halfW * 0.1f;
             innerSegs_.push_back({centerX - boxHalfW, st.q1});
             innerSegs_.push_back({centerX - boxHalfW, st.q3});
             innerSegs_.push_back({centerX + boxHalfW, st.q1});
             innerSegs_.push_back({centerX + boxHalfW, st.q3});
-            // Box top and bottom (horizontal lines).
             innerSegs_.push_back({centerX - boxHalfW, st.q1});
             innerSegs_.push_back({centerX + boxHalfW, st.q1});
             innerSegs_.push_back({centerX - boxHalfW, st.q3});
             innerSegs_.push_back({centerX + boxHalfW, st.q3});
-
-            // Median (thick horizontal line — drawn separately with medianWidth).
-            // We store median segments separately by appending after innerSegs_.
-            // For simplicity, we draw all inner segments with the same renderer.
-            // The median line is just a horizontal line at the median y.
             innerSegs_.push_back({centerX - boxHalfW, st.median});
             innerSegs_.push_back({centerX + boxHalfW, st.median});
         }

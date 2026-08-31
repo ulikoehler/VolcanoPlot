@@ -93,6 +93,27 @@ float autoTickStep(float vmin, float vmax, int nbins) {
     return niceStep;
 }
 
+/// Get tick positions, using fixed positions if set, otherwise auto.
+std::vector<float> getTickPositions(const plot::TickConfig& ticks,
+                                    float vmin, float vmax) {
+    if (ticks.positions && !ticks.positions->empty())
+        return *ticks.positions;
+    return autoTicks(vmin, vmax, ticks.nbins);
+}
+
+/// Get tick label for a position, using fixed labels if set, otherwise format.
+std::string getTickLabel(const plot::TickConfig& ticks,
+                         float pos, float step) {
+    if (ticks.positions && ticks.labels &&
+        ticks.positions->size() == ticks.labels->size()) {
+        for (size_t i = 0; i < ticks.positions->size(); ++i) {
+            if (std::abs((*ticks.positions)[i] - pos) < 1e-6f)
+                return (*ticks.labels)[i];
+        }
+    }
+    return formatTick(pos, step);
+}
+
 } // namespace
 
 Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {
@@ -246,13 +267,13 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     //   vertical center = y - ascent + height/2
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
-        auto xTicks = autoTicks(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
+        auto xTicks = getTickPositions(style.xAxis.ticks, vp.x.min, vp.x.max);
         float xStep = autoTickStep(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
         float tickBottom = float(rect.y + rect.height) + kTickLength;
         for (float tick : xTicks) {
             float px = rect.x + (tick - vp.x.min) / vp.x.span() * rect.width;
             if (px < rect.x || px > rect.x + rect.width) continue;
-            auto label = formatTick(tick, xStep);
+            auto label = getTickLabel(style.xAxis.ticks, tick, xStep);
             auto m = textRenderer_.measureText(label, scale);
             // Horizontal center at px: x = px - width/2
             // Top border at tickBottom + spacing: y - ascent = tickBottom + spacing
@@ -263,13 +284,13 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     }
 
     if (style.yAxis.visible) {
-        auto yTicks = autoTicks(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
+        auto yTicks = getTickPositions(style.yAxis.ticks, vp.y.min, vp.y.max);
         float yStep = autoTickStep(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
         float tickLeft = float(rect.x) - kTickLength;
         for (float tick : yTicks) {
             float py = rect.y + rect.height - (tick - vp.y.min) / vp.y.span() * rect.height;
             if (py < rect.y || py > rect.y + rect.height) continue;
-            auto label = formatTick(tick, yStep);
+            auto label = getTickLabel(style.yAxis.ticks, tick, yStep);
             auto m = textRenderer_.measureText(label, scale);
             // Right border at tickLeft - spacing: x + width = tickLeft - spacing
             // Vertical center at py: y - ascent + height/2 = py
@@ -301,13 +322,13 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     // Draw tick marks. Use 2.0px width for the same MSAA reason.
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
-        auto xTicks = autoTicks(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
+        auto xTicks = getTickPositions(style.xAxis.ticks, vp.x.min, vp.x.max);
         spineRenderer_.drawTicks(cmd, fullRect, rect, xTicks,
                                  style.xAxis.color, 4.0f,
                                  false, vp.x.min, vp.x.max);
     }
     if (style.yAxis.visible) {
-        auto yTicks = autoTicks(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
+        auto yTicks = getTickPositions(style.yAxis.ticks, vp.y.min, vp.y.max);
         spineRenderer_.drawTicks(cmd, fullRect, rect, yTicks,
                                  style.yAxis.color, 4.0f,
                                  true, vp.y.min, vp.y.max);
