@@ -123,6 +123,7 @@ endif()
 
 # libpng / libwebp — CPU fallback encoders
 find_package(PNG QUIET)
+find_package(Threads REQUIRED)
 if(PkgConfig_FOUND)
     pkg_check_modules(WEBP IMPORTED_TARGET libwebp QUIET)
 endif()
@@ -193,17 +194,17 @@ if(NOT EXISTS "${VMA_PATH}/include/vk_mem_alloc.h")
         "Please run: git submodule update --init --recursive")
 endif()
 
-# GoogleTest — prefer system package, fall back to FetchContent.
+# GoogleTest — use FetchContent by default to avoid system GTest issues.
 # A custom-built system GTest (e.g. in /usr/local/) may have been built with
-# HDF5 or MPI support, pulling in unwanted transitive dependencies. Set
-# -DVOLCANO_USE_FETCHCONTENT_GTEST=ON to always use a clean FetchContent GTest.
+# HDF5 or MPI support, pulling in unwanted transitive dependencies like
+# -lmpi_cxx. FetchContent gives us a clean GTest with no surprises.
+# Set -DVOLCANO_USE_SYSTEM_GTEST=ON to try system GTest first.
 if(VOLCANO_BUILD_TESTS)
-    option(VOLCANO_USE_FETCHCONTENT_GTEST
-           "Always FetchContent GoogleTest instead of using system GTest" OFF)
-    if(NOT VOLCANO_USE_FETCHCONTENT_GTEST)
+    option(VOLCANO_USE_SYSTEM_GTEST
+           "Use system GTest instead of FetchContent (may pull in HDF5/MPI)" OFF)
+    if(VOLCANO_USE_SYSTEM_GTEST)
         find_package(GTest QUIET)
         if(NOT GTest_FOUND)
-            # Try manual detection (libgtest-dev ships headers + .so but no config)
             find_path(GTEST_INCLUDE_DIR NAMES gtest/gtest.h)
             find_library(GTEST_LIBRARY NAMES gtest)
             find_library(GTEST_MAIN_LIBRARY NAMES gtest_main)
@@ -220,111 +221,8 @@ if(VOLCANO_BUILD_TESTS)
             endif()
         endif()
     endif()
-    # Some system packages (GTest, Vulkan, shaderc, SDL3, etc.) are built
-    # with MPI support and transitively require -lmpi_cxx at link time.
-    # We check for MPI references in multiple ways:
-    #   1. Check pkg-config modules' Libs/Libs.private for MPI
-    #   2. Check GTest library files for MPI symbols (readelf/nm)
-    #   3. Check SDL3 (if found) for MPI references
-    # The final check is done after the test target is created
-    # (in tests/CMakeLists.txt) by inspecting the resolved link flags.
-    find_package(MPI QUIET)
-    set(VOLCANO_MPI_LINK "")
-    if(MPI_FOUND)
-        # MPI::MPI_CXX may not include -lmpi_cxx correctly on all systems.
-        # Find the library directly to be sure.
-        find_library(MPI_CXX_LIBRARY NAMES mpi_cxx)
-        if(MPI_CXX_LIBRARY)
-            set(VOLCANO_MPI_LINK ${MPI_CXX_LIBRARY})
-            if(TARGET MPI::MPI_CXX)
-                # Also link MPI::MPI_CXX for include paths and other flags.
-                list(APPEND VOLCANO_MPI_LINK MPI::MPI_CXX)
-            endif()
-        elseif(TARGET MPI::MPI_CXX)
-            set(VOLCANO_MPI_LINK MPI::MPI_CXX)
-        endif()
-    endif()
-
-    # Early detection: check pkg-config modules for MPI references.
-    set(_mpi_in_pkgconfig FALSE)
-    foreach(_pc_mod shaderc libwebp freetype2 harfbuzz)
-        if(PkgConfig_FOUND)
-            execute_process(
-                COMMAND pkg-config --libs --static ${_pc_mod}
-                OUTPUT_VARIABLE _pc_libs
-                ERROR_QUIET
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-            )
-            if(_pc_libs MATCHES "mpi")
-                set(_mpi_in_pkgconfig TRUE)
-                message(STATUS "MPI reference found in pkg-config module: ${_pc_mod}")
-                break()
-            endif()
-        endif()
-    endforeach()
-
-    # Early detection: check GTest library files for MPI or HDF5 references.
-    # A custom-built GTest (e.g. in /usr/local/) may link HDF5, which in turn
-    # pulls in MPI. In that case, fall back to FetchContent GTest.
-    set(_mpi_in_gtest FALSE)
-    set(_hdf5_in_gtest FALSE)
-    foreach(_gtest_lib "${GTEST_LIBRARY}" "${GTEST_MAIN_LIBRARY}")
-        if(NOT EXISTS "${_gtest_lib}")
-            continue()
-        endif()
-        execute_process(
-            COMMAND readelf -d "${_gtest_lib}"
-            OUTPUT_VARIABLE _readelf_out ERROR_QUIET
-        )
-        if(_readelf_out MATCHES "mpi")
-            set(_mpi_in_gtest TRUE)
-        endif()
-        if(_readelf_out MATCHES "hdf5")
-            set(_hdf5_in_gtest TRUE)
-        endif()
-        if(_gtest_lib MATCHES "\\.a$")
-            execute_process(
-                COMMAND nm "${_gtest_lib}"
-                OUTPUT_VARIABLE _nm_out ERROR_QUIET
-            )
-            if(_nm_out MATCHES "MPI_|mpi_cxx|PMPI_|MPIX_")
-                set(_mpi_in_gtest TRUE)
-            endif()
-            if(_nm_out MATCHES "H5|hid_t|hdf5")
-                set(_hdf5_in_gtest TRUE)
-            endif()
-        endif()
-    endforeach()
-    if(_hdf5_in_gtest AND NOT VOLCANO_USE_FETCHCONTENT_GTEST)
-        message(STATUS
-            "System GTest (${GTEST_LIBRARY}) links HDF5 (which pulls in MPI). "
-            "Falling back to FetchContent GTest to avoid unwanted MPI dependency.")
-        set(VOLCANO_USE_FETCHCONTENT_GTEST ON)
-        # Clear the system GTest so FetchContent is used instead.
-        set(GTest_FOUND FALSE)
-        set(GTEST_LIBRARY "")
-        set(GTEST_MAIN_LIBRARY "")
-        set(GTEST_INCLUDE_DIR "")
-    endif()
-
-    # Early detection: check SDL3 for MPI.
-    set(_mpi_in_sdl3 FALSE)
-    if(TARGET SDL3::SDL3)
-        get_target_property(_sdl3_loc SDL3::SDL3 IMPORTED_LOCATION)
-        if(_sdl3_loc AND EXISTS "${_sdl3_loc}")
-            execute_process(
-                COMMAND readelf -d "${_sdl3_loc}"
-                OUTPUT_VARIABLE _sdl3_readelf ERROR_QUIET
-            )
-            if(_sdl3_readelf MATCHES "mpi")
-                set(_mpi_in_sdl3 TRUE)
-            endif()
-        endif()
-    endif()
-
-    set(VOLCANO_MPI_REQUIRED ${_mpi_in_pkgconfig} OR ${_mpi_in_gtest} OR ${_mpi_in_sdl3})
     if(NOT GTest_FOUND)
-        message(STATUS "GTest not found on system; FetchContent'ing GoogleTest")
+        message(STATUS "Using FetchContent GoogleTest (clean, no system deps)")
         FetchContent_Declare(
             googletest
             GIT_REPOSITORY https://github.com/google/googletest.git
