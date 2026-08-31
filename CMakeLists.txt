@@ -194,23 +194,30 @@ if(NOT EXISTS "${VMA_PATH}/include/vk_mem_alloc.h")
 endif()
 
 # GoogleTest — prefer system package, fall back to FetchContent.
+# A custom-built system GTest (e.g. in /usr/local/) may have been built with
+# HDF5 or MPI support, pulling in unwanted transitive dependencies. Set
+# -DVOLCANO_USE_FETCHCONTENT_GTEST=ON to always use a clean FetchContent GTest.
 if(VOLCANO_BUILD_TESTS)
-    find_package(GTest QUIET)
-    if(NOT GTest_FOUND)
-        # Try manual detection (libgtest-dev ships headers + .so but no config)
-        find_path(GTEST_INCLUDE_DIR NAMES gtest/gtest.h)
-        find_library(GTEST_LIBRARY NAMES gtest)
-        find_library(GTEST_MAIN_LIBRARY NAMES gtest_main)
-        if(GTEST_INCLUDE_DIR AND GTEST_LIBRARY AND GTEST_MAIN_LIBRARY)
-            add_library(GTest::gtest UNKNOWN IMPORTED)
-            set_target_properties(GTest::gtest PROPERTIES
-                IMPORTED_LOCATION "${GTEST_LIBRARY}"
-                INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
-            add_library(GTest::gtest_main UNKNOWN IMPORTED)
-            set_target_properties(GTest::gtest_main PROPERTIES
-                IMPORTED_LOCATION "${GTEST_MAIN_LIBRARY}"
-                INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
-            set(GTest_FOUND TRUE)
+    option(VOLCANO_USE_FETCHCONTENT_GTEST
+           "Always FetchContent GoogleTest instead of using system GTest" OFF)
+    if(NOT VOLCANO_USE_FETCHCONTENT_GTEST)
+        find_package(GTest QUIET)
+        if(NOT GTest_FOUND)
+            # Try manual detection (libgtest-dev ships headers + .so but no config)
+            find_path(GTEST_INCLUDE_DIR NAMES gtest/gtest.h)
+            find_library(GTEST_LIBRARY NAMES gtest)
+            find_library(GTEST_MAIN_LIBRARY NAMES gtest_main)
+            if(GTEST_INCLUDE_DIR AND GTEST_LIBRARY AND GTEST_MAIN_LIBRARY)
+                add_library(GTest::gtest UNKNOWN IMPORTED)
+                set_target_properties(GTest::gtest PROPERTIES
+                    IMPORTED_LOCATION "${GTEST_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
+                add_library(GTest::gtest_main UNKNOWN IMPORTED)
+                set_target_properties(GTest::gtest_main PROPERTIES
+                    IMPORTED_LOCATION "${GTEST_MAIN_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${GTEST_INCLUDE_DIR}")
+                set(GTest_FOUND TRUE)
+            endif()
         endif()
     endif()
     # Some system packages (GTest, Vulkan, shaderc, SDL3, etc.) are built
@@ -256,8 +263,11 @@ if(VOLCANO_BUILD_TESTS)
         endif()
     endforeach()
 
-    # Early detection: check GTest library files for MPI.
+    # Early detection: check GTest library files for MPI or HDF5 references.
+    # A custom-built GTest (e.g. in /usr/local/) may link HDF5, which in turn
+    # pulls in MPI. In that case, fall back to FetchContent GTest.
     set(_mpi_in_gtest FALSE)
+    set(_hdf5_in_gtest FALSE)
     foreach(_gtest_lib "${GTEST_LIBRARY}" "${GTEST_MAIN_LIBRARY}")
         if(NOT EXISTS "${_gtest_lib}")
             continue()
@@ -268,7 +278,9 @@ if(VOLCANO_BUILD_TESTS)
         )
         if(_readelf_out MATCHES "mpi")
             set(_mpi_in_gtest TRUE)
-            break()
+        endif()
+        if(_readelf_out MATCHES "hdf5")
+            set(_hdf5_in_gtest TRUE)
         endif()
         if(_gtest_lib MATCHES "\\.a$")
             execute_process(
@@ -277,10 +289,23 @@ if(VOLCANO_BUILD_TESTS)
             )
             if(_nm_out MATCHES "MPI_|mpi_cxx|PMPI_|MPIX_")
                 set(_mpi_in_gtest TRUE)
-                break()
+            endif()
+            if(_nm_out MATCHES "H5|hid_t|hdf5")
+                set(_hdf5_in_gtest TRUE)
             endif()
         endif()
     endforeach()
+    if(_hdf5_in_gtest AND NOT VOLCANO_USE_FETCHCONTENT_GTEST)
+        message(STATUS
+            "System GTest (${GTEST_LIBRARY}) links HDF5 (which pulls in MPI). "
+            "Falling back to FetchContent GTest to avoid unwanted MPI dependency.")
+        set(VOLCANO_USE_FETCHCONTENT_GTEST ON)
+        # Clear the system GTest so FetchContent is used instead.
+        set(GTest_FOUND FALSE)
+        set(GTEST_LIBRARY "")
+        set(GTEST_MAIN_LIBRARY "")
+        set(GTEST_INCLUDE_DIR "")
+    endif()
 
     # Early detection: check SDL3 for MPI.
     set(_mpi_in_sdl3 FALSE)
