@@ -19,52 +19,79 @@ endif()
 target_include_directories(volcano_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # After the target is fully linked, check if MPI is actually required.
-# Two strategies are combined:
-#   1. Inspect CMake link properties (INTERFACE_LINK_LIBRARIES, etc.) —
-#      catches imported targets that explicitly list MPI deps.
-#   2. Scan the actual library files with readelf/nm — catches static
-#      libraries (e.g. libgtest.a) with undefined MPI symbols that CMake
-#      doesn't know about (the find_library fallback path creates imported
-#      targets without INTERFACE_LINK_LIBRARIES).
+# We recursively resolve ALL link dependencies (both INTERFACE_LINK_LIBRARIES
+# and LINK_LIBRARIES, which includes PRIVATE deps of static libraries) and
+# then:
+#   1. Check CMake link properties for MPI references.
+#   2. Scan the actual library files with readelf/nm for MPI references.
 get_target_property(_test_link_libs volcano_tests LINK_LIBRARIES)
 get_target_property(_test_iface_libs volcano_tests INTERFACE_LINK_LIBRARIES)
-set(_all_link_libs "")
+get_target_property(_test_link_opts volcano_tests LINK_OPTIONS)
+set(_all_link_items "")
 if(_test_link_libs)
-    list(APPEND _all_link_libs ${_test_link_libs})
+    list(APPEND _all_link_items ${_test_link_libs})
 endif()
 if(_test_iface_libs)
-    list(APPEND _all_link_libs ${_test_iface_libs})
+    list(APPEND _all_link_items ${_test_iface_libs})
+endif()
+if(_test_link_opts)
+    list(APPEND _all_link_items ${_test_link_opts})
 endif()
 
-# Recursively resolve INTERFACE_LINK_LIBRARIES, INTERFACE_LINK_OPTIONS,
-# and IMPORTED_LOCATION of all linked targets.
-set(_resolved_libs ${_all_link_libs})
-set(_queue ${_all_link_libs})
+# Recursively resolve all link dependencies.
+# Check BOTH INTERFACE_LINK_LIBRARIES (propagated to dependents) AND
+# LINK_LIBRARIES (includes PRIVATE deps — needed for static lib linking).
+set(_resolved_items ${_all_link_items})
+set(_queue ${_all_link_items})
 set(_lib_files "")
 while(_queue)
     list(POP_FRONT _queue _item)
     if(TARGET ${_item})
+        # INTERFACE_LINK_LIBRARIES — propagated to dependents.
         get_target_property(_item_iface ${_item} INTERFACE_LINK_LIBRARIES)
         if(_item_iface)
             foreach(_sub ${_item_iface})
-                if(NOT _sub IN_LIST _resolved_libs)
-                    list(APPEND _resolved_libs ${_sub})
+                if(NOT _sub IN_LIST _resolved_items)
+                    list(APPEND _resolved_items ${_sub})
                     list(APPEND _queue ${_sub})
                 endif()
             endforeach()
         endif()
-        get_target_property(_item_opts ${_item} INTERFACE_LINK_OPTIONS)
-        if(_item_opts)
-            foreach(_opt ${_item_opts})
-                if(NOT _opt IN_LIST _resolved_libs)
-                    list(APPEND _resolved_libs ${_opt})
+        # LINK_LIBRARIES — includes PRIVATE deps (not propagated, but
+        # needed when linking a static lib into an executable).
+        get_target_property(_item_link ${_item} LINK_LIBRARIES)
+        if(_item_link)
+            foreach(_sub ${_item_link})
+                if(NOT _sub IN_LIST _resolved_items)
+                    list(APPEND _resolved_items ${_sub})
+                    list(APPEND _queue ${_sub})
                 endif()
             endforeach()
         endif()
-        foreach(_prop IMPORTED_LOCATION IMPORTED_LOCATION_RELEASE)
+        # INTERFACE_LINK_OPTIONS — may contain -lmpi_cxx directly.
+        get_target_property(_item_opts ${_item} INTERFACE_LINK_OPTIONS)
+        if(_item_opts)
+            foreach(_opt ${_item_opts})
+                if(NOT _opt IN_LIST _resolved_items)
+                    list(APPEND _resolved_items ${_opt})
+                endif()
+            endforeach()
+        endif()
+        # LINK_OPTIONS — may contain -lmpi_cxx directly.
+        get_target_property(_item_lopts ${_item} LINK_OPTIONS)
+        if(_item_lopts)
+            foreach(_opt ${_item_lopts})
+                if(NOT _opt IN_LIST _resolved_items)
+                    list(APPEND _resolved_items ${_opt})
+                endif()
+            endforeach()
+        endif()
+        # IMPORTED_LOCATION — actual library file paths.
+        foreach(_prop IMPORTED_LOCATION IMPORTED_LOCATION_RELEASE
+                      IMPORTED_LOCATION_DEBUG IMPORTED_LOCATION_NOCONFIG)
             get_target_property(_item_loc ${_item} ${_prop})
-            if(_item_loc AND NOT _item_loc IN_LIST _resolved_libs)
-                list(APPEND _resolved_libs ${_item_loc})
+            if(_item_loc AND NOT _item_loc IN_LIST _resolved_items)
+                list(APPEND _resolved_items ${_item_loc})
                 if(EXISTS "${_item_loc}")
                     list(APPEND _lib_files "${_item_loc}")
                 endif()
@@ -76,7 +103,7 @@ while(_queue)
 endwhile()
 
 # Strategy 1: Check CMake link properties for MPI references.
-string(REPLACE ";" " " _link_str "${_resolved_libs}")
+string(REPLACE ";" " " _link_str "${_resolved_items}")
 set(_mpi_in_cmake_props FALSE)
 if(_link_str MATCHES "mpi|MPI")
     set(_mpi_in_cmake_props TRUE)
