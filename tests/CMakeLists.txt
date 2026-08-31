@@ -18,12 +18,17 @@ endif()
 
 target_include_directories(volcano_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# After the target is fully linked, check if MPI is actually required.
-# We recursively resolve ALL link dependencies (both INTERFACE_LINK_LIBRARIES
-# and LINK_LIBRARIES, which includes PRIVATE deps of static libraries) and
-# then:
-#   1. Check CMake link properties for MPI references.
-#   2. Scan the actual library files with readelf/nm for MPI references.
+# Check if MPI is actually required by our dependencies.
+# The early detection in CMakeLists.txt checks pkg-config modules, GTest
+# library files, and SDL3. Here we also do a comprehensive check of the
+# resolved link tree (CMake properties + library file scanning).
+#
+# If MPI is required but not installed → FATAL_ERROR with instructions.
+# If MPI is required and installed → already linked via VOLCANO_MPI_LINK.
+
+# Recursively resolve ALL link dependencies of the test target.
+# Check BOTH INTERFACE_LINK_LIBRARIES (propagated) AND LINK_LIBRARIES
+# (includes PRIVATE deps needed for static lib linking).
 get_target_property(_test_link_libs volcano_tests LINK_LIBRARIES)
 get_target_property(_test_iface_libs volcano_tests INTERFACE_LINK_LIBRARIES)
 get_target_property(_test_link_opts volcano_tests LINK_OPTIONS)
@@ -38,55 +43,33 @@ if(_test_link_opts)
     list(APPEND _all_link_items ${_test_link_opts})
 endif()
 
-# Recursively resolve all link dependencies.
-# Check BOTH INTERFACE_LINK_LIBRARIES (propagated to dependents) AND
-# LINK_LIBRARIES (includes PRIVATE deps — needed for static lib linking).
 set(_resolved_items ${_all_link_items})
 set(_queue ${_all_link_items})
 set(_lib_files "")
 while(_queue)
     list(POP_FRONT _queue _item)
     if(TARGET ${_item})
-        # INTERFACE_LINK_LIBRARIES — propagated to dependents.
-        get_target_property(_item_iface ${_item} INTERFACE_LINK_LIBRARIES)
-        if(_item_iface)
-            foreach(_sub ${_item_iface})
-                if(NOT _sub IN_LIST _resolved_items)
-                    list(APPEND _resolved_items ${_sub})
-                    list(APPEND _queue ${_sub})
-                endif()
-            endforeach()
-        endif()
-        # LINK_LIBRARIES — includes PRIVATE deps (not propagated, but
-        # needed when linking a static lib into an executable).
-        get_target_property(_item_link ${_item} LINK_LIBRARIES)
-        if(_item_link)
-            foreach(_sub ${_item_link})
-                if(NOT _sub IN_LIST _resolved_items)
-                    list(APPEND _resolved_items ${_sub})
-                    list(APPEND _queue ${_sub})
-                endif()
-            endforeach()
-        endif()
-        # INTERFACE_LINK_OPTIONS — may contain -lmpi_cxx directly.
-        get_target_property(_item_opts ${_item} INTERFACE_LINK_OPTIONS)
-        if(_item_opts)
-            foreach(_opt ${_item_opts})
-                if(NOT _opt IN_LIST _resolved_items)
-                    list(APPEND _resolved_items ${_opt})
-                endif()
-            endforeach()
-        endif()
-        # LINK_OPTIONS — may contain -lmpi_cxx directly.
-        get_target_property(_item_lopts ${_item} LINK_OPTIONS)
-        if(_item_lopts)
-            foreach(_opt ${_item_lopts})
-                if(NOT _opt IN_LIST _resolved_items)
-                    list(APPEND _resolved_items ${_opt})
-                endif()
-            endforeach()
-        endif()
-        # IMPORTED_LOCATION — actual library file paths.
+        foreach(_prop INTERFACE_LINK_LIBRARIES LINK_LIBRARIES)
+            get_target_property(_item_deps ${_item} ${_prop})
+            if(_item_deps)
+                foreach(_sub ${_item_deps})
+                    if(NOT _sub IN_LIST _resolved_items)
+                        list(APPEND _resolved_items ${_sub})
+                        list(APPEND _queue ${_sub})
+                    endif()
+                endforeach()
+            endif()
+        endforeach()
+        foreach(_prop INTERFACE_LINK_OPTIONS LINK_OPTIONS)
+            get_target_property(_item_opts ${_item} ${_prop})
+            if(_item_opts)
+                foreach(_opt ${_item_opts})
+                    if(NOT _opt IN_LIST _resolved_items)
+                        list(APPEND _resolved_items ${_opt})
+                    endif()
+                endforeach()
+            endif()
+        endforeach()
         foreach(_prop IMPORTED_LOCATION IMPORTED_LOCATION_RELEASE
                       IMPORTED_LOCATION_DEBUG IMPORTED_LOCATION_NOCONFIG)
             get_target_property(_item_loc ${_item} ${_prop})
@@ -110,8 +93,6 @@ if(_link_str MATCHES "mpi|MPI")
 endif()
 
 # Strategy 2: Scan actual library files for MPI references.
-# Shared libs: readelf -d shows DT_NEEDED entries.
-# Static libs: nm shows undefined symbols.
 set(_mpi_in_lib_files FALSE)
 set(_mpi_referring_lib "")
 foreach(_lib IN LISTS _lib_files)
@@ -120,9 +101,7 @@ foreach(_lib IN LISTS _lib_files)
     endif()
     execute_process(
         COMMAND readelf -d "${_lib}"
-        OUTPUT_VARIABLE _readelf_out
-        ERROR_QUIET
-        RESULT_VARIABLE _readelf_rc
+        OUTPUT_VARIABLE _readelf_out ERROR_QUIET
     )
     if(_readelf_out MATCHES "mpi")
         set(_mpi_in_lib_files TRUE)
@@ -132,9 +111,7 @@ foreach(_lib IN LISTS _lib_files)
     if(_lib MATCHES "\\.a$")
         execute_process(
             COMMAND nm "${_lib}"
-            OUTPUT_VARIABLE _nm_out
-            ERROR_QUIET
-            RESULT_VARIABLE _nm_rc
+            OUTPUT_VARIABLE _nm_out ERROR_QUIET
         )
         if(_nm_out MATCHES "MPI_|mpi_cxx|PMPI_|MPIX_")
             set(_mpi_in_lib_files TRUE)
@@ -144,14 +121,20 @@ foreach(_lib IN LISTS _lib_files)
     endif()
 endforeach()
 
+# Combine all detection strategies.
+set(_mpi_required ${VOLCANO_MPI_REQUIRED})
 if(_mpi_in_cmake_props OR _mpi_in_lib_files)
+    set(_mpi_required TRUE)
+endif()
+
+if(_mpi_required)
     if(VOLCANO_MPI_LINK)
         message(STATUS "MPI required by system libraries — linked MPI::MPI_CXX")
     else()
         if(_mpi_referring_lib)
             set(_mpi_detail "Library: ${_mpi_referring_lib}")
         else()
-            set(_mpi_detail "Link flags: ${_link_str}")
+            set(_mpi_detail "Detected via pkg-config or CMake link properties")
         endif()
         message(FATAL_ERROR
             "A system library transitively requires MPI (-lmpi_cxx), "

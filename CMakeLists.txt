@@ -215,15 +215,79 @@ if(VOLCANO_BUILD_TESTS)
     endif()
     # Some system packages (GTest, Vulkan, shaderc, SDL3, etc.) are built
     # with MPI support and transitively require -lmpi_cxx at link time.
-    # We try to find MPI early; the actual requirement check is done after
-    # the test target is created (in tests/CMakeLists.txt) by inspecting
-    # the resolved link flags.
+    # We check for MPI references in multiple ways:
+    #   1. Check pkg-config modules' Libs/Libs.private for MPI
+    #   2. Check GTest library files for MPI symbols (readelf/nm)
+    #   3. Check SDL3 (if found) for MPI references
+    # The final check is done after the test target is created
+    # (in tests/CMakeLists.txt) by inspecting the resolved link flags.
     find_package(MPI QUIET)
     if(MPI_FOUND AND TARGET MPI::MPI_CXX)
         set(VOLCANO_MPI_LINK MPI::MPI_CXX)
     else()
         set(VOLCANO_MPI_LINK "")
     endif()
+
+    # Early detection: check pkg-config modules for MPI references.
+    set(_mpi_in_pkgconfig FALSE)
+    foreach(_pc_mod shaderc libwebp freetype2 harfbuzz)
+        if(PkgConfig_FOUND)
+            execute_process(
+                COMMAND pkg-config --libs --static ${_pc_mod}
+                OUTPUT_VARIABLE _pc_libs
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(_pc_libs MATCHES "mpi")
+                set(_mpi_in_pkgconfig TRUE)
+                message(STATUS "MPI reference found in pkg-config module: ${_pc_mod}")
+                break()
+            endif()
+        endif()
+    endforeach()
+
+    # Early detection: check GTest library files for MPI.
+    set(_mpi_in_gtest FALSE)
+    foreach(_gtest_lib "${GTEST_LIBRARY}" "${GTEST_MAIN_LIBRARY}")
+        if(NOT EXISTS "${_gtest_lib}")
+            continue()
+        endif()
+        execute_process(
+            COMMAND readelf -d "${_gtest_lib}"
+            OUTPUT_VARIABLE _readelf_out ERROR_QUIET
+        )
+        if(_readelf_out MATCHES "mpi")
+            set(_mpi_in_gtest TRUE)
+            break()
+        endif()
+        if(_gtest_lib MATCHES "\\.a$")
+            execute_process(
+                COMMAND nm "${_gtest_lib}"
+                OUTPUT_VARIABLE _nm_out ERROR_QUIET
+            )
+            if(_nm_out MATCHES "MPI_|mpi_cxx|PMPI_|MPIX_")
+                set(_mpi_in_gtest TRUE)
+                break()
+            endif()
+        endif()
+    endforeach()
+
+    # Early detection: check SDL3 for MPI.
+    set(_mpi_in_sdl3 FALSE)
+    if(TARGET SDL3::SDL3)
+        get_target_property(_sdl3_loc SDL3::SDL3 IMPORTED_LOCATION)
+        if(_sdl3_loc AND EXISTS "${_sdl3_loc}")
+            execute_process(
+                COMMAND readelf -d "${_sdl3_loc}"
+                OUTPUT_VARIABLE _sdl3_readelf ERROR_QUIET
+            )
+            if(_sdl3_readelf MATCHES "mpi")
+                set(_mpi_in_sdl3 TRUE)
+            endif()
+        endif()
+    endif()
+
+    set(VOLCANO_MPI_REQUIRED ${_mpi_in_pkgconfig} OR ${_mpi_in_gtest} OR ${_mpi_in_sdl3})
     if(NOT GTest_FOUND)
         message(STATUS "GTest not found on system; FetchContent'ing GoogleTest")
         FetchContent_Declare(
