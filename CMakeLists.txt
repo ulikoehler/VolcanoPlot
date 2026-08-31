@@ -102,9 +102,16 @@ if(NOT SHADERC_FOUND)
     endif()
 endif()
 if(NOT SHADERC_FOUND)
-    message(WARNING "shaderc not found — runtime shader compilation disabled; SPIR-V must be precompiled.")
-    set(VOLCANO_RUNTIME_SHADER_COMPILE OFF)
-    set(VOLCANO_SHADERC_LINK "")
+    message(FATAL_ERROR
+        "shaderc is required for runtime GLSL->SPIR-V shader compilation, "
+        "but it was not found.\n\n"
+        "Install shaderc development packages:\n"
+        "  Debian/Ubuntu:  sudo apt-get install libshaderc-dev glslang-dev spirv-tools\n"
+        "  Fedora/RHEL:    sudo dnf install shaderc-devel glslang-devel spirv-tools\n"
+        "  Arch Linux:     sudo pacman -S shaderc glslang spirv-tools\n"
+        "  macOS (Homebrew): brew install shaderc\n\n"
+        "Or install the Vulkan SDK which includes shaderc:\n"
+        "  https://vulkan.lunarg.com/sdk/home")
 else()
     set(VOLCANO_RUNTIME_SHADER_COMPILE ON)
     if(TARGET PkgConfig::SHADERC)
