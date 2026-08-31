@@ -18,18 +18,23 @@ namespace {
 std::vector<float> autoTicks(float vmin, float vmax, int nbins) {
     if (vmin >= vmax) return {};
     float range = vmax - vmin;
-    // matplotlib's MaxNLocator uses rawStep = range / (nbins * 1.05)
-    // to bias toward fewer ticks. We use range / nbins with rounding
-    // thresholds that match matplotlib's 'auto' behavior.
+    // matplotlib's MaxNLocator tries steps [1, 2, 2.5, 5, 10] × 10^k and picks
+    // the smallest step that gives at most nbins+1 ticks (i.e. the most
+    // ticks without exceeding nbins).
     float rawStep = range / nbins;
     float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    float norm = rawStep / mag;
-    float niceStep;
-    // matplotlib thresholds: <1.5->1, <3->2, <6->5, else->10
-    if (norm < 1.5f)       niceStep = 1.0f * mag;
-    else if (norm < 3.0f)  niceStep = 2.0f * mag;
-    else if (norm < 6.0f)  niceStep = 5.0f * mag;
-    else                   niceStep = 10.0f * mag;
+    // Try nice steps from smallest to largest, pick the FIRST one that
+    // gives <= nbins+1 ticks. This maximizes the number of ticks.
+    float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
+    float niceStep = 10.0f * mag;  // fallback: largest step
+    for (float s : niceSteps) {
+        float step = s * mag;
+        int numTicks = int(std::floor(vmax / step) - std::ceil(vmin / step)) + 1;
+        if (numTicks <= nbins + 1) {
+            niceStep = step;
+            break;  // first (smallest) step that fits
+        }
+    }
 
     float start = std::ceil(vmin / niceStep) * niceStep;
     std::vector<float> ticks;
@@ -51,21 +56,22 @@ std::string formatTick(float v, float step) {
         return std::format("{:.1e}", v);
     }
     // Determine decimal places from the step size.
+    // Use enough decimal places to represent the step exactly.
+    // e.g., step=0.5 → 1 dp, step=0.25 → 2 dp, step=0.1 → 1 dp.
     float stepMag = std::abs(step);
     if (stepMag >= 1.0f) {
         // Integer steps: no decimal places.
         return std::format("{:.0f}", v);
-    } else if (stepMag >= 0.1f) {
-        // 0.1–0.9 steps: 1 decimal place.
-        return std::format("{:.1f}", v);
-    } else if (stepMag >= 0.01f) {
-        // 0.01–0.09 steps: 2 decimal places.
-        return std::format("{:.2f}", v);
-    } else if (stepMag >= 0.001f) {
-        // 0.001–0.009 steps: 3 decimal places.
-        return std::format("{:.3f}", v);
     }
-    return std::format("{:.1e}", v);
+    // Find the minimum decimals where round(step, d) == step.
+    int decimals = 0;
+    while (decimals < 6) {
+        float scale = std::pow(10.0f, decimals);
+        float rounded = std::round(stepMag * scale) / scale;
+        if (std::abs(rounded - stepMag) < stepMag * 0.01f) break;
+        ++decimals;
+    }
+    return std::format("{:.{}f}", v, decimals);
 }
 
 /// Compute the nice step size used by autoTicks.
@@ -74,11 +80,17 @@ float autoTickStep(float vmin, float vmax, int nbins) {
     float range = vmax - vmin;
     float rawStep = range / nbins;
     float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    float norm = rawStep / mag;
-    if (norm < 1.5f)       return 1.0f * mag;
-    else if (norm < 3.0f)  return 2.0f * mag;
-    else if (norm < 6.0f)  return 5.0f * mag;
-    else                   return 10.0f * mag;
+    float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
+    float niceStep = 10.0f * mag;
+    for (float s : niceSteps) {
+        float step = s * mag;
+        int numTicks = int(std::floor(vmax / step) - std::ceil(vmin / step)) + 1;
+        if (numTicks <= nbins + 1) {
+            niceStep = step;
+            break;
+        }
+    }
+    return niceStep;
 }
 
 } // namespace
@@ -169,27 +181,41 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     auto ext = backend_.extent();
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
 
+    // Tick mark geometry constants (shared with drawSpines).
+    constexpr float kTickLength = 4.0f;
+    constexpr float kTickSpacing = 4.0f;  // gap between tick mark and label
+
     // --- X axis label ---
     if (style.xAxis.visible && !style.xAxis.label.empty()) {
-        float textWidth = style.xAxis.label.size() * fontSize * 0.5f;
-        float cx = rect.x + rect.width / 2.0f - textWidth / 2.0f;
-        float cy = rect.y + rect.height + 25.0f;  // below the axes
+        auto m = textRenderer_.measureText(style.xAxis.label, scale);
+        // Center horizontally at axes center, below the tick labels.
+        // Top border at tickBottom + kTickSpacing + labelHeight + labelGap.
+        constexpr float kXLabelGap = 8.0f;
+        float cx = rect.x + rect.width / 2.0f - m.width / 2.0f;
+        float cy = float(rect.y + rect.height) + kTickLength + kTickSpacing +
+                   16.0f + kXLabelGap + m.ascent;  // 16px approx label height
         textRenderer_.draw(cmd, fullRect,
             style.xAxis.label, cx, cy, labelColor, scale);
     }
 
     // --- Y axis label ---
     if (style.yAxis.visible && !style.yAxis.label.empty()) {
-        // Rotate 90° counterclockwise (in math convention) so the label
-        // reads bottom-to-top. In screen space (Y-down), this is -90°
-        // (i.e. -π/2 radians clockwise). The rotation origin is the text
-        // baseline (x, y); we position it at the left-center of the axes.
-        float textWidth = style.yAxis.label.size() * fontSize * 0.5f;
-        float textHeight = fontSize;
-        // Origin: left of the axes, vertically centered.
-        // After rotation, the text extends upward from the origin.
-        float ox = rect.x - textHeight - 10.0f;
-        float oy = rect.y + rect.height / 2.0f + textWidth / 2.0f;
+        // Rotate -90° (clockwise in screen space, Y-down) so the label
+        // reads bottom-to-top. The rotation origin is the text baseline (x, y).
+        // After rotation:
+        //   - text width becomes vertical extent (upward from origin)
+        //   - ascent becomes leftward extent, descent becomes rightward
+        // We want: vertical center at axes middle, positioned left of tick labels.
+        auto m = textRenderer_.measureText(style.yAxis.label, scale);
+        // Y position: y - width/2 = axes vertical center
+        float oy = rect.y + rect.height / 2.0f + m.width / 2.0f;
+        // X position: center of rotated text at (rect.x - tickLen - spacing - maxLabelW - labelGap)
+        // Center after rotation = x + (descent - ascent)/2 = x + (m.height - m.ascent - m.ascent)/2
+        //                      = x + m.height/2 - m.ascent
+        // So x = centerPos - m.height/2 + m.ascent
+        constexpr float kYLabelGap = 8.0f;
+        float centerPos = float(rect.x) - kTickLength - kTickSpacing - 40.0f - kYLabelGap;
+        float ox = centerPos - m.height / 2.0f + m.ascent;
         constexpr float kRotMinus90 = -1.5707963267948966f; // -π/2
         textRenderer_.draw(cmd, fullRect,
             style.yAxis.label, ox, oy, labelColor, scale, kRotMinus90);
@@ -197,38 +223,59 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
 
     // --- Title ---
     if (!style.title.text.empty()) {
-        float textWidth = style.title.text.size() * fontSize * 0.5f;
-        float cx = rect.x + rect.width / 2.0f - textWidth / 2.0f;
-        float cy = rect.y - 25.0f;  // above the axes
+        auto m = textRenderer_.measureText(style.title.text, scale);
+        float cx = rect.x + rect.width / 2.0f - m.width / 2.0f;
+        // Position above the axes: text bottom at rect.y - padding.
+        // text bottom = y + descent = y + (height - ascent)
+        // So y = rect.y - pad - (height - ascent) = rect.y - pad - height + ascent
+        constexpr float kTitlePad = 6.0f;
+        float cy = float(rect.y) - kTitlePad - m.height + m.ascent;
         textRenderer_.draw(cmd, fullRect,
             style.title.text, cx, cy, style.title.color, scale);
     }
 
     // --- Tick labels ---
+    // Positioning (matching matplotlib):
+    //   X labels: horizontal center at tick x, top border at tick mark bottom + spacing.
+    //   Y labels: vertical center at tick y, right border at tick mark left + spacing.
+    // The text renderer's draw(x, y) uses (x, y) as the baseline origin.
+    //   text top    = y - ascent
+    //   text bottom = y - ascent + height = y + descent
+    //   text left   = x
+    //   text right  = x + width
+    //   vertical center = y - ascent + height/2
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
         auto xTicks = autoTicks(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
         float xStep = autoTickStep(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);
+        float tickBottom = float(rect.y + rect.height) + kTickLength;
         for (float tick : xTicks) {
             float px = rect.x + (tick - vp.x.min) / vp.x.span() * rect.width;
             if (px < rect.x || px > rect.x + rect.width) continue;
             auto label = formatTick(tick, xStep);
-            float lw = label.size() * fontSize * 0.3f;
-            textRenderer_.draw(cmd, fullRect,
-                label, px - lw, rect.y + rect.height + 5.0f, labelColor, scale);
+            auto m = textRenderer_.measureText(label, scale);
+            // Horizontal center at px: x = px - width/2
+            // Top border at tickBottom + spacing: y - ascent = tickBottom + spacing
+            float x = px - m.width * 0.5f;
+            float y = tickBottom + kTickSpacing + m.ascent;
+            textRenderer_.draw(cmd, fullRect, label, x, y, labelColor, scale);
         }
     }
 
     if (style.yAxis.visible) {
         auto yTicks = autoTicks(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
         float yStep = autoTickStep(vp.y.min, vp.y.max, style.yAxis.ticks.nbins);
+        float tickLeft = float(rect.x) - kTickLength;
         for (float tick : yTicks) {
             float py = rect.y + rect.height - (tick - vp.y.min) / vp.y.span() * rect.height;
             if (py < rect.y || py > rect.y + rect.height) continue;
             auto label = formatTick(tick, yStep);
-            float lw = label.size() * fontSize * 0.3f;
-            textRenderer_.draw(cmd, fullRect,
-                label, rect.x - lw - 5.0f, py, labelColor, scale);
+            auto m = textRenderer_.measureText(label, scale);
+            // Right border at tickLeft - spacing: x + width = tickLeft - spacing
+            // Vertical center at py: y - ascent + height/2 = py
+            float x = tickLeft - kTickSpacing - m.width;
+            float y = py + m.ascent - m.height * 0.5f;
+            textRenderer_.draw(cmd, fullRect, label, x, y, labelColor, scale);
         }
     }
 }
@@ -243,11 +290,15 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
 
     // Draw the border rectangle around the axes area.
+    // Use 2.0px width so MSAA produces full-coverage (pure black) pixels.
+    // With 1.5px and 4x MSAA, a line centered at y=N covers pixels y=N-1 and
+    // y=N at 75% coverage each, producing gray (64,64,64) instead of black.
+    // With 2.0px, both pixels get 100% coverage → pure black.
     auto spineColor = style.xAxis.color;
-    auto spineWidth = style.xAxis.lineWidth;
+    auto spineWidth = std::max(style.xAxis.lineWidth, 2.0f);
     spineRenderer_.drawRect(cmd, fullRect, rect, spineColor, spineWidth);
 
-    // Draw tick marks.
+    // Draw tick marks. Use 2.0px width for the same MSAA reason.
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
         auto xTicks = autoTicks(vp.x.min, vp.x.max, style.xAxis.ticks.nbins);

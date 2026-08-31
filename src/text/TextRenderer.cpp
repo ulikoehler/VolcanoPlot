@@ -14,6 +14,9 @@
 #include <string>
 #include <vector>
 
+#include <ft2build.h>
+#include FT_FREETYPE_H
+
 // glyb headers (must be included in dependency order — glyb headers
 // don't include their own dependencies)
 #include "binpack.h"
@@ -133,6 +136,25 @@ std::string findSystemFontFile() {
 }
 
 } // namespace
+
+TextRenderer::TextMetrics
+TextRenderer::measureText(std::string_view text, float scale) {
+    if (!fontFace_ || text.empty()) return {0, 0, 0};
+    int font_size = int(16.0f * scale * 64.0f);
+    std::vector<glyph_shape> shapes;
+    std::string lang = "en";
+    text_segment segment(std::string(text), lang, fontFace_,
+                         font_size, 0, 0, 0xff000000);
+    shaper_->shape(shapes, segment);
+    float width = 0.0f;
+    for (const auto& s : shapes) width += s.x_advance / 64.0f;
+    // Get font metrics for ascent/descent.
+    auto* ftface = static_cast<font_face_ft*>(fontFace_);
+    auto* m = ftface->get_metrics(font_size);
+    float ascent = m->ascender / 64.0f;
+    float descent = -m->descender / 64.0f;  // descender is negative
+    return {width, ascent + descent, ascent};
+}
 
 TextRenderer::TextRenderer() = default;
 TextRenderer::~TextRenderer() {

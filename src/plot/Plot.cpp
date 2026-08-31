@@ -21,7 +21,12 @@ Axes* Figure::addAxes(uint32_t row, uint32_t col, uint32_t rowSpan, uint32_t col
 
 void Figure::layout(Extent2D extent) {
     const float margin = 0.08f;
-    const float titleH = style_.title.text.empty() ? 0.0f : 0.06f;
+    // Reserve space for a title if any axes has one set.
+    bool hasTitle = false;
+    for (const auto& p : placements_) {
+        if (!p.axes->style().title.text.empty()) { hasTitle = true; break; }
+    }
+    const float titleH = hasTitle ? 0.06f : 0.0f;
     float cellW = (1.0f - 2*margin) / cols_;
     float cellH = (1.0f - 2*margin - titleH) / rows_;
     for (auto& p : placements_) {

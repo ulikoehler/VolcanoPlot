@@ -362,12 +362,35 @@ GENERATORS = [
 
 
 def main():
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else "gallery/matplotlib"
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("out_dir", nargs="?", default="gallery/matplotlib")
+    parser.add_argument("--filter", default=None,
+                        help="Comma-separated list of plot names to generate (e.g. 'fill,line')")
+    args = parser.parse_args()
+    out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
-    print(f"Generating matplotlib gallery in {out_dir}/")
+
+    # Map generator function names (e.g. "gen_fill" → "fill").
+    name_map = {}
     for gen in GENERATORS:
+        name = gen.__name__.replace("gen_", "")
+        name_map[name] = gen
+
+    if args.filter:
+        wanted = [n.strip() for n in args.filter.split(",") if n.strip()]
+        gens = [name_map[n] for n in wanted if n in name_map]
+        missing = [n for n in wanted if n not in name_map]
+        if missing:
+            print(f"WARNING: unknown plot name(s): {missing}", file=sys.stderr)
+            print(f"  Available: {sorted(name_map.keys())}", file=sys.stderr)
+    else:
+        gens = GENERATORS
+
+    print(f"Generating matplotlib gallery in {out_dir}/")
+    for gen in gens:
         gen(out_dir)
-    print(f"Done. Generated {len(GENERATORS)} plots.")
+    print(f"Done. Generated {len(gens)} plots.")
 
 
 if __name__ == "__main__":

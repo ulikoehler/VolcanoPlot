@@ -57,6 +57,13 @@ public:
               plot::Color color, float scale = 1.0f,
               float rotation = 0.0f);
 
+    /// Measure the bounding box of a UTF-8 string at the given scale.
+    /// Returns {width, height, ascent} in pixels.
+    /// width = total horizontal advance, height = ascent + descent,
+    /// ascent = distance from baseline to top of text.
+    struct TextMetrics { float width; float height; float ascent; };
+    TextMetrics measureText(std::string_view text, float scale = 1.0f);
+
 private:
     vk::Device device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;

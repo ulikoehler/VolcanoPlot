@@ -21,7 +21,8 @@ struct FontProperties {
 /// Tick configuration for one axis.
 struct TickConfig {
     /// Number of major ticks to aim for (matplotlib 'MaxNLocator' style).
-    int nbins = 10;
+    /// matplotlib's AutoLocator defaults to nbins=9.
+    int nbins = 9;
     /// If set, fixed tick positions.
     std::optional<std::vector<float>> positions;
     /// If set, fixed tick labels (parallel to positions).

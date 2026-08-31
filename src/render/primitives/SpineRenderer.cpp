@@ -301,9 +301,10 @@ void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
     // pipeline to support both, or just draw each segment individually.
     //
     // For now, draw each tick as a 2-point line strip.
+    // Use 2.0px width so MSAA gives full-coverage (pure black) pixels.
     for (size_t i = 0; i < points.size(); i += 2) {
         std::span<const plot::Point2D> seg(&points[i], 2);
-        drawLineStrip(cmd, scissor, seg, color, 1.0f);
+        drawLineStrip(cmd, scissor, seg, color, 2.0f);
     }
 }
 

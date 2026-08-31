@@ -12,6 +12,7 @@
 #   ./scripts/llm_compare_plot.py PATH/TO/comparison.png --json
 #   ./scripts/llm_compare_plot.py gallery/comparison/line_compare.png
 #   ./scripts/llm_compare_plot.py gallery/comparison/*.png   # batch mode
+#   ./scripts/llm_compare_plot.py PATH/TO/comparison.png --prompt "Focus on tick label alignment"
 #
 # Credentials are read from ~/.volcanoplot.llm.yaml:
 #   llm:
@@ -131,10 +132,15 @@ def encode_image(path: Path) -> tuple[str, str]:
     return f"data:{mime};base64,{b64}", mime
 
 
-def query_llm(client: OpenAI, model: str, image_data_url: str, image_name: str) -> str:
+def query_llm(client: OpenAI, model: str, image_data_url: str, image_name: str,
+              custom_prompt: str | None = None) -> str:
     # Qwen3 models emit a long internal "thinking" trace that counts toward
     # max_tokens and can leave content empty (finish_reason=length). Disable
     # thinking via the chat template kwarg exposed by the Hetzner endpoint.
+    user_text = (
+        f"Image under review: {image_name}\n\n"
+        + (custom_prompt if custom_prompt else USER_PROMPT)
+    )
     completion = client.chat.completions.create(
         model=model,
         messages=[
@@ -144,10 +150,7 @@ def query_llm(client: OpenAI, model: str, image_data_url: str, image_name: str) 
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            f"Image under review: {image_name}\n\n"
-                            + USER_PROMPT
-                        ),
+                        "text": user_text,
                     },
                     {
                         "type": "image_url",
@@ -166,14 +169,15 @@ def query_llm(client: OpenAI, model: str, image_data_url: str, image_name: str) 
     return getattr(msg, "content", None) or ""
 
 
-def process_one(path: Path, client: OpenAI, model: str, as_json: bool) -> dict:
+def process_one(path: Path, client: OpenAI, model: str, as_json: bool,
+                custom_prompt: str | None = None) -> dict:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"image not found: {path}")
     image_data_url, mime = encode_image(path)
     if as_json:
         # Stream nothing; just collect.
         pass
-    response = query_llm(client, model, image_data_url, path.name)
+    response = query_llm(client, model, image_data_url, path.name, custom_prompt)
     verdict = "UNKNOWN"
     for line in response.splitlines():
         s = line.strip()
@@ -212,6 +216,12 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="Suppress per-image progress lines on stderr.",
     )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Custom prompt to send to the LLM instead of the default review prompt. "
+             "Use this to focus on specific aspects (e.g. tick label alignment).",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(Path(args.config))
@@ -234,7 +244,7 @@ def main(argv: list[str]) -> int:
         if not args.quiet:
             print(f"[{i}/{len(paths)}] {p} ...", file=sys.stderr, flush=True)
         try:
-            res = process_one(p, client, model, args.json)
+            res = process_one(p, client, model, args.json, args.prompt)
         except Exception as e:
             failures.append({"image": str(p), "error": str(e)})
             if not args.quiet:

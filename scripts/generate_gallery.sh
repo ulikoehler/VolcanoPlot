@@ -6,8 +6,11 @@
 # matplotlib PNGs, and optionally creates side-by-side comparison images.
 #
 # Usage:
-#   ./scripts/generate_gallery.sh [output_dir]
+#   ./scripts/generate_gallery.sh [output_dir] [--filter NAME]
+#   ./scripts/generate_gallery.sh gallery --filter fill
+#   ./scripts/generate_gallery.sh gallery --filter fill,line
 #
+# When --filter is given, only the named plot(s) are generated and compared.
 # Defaults:
 #   output_dir = gallery/
 #
@@ -20,7 +23,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-gallery}"
+
+# Parse args: first non-flag arg is output_dir, --filter VALUE selects plots.
+OUT_DIR="gallery"
+FILTER=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --filter)
+            FILTER="$2"
+            shift 2
+            ;;
+        --filter=*)
+            FILTER="${1#--filter=}"
+            shift
+            ;;
+        *)
+            OUT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
 VOLCANO_DIR="$OUT_DIR/volcano"
 MPL_DIR="$OUT_DIR/matplotlib"
 COMPARE_DIR="$OUT_DIR/comparison"
@@ -49,17 +72,43 @@ echo ""
 # ── Step 3: Generate matplotlib PNGs ───────────────────────────────────────
 echo "[3/4] Generating matplotlib PNGs..."
 mkdir -p "$MPL_DIR"
-python3 scripts/matplotlib_gallery.py "$MPL_DIR"
+if [[ -n "$FILTER" ]]; then
+    python3 scripts/matplotlib_gallery.py "$MPL_DIR" --filter "$FILTER"
+else
+    python3 scripts/matplotlib_gallery.py "$MPL_DIR"
+fi
 echo ""
 
 # ── Step 4: Create side-by-side comparisons (optional) ─────────────────────
 echo "[4/4] Creating comparison images..."
 mkdir -p "$COMPARE_DIR"
 
+# Build the list of plot names to compare.
+if [[ -n "$FILTER" ]]; then
+    IFS=',' read -ra FILTER_NAMES <<< "$FILTER"
+else
+    FILTER_NAMES=()
+fi
+
+# Function: should_compare NAME — returns 0 if NAME passes the filter.
+should_compare() {
+    local name="$1"
+    if [[ ${#FILTER_NAMES[@]} -eq 0 ]]; then
+        return 0
+    fi
+    for f in "${FILTER_NAMES[@]}"; do
+        if [[ "$name" == "$f" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 if command -v convert &>/dev/null; then
     # ImageMagick available — create side-by-side composites.
     for volcano_png in "$VOLCANO_DIR"/*.png; do
         name=$(basename "$volcano_png" .png)
+        should_compare "$name" || continue
         mpl_png="$MPL_DIR/$name.png"
         if [ -f "$mpl_png" ]; then
             compare_png="$COMPARE_DIR/${name}_compare.png"
@@ -69,17 +118,21 @@ if command -v convert &>/dev/null; then
     done
 elif command -v python3 &>/dev/null; then
     # Fall back to PIL if available.
-    python3 - "$VOLCANO_DIR" "$MPL_DIR" "$COMPARE_DIR" << 'PYEOF'
+    python3 - "$VOLCANO_DIR" "$MPL_DIR" "$COMPARE_DIR" "$FILTER" << 'PYEOF'
 import sys, os
 from PIL import Image
 
 volcano_dir, mpl_dir, compare_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+filter_str = sys.argv[4] if len(sys.argv) > 4 else ""
+filter_names = set(n.strip() for n in filter_str.split(",") if n.strip()) if filter_str else None
 os.makedirs(compare_dir, exist_ok=True)
 
 for f in sorted(os.listdir(volcano_dir)):
     if not f.endswith(".png"):
         continue
     name = f[:-4]
+    if filter_names and name not in filter_names:
+        continue
     mpl_path = os.path.join(mpl_dir, f)
     vol_path = os.path.join(volcano_dir, f)
     if not os.path.exists(mpl_path):
