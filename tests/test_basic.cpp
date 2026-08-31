@@ -27,7 +27,12 @@ TEST(Colormap, ViridisSample) {
 TEST(Style, GgplotHasGrayBackground) {
     using namespace volcano::plot;
     auto s = styles::ggplotStyle();
-    EXPECT_NEAR(s.faceColor.r, 238/255.0f, 0.01f);
+    // matplotlib ggplot: axes.facecolor = E5E5E5 = (229,229,229)
+    EXPECT_NEAR(s.faceColor.r, 229/255.0f, 0.01f);
+    // ggplot has a color cycle with 7 colors
+    EXPECT_EQ(s.colorCycle.size(), 7u);
+    // first color is E24A33 = (226, 74, 51)
+    EXPECT_NEAR(s.colorCycle.at(0).r, 226/255.0f, 0.01f);
 }
 
 TEST(Transform, ToNdc) {

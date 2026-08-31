@@ -247,9 +247,19 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [ ] Style sheets (`*.mplstyle`)
 - [ ] `plt.style.use()`, `plt.style.context()`, `plt.style.available`
 - [x] Built-in styles: `default`, `ggplot`, `seaborn`, `dark_background`, `grayscale`
-- [ ] Built-in styles: `classic`, `fast`, `bmh`, `fivethirtyeight`, `Solarize_Light2`
-- [ ] Seaborn variants: `seaborn-v0_8-*` (bright, colorblind, dark, darkgrid, deep, muted, ...)
-- [ ] `tableau-colorblind10`, `petroff6`, `petroff8`, `petroff10`
+- [x] Built-in styles: `classic`, `fast`, `bmh`, `fivethirtyeight`, `Solarize_Light2`
+- [x] Seaborn variants: `seaborn-v0_8-*` (bright, colorblind, dark, darkgrid, deep, muted, pastel, white, whitegrid, ticks)
+- [x] Seaborn contexts: `seaborn-v0_8-paper`, `seaborn-v0_8-notebook`, `seaborn-v0_8-talk`, `seaborn-v0_8-poster`
+- [x] `tableau-colorblind10`, `petroff6`, `petroff8`
+- [x] `styles::byName()` lookup function for all built-in styles
+- [x] Color cycle per style (`ColorCycleStyle` with `axes.prop_cycle` colors)
+- [x] Line style defaults per style (`LineStyleDefaults`: linewidth, capstyle, joinstyle)
+- [x] Patch style defaults per style (`PatchStyleDefaults`: facecolor, edgecolor, linewidth)
+- [x] Tick direction per style (`in`, `out`, `inout`)
+- [x] Legend frame on/off per style (`LegendStyle::frameOn`)
+- [x] Text color per style (`FigureStyle::textColor`)
+- [x] Axis below per style (`FigureStyle::axisBelow`)
+- [ ] `petroff10`
 - [ ] Composable style lists
 - [ ] XKCD sketch style (`plt.xkcd()` context manager)
 
