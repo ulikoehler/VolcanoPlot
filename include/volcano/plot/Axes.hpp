@@ -5,6 +5,7 @@
 #include "volcano/plot/Style.hpp"
 #include "volcano/plot/Transform.hpp"
 #include "volcano/plot/DataSeries.hpp"
+#include "volcano/plot/Annotation.hpp"
 
 #include <memory>
 #include <vector>
@@ -49,6 +50,35 @@ public:
 
     [[nodiscard]] const std::vector<std::unique_ptr<IPlot>>& plots() const noexcept { return plots_; }
 
+    /// Add a text annotation at (x, y) in the given coordinate system.
+    /// Returns a pointer to the annotation for further customization.
+    TextAnnotation* text(float x, float y, std::string txt,
+                         CoordSystem coords = CoordSystem::Data) {
+        TextAnnotation t;
+        t.x = x; t.y = y; t.coords = coords;
+        t.text = std::move(txt);
+        texts_.push_back(std::move(t));
+        return &texts_.back();
+    }
+
+    /// Add an annotation with an arrow from xyText to xy.
+    /// Returns a pointer to the annotation for further customization.
+    Annotation* annotate(float xyX, float xyY, float xyTextX, float xyTextY,
+                         std::string txt,
+                         CoordSystem coords = CoordSystem::Data) {
+        Annotation a;
+        a.xy[0] = xyX; a.xy[1] = xyY;
+        a.xyCoords = coords;
+        a.xyText[0] = xyTextX; a.xyText[1] = xyTextY;
+        a.xyTextCoords = coords;
+        a.text = std::move(txt);
+        annotations_.push_back(std::move(a));
+        return &annotations_.back();
+    }
+
+    [[nodiscard]] const std::vector<TextAnnotation>& texts() const noexcept { return texts_; }
+    [[nodiscard]] const std::vector<Annotation>& annotations() const noexcept { return annotations_; }
+
     /// Compute the data viewport from all layers if not manually set (CPU).
     void autoscale();
 
@@ -71,6 +101,8 @@ private:
     bool logY_ = false;
     FigureStyle style_;
     std::vector<std::unique_ptr<IPlot>> plots_;
+    std::vector<TextAnnotation> texts_;
+    std::vector<Annotation> annotations_;
 };
 
 } // namespace volcano::plot

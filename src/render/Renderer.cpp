@@ -1,6 +1,7 @@
 // volcano/render/Renderer.cpp
 #include "volcano/render/Renderer.hpp"
 #include <volcano/plot/Colormap.hpp>
+#include <volcano/plot/Annotation.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -445,6 +446,11 @@ void Renderer::renderFrame(plot::Figure& figure) {
             drawText(cmd, *p.axes, rect);
         }
 
+        // Draw text annotations and arrow annotations.
+        if (textInited_ && textReady_) {
+            drawAnnotations(cmd, *p.axes, rect);
+        }
+
         // Draw legend (if enabled).
         drawLegend(cmd, *p.axes, rect);
 
@@ -516,6 +522,131 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         textRenderer_.draw(cmd, fullRect, label,
                            stripX + stripW + 8.0f, y + 6.0f,
                            style.colorbar.labelColor);
+    }
+}
+
+void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
+                                plot::Rect2D rect) {
+    const auto& vp = axes.viewport();
+    auto ext = backend_.extent();
+    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Extent2D figExtent{ext.width, ext.height};
+    float dpi = axes.style().dpi;
+    float baseFontSize = 16.0f;
+
+    // --- Text annotations (ax.text) ---
+    for (const auto& t : axes.texts()) {
+        if (t.text.empty()) continue;
+        auto pos = plot::toDisplay(t.x, t.y, t.coords, rect, figExtent, vp, dpi,
+                                   t.xyOffsetX, t.xyOffsetY);
+        float scale = t.fontSize;
+        auto m = textRenderer_.measureText(t.text, scale);
+
+        // Draw background box if requested.
+        if (t.bboxFaceColor.a > 0.0f) {
+            auto aligned = plot::alignText(pos, t.halign, t.valign,
+                                           m.width, m.height, m.ascent);
+            float pad = t.bboxPadding;
+            plot::Rect2D bbox{
+                static_cast<int32_t>(aligned.x - pad),
+                static_cast<int32_t>(aligned.y - m.ascent - pad),
+                static_cast<uint32_t>(m.width + 2 * pad),
+                static_cast<uint32_t>(m.height + 2 * pad)};
+            spineRenderer_.drawFilledRect(cmd, fullRect, bbox, t.bboxFaceColor);
+            if (t.bboxEdgeColor.a > 0.0f) {
+                spineRenderer_.drawRect(cmd, fullRect, bbox, t.bboxEdgeColor, 1.0f);
+            }
+        }
+
+        auto drawPos = plot::alignText(pos, t.halign, t.valign,
+                                       m.width, m.height, m.ascent);
+        textRenderer_.draw(cmd, fullRect, t.text,
+                           drawPos.x, drawPos.y, t.color, scale, t.rotation);
+    }
+
+    // --- Arrow annotations (ax.annotate) ---
+    for (const auto& a : axes.annotations()) {
+        // Compute pixel positions for the data point and the text.
+        auto dataPos = plot::toDisplay(a.xy[0], a.xy[1], a.xyCoords,
+                                       rect, figExtent, vp, dpi);
+        auto textPos = plot::toDisplay(a.xyText[0], a.xyText[1], a.xyTextCoords,
+                                       rect, figExtent, vp, dpi,
+                                       a.textOffsetX, a.textOffsetY);
+
+        // Draw arrow if requested.
+        if (a.arrowStyle != plot::ArrowStyle::None) {
+            // Compute direction and length.
+            float dx = dataPos.x - textPos.x;
+            float dy = dataPos.y - textPos.y;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len > 1.0f) {
+                float ux = dx / len, uy = dy / len;
+                // Apply shrink: move start and end inward.
+                float startX = textPos.x + ux * a.shrinkA;
+                float startY = textPos.y + uy * a.shrinkA;
+                float endX = dataPos.x - ux * a.shrinkB;
+                float endY = dataPos.y - uy * a.shrinkB;
+
+                // Draw the shaft as a line strip.
+                plot::Point2D shaft[2] = {{startX, startY}, {endX, endY}};
+                spineRenderer_.drawLineStrip(cmd, fullRect,
+                    std::span{shaft, 2}, a.arrowColor, a.arrowWidth);
+
+                // Draw arrowhead at the data-point end.
+                if (a.arrowStyle != plot::ArrowStyle::None) {
+                    float headLen = a.arrowHeadSize;
+                    float headAngle = a.arrowHeadAngle * static_cast<float>(M_PI) / 180.0f;
+                    // Arrowhead: two lines from endX,endY at ±headAngle from the shaft direction.
+                    float cosA = std::cos(headAngle);
+                    float sinA = std::sin(headAngle);
+                    // Rotate the unit vector by ±headAngle.
+                    float leftX = ux * cosA - uy * sinA;
+                    float leftY = ux * sinA + uy * cosA;
+                    float rightX = ux * cosA + uy * sinA;
+                    float rightY = -ux * sinA + uy * cosA;
+                    // Arrowhead lines: from (endX,endY) backward by headLen.
+                    plot::Point2D head1[2] = {
+                        {endX, endY},
+                        {endX - leftX * headLen, endY - leftY * headLen}
+                    };
+                    plot::Point2D head2[2] = {
+                        {endX, endY},
+                        {endX - rightX * headLen, endY - rightY * headLen}
+                    };
+                    spineRenderer_.drawLineStrip(cmd, fullRect,
+                        std::span{head1, 2}, a.arrowColor, a.arrowWidth);
+                    spineRenderer_.drawLineStrip(cmd, fullRect,
+                        std::span{head2, 2}, a.arrowColor, a.arrowWidth);
+                }
+            }
+        }
+
+        // Draw the text label.
+        if (!a.text.empty()) {
+            float scale = a.fontSize;
+            auto m = textRenderer_.measureText(a.text, scale);
+
+            // Draw background box if requested.
+            if (a.bboxFaceColor.a > 0.0f) {
+                auto aligned = plot::alignText(textPos, a.halign, a.valign,
+                                               m.width, m.height, m.ascent);
+                float pad = a.bboxPadding;
+                plot::Rect2D bbox{
+                    static_cast<int32_t>(aligned.x - pad),
+                    static_cast<int32_t>(aligned.y - m.ascent - pad),
+                    static_cast<uint32_t>(m.width + 2 * pad),
+                    static_cast<uint32_t>(m.height + 2 * pad)};
+                spineRenderer_.drawFilledRect(cmd, fullRect, bbox, a.bboxFaceColor);
+                if (a.bboxEdgeColor.a > 0.0f) {
+                    spineRenderer_.drawRect(cmd, fullRect, bbox, a.bboxEdgeColor, 1.0f);
+                }
+            }
+
+            auto drawPos = plot::alignText(textPos, a.halign, a.valign,
+                                           m.width, m.height, m.ascent);
+            textRenderer_.draw(cmd, fullRect, a.text,
+                               drawPos.x, drawPos.y, a.color, scale);
+        }
     }
 }
 

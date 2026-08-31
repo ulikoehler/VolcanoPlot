@@ -330,10 +330,16 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ## 5. Text and Annotations
 - [x] `title`, `suptitle`, `figtext`, `xlabel`, `ylabel` (data model: [x], rendering: [x] — glyb bitmap atlas)
-- [ ] `text`, `figtext`, `annotate`
+- [x] `text`, `annotate` (Axes::text(), Axes::annotate() with arrows)
 - [x] `tick_params`, `set_xticklabels`, `set_yticklabels` (auto tick labels: [x])
+- [x] `Annotation` with `arrowprops` (simple arrow shaft + arrowhead)
+- [x] Coordinate systems: `data`, `axes`, `figure`, `display`, `offset points`
+- [x] Text alignment: left/center/right, top/center/bottom/baseline
+- [x] Text background box (bbox face/edge color, padding)
+- [x] Text rotation (per-annotation, radians)
+- [x] Text color and font size scaling
+- [ ] `FancyArrowPatch` with curved shaft, connection styles (arc, arc3, angle, bar)
 - [ ] `Annotation` with `arrowprops` / `FancyArrowPatch`
-- [ ] Coordinate systems: `data`, `axes`, `figure`, `display`, `offset points`
 - [ ] MathText (TeX-like subset): sub/sup, fractions, radicals, Greek, accents, calligraphic, etc.
 - [ ] MathText fontsets: `dejavusans` (default), `dejavuserif`, `cm`, `stix`, `stixsans`
 - [ ] `text.usetex` full LaTeX rendering (requires external TeX)

@@ -65,6 +65,10 @@ private:
     /// Draw a colorbar for the axes (if enabled in style).
     void drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                       plot::Rect2D rect);
+
+    /// Draw text annotations and arrow annotations for one axes.
+    void drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
+                         plot::Rect2D rect);
 };
 
 } // namespace volcano::render
