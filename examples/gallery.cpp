@@ -202,10 +202,25 @@ void plotHist(GalleryCtx& ctx) {
 
 void plotPie(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "Pie");
+    auto* ax = fig.addAxes();
+    ax->setStyle(galleryStyle());
+    ax->setTitle("Pie");
+    // Pie charts don't show axes/spines/ticks/grid.
+    ax->style().xAxis.visible = false;
+    ax->style().yAxis.visible = false;
+    ax->style().xAxis.grid = false;
+    ax->style().yAxis.grid = false;
     PieData pd;
     pd.values = {30, 20, 25, 15, 10};
     pd.labels = {"A", "B", "C", "D", "E"};
+    // matplotlib default color cycle: tab10
+    pd.colors = {
+        Color::fromRgba8(31, 119, 180),   // blue
+        Color::fromRgba8(255, 127, 14),   // orange
+        Color::fromRgba8(44, 160, 44),    // green
+        Color::fromRgba8(214, 39, 40),    // red
+        Color::fromRgba8(148, 103, 189),  // purple
+    };
     ax->addPlot(std::make_unique<PiePlot>(std::move(pd)));
     ctx.render(fig, "pie");
 }
