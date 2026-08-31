@@ -236,7 +236,10 @@ void BoxPlot::contributeToAutoscale(Viewport& v) const {
 
 void BoxPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    // Use the box edge segment buffer (contains all extreme points).
+    // Reduce over the box edge segment buffer (contains box + whisker + cap
+    // vertices). Outliers are uploaded to a separate PointRenderer buffer,
+    // so we reduce over both to include outlier extremes in the viewport.
+    bool gotAny = false;
     if (boxEdgeCount_ > 0) {
         auto r = reducer.reduceMinMax2D(boxEdgeRenderer_.pointBuffer(),
                                         boxEdgeRenderer_.pointCount());
@@ -245,10 +248,21 @@ void BoxPlot::contributeToAutoscaleGpu(
             v.x.max = std::max(v.x.max, r->maxX);
             v.y.min = std::min(v.y.min, r->minY);
             v.y.max = std::max(v.y.max, r->maxY);
-            return;
+            gotAny = true;
         }
     }
-    contributeToAutoscale(v);
+    if (cfg_.showOutliers && outlierCount_ > 0) {
+        auto r = reducer.reduceMinMax2D(outlierRenderer_.pointBuffer(),
+                                        outlierRenderer_.pointCount());
+        if (r) {
+            v.x.min = std::min(v.x.min, r->minX);
+            v.x.max = std::max(v.x.max, r->maxX);
+            v.y.min = std::min(v.y.min, r->minY);
+            v.y.max = std::max(v.y.max, r->maxY);
+            gotAny = true;
+        }
+    }
+    if (!gotAny) contributeToAutoscale(v);
 }
 
 } // namespace volcano::plot
