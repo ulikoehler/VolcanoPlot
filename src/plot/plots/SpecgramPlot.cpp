@@ -131,7 +131,10 @@ void SpecgramPlot::buildGeometry() {
     if (nrows_ == 0 || ncols_ == 0) return;
 
     // Compute value range.
-    if (config_.valueRange.valid()) {
+    if (config_.norm) {
+        config_.norm->autoscale(data_);
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+    } else if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
     } else {
         float vmin = std::numeric_limits<float>::max();
@@ -165,8 +168,13 @@ void SpecgramPlot::buildGeometry() {
             if (std::isnan(val)) {
                 color = Color::transparent();
             } else {
-                float t = (val - valueRange_.min) / vspan;
-                t = std::clamp(t, 0.0f, 1.0f);
+                float t;
+                if (config_.norm) {
+                    t = (*config_.norm)(val);
+                } else {
+                    t = (val - valueRange_.min) / vspan;
+                    t = std::clamp(t, 0.0f, 1.0f);
+                }
                 color = cmap.sample(t);
             }
             if (color.a == 0.0f) continue;

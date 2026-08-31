@@ -37,6 +37,12 @@ Color PcolormeshPlot::legendColor() const {
 }
 
 void PcolormeshPlot::computeValueRange() {
+    // If a norm is set, autoscale it from the data (if vmin/vmax not set).
+    if (config_.norm) {
+        config_.norm->autoscale(C_);
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+        return;
+    }
     if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
         return;
@@ -68,9 +74,14 @@ void PcolormeshPlot::buildGeometry() {
             float x0 = x_[i], x1 = x_[i + 1];
             float y0 = y_[j], y1 = y_[j + 1];
 
-            // Color from colormap.
-            float t = (val - valueRange_.min) / vspan;
-            t = std::clamp(t, 0.0f, 1.0f);
+            // Color from colormap: use norm if set, else linear mapping.
+            float t;
+            if (config_.norm) {
+                t = (*config_.norm)(val);
+            } else {
+                t = (val - valueRange_.min) / vspan;
+                t = std::clamp(t, 0.0f, 1.0f);
+            }
             Color color = cmap.sample(t);
 
             // Two triangles per cell.

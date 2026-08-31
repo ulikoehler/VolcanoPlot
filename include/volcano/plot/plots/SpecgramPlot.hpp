@@ -3,7 +3,9 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 #include <complex>
@@ -23,7 +25,10 @@ struct SpecgramConfig {
     /// Colormap for coloring (nullptr = viridis).
     const Colormap* cmap = nullptr;
     /// Explicit value range (dB) for color mapping. If invalid, computed from data.
+    /// Ignored if norm is set (use norm->setVmin/setVmax instead).
     Range valueRange{0, 0};
+    /// Optional normalization. If set, replaces the linear (vmin,vmax) mapping.
+    std::shared_ptr<Normalize> norm;
     /// Label for legend (typically empty).
     std::string label;
 };

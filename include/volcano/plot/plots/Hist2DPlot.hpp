@@ -3,7 +3,9 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 #include <optional>
@@ -33,9 +35,13 @@ struct Hist2DConfig {
     std::vector<float> yEdges;     ///< used when bins = Edges
     std::optional<Range> xRange;   ///< data range; auto if unset
     std::optional<Range> yRange;
-    Hist2DNorm norm = Hist2DNorm::Count;
+    Hist2DNorm normMode = Hist2DNorm::Count;
     const Colormap* cmap = nullptr;  ///< colormap (nullptr = viridis)
-    Range valueRange{0, 0};          ///< explicit count/value range; auto if invalid
+    /// Explicit count/value range; auto if invalid.
+    /// Ignored if norm is set (use norm->setVmin/setVmax instead).
+    Range valueRange{0, 0};
+    /// Optional normalization. If set, replaces the linear (vmin,vmax) mapping.
+    std::shared_ptr<Normalize> norm;
     std::string label;
 };
 

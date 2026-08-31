@@ -138,7 +138,7 @@ void HexbinPlot::computeBins() {
     }
 
     // Apply normalization.
-    if (config_.norm == HexbinNorm::Density) {
+    if (config_.normMode == HexbinNorm::Density) {
         float total = static_cast<float>(x_.size());
         if (total > 0) {
             for (auto& c : counts_) c /= total;
@@ -146,7 +146,10 @@ void HexbinPlot::computeBins() {
     }
 
     // Compute value range.
-    if (config_.valueRange.valid()) {
+    if (config_.norm) {
+        config_.norm->autoscale(counts_);
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+    } else if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
     } else {
         float vmin = std::numeric_limits<float>::max();
@@ -168,8 +171,13 @@ void HexbinPlot::buildGeometry() {
     if (vspan <= 0.0f) vspan = 1.0f;
 
     for (size_t i = 0; i < centers_.size(); ++i) {
-        float t = (counts_[i] - valueRange_.min) / vspan;
-        t = std::clamp(t, 0.0f, 1.0f);
+        float t;
+        if (config_.norm) {
+            t = (*config_.norm)(counts_[i]);
+        } else {
+            t = (counts_[i] - valueRange_.min) / vspan;
+            t = std::clamp(t, 0.0f, 1.0f);
+        }
         Color color = cmap.sample(t);
 
         auto verts = hexVertices(centers_[i].x, centers_[i].y, hexRadius_);

@@ -3,7 +3,9 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 #include <optional>
@@ -30,11 +32,14 @@ struct HexbinConfig {
     /// Colormap for cell coloring (nullptr = viridis).
     const Colormap* cmap = nullptr;
     /// Explicit value range for color mapping. If invalid, computed from data.
+    /// Ignored if norm is set (use norm->setVmin/setVmax instead).
     Range valueRange{0, 0};
+    /// Optional normalization. If set, replaces the linear (vmin,vmax) mapping.
+    std::shared_ptr<Normalize> norm;
     /// Hexagon orientation.
     HexOrientation orientation = HexOrientation::PointyTop;
     /// Normalization mode.
-    HexbinNorm norm = HexbinNorm::Count;
+    HexbinNorm normMode = HexbinNorm::Count;
     /// Minimum count to display a cell. Cells with fewer points are skipped.
     int minCount = 1;
     /// Optional edge color for hex borders. If alpha=0, no edges.

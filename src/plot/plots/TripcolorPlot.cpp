@@ -46,6 +46,15 @@ Color TripcolorPlot::legendColor() const {
 }
 
 void TripcolorPlot::computeValueRange() {
+    if (config_.norm) {
+        if (useFacevalues_) {
+            config_.norm->autoscale(facevalues_);
+        } else {
+            config_.norm->autoscale(z_);
+        }
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+        return;
+    }
     if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
         return;
@@ -79,7 +88,12 @@ void TripcolorPlot::buildGeometry() {
 
     auto sampleColor = [&](float v) {
         if (std::isnan(v)) return Color::transparent();
-        float t = std::clamp((v - valueRange_.min) / vspan, 0.0f, 1.0f);
+        float t;
+        if (config_.norm) {
+            t = (*config_.norm)(v);
+        } else {
+            t = std::clamp((v - valueRange_.min) / vspan, 0.0f, 1.0f);
+        }
         return cmap.sample(t);
     };
 

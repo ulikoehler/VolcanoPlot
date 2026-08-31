@@ -56,6 +56,11 @@ Color PcolorfastPlot::legendColor() const {
 }
 
 void PcolorfastPlot::computeValueRange() {
+    if (config_.norm) {
+        config_.norm->autoscale(C_);
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+        return;
+    }
     if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
         return;
@@ -84,8 +89,13 @@ void PcolorfastPlot::buildGeometry() {
             float val = C_[j * nCols_ + i];
             if (config_.skipNaN && std::isnan(val)) continue;
 
-            float t = std::isnan(val) ? 0.0f : (val - valueRange_.min) / vspan;
-            t = std::clamp(t, 0.0f, 1.0f);
+            float t;
+            if (config_.norm) {
+                t = (*config_.norm)(val);
+            } else {
+                t = std::isnan(val) ? 0.0f : (val - valueRange_.min) / vspan;
+                t = std::clamp(t, 0.0f, 1.0f);
+            }
             Color color = cmap.sample(t);
 
             float x0 = x_[i];

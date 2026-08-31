@@ -4,7 +4,9 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 
@@ -15,7 +17,10 @@ struct PcolorfastConfig {
     /// Colormap for cell coloring. If nullptr, uses viridis.
     const Colormap* cmap = nullptr;
     /// Explicit value range for color mapping. If invalid, computed from data.
+    /// Ignored if norm is set (use norm->setVmin/setVmax instead).
     Range valueRange{0, 0};
+    /// Optional normalization. If set, replaces the linear (vmin,vmax) mapping.
+    std::shared_ptr<Normalize> norm;
     /// If true, cells with NaN values are skipped (transparent).
     bool skipNaN = true;
     std::string label;

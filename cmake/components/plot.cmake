@@ -10,6 +10,7 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/ColormapData.cpp
     ${VOLCANO_ROOT}/src/plot/Color.cpp
     ${VOLCANO_ROOT}/src/plot/DataSeries.cpp
+    ${VOLCANO_ROOT}/src/plot/Normalize.cpp
     ${VOLCANO_ROOT}/src/plot/plots/ScatterPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/LinePlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/BarPlot.cpp

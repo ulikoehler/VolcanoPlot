@@ -3,6 +3,7 @@
 
 #include <volcano/plot/plots/PcolormeshPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
+#include <volcano/plot/Normalize.hpp>
 
 #include <gtest/gtest.h>
 
@@ -311,4 +312,125 @@ TEST(PcolormeshRegression, DifferentColormapsProduceDifferentColors) {
     Pixel p2 = img2.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
     EXPECT_FALSE(p1.approx(p2, 30))
         << "Viridis and plasma should produce different colors at t=0";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Normalization integration tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(PcolormeshRegression, LogNormProducesDifferentColorsThanLinear) {
+    // Data with exponential range: 1, 10, 100, 1000
+    // With linear norm, 1 and 10 look almost the same (both near t=0).
+    // With log norm, they are evenly spaced.
+    std::vector<float> x = {0, 1, 2, 3, 4};
+    std::vector<float> y = {0, 1};
+    std::vector<float> C = {1, 10, 100, 1000};
+    uint32_t nCols = 4, nRows = 1;
+
+    // Linear (default).
+    PcmFigure cf1(256);
+    PcolormeshConfig cfg1;
+    cfg1.cmap = &colormaps::viridis();
+    cf1.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, nCols, nRows, cfg1));
+    auto img1 = cf1.render();
+
+    // Log norm.
+    PcmFigure cf2(256);
+    PcolormeshConfig cfg2;
+    cfg2.cmap = &colormaps::viridis();
+    cfg2.norm = std::make_shared<LogNorm>(1.0f, 1000.0f);
+    cf2.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, nCols, nRows, cfg2));
+    auto img2 = cf2.render();
+
+    auto vp = expectedViewport(0, 4, 0, 1);
+    // Check the cell at x=0.5 (value=1) — log norm maps to t=0,
+    // linear norm maps to t≈0 too. Check x=1.5 (value=10):
+    // linear: (10-1)/999 ≈ 0.009, log: 1/3 ≈ 0.33.
+    // These should produce very different colors.
+    auto [px, py] = dataToPixel(vp, cf1.axes->rect, 1.5f, 0.5f);
+    Pixel p1Linear = img1.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+    Pixel p2Log = img2.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+    EXPECT_FALSE(p1Linear.approx(p2Log, 30))
+        << "LogNorm should produce different colors than linear for value=10";
+}
+
+TEST(PcolormeshRegression, LogNormAutoscalesFromData) {
+    // If LogNorm has no explicit vmin/vmax, it should autoscale from data.
+    std::vector<float> x = {0, 1, 2};
+    std::vector<float> y = {0, 1};
+    std::vector<float> C = {1, 100};
+    uint32_t nCols = 2, nRows = 1;
+
+    PcmFigure cf(256);
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.norm = std::make_shared<LogNorm>();  // no explicit range
+    cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, nCols, nRows, cfg));
+    auto img = cf.render();
+
+    // Should render without errors and produce non-white pixels.
+    size_t filledCount = countPixels(img, isNotWhite);
+    EXPECT_GT(filledCount, 5000u) << "LogNorm autoscale should render cells";
+}
+
+TEST(PcolormeshRegression, BoundaryNormProducesDiscreteColors) {
+    // 4 bins: [0,1), [1,2), [2,3), [3,4]
+    std::vector<float> x = {0, 1, 2, 3, 4};
+    std::vector<float> y = {0, 1};
+    std::vector<float> C = {0.5f, 1.5f, 2.5f, 3.5f};
+    uint32_t nCols = 4, nRows = 1;
+
+    PcmFigure cf(256);
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.norm = std::make_shared<BoundaryNorm>(
+        std::vector<float>{0, 1, 2, 3, 4});
+    cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, nCols, nRows, cfg));
+    auto img = cf.render();
+
+    // Each cell should have a distinct color (4 discrete bins).
+    auto vp = expectedViewport(0, 4, 0, 1);
+    Pixel colors[4];
+    for (int i = 0; i < 4; ++i) {
+        auto [px, py] = dataToPixel(vp, cf.axes->rect, i + 0.5f, 0.5f);
+        colors[i] = img.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+    }
+    // All 4 should be distinct.
+    for (int i = 0; i < 4; ++i) {
+        for (int j = i + 1; j < 4; ++j) {
+            EXPECT_FALSE(colors[i].approx(colors[j], 20))
+                << "Bin " << i << " and bin " << j << " should differ";
+        }
+    }
+}
+
+TEST(PcolormeshRegression, TwoSlopeNormCenterAtZero) {
+    // Data from -10 to 10, center at 0.
+    std::vector<float> x = {0, 1, 2, 3, 4};
+    std::vector<float> y = {0, 1};
+    std::vector<float> C = {-10, -5, 5, 10};
+    uint32_t nCols = 4, nRows = 1;
+
+    PcmFigure cf(256);
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::coolwarm();
+    cfg.norm = std::make_shared<TwoSlopeNorm>(0.0f, -10.0f, 10.0f);
+    cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, nCols, nRows, cfg));
+    auto img = cf.render();
+
+    // v=-10 → t=0 (cool), v=10 → t=1 (warm), v=-5 → t=0.25, v=5 → t=0.75.
+    // The center cell pair (-5, 5) should be at the midpoint colors.
+    auto vp = expectedViewport(0, 3, 0, 1);
+    auto [px1, py1] = dataToPixel(vp, cf.axes->rect, 0.5f, 0.5f);
+    auto [px2, py2] = dataToPixel(vp, cf.axes->rect, 2.5f, 0.5f);
+    Pixel cNeg = img.get(static_cast<uint32_t>(px1), static_cast<uint32_t>(py1));
+    Pixel cPos = img.get(static_cast<uint32_t>(px2), static_cast<uint32_t>(py2));
+    // With coolwarm, t=0.25 is cool (blue-ish), t=0.75 is warm (red-ish).
+    EXPECT_GT(cPos.r - cNeg.r, 20)
+        << "Positive value should be warmer (more red) than negative";
 }

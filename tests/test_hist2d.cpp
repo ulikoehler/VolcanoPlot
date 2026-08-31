@@ -200,7 +200,7 @@ TEST(Hist2DRegression, DensityNormalization) {
     cfg.bins = Hist2DBinMethod::Fixed;
     cfg.nBinsX = 10;
     cfg.nBinsY = 10;
-    cfg.norm = Hist2DNorm::Density;
+    cfg.normMode = Hist2DNorm::Density;
     cfg.cmap = &colormaps::viridis();
     cf.axes->addPlot(std::make_unique<Hist2DPlot>(std::move(xs), std::move(ys), cfg));
     auto img = cf.render();

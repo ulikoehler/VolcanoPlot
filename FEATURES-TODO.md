@@ -391,9 +391,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Color cycles / `axes.prop_cycle` (ColorCycle with tab10 palette)
 - [ ] `cycler` library integration (color + linestyle + marker + linewidth cycling)
 - [ ] Normalization:
-  - [ ] `Normalize`, `NoNorm`
-  - [ ] `LogNorm`, `PowerNorm`, `SymLogNorm`, `AsinhNorm`
-  - [ ] `BoundaryNorm`, `CenteredNorm`, `TwoSlopeNorm`, `FuncNorm`, `MultiNorm`
+  - [x] `Normalize`, `NoNorm`
+  - [x] `LogNorm`, `PowerNorm`, `SymLogNorm`, `AsinhNorm`
+  - [x] `BoundaryNorm`, `CenteredNorm`, `TwoSlopeNorm`, `FuncNorm`, `MultiNorm`
+  - [x] Norm integration in colormapped plots (pcolormesh, matshow, hexbin,
+        hist2d, tripcolor, pcolorfast, trisurf, specgram)
+  - [x] Norm autoscale from data (vmin/vmax auto-computed if unset)
+  - [x] Factory functions (`norms::linear`, `norms::log`, `norms::power`, etc.)
+  - [ ] `Colormap` `bad`, `under`, `over` colors
 
 ---
 

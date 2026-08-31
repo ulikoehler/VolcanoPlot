@@ -136,7 +136,7 @@ void Hist2DPlot::computeBins() {
     }
 
     // Apply normalization.
-    if (config_.norm == Hist2DNorm::Density) {
+    if (config_.normMode == Hist2DNorm::Density) {
         float total = static_cast<float>(x_.size());
         if (total > 0) {
             for (uint32_t j = 0; j < nBinsY_; ++j) {
@@ -147,7 +147,7 @@ void Hist2DPlot::computeBins() {
                 }
             }
         }
-    } else if (config_.norm == Hist2DNorm::Probability) {
+    } else if (config_.normMode == Hist2DNorm::Probability) {
         float total = static_cast<float>(x_.size());
         if (total > 0) {
             for (auto& c : counts_) c /= total;
@@ -155,7 +155,10 @@ void Hist2DPlot::computeBins() {
     }
 
     // Compute value range for color mapping.
-    if (config_.valueRange.valid()) {
+    if (config_.norm) {
+        config_.norm->autoscale(counts_);
+        valueRange_ = {config_.norm->vmin(), config_.norm->vmax()};
+    } else if (config_.valueRange.valid()) {
         valueRange_ = config_.valueRange;
     } else {
         float vmin = std::numeric_limits<float>::max();
@@ -184,8 +187,13 @@ void Hist2DPlot::buildGeometry() {
             float x0 = xEdges_[i], x1 = xEdges_[i + 1];
             float y0 = yEdges_[j], y1 = yEdges_[j + 1];
 
-            float t = (count - valueRange_.min) / vspan;
-            t = std::clamp(t, 0.0f, 1.0f);
+            float t;
+            if (config_.norm) {
+                t = (*config_.norm)(count);
+            } else {
+                t = (count - valueRange_.min) / vspan;
+                t = std::clamp(t, 0.0f, 1.0f);
+            }
             Color color = cmap.sample(t);
 
             Point2D bl{x0, y0}, br{x1, y0}, ul{x0, y1}, ur{x1, y1};

@@ -70,7 +70,10 @@ void TrisurfPlot::projectSurface() {
 
     // Compute z range for color mapping.
     Range zRange = config_.valueRange;
-    if (!zRange.valid()) {
+    if (config_.norm) {
+        config_.norm->autoscale(z_);
+        zRange = {config_.norm->vmin(), config_.norm->vmax()};
+    } else if (!zRange.valid()) {
         float vmin = std::numeric_limits<float>::max();
         float vmax = std::numeric_limits<float>::lowest();
         for (float v : z_) {
@@ -107,7 +110,12 @@ void TrisurfPlot::projectSurface() {
                           projectDepth(vp, p2.x, p2.y, p2.z)) / 3.0f;
 
         float avgZ = (p0.z + p1.z + p2.z) / 3.0f;
-        float t = std::clamp((avgZ - zRange.min) / zSpan, 0.0f, 1.0f);
+        float t;
+        if (config_.norm) {
+            t = (*config_.norm)(avgZ);
+        } else {
+            t = std::clamp((avgZ - zRange.min) / zSpan, 0.0f, 1.0f);
+        }
         Color color = cmap.sample(t);
 
         tris.push_back({
