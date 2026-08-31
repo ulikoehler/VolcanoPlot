@@ -222,10 +222,20 @@ if(VOLCANO_BUILD_TESTS)
     # The final check is done after the test target is created
     # (in tests/CMakeLists.txt) by inspecting the resolved link flags.
     find_package(MPI QUIET)
-    if(MPI_FOUND AND TARGET MPI::MPI_CXX)
-        set(VOLCANO_MPI_LINK MPI::MPI_CXX)
-    else()
-        set(VOLCANO_MPI_LINK "")
+    set(VOLCANO_MPI_LINK "")
+    if(MPI_FOUND)
+        # MPI::MPI_CXX may not include -lmpi_cxx correctly on all systems.
+        # Find the library directly to be sure.
+        find_library(MPI_CXX_LIBRARY NAMES mpi_cxx)
+        if(MPI_CXX_LIBRARY)
+            set(VOLCANO_MPI_LINK ${MPI_CXX_LIBRARY})
+            if(TARGET MPI::MPI_CXX)
+                # Also link MPI::MPI_CXX for include paths and other flags.
+                list(APPEND VOLCANO_MPI_LINK MPI::MPI_CXX)
+            endif()
+        elseif(TARGET MPI::MPI_CXX)
+            set(VOLCANO_MPI_LINK MPI::MPI_CXX)
+        endif()
     endif()
 
     # Early detection: check pkg-config modules for MPI references.
