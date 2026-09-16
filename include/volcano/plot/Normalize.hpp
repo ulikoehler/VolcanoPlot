@@ -16,6 +16,7 @@
 
 #include "volcano/plot/Types.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
