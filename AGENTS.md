@@ -40,12 +40,15 @@ cmake --build build -j4
 ## Dependencies (system)
 
 ```bash
-sudo apt-get install -y libvulkan-dev libsdl3-dev libshaderc-dev glslang-dev \
+sudo apt-get install -y libvulkan-dev libshaderc-dev glslang-dev \
     spirv-tools vulkan-validationlayers vulkan-utility-libraries-dev \
     libpng-dev libwebp-dev
 ```
 
-Optional: `libfreetype-dev` and `libharfbuzz-dev` (for text rendering via glyb).
+Optional: `libsdl3-dev` (screen mode — without it, the screen backend,
+`volcano_screen`, and `example_chirp_liveplot` are skipped at configure
+time with a warning). Also optional: `libfreetype-dev` and
+`libharfbuzz-dev` (for text rendering via glyb).
 
 ## Architecture
 

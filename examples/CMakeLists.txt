@@ -1,9 +1,11 @@
 # examples/CMakeLists.txt
 
-add_executable(example_chirp_liveplot chirp_liveplot.cpp)
-target_link_libraries(example_chirp_liveplot PRIVATE
-    volcano_backend volcano_render volcano_plot volcano_text volcano_encode
-)
+if(VOLCANO_BUILD_SCREEN_BACKEND)
+    add_executable(example_chirp_liveplot chirp_liveplot.cpp)
+    target_link_libraries(example_chirp_liveplot PRIVATE
+        volcano_backend volcano_render volcano_plot volcano_text volcano_encode
+    )
+endif()
 
 add_executable(example_headless_scatter headless_scatter.cpp)
 target_link_libraries(example_headless_scatter PRIVATE

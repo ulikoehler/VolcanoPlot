@@ -84,9 +84,20 @@ endif()
 # Vulkan loader + headers (system)
 find_package(Vulkan REQUIRED)
 
-# SDL3 (system) — for screen backend
+# SDL3 (system) — optional, for screen backend.
+# If SDL3 is not installed, the screen backend and its binaries are skipped.
 if(VOLCANO_BUILD_SCREEN_BACKEND)
-    find_package(SDL3 REQUIRED)
+    find_package(SDL3 QUIET)
+    if(NOT SDL3_FOUND)
+        message(WARNING
+            "SDL3 not found — screen backend disabled.\n"
+            "Install SDL3 development packages to enable it:\n"
+            "  Debian/Ubuntu:  sudo apt-get install libsdl3-dev\n"
+            "  Fedora/RHEL:    sudo dnf install SDL3-devel\n"
+            "  Arch Linux:     sudo pacman -S sdl3\n"
+            "Or configure with -DVOLCANO_BUILD_SCREEN_BACKEND=OFF to silence this warning.")
+        set(VOLCANO_BUILD_SCREEN_BACKEND OFF)
+    endif()
 endif()
 
 # shaderc (system) — runtime GLSL→SPIR-V compilation
