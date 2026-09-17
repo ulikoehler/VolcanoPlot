@@ -259,11 +259,51 @@ void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
+void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
+                                  vk::Extent2D resolution,
+                                  std::span<const plot::Point2D> triVerts,
+                                  plot::Color color) {
+    if (!inited_ || triVerts.empty()) return;
+
+    size_t count = triVerts.size();
+    size_t byteSize = count * sizeof(LineVertex);
+    ensureScratch(byteSize);
+
+    auto* verts = reinterpret_cast<LineVertex*>(
+        static_cast<char*>(scratchVB_.mappedData()) + scratchOffset_);
+    for (size_t i = 0; i < count; ++i) {
+        verts[i].x = triVerts[i].x;
+        verts[i].y = triVerts[i].y;
+        verts[i].r = color.r; verts[i].g = color.g;
+        verts[i].b = color.b; verts[i].a = color.a;
+    }
+
+    cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
+
+    struct PC { float w, h, lw; } pc{
+        float(resolution.width), float(resolution.height), 1.0f};
+    cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
+                      0, sizeof(PC), &pc);
+
+    vk::DeviceSize offsets[] = { scratchOffset_ };
+    cmd.bindVertexBuffers(0, scratchVB_.handle(), offsets);
+
+    vk::Viewport viewport{0, 0, float(resolution.width),
+                          float(resolution.height), 0, 1};
+    cmd.setViewport(0, viewport);
+    cmd.setScissor(0, clip);
+
+    cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
+
+    scratchOffset_ += (byteSize + 15) & ~size_t(15);
+}
+
 void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
                               plot::Rect2D rect, std::span<const float> positions,
                               plot::Color color, float tickLength,
-                              bool yAxis, float dataMin, float dataMax) {
-    if (!inited_ || positions.empty()) return;
+                              bool yAxis, float dataMin, float dataMax,
+                              float inFrac, bool farSide, float tickWidth) {
+    if (!inited_ || positions.empty() || tickLength <= 0.0f) return;
 
     float range = dataMax - dataMin;
     if (range <= 0) return;
@@ -271,40 +311,35 @@ void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
     std::vector<plot::Point2D> points;
     points.reserve(positions.size() * 2);
 
+    // Tick segment: inner end at edge - d*len*inFrac (into the axes),
+    // outer end at edge + d*len*(1-inFrac) (outward). d = outward sign.
     if (!yAxis) {
-        // X-axis ticks: below the axes, pointing down.
+        // X-axis ticks at the bottom edge (or top edge when farSide).
+        float edge = farSide ? rect.y : rect.y + rect.height;
+        float d = farSide ? -1.0f : 1.0f; // outward direction
         for (float pos : positions) {
             float px = rect.x + (pos - dataMin) / range * rect.width;
             if (px < rect.x || px > rect.x + rect.width) continue;
-            points.push_back({px, float(rect.y + rect.height)});
-            points.push_back({px, float(rect.y + rect.height + tickLength)});
+            points.push_back({px, edge - d * tickLength * inFrac});
+            points.push_back({px, edge + d * tickLength * (1.0f - inFrac)});
         }
     } else {
-        // Y-axis ticks: left of the axes, pointing left.
+        // Y-axis ticks at the left edge (or right edge when farSide).
+        float edge = farSide ? rect.x + rect.width : rect.x;
+        float d = farSide ? 1.0f : -1.0f;
         for (float pos : positions) {
             float py = rect.y + rect.height - (pos - dataMin) / range * rect.height;
             if (py < rect.y || py > rect.y + rect.height) continue;
-            points.push_back({float(rect.x), py});
-            points.push_back({float(rect.x - tickLength), py});
+            points.push_back({edge - d * tickLength * inFrac, py});
+            points.push_back({edge + d * tickLength * (1.0f - inFrac), py});
         }
     }
 
     if (points.empty()) return;
 
-    // Draw as separate line segments (pairs of points).
-    // We use line strip topology, but need to break between segments.
-    // Simplest: draw each pair as a separate draw call.
-    // Actually, for line strip, consecutive points are connected.
-    // To draw separate segments, we can use line list topology instead.
-    // But our pipeline is set up for line strip. Let's just draw each pair.
-    // For efficiency, we could use LINE_LIST topology. Let's change the
-    // pipeline to support both, or just draw each segment individually.
-    //
-    // For now, draw each tick as a 2-point line strip.
-    // Use 2.0px width so MSAA gives full-coverage (pure black) pixels.
     for (size_t i = 0; i < points.size(); i += 2) {
         std::span<const plot::Point2D> seg(&points[i], 2);
-        drawLineStrip(cmd, scissor, seg, color, 2.0f);
+        drawLineStrip(cmd, scissor, seg, color, tickWidth);
     }
 }
 

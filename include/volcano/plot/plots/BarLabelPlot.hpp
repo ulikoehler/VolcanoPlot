@@ -63,7 +63,7 @@ private:
 
     void generateLabels();
     std::string formatValue(float v) const;
-    Point2D dataToPixel(const Viewport& v, const Rect2D& rect,
+    Point2D dataToPixel(const Axes& axes, const Rect2D& rect,
                         float dx, float dy) const;
 };
 

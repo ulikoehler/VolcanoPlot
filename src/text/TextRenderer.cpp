@@ -137,23 +137,52 @@ std::string findSystemFontFile() {
 
 } // namespace
 
+// The atlas always stores glyphs rasterized at this fixed reference size;
+// draw()/measureText() scale vertex positions and metrics from it. This
+// keeps every glyph valid at every render scale (the one atlas upload
+// covers all sizes).
+static constexpr int kRefFontSize = int(16.0f * 64.0f);  // 16px, 26.6
+
+float TextRenderer::lineHeight(float scale) {
+    if (!fontFace_) return 16.0f * scale;
+    auto* ftface = static_cast<font_face_ft*>(fontFace_);
+    auto* m = ftface->get_metrics(kRefFontSize);
+    float h = m->height / 64.0f;
+    return (h > 0.0f ? h : 19.2f) * scale;
+}
+
 TextRenderer::TextMetrics
 TextRenderer::measureText(std::string_view text, float scale) {
     if (!fontFace_ || text.empty()) return {0, 0, 0};
-    int font_size = int(16.0f * scale * 64.0f);
-    std::vector<glyph_shape> shapes;
-    std::string lang = "en";
-    text_segment segment(std::string(text), lang, fontFace_,
-                         font_size, 0, 0, 0xff000000);
-    shaper_->shape(shapes, segment);
-    float width = 0.0f;
-    for (const auto& s : shapes) width += s.x_advance / 64.0f;
-    // Get font metrics for ascent/descent.
     auto* ftface = static_cast<font_face_ft*>(fontFace_);
-    auto* m = ftface->get_metrics(font_size);
+    auto* m = ftface->get_metrics(kRefFontSize);
     float ascent = m->ascender / 64.0f;
     float descent = -m->descender / 64.0f;  // descender is negative
-    return {width, ascent + descent, ascent};
+    float lineH = lineHeight(1.0f);
+
+    float maxWidth = 0.0f;
+    int lines = 0;
+    size_t start = 0;
+    while (true) {
+        size_t nl = text.find('\n', start);
+        auto line = text.substr(start, nl == std::string_view::npos
+                                        ? nl : nl - start);
+        ++lines;
+        if (!line.empty()) {
+            std::vector<glyph_shape> shapes;
+            std::string lang = "en";
+            text_segment segment(std::string(line), lang, fontFace_,
+                                 kRefFontSize, 0, 0, 0xff000000);
+            shaper_->shape(shapes, segment);
+            float width = 0.0f;
+            for (const auto& s : shapes) width += s.x_advance / 64.0f;
+            maxWidth = std::max(maxWidth, width);
+        }
+        if (nl == std::string_view::npos) break;
+        start = nl + 1;
+    }
+    float height = ascent + descent + (lines - 1) * lineH;
+    return {maxWidth * scale, height * scale, ascent * scale};
 }
 
 TextRenderer::TextRenderer() = default;
@@ -349,11 +378,19 @@ void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
 void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     if (atlasUploaded_ || !fontFace_) return;
 
-    // Pre-render common ASCII characters to populate the atlas.
-    // This ensures all common glyphs are rasterized before upload.
+    // Pre-render common characters to populate the atlas: ASCII plus the
+    // Greek letters, math symbols, and combining accents emitted by the
+    // MathText engine (the GPU atlas texture is uploaded once, so all
+    // needed glyphs must be rasterized here).
     auto* batch = static_cast<draw_list*>(batch_);
     std::string charset;
     for (char c = 32; c < 127; ++c) charset.push_back(c);
+    charset += "αβγδϵεζηθϑικλμνξπϖρϱσςτυϕφχψω"
+               "ΓΔΘΛΞΠΣΥΦΨΩ"
+               "×÷±∓⋅⋯…≤≥≠≈≃≅≡∼∝≪≫∈∉∋⊂⊃⊆⊇∪∩∖∅∀∃∄¬∧∨"
+               "→←⇒⇐↔⇔↦↑↓∑∏∐∫∬∭∮⋃⋂⨁⨂⨀⨄⨆⋁⋀∂∇∞ℏℓℜℑ℘ℵıȷ"
+               "°∘•⋆∗′⊕⊖⊗⊘⊙⊥∥∠△□■⋄⟨⟩⌈⌉⌊⌋∣⊤⊢⊣⊨∴∵√"
+               "̂̃̄̇̈⃗̆̌́̀";
 
     int font_size = int(16.0f * 64.0f);  // 16px in 26.6 fixed-point
     std::string lang = "en";
@@ -461,27 +498,58 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
 
 void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                         std::string_view text, float x, float y,
-                        plot::Color color, float scale, float rotation) {
+                        plot::Color color, float scale, float rotation,
+                        plot::HAlign lineAlign) {
     if (!inited_ || !fontFace_ || text.empty()) return;
 
-    // Font size in 26.6 fixed-point (glyb convention).
-    int font_size = int(16.0f * scale * 64.0f);
-
-    // Shape text using glyb.
-    std::vector<glyph_shape> shapes;
-    std::string lang = "en";
+    // Glyphs are shaped at the fixed reference size (the atlas stores 16px
+    // bitmaps); `scale` is applied to vertex positions below.
+    constexpr int font_size = kRefFontSize;
     uint32_t rgba = (uint32_t(color.r * 255) << 24) |
                     (uint32_t(color.g * 255) << 16) |
                     (uint32_t(color.b * 255) << 8)  |
                     (uint32_t(color.a * 255));
-    text_segment segment(std::string(text), lang, fontFace_,
-                         font_size, x, y, rgba);
 
     auto* batch = static_cast<draw_list*>(batch_);
-
     draw_list_clear(*batch);
-    shaper_->shape(shapes, segment);
-    textRenderer_->render(*batch, shapes, segment);
+
+    // Split into lines; each line is shaped at its own offset so the
+    // whole block rotates around (x, y). All layout offsets are in
+    // unscaled reference space — `scale` is applied to vertices below.
+    float lineH = lineHeight(1.0f);
+    float blockW = lineAlign == plot::HAlign::Left
+                       ? 0.0f : measureText(text, 1.0f).width;
+    float lineY = y;
+    size_t start = 0;
+    while (true) {
+        size_t nl = text.find('\n', start);
+        auto line = text.substr(start, nl == std::string_view::npos
+                                        ? nl : nl - start);
+        if (!line.empty()) {
+            float lineX = x;
+            if (lineAlign != plot::HAlign::Left) {
+                // Per-line alignment within the block width.
+                float lw = 0.0f;
+                std::vector<glyph_shape> ws;
+                std::string lang = "en";
+                text_segment wseg(std::string(line), lang, fontFace_,
+                                  font_size, 0, 0, rgba);
+                shaper_->shape(ws, wseg);
+                for (const auto& s : ws) lw += s.x_advance / 64.0f;
+                lineX += lineAlign == plot::HAlign::Center
+                             ? (blockW - lw) * 0.5f : (blockW - lw);
+            }
+            std::vector<glyph_shape> shapes;
+            std::string lang = "en";
+            text_segment segment(std::string(line), lang, fontFace_,
+                                 font_size, lineX, lineY, rgba);
+            shaper_->shape(shapes, segment);
+            textRenderer_->render(*batch, shapes, segment);
+        }
+        if (nl == std::string_view::npos) break;
+        start = nl + 1;
+        lineY += lineH;
+    }
 
     if (batch->vertices.empty() || batch->indices.empty()) return;
 
@@ -506,15 +574,17 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         ensureScratch(vbOffset_ + vertBytes, ibOffset_ + idxBytes);
     }
 
-    // Convert vertices, applying rotation around the text origin (x, y).
+    // Convert vertices, applying scale and rotation around the text
+    // origin (x, y). Glyph bitmaps are the fixed 16px reference size;
+    // `scale` stretches the quads (GPU-side upsampling).
     auto* dstVerts = static_cast<TextVertex*>(scratchVB_.mappedData()) + vbOffset_ / sizeof(TextVertex);
-    float cosR = std::cos(rotation);
-    float sinR = std::sin(rotation);
+    float cosR = std::cos(rotation) * scale;
+    float sinR = std::sin(rotation) * scale;
     for (size_t i = 0; i < vertCount; ++i) {
         const auto& sv = batch->vertices[i];
         float px = sv.pos[0];
         float py = sv.pos[1];
-        // Rotate (px, py) around origin (x, y).
+        // Scale + rotate (px, py) around origin (x, y).
         float dx = px - x;
         float dy = py - y;
         dstVerts[i].x = x + dx * cosR - dy * sinR;

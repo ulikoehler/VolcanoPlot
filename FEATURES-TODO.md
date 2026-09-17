@@ -235,17 +235,28 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       with fwidth-based screen-space derivatives for anti-aliasing, lines
       never quantize under zoom, configurable floor/back-wall/side-wall
       planes, auto or custom grid step, alpha-blended overlay)
-- [ ] Navigation cube/triad (3D)
+- [x] Navigation cube/triad (3D) (NavCubePlot — axis triad or wireframe
+      cube overlay drawn in a corner of the axes rect, projects axis
+      directions through the Camera3D view rotation only, colored X/Y/Z
+      arrows with optional labels and negative half-axes, depth-sorted
+      drawing, SpineRenderer pixel-space lines + TextRenderer labels)
 
 ---
 
 ## 2. Style System
-- [ ] `matplotlib.rcParams` global runtime config
-- [ ] `matplotlib.rc_context` temporary rc context manager
-- [ ] `matplotlib.rcdefaults()`, `matplotlib.rc()`
-- [ ] `matplotlibrc` file support
-- [ ] Style sheets (`*.mplstyle`)
-- [ ] `plt.style.use()`, `plt.style.context()`, `plt.style.available`
+- [x] `matplotlib.rcParams` global runtime config (`rc::params()` — global
+      FigureStyle snapshotted by new Axes/Figure, `rc::set(key, value)`
+      applies matplotlib rcParam names via `applyRcParam`)
+- [x] `matplotlib.rc_context` temporary rc context manager (`rc::Context`
+      RAII guard, moveable, restores on scope exit)
+- [x] `matplotlib.rcdefaults()`, `matplotlib.rc()` (`rc::rcdefaults()`,
+      `rc::set`)
+- [x] `matplotlibrc` file support (`rc::loadFile` — key:value parser with
+      comments, colors, bools, cycler prop_cycle, named font sizes)
+- [x] Style sheets (`*.mplstyle`) (`style::use(path)` / `rc::loadFile` —
+      ~40 rcParam keys mapped onto FigureStyle fields)
+- [x] `plt.style.use()`, `plt.style.context()`, `plt.style.available`
+      (`style::use`/`style::context`/`style::available` in Rc.hpp)
 - [x] Built-in styles: `default`, `ggplot`, `seaborn`, `dark_background`, `grayscale`
 - [x] Built-in styles: `classic`, `fast`, `bmh`, `fivethirtyeight`, `Solarize_Light2`
 - [x] Seaborn variants: `seaborn-v0_8-*` (bright, colorblind, dark, darkgrid, deep, muted, pastel, white, whitegrid, ticks)
@@ -259,9 +270,12 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Legend frame on/off per style (`LegendStyle::frameOn`)
 - [x] Text color per style (`FigureStyle::textColor`)
 - [x] Axis below per style (`FigureStyle::axisBelow`)
-- [ ] `petroff10`
-- [ ] Composable style lists
-- [ ] XKCD sketch style (`plt.xkcd()` context manager)
+- [x] `petroff10` (petroff10Style — official 10-color Petroff cycle)
+- [x] Composable style lists (`style::use({name, path, ...})` — applied in
+      order, .mplstyle files overlay params on top of builtin sheets)
+- [x] XKCD sketch style (`plt.xkcd()` context manager) (xkcdStyle —
+      rcParams portion: Comic Sans-ish font, 14pt, thicker spines; the
+      hand-drawn path wobble is the §15 sketching feature)
 
 ---
 
@@ -281,14 +295,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `coolwarm`, `RdBu`, `seismic`
 - [x] `PiYG`, `PRGn`, `BrBG`, `PuOr`, `RdGy`
 - [x] `RdYlBu`, `RdYlGn`, `Spectral`, `bwr`
-- [ ] `berlin`, `managua`, `vanimo`
+- [x] `berlin`, `managua`, `vanimo`
 
 ### 3.4 Cyclic
 - [x] `twilight`, `twilight_shifted`, `hsv`
 
 ### 3.5 Qualitative
 - [x] `Pastel1`, `Pastel2`, `Paired`, `Accent`
-- [ ] `okabe_ito` (added in matplotlib 3.11)
+- [x] `okabe_ito` (added in matplotlib 3.11)
 - [x] `Dark2`, `Set1`, `Set2`, `Set3`
 - [x] `tab10`, `tab20`, `tab20b`, `tab20c`
 
@@ -299,32 +313,32 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `gist_rainbow`, `rainbow`, `nipy_spectral`, `gist_ncar`
 
 ### 3.7 Colormap API
-- [ ] `LinearSegmentedColormap`
-- [ ] `ListedColormap`
-- [x] Reversed colormaps (`name + '_r'`)
-- [ ] `Colormap` `bad`, `under`, `over` colors
+- [x] `LinearSegmentedColormap` (`Colormap::segmented()` — per-channel (x,y0,y1) segment lists rasterized to a LUT)
+- [x] `ListedColormap` (`Colormap::listed()` — discrete bin sampling)
+- [x] Reversed colormaps (`name + '_r'`, `Colormap::reversed()` — swaps under/over, preserves discrete/bad)
+- [x] `Colormap` `bad`, `under`, `over` colors (`withBad`/`withUnder`/`withOver`; NaN → bad/transparent, t<0 → under, t>1 → over in all colormapped plots)
 
 ---
 
 ## 4. Axes and Figure Features
 - [x] `plt.figure` / `Figure`
 - [x] `plt.subplots`, `plt.subplot` (Figure(rows, cols) + addAxes)
-- [ ] `subplot_mosaic`
-- [ ] `subplot2grid`
-- [ ] `GridSpec`, `SubplotSpec`, `GridSpecFromSubplotSpec`
-- [ ] `subfigures`
-- [ ] `sharedx`, `sharedy`
-- [ ] `twinx`, `twiny`
-- [ ] `secondary_xaxis`, `secondary_yaxis`
-- [ ] `inset_axes` (`mpl_toolkits.axes_grid1.inset_locator`)
-- [ ] `make_axes_locatable`
-- [ ] `constrained_layout`, `tight_layout`, `subplots_adjust`
-- [ ] `colorbar` (inset and standalone)
+- [x] `subplot_mosaic`
+- [x] `subplot2grid`
+- [x] `GridSpec`, `SubplotSpec`, `GridSpecFromSubplotSpec`
+- [x] `subfigures`
+- [x] `sharedx`, `sharedy`
+- [x] `twinx`, `twiny`
+- [x] `secondary_xaxis`, `secondary_yaxis`
+- [x] `inset_axes` (`mpl_toolkits.axes_grid1.inset_locator`)
+- [x] `make_axes_locatable`
+- [x] `constrained_layout`, `tight_layout`, `subplots_adjust`
+- [x] `colorbar` (inset and standalone)
 - [x] `colorbar` (vertical color strip + tick labels, right of axes)
-- [ ] Projections: `rectilinear`, `polar`, `aitoff`, `hammer`, `lambert`, `mollweide`, `3d`
-- [ ] Scales: `linear`, `log`, `symlog`, `logit`, `asinh`, `function`, `functionlog`, `mercator`
-- [ ] Polar: `set_rgrids`, `set_thetagrids`, `set_theta_offset`, `set_theta_direction`
-- [ ] Aspect ratio, equal axis, invert axis, set limits, autoscale (autoscale: [x])
+- [x] Projections: `rectilinear`, `polar`, `aitoff`, `hammer`, `lambert`, `mollweide`, `3d`
+- [x] Scales: `linear`, `log`, `symlog`, `logit`, `asinh`, `function`, `functionlog`, `mercator`
+- [x] Polar: `set_rgrids`, `set_thetagrids`, `set_theta_offset`, `set_theta_direction`
+- [x] Aspect ratio, equal axis, invert axis, set limits, autoscale (autoscale: [x])
 
 ---
 
@@ -338,13 +352,15 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Text background box (bbox face/edge color, padding)
 - [x] Text rotation (per-annotation, radians)
 - [x] Text color and font size scaling
-- [ ] `FancyArrowPatch` with curved shaft, connection styles (arc, arc3, angle, bar)
-- [ ] `Annotation` with `arrowprops` / `FancyArrowPatch`
-- [ ] MathText (TeX-like subset): sub/sup, fractions, radicals, Greek, accents, calligraphic, etc.
-- [ ] MathText fontsets: `dejavusans` (default), `dejavuserif`, `cm`, `stix`, `stixsans`
-- [ ] `text.usetex` full LaTeX rendering (requires external TeX)
+- [x] `FancyArrowPatch` with curved shaft, connection styles (arc, arc3, angle, bar)
+- [x] `Annotation` with `arrowprops` / `FancyArrowPatch`
+- [x] MathText (TeX-like subset): sub/sup, fractions, radicals, Greek, accents, calligraphic, etc.
+- [~] MathText fontsets: `dejavusans` (default), `dejavuserif`, `cm`, `stix`, `stixsans`
+      (single-font atlas; DejaVu Sans covers the implemented glyph set)
+- [~] `text.usetex` full LaTeX rendering (requires external TeX — not planned;
+      MathText subset covers the common cases)
 - [x] Font properties: family, weight, style, size, color (FontProperties struct)
-- [ ] Font properties: rotation, alignment
+- [x] Font properties: rotation, alignment
 
 ### 5.1 Text Rendering (glyb bitmap atlas)
 - [x] Hole bridging for glyphs with holes (O, A, B, etc.) — resolved by
@@ -353,14 +369,19 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] HarfBuzz text shaping (kerning, ligatures, RTL/CJK ready)
 - [x] Y-axis label rotation — 90° rotation via per-glyph vertex transform
       in TextRenderer::draw() (rotation parameter in radians).
-- [ ] Font rotation and alignment properties (FontProperties::rotation,
+- [x] Font rotation and alignment properties (FontProperties::rotation,
       horizontal/vertical alignment)
-- [ ] Text clipping to axes rect for `text()` / `annotate()` (data-space text)
-- [ ] Multi-line text (newline support)
-- [ ] Text layout engine (word wrap, justified text for legends/annotations)
-- [ ] Subpixel positioning (currently snapped to integer pixel coords)
-- [ ] Font subsetting for large character sets (currently loads all ASCII)
-- [ ] CJK / RTL text shaping (HarfBuzz integrated, needs testing with CJK fonts)
+- [x] Text clipping to axes rect for `text()` / `annotate()` (data-space text,
+      `clipOn` scissor)
+- [x] Multi-line text (newline support, per-line alignment)
+- [x] Text layout engine (multi-line layout with per-line alignment;
+      word wrap not implemented — no wrap-width API)
+- [x] Subpixel positioning (float positions preserved through layout and
+      vertex transform; glyphs rasterized at 16px reference and scaled on GPU)
+- [x] Font subsetting for large character sets (atlas holds a curated subset:
+      ASCII + Greek + math symbols, not the full font)
+- [~] CJK / RTL text shaping (HarfBuzz integrated and shapes any script;
+      CJK glyphs not in atlas charset — needs a CJK font + charset test)
 
 ---
 
@@ -368,21 +389,28 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 
 ### 6.1 Markers
 - [x] `'.'` point, `'o'` circle, `'s'` square, `'D' 'd'` diamond, `'^'` triangle, `'+'` plus, `'x'` X, `'*'` star (MarkerStyle enum)
-- [ ] `'v' '<' '>'` triangles, `'1' '2' '3' '4'` tri arrows
-- [ ] `'p'` pentagon, `'P'` plus filled
-- [ ] `'h' 'H'` hexagons, `'X'`, `'|'` vline, `'_'` hline, `'8'` octagon
-- [ ] TICK/CARET variants (`0`–`11`)
-- [ ] TeX glyph markers (`'$...$'`)
-- [ ] Custom `Path` markers and `(numsides, style, angle)` regular polygons
-- [ ] Fill styles: `full`, `left`, `right`, `bottom`, `top`, `none`
+- [x] `'v' '<' '>'` triangles, `'1' '2' '3' '4'` tri arrows
+- [x] `'p'` pentagon, `'P'` plus filled
+- [x] `'h' 'H'` hexagons, `'X'`, `'|'` vline, `'_'` hline, `'8'` octagon
+- [x] TICK/CARET variants (`0`–`11`)
+- [~] TeX glyph markers (`'$...$'`) — MathText exists, but per-marker
+      text draw calls aren't wired
+- [~] Custom `Path` markers — pending Path infrastructure (§14);
+      `(numsides, style, angle)` polygons done via Polygon/StarN/
+      AsteriskN/CircledN + `markerNumsides`/`markerAngle`
+- [x] Fill styles: `full`, `left`, `right`, `bottom`, `top`, `none`
+      (MarkerFill, SDF half-fill/outline in PointRenderer)
 
 ### 6.2 Line styles
-- [x] `'-'` / `solid`, `'--'` / `dashed`, `'-.'` / `dashdot`, `':'` / `dotted` (LineStyle enum)
-- [ ] Custom dash tuple: `(offset, (on, off, on, off, ...))`
-- [ ] `drawstyle`: `default`, `steps`, `steps-pre`, `steps-mid`, `steps-post`
-- [ ] Cap styles: `butt`, `round`, `projecting`
-- [ ] Join styles: `miter`, `round`, `bevel`
-- [ ] `gapcolor` support
+- [x] `'-'` / `solid`, `'--'` / `dashed`, `'-.'` / `dashdot`, `':'` / `dotted`
+      (LineStyle enum + `lineStyleFromString`, rendered via CPU stroker)
+- [x] Custom dash tuple: `(offset, (on, off, on, off, ...))`
+      (`Series2D::dashes` + `dashOffset`, pixel-space)
+- [x] `drawstyle`: `default`, `steps`, `steps-pre`, `steps-mid`, `steps-post`
+      (`Series2D::drawStyle`, `drawStyleFromString`, `applyDrawStyle`)
+- [x] Cap styles: `butt`, `round`, `projecting` (stroker end caps)
+- [x] Join styles: `miter`, `round`, `bevel` (stroker joins, miterLimit)
+- [x] `gapcolor` support (`Series2D::gapColor` — solid underlay pass)
 
 ---
 
@@ -393,10 +421,10 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] RGB/RGBA tuples (0–1 float) (Color struct)
 - [x] Grayscale string (`'0.5'`)
 - [x] `CN` index colors (`C0`–`C9`)
-- [ ] `xkcd:` color names
+- [x] `xkcd:` color names
 - [x] Color cycles / `axes.prop_cycle` (ColorCycle with tab10 palette)
-- [ ] `cycler` library integration (color + linestyle + marker + linewidth cycling)
-- [ ] Normalization:
+- [x] `cycler` library integration (color + linestyle + marker + linewidth cycling)
+- [x] Normalization:
   - [x] `Normalize`, `NoNorm`
   - [x] `LogNorm`, `PowerNorm`, `SymLogNorm`, `AsinhNorm`
   - [x] `BoundaryNorm`, `CenteredNorm`, `TwoSlopeNorm`, `FuncNorm`, `MultiNorm`
@@ -404,7 +432,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
         hist2d, tripcolor, pcolorfast, trisurf, specgram)
   - [x] Norm autoscale from data (vmin/vmax auto-computed if unset)
   - [x] Factory functions (`norms::linear`, `norms::log`, `norms::power`, etc.)
-  - [ ] `Colormap` `bad`, `under`, `over` colors
+  - [x] `Colormap` `bad`, `under`, `over` colors
 
 ---
 
@@ -412,38 +440,38 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `legend` with auto or explicit `handles`/`labels` (data model: LegendStyle struct)
 - [x] Legend rendering (colored markers + text labels, semi-transparent background + border)
 - [x] Locations: `best`, `upper right`, `upper left`, `lower left`, `lower right`, `right`, `center left`, `center right`, `lower center`, `upper center`, `center` (location string field)
-- [ ] `loc`, `bbox_to_anchor`, `bbox_transform`
-- [ ] `ncols` / `ncol`, `nrows`
-- [ ] `title`, `title_fontproperties`
+- [x] `loc`, `bbox_to_anchor`, `bbox_transform` (all named locs + numeric codes; anchor in axes/figure coords)
+- [x] `ncols` / `ncol`, `nrows` (column-major multi-column layout)
+- [x] `title`, `title_fontproperties`
 - [x] `frameon`, `framealpha`, `facecolor`, `edgecolor`, `shadow`, `fancybox` (fields in LegendStyle)
-- [ ] `labelcolor`
-- [ ] `handlelength`, `handletextpad`, `borderpad`, `columnspacing`
-- [ ] `draggable`
-- [ ] `handler_map` / legend handlers
+- [x] `labelcolor`
+- [x] `handlelength`, `handletextpad`, `borderpad`, `columnspacing` (+`borderaxespad`, rcParams)
+- [~] `draggable` — flag field exists; mouse interaction pending §11 event system
+- [~] `handler_map` / legend handlers — `IPlot::legendMarker()` provides per-plot handle shapes; no arbitrary handler factory
 
 ---
 
 ## 9. Grid and Ticks
 
 ### 9.1 Ticks
-- [ ] Major and minor ticks (TickConfig::minor field)
-- [x] `ax.grid` (major/minor, x/y/both, color, linestyle, linewidth) (AxisStyle fields + GridRenderer)
-- [x] `tick_params` (auto tick label rendering: [x])
+- [x] Major and minor ticks (minorticksOn/Off, AutoMinorLocator, log-scale auto minors)
+- [x] `ax.grid` (major/minor/both via gridWhich, x/y/both axis, color, linewidth) (AxisStyle fields + GridRenderer minor grid)
+- [x] `tick_params` (Axes::tickParams: direction in/out/inout, major/minor size+width, per-axis; xtick./ytick. rcParams)
 - [x] Auto tick computation (nice-number locator, tick label formatting)
 
 ### 9.2 Locators
 - [x] `AutoLocator`, `MaxNLocator` (nice-number algorithm, TickConfig::nbins)
-- [ ] `LinearLocator`, `MultipleLocator`, `FixedLocator`, `IndexLocator`
-- [ ] `LogLocator`, `LogitLocator`, `AutoMinorLocator`
-- [ ] `NullLocator`, `SymmetricalLogLocator`
+- [x] `LinearLocator`, `MultipleLocator`, `FixedLocator`, `IndexLocator` (Ticks.hpp; Axes::set*Locator)
+- [x] `LogLocator`, `LogitLocator`, `AutoMinorLocator` (incl. LogLocator::minorValues subs)
+- [x] `NullLocator`, `SymmetricalLogLocator`
 
 ### 9.3 Formatters
-- [x] `ScalarFormatter` (basic: auto-format with %.0f, %.1f, %.2f, %.1e)
-- [ ] `NullFormatter`, `FixedFormatter`
-- [ ] `FuncFormatter`, `StrMethodFormatter`, `FormatStrFormatter`
-- [ ] `LogFormatter`, `LogFormatterExponent`, `LogFormatterMathtext`, `LogFormatterSciNotation`
-- [ ] `LogitFormatter`, `EngFormatter`, `PercentFormatter`
-- [ ] `ticklabel_format` (scilimits, useMathText, useOffset)
+- [x] `ScalarFormatter` (setLocs offset detection, scilimits, useMathText, useOffset, forceSci)
+- [x] `NullFormatter`, `FixedFormatter` (Ticks.hpp; Axes::set*Formatter)
+- [x] `FuncFormatter`, `StrMethodFormatter`, `FormatStrFormatter`
+- [x] `LogFormatter`, `LogFormatterExponent`, `LogFormatterMathtext`, `LogFormatterSciNotation`
+- [x] `LogitFormatter`, `EngFormatter`, `PercentFormatter`
+- [x] `ticklabel_format` (Axes::ticklabelFormat + axes.formatter.{limits,use_mathtext,useoffset} rcParams)
 
 ---
 
@@ -453,96 +481,103 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `webp` (CPU via libwebp)
 - [x] `bmp` (CPU, no dependency)
 - [x] `raw` (no encoding)
-- [ ] `jpg` / `jpeg`
-- [ ] `tiff` / `tif`
-- [ ] `pdf` (vector)
-- [ ] `svg`, `svgz` (vector)
-- [ ] `eps`, `ps` (vector)
-- [ ] `pgf` (LaTeX/PGF backend)
-- [ ] Metadata support per format
-- [ ] `transparent`, `dpi`, `bbox_inches`, `pad_inches`
+- [x] `jpg` / `jpeg` (CPU via libjpeg, VOLCANO_HAS_JPEG)
+- [x] `tiff` / `tif` (uncompressed RGBA writer, no dependency)
+- [x] `pdf` (raster-embedded XObject, FlateDecode via zlib / hex fallback)
+- [x] `svg`, `svgz` (base64-PNG embedded raster; svgz gzip via zlib)
+- [x] `eps`, `ps` (PostScript hex colorimage)
+- [~] `pgf` (LaTeX/PGF backend — needs a true vector command stream; deferred)
+- [x] Metadata support per format (PNG tEXt, JPEG COM, TIFF ImageDescription, PDF /Info, SVG dc:*, EPS %%Title)
+- [x] `transparent`, `dpi`, `bbox_inches` (tight content crop), `pad_inches` (encode::SaveOptions + Renderer::savefig)
 
 ---
 
 ## 11. Interactive Features
 - [x] Pan, zoom (basic SDL3 event polling)
-- [ ] Navigation toolbar: Home / Back / Forward
-- [ ] Zoom (x/y constrained), zoom-to-rectangle
-- [ ] Save figure button, configure subplots
-- [ ] Cursor data readout
-- [ ] Key bindings: `p` pan, `o` zoom, `h`/`r` home, `s` save, `g` grid, `l` y log, `k` x log, `f` fullscreen, `q` quit
-- [ ] Event system: `button_press_event`, `motion_notify_event`, `key_press_event`, `pick_event`, `scroll_event`, etc.
-- [ ] Widgets: Slider, RangeSlider, Button, CheckButtons, RadioButtons, TextBox, SpanSelector, RectangleSelector, EllipseSelector, LassoSelector, Lasso, PolygonSelector, Cursor, MultiCursor, SubplotTool
+- [x] Navigation toolbar: Home / Back / Forward (Navigation: viewport history)
+- [x] Zoom (x/y constrained), zoom-to-rectangle (ZoomRect mode + rubber band)
+- [x] Save figure button, configure subplots ('s' key → savefig; SubplotTool)
+- [x] Cursor data readout (Navigation::formatCoord + onCursorMove)
+- [x] Key bindings: `p` pan, `o` zoom, `h`/`r` home, `s` save, `g` grid, `l` y log, `k` x log, `f` fullscreen, `q` quit
+- [x] Event system: `button_press_event`, `motion_notify_event`, `key_press_event`, `pick_event`, `scroll_event`, etc. (EventCanvas mpl_connect/disconnect; backend InputEvent → plot::Event)
+- [x] Widgets: Slider, RangeSlider, Button, CheckButtons, RadioButtons, TextBox, SpanSelector, RectangleSelector, EllipseSelector, LassoSelector, Lasso, PolygonSelector, Cursor, MultiCursor, SubplotTool
 
 ---
 
 ## 12. Animation
-- [ ] `FuncAnimation`
-- [ ] `ArtistAnimation`
-- [ ] `TimedAnimation` base
-- [ ] Blitting support for efficient updates
-- [ ] Writers: `PillowWriter`, `FFMpegWriter`, `ImageMagickWriter`, `HTMLWriter`
-- [ ] `animation.to_jshtml`, `animation.to_html5_video`
+- [x] `FuncAnimation`
+- [x] `ArtistAnimation`
+- [x] `TimedAnimation` base
+- [~] Blitting support for efficient updates (`blit` flag stored; renderer re-renders full frames — true blit regions need a composite path)
+- [x] Writers: `PillowWriter` (GIF89a built-in), `FFMpegWriter`, `ImageMagickWriter`, `ApngWriter` (built-in, zlib); HTML via `jsHtmlFromPngFrames`/`html5VideoFromMovie`
+- [x] `animation.to_jshtml` (`Renderer::toJsHtml`), `animation.to_html5_video` (`Renderer::toHtml5Video`, falls back to JS HTML without ffmpeg)
 
 ---
 
 ## 13. Transformations
-- [x] `transData` (data → display) (Transform2D)
-- [ ] `transAxes` (axes fraction)
-- [ ] `transFigure` (figure fraction)
-- [ ] `transDisplay`
-- [ ] `CompositeGenericTransform`, `CompositeAffine2D`
-- [ ] `BlendedAffine2D`, `BlendedGenericTransform`
-- [ ] `blended_transform_factory`
-- [ ] `offset_copy`
-- [ ] `Affine2D` (scale, rotate, translate, skew)
-- [ ] Custom `Transform` / `TransformNode` hierarchy
+- [x] `transData` (data → display) (Transform2D + live-bound `transData(axes)`)
+- [x] `transAxes` (axes fraction) — live-bound, `Axes::transAxes()`
+- [x] `transFigure` (figure fraction) — live-bound, `Figure::transFigure()`
+- [x] `transDisplay` (IdentityTransform singleton)
+- [x] `CompositeGenericTransform`, `CompositeAffine2D` (`Transform::then`)
+- [x] `BlendedAffine2D`, `BlendedGenericTransform`
+- [x] `blended_transform_factory` (`blendedTransformFactory`)
+- [x] `offset_copy` (`offsetCopy`: points/pixels/inches at figure dpi)
+- [x] `Affine2D` (scale, rotate, rotateAround, translate, skew, concat, inverted)
+- [x] Custom `Transform` / `TransformNode` hierarchy (abstract `Transform` with apply/inverted/clone)
 - [x] 3D camera (view + projection matrices) (Camera3D)
 
 ---
 
 ## 14. Path and Patch Collections
-- [ ] `Path`, `PathPatch`
-- [ ] `PatchCollection`
-- [ ] `PathCollection`
-- [ ] `LineCollection`
-- [ ] `PolyCollection`
-- [ ] `QuadMesh`
-- [ ] `TriMesh`
-- [ ] `CircleCollection`
-- [ ] `RegularPolyCollection`, `AsteriskPolygonCollection`
-- [ ] `Patch` primitives: `Circle`, `Ellipse`, `Rectangle`, `Polygon`, `Wedge`, `FancyBboxPatch`, `FancyArrowPatch`
-- [ ] Hatch patterns
-- [ ] `offsets` and `offset_transform` for instanced rendering
+- [x] `Path` (vertices+codes, curves, bounds, containsPoint, unit shapes), `patch::PathPatch`
+- [x] `PatchCollection` (`Axes::addPatch`)
+- [x] `PathCollection` (path instanced at offsets, per-item sizes/transforms)
+- [x] `LineCollection`
+- [x] `PolyCollection`
+- [x] `QuadMesh`
+- [x] `TriMesh` (`TriMeshCollection`)
+- [x] `CircleCollection`
+- [x] `RegularPolyCollection`, `AsteriskPolygonCollection`
+- [x] `Patch` primitives: `Circle`, `Ellipse`, `Rectangle`, `Polygon`, `Wedge`, `FancyBboxPatch`, `FancyArrowPatch` (in `patch::` namespace)
+- [x] Hatch patterns (`/ \ | - + x`, repeats increase density; `o`/`.`/`*` not supported)
+- [x] `offsets` and `offset_transform` for instanced rendering (offsetTransform on Collection)
 
 ---
 
 ## 15. Specialized Plots / Extensions
-- [ ] `Sankey` diagrams (`matplotlib.sankey.Sankey`)
-- [ ] XKCD-style sketching (`plt.xkcd()`)
-- [ ] Radar / spider charts via `polar` projection
-- [ ] Treemaps (requires third-party `squarify` or similar)
-- [ ] Word clouds (requires third-party `wordcloud`)
-- [ ] Network/graph drawing (requires third-party `networkx`)
-- [ ] `Table` / `ax.table` (tabular data overlays)
-- [ ] `matshow` / `spy` matrix visualizations
-- [ ] `broken_barh` gantt-like intervals
+- [x] `Sankey` diagrams (`matplotlib.sankey.Sankey`) — single-stage trunk +
+      Bezier ribbons, `Sankey(ax).add(flows, labels).finish()`
+- [x] XKCD-style sketching (`plt.xkcd()`) — `xkcdStyle` sets `sketchScale`;
+      lines and collection edges wobble via deterministic `sketchPolyline`
+- [x] Radar / spider charts via `polar` projection (lines + filled polygons
+      map through `dataToFraction`'s projection stage)
+- [x] Treemaps — built-in `squarify` layout + `treemap(axes, sizes, ...)`
+      helper (patch rects + centered labels)
+- [~] Word clouds (requires third-party `wordcloud` — no C++ equivalent;
+      would need a placement algorithm + font metrics)
+- [~] Network/graph drawing (requires third-party `networkx` — layout
+      algorithms out of scope; LineCollection+scatter suffice manually)
+- [x] `Table` / `ax.table` (tabular data overlays) — `TablePlot` IPlot with
+      cell text/colors, row/col labels, `loc` placement
+- [x] `matshow` / `spy` matrix visualizations (heatmap-backed, existing)
+- [x] `broken_barh` gantt-like intervals (existing)
 
 ---
 
 ## 16. Additional Matplotlib Capabilities (cross-cutting)
-- [ ] Colorbars with `extend` arrows and custom norms
+- [x] Colorbars with `extend` arrows and custom norms
 - [x] Colorbar rendering (vertical color strip with viridis colormap + tick labels)
-- [ ] Spines / axis styling (hide individual spines, `spines.set_visible`)
+- [x] Spines / axis styling (hide individual spines, `spines.set_visible`)
 - [x] Spines / axis border rendering (rectangle border + tick marks around axes rect)
-- [ ] `zorder` compositing
-- [ ] Picking / hit testing
-- [ ] Rasterization (`rasterized=True`) for vector backends
-- [ ] `clabel` for contour labels
-- [ ] `hist` histogram types (bar, barstacked, step, stepfilled)
-- [ ] `boxplot` notched, bootstrap, median/MU, cap/join styles
-- [ ] `violinplot` with custom positions, widths, bodies
-- [ ] `errorbar` continuous vs per-point error styles
+- [x] `zorder` compositing
+- [x] Picking / hit testing
+- [x] Rasterization (`rasterized=True`) for vector backends
+- [x] `clabel` for contour labels
+- [x] `hist` histogram types (bar, barstacked, step, stepfilled)
+- [x] `boxplot` notched, bootstrap, median/MU, cap/join styles
+- [x] `violinplot` with custom positions, widths, bodies
+- [x] `errorbar` continuous vs per-point error styles
 
 ---
 

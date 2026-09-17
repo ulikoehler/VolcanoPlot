@@ -17,70 +17,70 @@ using namespace volcano::plot;
 TEST(AnnotationTransform, DataCoordsCenter) {
     // Data (0.5, 0.5) in viewport [0,1]×[0,1] should map to the center
     // of a 100×100 axes rect at (0,0).
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
-    auto p = toDisplay(0.5f, 0.5f, CoordSystem::Data, rect, fig, vp);
+    auto p = toDisplay(0.5f, 0.5f, CoordSystem::Data, rect, fig, ax);
     EXPECT_NEAR(p.x, 50.0f, 0.5f);
     EXPECT_NEAR(p.y, 50.0f, 0.5f);
 }
 
 TEST(AnnotationTransform, DataCoordsOrigin) {
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
     // (0, 0) in data → bottom-left of axes → pixel (0, 100) (Y-down)
-    auto p = toDisplay(0.0f, 0.0f, CoordSystem::Data, rect, fig, vp);
+    auto p = toDisplay(0.0f, 0.0f, CoordSystem::Data, rect, fig, ax);
     EXPECT_NEAR(p.x, 0.0f, 0.5f);
     EXPECT_NEAR(p.y, 100.0f, 0.5f);
 }
 
 TEST(AnnotationTransform, DataCoordsTopRight) {
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
-    auto p = toDisplay(1.0f, 1.0f, CoordSystem::Data, rect, fig, vp);
+    auto p = toDisplay(1.0f, 1.0f, CoordSystem::Data, rect, fig, ax);
     EXPECT_NEAR(p.x, 100.0f, 0.5f);
     EXPECT_NEAR(p.y, 0.0f, 0.5f);
 }
 
 TEST(AnnotationTransform, AxesCoords) {
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{10, 20, 100, 200};
     Extent2D fig{200, 300};
     // (0, 0) in axes fraction → bottom-left of axes rect
-    auto p0 = toDisplay(0.0f, 0.0f, CoordSystem::Axes, rect, fig, vp);
+    auto p0 = toDisplay(0.0f, 0.0f, CoordSystem::Axes, rect, fig, ax);
     EXPECT_NEAR(p0.x, 10.0f, 0.5f);
     EXPECT_NEAR(p0.y, 220.0f, 0.5f);  // 20 + 200
     // (1, 1) → top-right
-    auto p1 = toDisplay(1.0f, 1.0f, CoordSystem::Axes, rect, fig, vp);
+    auto p1 = toDisplay(1.0f, 1.0f, CoordSystem::Axes, rect, fig, ax);
     EXPECT_NEAR(p1.x, 110.0f, 0.5f);  // 10 + 100
     EXPECT_NEAR(p1.y, 20.0f, 0.5f);
     // (0.5, 0.5) → center
-    auto pc = toDisplay(0.5f, 0.5f, CoordSystem::Axes, rect, fig, vp);
+    auto pc = toDisplay(0.5f, 0.5f, CoordSystem::Axes, rect, fig, ax);
     EXPECT_NEAR(pc.x, 60.0f, 0.5f);   // 10 + 50
     EXPECT_NEAR(pc.y, 120.0f, 0.5f);  // 20 + 100
 }
 
 TEST(AnnotationTransform, FigureCoords) {
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{10, 20, 100, 200};
     Extent2D fig{200, 300};
     // (0, 0) in figure fraction → bottom-left of figure
-    auto p0 = toDisplay(0.0f, 0.0f, CoordSystem::Figure, rect, fig, vp);
+    auto p0 = toDisplay(0.0f, 0.0f, CoordSystem::Figure, rect, fig, ax);
     EXPECT_NEAR(p0.x, 0.0f, 0.5f);
     EXPECT_NEAR(p0.y, 300.0f, 0.5f);
     // (1, 1) → top-right
-    auto p1 = toDisplay(1.0f, 1.0f, CoordSystem::Figure, rect, fig, vp);
+    auto p1 = toDisplay(1.0f, 1.0f, CoordSystem::Figure, rect, fig, ax);
     EXPECT_NEAR(p1.x, 200.0f, 0.5f);
     EXPECT_NEAR(p1.y, 0.0f, 0.5f);
 }
 
 TEST(AnnotationTransform, DisplayCoords) {
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
-    auto p = toDisplay(42.0f, 58.0f, CoordSystem::Display, rect, fig, vp);
+    auto p = toDisplay(42.0f, 58.0f, CoordSystem::Display, rect, fig, ax);
     EXPECT_NEAR(p.x, 42.0f, 0.5f);
     EXPECT_NEAR(p.y, 58.0f, 0.5f);
 }
@@ -88,11 +88,11 @@ TEST(AnnotationTransform, DisplayCoords) {
 TEST(AnnotationTransform, OffsetPoints) {
     // Data (0.5, 0.5) with offset (72, 72) points at 72 DPI
     // → 72pt = 72px right, 72px up
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
     float dpi = 72.0f;
-    auto p = toDisplay(0.5f, 0.5f, CoordSystem::OffsetPoints, rect, fig, vp,
+    auto p = toDisplay(0.5f, 0.5f, CoordSystem::OffsetPoints, rect, fig, ax,
                        dpi, 72.0f, 72.0f);
     // Base: (50, 50). Offset: +72px x, -72px y (Y-up → Y-down)
     EXPECT_NEAR(p.x, 122.0f, 0.5f);
@@ -101,11 +101,11 @@ TEST(AnnotationTransform, OffsetPoints) {
 
 TEST(AnnotationTransform, OffsetPointsDpi100) {
     // At 100 DPI, 72pt = 100px
-    Viewport vp{0, 1, 0, 1, 0, 1};
+    Axes ax; ax.setViewport({0, 1, 0, 1, 0, 1});
     Rect2D rect{0, 0, 100, 100};
     Extent2D fig{100, 100};
     float dpi = 100.0f;
-    auto p = toDisplay(0.0f, 0.0f, CoordSystem::OffsetPoints, rect, fig, vp,
+    auto p = toDisplay(0.0f, 0.0f, CoordSystem::OffsetPoints, rect, fig, ax,
                        dpi, 72.0f, 0.0f);
     // Base: (0, 100). Offset: +100px x
     EXPECT_NEAR(p.x, 100.0f, 0.5f);

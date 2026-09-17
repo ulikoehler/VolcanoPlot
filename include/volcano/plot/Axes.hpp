@@ -2,12 +2,18 @@
 #pragma once
 
 #include "volcano/plot/Types.hpp"
+#include "volcano/plot/Cycler.hpp"
 #include "volcano/plot/Style.hpp"
 #include "volcano/plot/Transform.hpp"
 #include "volcano/plot/DataSeries.hpp"
 #include "volcano/plot/Annotation.hpp"
+#include "volcano/plot/Scale.hpp"
+#include "volcano/plot/Projection.hpp"
 
+#include <functional>
 #include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace volcano::render::primitives { class ReduceRenderer; }
@@ -15,40 +21,228 @@ namespace volcano::render::primitives { class ReduceRenderer; }
 namespace volcano::plot {
 
 class IPlot;
+struct Patch;
+class Figure;
+
+/// Which side of the axes a spine/tick/label set is drawn on.
+enum class AxisSide { Bottom, Top, Left, Right };
+
+/// Aspect-ratio mode (matplotlib set_aspect).
+enum class AspectMode {
+    Auto,   ///< Rect fills its cell.
+    Equal,  ///< 1 data unit has equal pixel size on x and y.
+};
+
+/// How 'equal' aspect is achieved (matplotlib `adjustable`).
+enum class Adjustable {
+    Box,     ///< Shrink the axes box to match data aspect (default).
+    DataLim, ///< Expand data limits to match the box aspect.
+};
+
+/// A secondary axis: tick labels derived from the primary axis through
+/// user functions (matplotlib secondary_xaxis/secondary_yaxis).
+struct SecondaryAxis {
+    std::function<float(float)> forward;  ///< primary -> secondary units
+    std::function<float(float)> inverse;  ///< secondary -> primary units
+    std::string label;
+    bool enabled = false;
+};
 
 /// An Axes is one subplot with its own coordinate system, axes, and layers.
 class Axes {
 public:
-    Axes() = default;
+    /// Constructs an Axes with the current global rc params (rc::params()).
+    Axes();
 
     /// Set the data viewport (axis limits).
-    void setViewport(Viewport v) { viewport_ = v; manualViewport_ = true; }
+    void setViewport(Viewport v) {
+        viewport_ = v; manualX_ = manualY_ = true;
+    }
     [[nodiscard]] const Viewport& viewport() const noexcept { return viewport_; }
     [[nodiscard]] Viewport& viewport() noexcept { return viewport_; }
-    [[nodiscard]] bool manualViewport() const noexcept { return manualViewport_; }
+    [[nodiscard]] bool manualViewport() const noexcept {
+        return manualX_ && manualY_;
+    }
+    [[nodiscard]] bool manualX() const noexcept { return manualX_; }
+    [[nodiscard]] bool manualY() const noexcept { return manualY_; }
 
-    /// Enable log scale on an axis.
-    void setLogX(bool v) { logX_ = v; }
-    void setLogY(bool v) { logY_ = v; }
-    [[nodiscard]] bool logX() const noexcept { return logX_; }
-    [[nodiscard]] bool logY() const noexcept { return logY_; }
+    /// matplotlib set_xlim / set_ylim / xlim / ylim.
+    void setXlim(float lo, float hi) { viewport_.x = {lo, hi}; manualX_ = true; }
+    void setYlim(float lo, float hi) { viewport_.y = {lo, hi}; manualY_ = true; }
+    [[nodiscard]] Range xlim() const { return viewport_.x; }
+    [[nodiscard]] Range ylim() const { return viewport_.y; }
+    [[nodiscard]] bool xAxisInverted() const { return viewport_.x.min > viewport_.x.max; }
+    [[nodiscard]] bool yAxisInverted() const { return viewport_.y.min > viewport_.y.max; }
+    void invertXAxis() { std::swap(viewport_.x.min, viewport_.x.max); manualX_ = true; }
+    void invertYAxis() { std::swap(viewport_.y.min, viewport_.y.max); manualY_ = true; }
+
+    // --- Scales (matplotlib set_xscale/set_yscale) ---
+    void setXscale(AxisScale s) { xScale_ = std::move(s); }
+    void setYscale(AxisScale s) { yScale_ = std::move(s); }
+    void setXscale(std::string_view name);   ///< "linear","log","symlog","logit","asinh","mercator"
+    void setYscale(std::string_view name);
+    [[nodiscard]] const AxisScale& xscale() const noexcept { return xScale_; }
+    [[nodiscard]] const AxisScale& yscale() const noexcept { return yScale_; }
+    [[nodiscard]] AxisScale& xscale() noexcept { return xScale_; }
+    [[nodiscard]] AxisScale& yscale() noexcept { return yScale_; }
+
+    /// Back-compat log toggles (equivalent to setXscale("log")).
+    void setLogX(bool v) { if (v) xScale_ = AxisScale::log(); else xScale_ = {}; }
+    void setLogY(bool v) { if (v) yScale_ = AxisScale::log(); else yScale_ = {}; }
+    [[nodiscard]] bool logX() const noexcept { return xScale_.kind == ScaleKind::Log; }
+    [[nodiscard]] bool logY() const noexcept { return yScale_.kind == ScaleKind::Log; }
 
     /// Convenience: log scale on both axes (matplotlib `loglog`).
-    void loglog() { logX_ = true; logY_ = true; }
+    void loglog() { setLogX(true); setLogY(true); }
     /// Convenience: log scale on x only (matplotlib `semilogx`).
-    void semilogx() { logX_ = true; logY_ = false; }
+    void semilogx() { setLogX(true); setLogY(false); }
     /// Convenience: log scale on y only (matplotlib `semilogy`).
-    void semilogy() { logX_ = false; logY_ = true; }
+    void semilogy() { setLogX(false); setLogY(true); }
+
+    // --- Projection (matplotlib projection="polar" etc.) ---
+    void setProjection(Projection p) { projection_ = p; }
+    void setProjection(std::string_view name) { projection_ = Projection::parse(name); }
+    [[nodiscard]] const Projection& projection() const noexcept { return projection_; }
+
+    /// Polar helpers (matplotlib set_rgrids/set_thetagrids/...).
+    void setRgrids(std::vector<float> radii) { rgrids_ = std::move(radii); }
+    void setThetagrids(std::vector<float> degrees) { thetagrids_ = std::move(degrees); }
+    void setThetaOffset(float radians) { projection_.thetaOffset = radians; }
+    void setThetaDirection(int dir) { projection_.thetaDir = dir < 0 ? -1.0f : 1.0f; }
+    void setThetaZeroLocation(std::string_view loc); ///< "N","E","S","W",...
+    [[nodiscard]] const std::vector<float>& rgrids() const { return rgrids_; }
+    [[nodiscard]] const std::vector<float>& thetagrids() const { return thetagrids_; }
+
+    // --- Aspect ---
+    void setAspect(AspectMode m) { aspect_ = m; }
+    void setAspectEqual() { aspect_ = AspectMode::Equal; }
+    void setAdjustable(Adjustable a) { adjustable_ = a; }
+    [[nodiscard]] AspectMode aspect() const noexcept { return aspect_; }
+    [[nodiscard]] Adjustable adjustable() const noexcept { return adjustable_; }
+
+    // --- Axis sharing (matplotlib sharex/sharey) ---
+    void shareX(Axes& other);
+    void shareY(Axes& other);
+    [[nodiscard]] const std::vector<Axes*>& sharedX() const { return shareXWith_; }
+    [[nodiscard]] const std::vector<Axes*>& sharedY() const { return shareYWith_; }
+
+    // --- Twin / secondary axes ---
+    /// matplotlib ax.twinx(): overlay axes sharing x, y ticks on the right.
+    Axes* twinx();
+    /// matplotlib ax.twiny(): overlay axes sharing y, x ticks on top.
+    Axes* twiny();
+    /// matplotlib secondary_xaxis/secondary_yaxis.
+    void secondaryXaxis(std::function<float(float)> forward,
+                        std::function<float(float)> inverse,
+                        std::string label = {});
+    void secondaryYaxis(std::function<float(float)> forward,
+                        std::function<float(float)> inverse,
+                        std::string label = {});
+    [[nodiscard]] const std::optional<SecondaryAxis>& secondaryX() const { return secondaryX_; }
+    [[nodiscard]] const std::optional<SecondaryAxis>& secondaryY() const { return secondaryY_; }
+
+    /// matplotlib inset_axes: fractional rect inside this axes.
+    Axes* insetAxes(float x, float y, float w, float h);
+
+    // --- Tick / spine placement ---
+    void setXTicksTop(bool top) { xTicksTop_ = top; }
+    void setYTicksRight(bool right) { yTicksRight_ = right; }
+
+    /// Per-side spine visibility (matplotlib ax.spines[...].set_visible).
+    struct SpineSet { bool left = true, right = true, bottom = true, top = true; };
+    /// `side`: "left", "right", "bottom", "top", or "all".
+    void setSpineVisible(std::string_view side, bool visible);
+    [[nodiscard]] const SpineSet& spines() const noexcept { return spines_; }
+    [[nodiscard]] bool xTicksTop() const noexcept { return xTicksTop_; }
+    [[nodiscard]] bool yTicksRight() const noexcept { return yTicksRight_; }
+
+    // --- Tick locators / formatters (matplotlib axis.set_*_locator etc.) ---
+    void setXLocator(std::shared_ptr<Locator> l) {
+        style_.xAxis.ticks.locator = std::move(l);
+    }
+    void setYLocator(std::shared_ptr<Locator> l) {
+        style_.yAxis.ticks.locator = std::move(l);
+    }
+    void setXMinorLocator(std::shared_ptr<Locator> l) {
+        style_.xAxis.ticks.minorLocator = std::move(l);
+    }
+    void setYMinorLocator(std::shared_ptr<Locator> l) {
+        style_.yAxis.ticks.minorLocator = std::move(l);
+    }
+    void setXFormatter(std::shared_ptr<Formatter> f) {
+        style_.xAxis.ticks.formatter = std::move(f);
+    }
+    void setYFormatter(std::shared_ptr<Formatter> f) {
+        style_.yAxis.ticks.formatter = std::move(f);
+    }
+    void setXMinorFormatter(std::shared_ptr<Formatter> f) {
+        style_.xAxis.ticks.minorFormatter = std::move(f);
+    }
+    void setYMinorFormatter(std::shared_ptr<Formatter> f) {
+        style_.yAxis.ticks.minorFormatter = std::move(f);
+    }
+
+    /// matplotlib ax.minorticks_on/off (both axes).
+    void minorticksOn() {
+        style_.xAxis.ticks.minor = style_.yAxis.ticks.minor = true;
+    }
+    void minorticksOff() {
+        style_.xAxis.ticks.minor = style_.yAxis.ticks.minor = false;
+    }
+
+    /// matplotlib ax.tick_params: direction ("in"/"out"/"inout") and
+    /// major/minor sizes & widths in pixels. axis: "x", "y", or "both".
+    void tickParams(std::string_view axis = "both",
+                    std::string_view direction = "",
+                    float majorSize = -1.0f, float minorSize = -1.0f,
+                    float majorWidth = -1.0f, float minorWidth = -1.0f);
+
+    /// matplotlib ax.ticklabel_format: axis = "x"/"y"/"both",
+    /// style = "plain"/"sci"/"scientific".
+    void ticklabelFormat(std::string_view axis = "both",
+                         std::string_view style = "",
+                         std::pair<int, int> scilimits = {-5, 6},
+                         bool useOffset = true, bool useMathText = false);
+
+    /// matplotlib ax.grid: on/off, which = "major"/"minor"/"both",
+    /// axis = "x"/"y"/"both".
+    void grid(bool on, std::string_view which = "major",
+              std::string_view axis = "both");
 
     void setTitle(std::string t) { style_.title.text = std::move(t); }
+    /// matplotlib ax.legend(): enable the legend and return its style for
+    /// configuration (`axes.legend().location = "upper left";`).
+    LegendStyle& legend() { style_.legend.visible = true; return style_.legend; }
     void setStyle(FigureStyle s) { style_ = std::move(s); }
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
     [[nodiscard]] FigureStyle& style() noexcept { return style_; }
 
     /// Add a plot layer (scatter, line, bar, ...). Returns a raw pointer for further configuration.
+    /// If the axes' property cycler is non-empty and the plot consumes it
+    /// (IPlot::applyCycleProps), the cycle position advances.
     IPlot* addPlot(std::unique_ptr<IPlot> plot);
+    /// mpl `ax.add_patch`: append a patch drawn as a PatchCollection layer.
+    /// Returns a reference to the stored patch for styling.
+    Patch& addPatch(Patch p);
+    /// mpl `ax.table`: a grid of text cells along an axes edge.
+    /// Returns the created TablePlot for styling.
+    class TablePlot& table(std::vector<std::vector<std::string>> cellText,
+                           std::string loc = "bottom");
+
+    /// Set the property cycler (matplotlib axes.prop_cycle). Initialized
+    /// from style_.colorCycle (or tab10 when unset).
+    void setPropCycle(Cycler c) { cycler_ = std::move(c); }
+    [[nodiscard]] Cycler& propCycle() noexcept { return cycler_; }
+    [[nodiscard]] const Cycler& propCycle() const noexcept { return cycler_; }
+    /// Reset the cycler position to the first entry.
+    void resetPropCycle() { cycler_.reset(); }
 
     [[nodiscard]] const std::vector<std::unique_ptr<IPlot>>& plots() const noexcept { return plots_; }
+    /// Plots in ascending zorder (stable — matplotlib draw order).
+    [[nodiscard]] std::vector<const IPlot*> drawOrder() const;
+    /// Picking: layers hit by the data-space point, topmost first
+    /// (descending zorder). Uses each plot's `contains` virtual.
+    [[nodiscard]] std::vector<const IPlot*> pick(Point2D dataPt) const;
 
     /// Add a text annotation at (x, y) in the given coordinate system.
     /// Returns a pointer to the annotation for further customization.
@@ -88,6 +282,29 @@ public:
     /// Must be called after each layer's `prepare()` has uploaded GPU data.
     void autoscaleGpu(render::primitives::ReduceRenderer& reducer);
 
+    /// Transform2D configured for this axes: view in *display* space
+    /// (scale + projection applied to the bounds) plus scale/projection
+    /// codes for the shaders.
+    [[nodiscard]] Transform2D transform() const;
+
+    /// data-space point -> axes-fraction position (0..1), honoring scales
+    /// and projection. Used for tick/annotation placement.
+    [[nodiscard]] Point2D dataToFraction(Point2D p) const;
+    /// Inverse of dataToFraction (scale + viewport; projection inverse is
+    /// not applied — returns pre-projection coords).
+    [[nodiscard]] Point2D fractionToData(Point2D f) const;
+    /// Canvas pixel → axes fraction (Y-down canvas → Y-up fraction).
+    [[nodiscard]] Point2D canvasToFraction(Point2D px) const;
+
+    /// mpl `ax.transData`: data coords → display pixels (live-bound).
+    [[nodiscard]] TransformPtr transData() const { return plot::transData(*this); }
+    /// mpl `ax.transAxes`: axes fraction → display pixels (live-bound).
+    [[nodiscard]] TransformPtr transAxes() const { return plot::transAxes(*this); }
+
+    /// The figure this axes belongs to (set by Figure::addAxes).
+    void setFigure(Figure* f) { figure_ = f; }
+    [[nodiscard]] Figure* figure() const noexcept { return figure_; }
+
     /// Pixel rect within the figure (set by Figure layout).
     Rect2D rect{};
 
@@ -96,10 +313,19 @@ private:
     static void finalizeAutoscale(Viewport& v);
 
     Viewport viewport_{0,1,0,1};
-    bool manualViewport_ = false;
-    bool logX_ = false;
-    bool logY_ = false;
+    bool manualX_ = false, manualY_ = false;
+    AxisScale xScale_, yScale_;
+    Projection projection_;
+    std::vector<float> rgrids_, thetagrids_;
+    AspectMode aspect_ = AspectMode::Auto;
+    Adjustable adjustable_ = Adjustable::Box;
+    std::vector<Axes*> shareXWith_, shareYWith_;
+    std::optional<SecondaryAxis> secondaryX_, secondaryY_;
+    bool xTicksTop_ = false, yTicksRight_ = false;
+    SpineSet spines_{};
+    Figure* figure_ = nullptr;
     FigureStyle style_;
+    Cycler cycler_;
     std::vector<std::unique_ptr<IPlot>> plots_;
     std::vector<TextAnnotation> texts_;
     std::vector<Annotation> annotations_;

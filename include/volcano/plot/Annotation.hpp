@@ -17,27 +17,8 @@
 
 namespace volcano::plot {
 
-/// Coordinate system for text/annotation positioning.
-enum class CoordSystem {
-    /// Data coordinates — transformed by the axes viewport.
-    Data,
-    /// Axes fraction — (0,0) = bottom-left, (1,1) = top-right of axes rect.
-    Axes,
-    /// Figure fraction — (0,0) = bottom-left, (1,1) = top-right of figure.
-    Figure,
-    /// Display/pixel coordinates — (0,0) = top-left of framebuffer.
-    Display,
-    /// Offset in points from a data coordinate position.
-    /// The position is in data coords; xyOffset is in points (1pt = 1/72 inch
-    /// at the figure DPI). Positive x = right, positive y = up.
-    OffsetPoints,
-};
-
-/// Horizontal alignment.
-enum class HAlign { Left, Center, Right };
-
-/// Vertical alignment.
-enum class VAlign { Bottom, Center, Top, Baseline };
+// CoordSystem and HAlign/VAlign live in Types.hpp (shared with
+// FontProperties/LegendStyle).
 
 /// Arrow style for annotations.
 enum class ArrowStyle {
@@ -48,6 +29,33 @@ enum class ArrowStyle {
     Arrow,      ///< Standard arrow (matplotlib '->').
     ArrowSmall, ///< Small arrow (matplotlib '->' with small head).
 };
+
+/// Connection path style between the text and the annotated point
+/// (matplotlib connectionstyle). Parameters mirror matplotlib:
+///   "arc3,rad=0.3"    — quadratic bezier, control offset rad·|AB|/2
+///   "arc,angleA=a,angleB=b,rad=r" — rounded joint at angles
+///   "angle,angleA=a,angleB=b,rad=r" — two-segment kinked path
+///   "bar,fraction=0.3" — straight path with a perpendicular notch
+struct ConnectionStyle {
+    enum class Kind { Arc3, Arc, Angle, Bar } kind = Kind::Arc3;
+    float rad = 0.0f;          ///< arc3/arc/angle: curvature radius param
+    float angleA = 0.0f;       ///< arc/angle: entry angle at A (degrees)
+    float angleB = 90.0f;      ///< arc/angle: exit angle at B (degrees)
+    float fraction = 0.3f;     ///< bar: notch height as fraction of |AB|
+};
+
+/// Parse a matplotlib connectionstyle string such as
+/// "arc3,rad=-0.2", "angle,angleA=0,angleB=90,rad=10", "bar,fraction=0.3".
+/// Unrecognized strings fall back to Arc3 with rad=0 (straight line).
+ConnectionStyle parseConnectionStyle(std::string_view s);
+
+/// Sample the connection path between A (text end) and B (data end),
+/// in pixel space. Returns a polyline including both endpoints.
+/// shrinkA/shrinkB pull the endpoints inward along the local tangent.
+std::vector<Point2D> connectionPath(Point2D a, Point2D b,
+                                    const ConnectionStyle& style,
+                                    float shrinkA = 0.0f, float shrinkB = 0.0f,
+                                    int samples = 24);
 
 /// A text annotation placed at a position in a given coordinate system.
 struct TextAnnotation {
@@ -80,6 +88,10 @@ struct TextAnnotation {
     float bboxPadding = 4.0f;
     /// Background box corner radius in pixels (0 = square corners).
     float bboxCornerRadius = 0.0f;
+
+    /// Whether to clip the text to the axes rect (matplotlib clip_on).
+    /// Default false (matplotlib default); set true to clip data-space text.
+    bool clipOn = false;
 };
 
 /// An annotation with an arrow connecting text to a data point.
@@ -117,6 +129,14 @@ struct Annotation {
     /// Arrowhead opening angle in degrees.
     float arrowHeadAngle = 30.0f;
 
+    /// Connection path style (matplotlib connectionstyle; default
+    /// arc3 with rad=0, i.e. a straight line). Set via
+    /// `a.connection = parseConnectionStyle("arc3,rad=0.3")`.
+    ConnectionStyle connection;
+
+    /// Whether to clip the text/arrow to the axes rect (matplotlib clip_on).
+    bool clipOn = false;
+
     /// Optional background box for the text.
     Color bboxFaceColor = Color::transparent();
     Color bboxEdgeColor = Color::transparent();
@@ -128,12 +148,14 @@ struct Annotation {
     float shrinkB = 2.0f;  ///< shrink at the data point end
 };
 
+class Axes;
+
 /// Convert a position from a coordinate system to display (pixel) coordinates.
 /// `axesRect` is the pixel rect of the axes, `figExtent` is the full framebuffer,
-/// `viewport` is the data viewport, `dpi` is the figure DPI.
+/// `axes` provides the scale/projection-aware data mapping, `dpi` is the figure DPI.
 Point2D toDisplay(float x, float y, CoordSystem coords,
                   Rect2D axesRect, Extent2D figExtent,
-                  const Viewport& viewport, float dpi = 100.0f,
+                  const Axes& axes, float dpi = 100.0f,
                   float xyOffsetX = 0.0f, float xyOffsetY = 0.0f);
 
 /// Compute the pixel position of text given alignment and text metrics.

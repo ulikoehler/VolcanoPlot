@@ -23,23 +23,12 @@ Point2D rk4Step(float x, float y, float h, F&& f) {
     };
 }
 
-/// Convert data coordinates to pixel coordinates.
-Point2D dataToPixel(float dx, float dy, const Viewport& vp, const Rect2D& rect) {
-    float nx = (dx - vp.x.min) / vp.x.span();
-    float ny = (dy - vp.y.min) / vp.y.span();
+/// Convert data coordinates to pixel coordinates (scale/projection aware).
+Point2D dataToPixel(const Axes& axes, float dx, float dy, const Rect2D& rect) {
+    Point2D f = axes.dataToFraction({dx, dy});
     return {
-        rect.x + nx * rect.width,
-        rect.y + (1.0f - ny) * rect.height
-    };
-}
-
-/// Convert pixel coordinates back to data coordinates.
-Point2D pixelToData(float px, float py, const Viewport& vp, const Rect2D& rect) {
-    float nx = (px - rect.x) / rect.width;
-    float ny = 1.0f - (py - rect.y) / rect.height;
-    return {
-        vp.x.min + nx * vp.x.span(),
-        vp.y.min + ny * vp.y.span()
+        rect.x + f.x * rect.width,
+        rect.y + (1.0f - f.y) * rect.height
     };
 }
 
@@ -212,10 +201,7 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!prepared_ || streamlineStarts_.empty()) return;
 
     auto& ctx = r.backend().context();
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
@@ -233,7 +219,6 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (config_.arrows && !streamlineStarts_.empty()) {
         arrowPositions_.clear();
         arrowColors_.clear();
-        const auto& vp = axes.viewport();
 
         for (uint32_t s = 0; s < streamlineStarts_.size(); ++s) {
             uint32_t start = streamlineStarts_[s];
@@ -245,8 +230,8 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             Point2D p0 = streamlinePoints_[arrowIdx];
             Point2D p1 = streamlinePoints_[arrowIdx + 1];
 
-            Point2D pp0 = dataToPixel(p0.x, p0.y, vp, rect);
-            Point2D pp1 = dataToPixel(p1.x, p1.y, vp, rect);
+            Point2D pp0 = dataToPixel(axes, p0.x, p0.y, rect);
+            Point2D pp1 = dataToPixel(axes, p1.x, p1.y, rect);
             float ddx = pp1.x - pp0.x, ddy = pp1.y - pp0.y;
             float plen = std::sqrt(ddx * ddx + ddy * ddy);
             if (plen < 1.0f) continue;
@@ -259,13 +244,11 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             Point2D base1 = {pp1.x - ux * hl + px * hw, pp1.y - uy * hl + py * hw};
             Point2D base2 = {pp1.x - ux * hl - px * hw, pp1.y - uy * hl - py * hw};
 
-            Point2D dTip = pixelToData(tip.x, tip.y, vp, rect);
-            Point2D dBase1 = pixelToData(base1.x, base1.y, vp, rect);
-            Point2D dBase2 = pixelToData(base2.x, base2.y, vp, rect);
-
-            arrowPositions_.push_back(dTip);
-            arrowPositions_.push_back(dBase1);
-            arrowPositions_.push_back(dBase2);
+            // Arrowheads stay in pixel space (identity transform) so
+            // non-linear scales don't warp the head shape.
+            arrowPositions_.push_back(tip);
+            arrowPositions_.push_back(base1);
+            arrowPositions_.push_back(base2);
             Color ac = config_.color;
             for (int k = 0; k < 3; ++k) arrowColors_.push_back(ac);
         }
@@ -274,7 +257,13 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             arrowRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                                   ctx.graphicsPool.handle(), ctx.allocator.handle(),
                                   std::span{arrowPositions_}, std::span{arrowColors_});
-            arrowRenderer_.draw(cmd, vrect, t);
+            auto ext = r.backend().extent();
+            Transform2D tpix;
+            tpix.view.x = {0.0f, static_cast<float>(ext.width)};
+            tpix.view.y = {static_cast<float>(ext.height), 0.0f};
+            tpix.view.z = {0, 1};
+            vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+            arrowRenderer_.draw(cmd, fullRect, tpix);
         }
     }
 }

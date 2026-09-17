@@ -12,6 +12,18 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/DataSeries.cpp
     ${VOLCANO_ROOT}/src/plot/Normalize.cpp
     ${VOLCANO_ROOT}/src/plot/Annotation.cpp
+    ${VOLCANO_ROOT}/src/plot/Rc.cpp
+    ${VOLCANO_ROOT}/src/plot/GridSpec.cpp
+    ${VOLCANO_ROOT}/src/plot/Scale.cpp
+    ${VOLCANO_ROOT}/src/plot/Projection.cpp
+    ${VOLCANO_ROOT}/src/plot/Cycler.cpp
+    ${VOLCANO_ROOT}/src/plot/Ticks.cpp
+    ${VOLCANO_ROOT}/src/plot/LineMarker.cpp
+    ${VOLCANO_ROOT}/src/plot/Stroke.cpp
+    ${VOLCANO_ROOT}/src/plot/Events.cpp
+    ${VOLCANO_ROOT}/src/plot/Interaction.cpp
+    ${VOLCANO_ROOT}/src/plot/Widgets.cpp
+    ${VOLCANO_ROOT}/src/plot/Animation.cpp
     ${VOLCANO_ROOT}/src/plot/plots/ScatterPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/LinePlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/BarPlot.cpp
@@ -70,6 +82,10 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/plots/SurfacePlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/KDEPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/FunctionPlot.cpp
+    ${VOLCANO_ROOT}/src/plot/plots/NavCubePlot.cpp
+    ${VOLCANO_ROOT}/src/plot/Path.cpp
+    ${VOLCANO_ROOT}/src/plot/Collections.cpp
+    ${VOLCANO_ROOT}/src/plot/Specialized.cpp
 )
 
 volcano_add_component(volcano_plot

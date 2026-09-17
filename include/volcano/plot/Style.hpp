@@ -2,8 +2,11 @@
 #pragma once
 
 #include "volcano/plot/Types.hpp"
+#include "volcano/plot/Cycler.hpp"
+#include "volcano/plot/Normalize.hpp"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,6 +19,12 @@ struct FontProperties {
     std::string style = "normal";   // normal, italic, oblique
     std::string weight = "normal";  // normal, bold, light
     float size = 12.0f;             // points
+    /// Text rotation in radians (screen space, Y-down; added to any
+    /// built-in rotation such as the y-label's -90°).
+    float rotation = 0.0f;
+    /// Horizontal/vertical alignment (matplotlib ha/va).
+    HAlign halign = HAlign::Center;
+    VAlign valign = VAlign::Baseline;
 };
 
 /// Tick configuration for one axis.
@@ -27,9 +36,10 @@ struct TickConfig {
     std::optional<std::vector<float>> positions;
     /// If set, fixed tick labels (parallel to positions).
     std::optional<std::vector<std::string>> labels;
-    /// Whether to show minor ticks.
-    bool minor = true;
-    /// Label format, e.g. "%.2f" or "%.1e".
+    /// Whether to show minor ticks (matplotlib default: off for linear,
+    /// on for log-family scales — handled automatically in rendering).
+    bool minor = false;
+    /// Label format, e.g. "%.2f" or "%.1e" (used when no formatter set).
     std::string format = "%g";
     /// Tick direction: "in", "out", or "inout".
     std::string direction = "out";
@@ -41,6 +51,14 @@ struct TickConfig {
     float majorWidth = 0.8f;
     /// Minor tick width in points.
     float minorWidth = 0.6f;
+    /// Locator/formatter overrides (matplotlib set_major_locator,
+    /// set_minor_locator, set_major_formatter, set_minor_formatter).
+    /// Null → automatic (scale-aware nice ticks / ScalarFormatter /
+    /// AutoMinorLocator / no minor labels).
+    std::shared_ptr<class Locator> locator;
+    std::shared_ptr<class Locator> minorLocator;
+    std::shared_ptr<class Formatter> formatter;
+    std::shared_ptr<class Formatter> minorFormatter;
 };
 
 /// Axis appearance configuration.
@@ -54,10 +72,17 @@ struct AxisStyle {
     TickConfig ticks;
     /// Grid lines on this axis.
     bool grid = false;
+    /// Which ticks produce grid lines: "major", "minor", or "both"
+    /// (matplotlib grid(which=...)).
+    std::string gridWhich = "major";
     Color gridColor = Color::fromRgba8(176, 176, 176);
     float gridLineWidth = 0.8f;
     /// Grid line style: "-", "--", ":", "-."
     std::string gridLineStyle = "-";
+    /// Minor-grid styling (used when gridWhich is "minor"/"both").
+    Color minorGridColor = Color::fromRgba8(215, 215, 215);
+    float minorGridLineWidth = 0.5f;
+    std::string minorGridLineStyle = "-";
     /// Log scale.
     bool logScale = false;
     /// Label color (defaults to axis color if not set).
@@ -67,13 +92,43 @@ struct AxisStyle {
 /// Legend configuration.
 struct LegendStyle {
     bool visible = false;
-    std::string location = "best"; // best, upper right, upper left, lower right, ...
+    /// Location: "best", "upper right", "upper left", "lower left",
+    /// "lower right", "right"/"center right", "center left",
+    /// "lower center", "upper center", "center", or code "0".."10".
+    std::string location = "best";
+    /// bbox_to_anchor: anchor point for the loc-specified corner/edge of
+    /// the legend box. Unused when either coordinate is negative.
+    /// anchorSpace selects the coordinate space (matplotlib bbox_transform).
+    float anchorX = -1.0f, anchorY = -1.0f;
+    CoordSystem anchorSpace = CoordSystem::Axes;
+    /// Column/row layout (matplotlib ncols/nrows). nrows=0 → auto.
+    int ncols = 1;
+    int nrows = 0;
+    /// Legend title row (matplotlib legend title / title_fontproperties).
+    std::string title;
+    FontProperties titleFont;
     FontProperties font;
+    /// Label color override; nullopt → inherit style text color.
+    std::optional<Color> labelColor;
     Color faceColor = Color::fromRgba8(255, 255, 255, 200);
     Color edgeColor = Color::black();
     float frameAlpha = 0.8f;
     /// Whether to draw a frame around the legend.
     bool frameOn = true;
+    /// Rounded box corners (matplotlib fancybox). Adds slight padding.
+    bool fancyBox = true;
+    /// Draw a drop shadow behind the legend box.
+    bool shadow = false;
+    /// Spacing parameters in multiples of the legend font size
+    /// (matplotlib legend.handlelength / handletextpad / borderpad /
+    /// columnspacing / borderaxespad).
+    float handleLength = 2.0f;
+    float handleTextPad = 0.8f;
+    float borderPad = 0.4f;
+    float columnSpacing = 2.0f;
+    float borderAxesPad = 0.5f;
+    /// Whether the legend may be dragged (interaction wiring in §11).
+    bool draggable = false;
 };
 
 /// Colorbar configuration.
@@ -85,6 +140,12 @@ struct ColorbarStyle {
     float padding = 10.0f;     // padding from the axes rect
     FontProperties labelFont;
     Color labelColor = Color::black();
+    /// matplotlib `extend`: "neither" (default), "min", "max", or "both" —
+    /// triangular extensions at the strip ends for out-of-range values.
+    std::string extend = "neither";
+    /// Optional custom normalization (matplotlib colorbar `norm`). When
+    /// set, strip colors and tick positions map through it.
+    std::shared_ptr<Normalize> norm;
 };
 
 /// Title configuration.
@@ -149,7 +210,13 @@ struct FigureStyle {
     bool axisBelow = false;
 
     /// Color cycle for automatic plot coloring (axes.prop_cycle).
+    /// Mirrors the 'color' key of a parsed cycler expression.
     ColorCycleStyle colorCycle;
+
+    /// Full multi-key prop_cycle entries parsed from axes.prop_cycle
+    /// (e.g. cycler('color',[...]) * cycler('linestyle',[...])). When
+    /// non-empty, Axes seeds its Cycler from these instead of colorCycle.
+    std::vector<CycleProps> propCycle;
 
     /// Line style defaults.
     LineStyleDefaults lines;
@@ -162,6 +229,16 @@ struct FigureStyle {
 
     /// Default font size (font.size).
     float fontSize = 10.0f;
+
+    /// Default ScalarFormatter options (axes.formatter.* rcParams),
+    /// applied when no explicit formatter is set on an axis.
+    std::pair<int, int> formatterLimits{-5, 6};
+    bool formatterUseOffset = true;
+    bool formatterUseMathText = false;
+
+    /// Path sketch wobble amplitude in pixels (mpl `path.sketch` /
+    /// plt.xkcd). 0 = off; xkcd style sets ~1.0.
+    float sketchScale = 0.0f;
 };
 
 /// Built-in style presets (matplotlib style sheets equivalent).
@@ -220,6 +297,12 @@ namespace styles {
     FigureStyle petroff6Style();
     /// petroff8 color cycle.
     FigureStyle petroff8Style();
+    /// petroff10 color cycle.
+    FigureStyle petroff10Style();
+    /// xkcd style (plt.xkcd rcParams: Comic Sans-ish font, thicker axes).
+    /// Note: the hand-drawn path sketching itself is a separate feature;
+    /// this captures the rcParams portion only.
+    FigureStyle xkcdStyle();
 
     /// Look up a style by name (returns nullptr if not found).
     FigureStyle (*byName(const std::string& name))();

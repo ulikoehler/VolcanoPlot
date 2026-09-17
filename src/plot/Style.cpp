@@ -632,6 +632,42 @@ FigureStyle petroff8Style() {
     return s;
 }
 
+// ─── petroff10 ────────────────────────────────────────────────────────────
+FigureStyle petroff10Style() {
+    FigureStyle s = defaultStyle();
+    s.styleName = "petroff10";
+    s.colorCycle.colors = {
+        hex("3f90da"), hex("ffa90e"), hex("bd1f01"), hex("94a4a2"),
+        hex("832db6"), hex("a96b59"), hex("e76300"), hex("b9ac70"),
+        hex("717581"), hex("92dadd"),
+    };
+    s.patch.faceColor = hex("3f90da");
+    return s;
+}
+
+// ─── xkcd ─────────────────────────────────────────────────────────────────
+FigureStyle xkcdStyle() {
+    // Captures the rcParams portion of plt.xkcd(): hand-drawn-looking font,
+    // larger sizes, thicker spines. The actual path-sketch wobble
+    // (path.sketch) is a renderer feature, not a style.
+    FigureStyle s = defaultStyle();
+    s.styleName = "xkcd";
+    s.fontFamily = "Comic Sans MS";
+    s.fontSize = 14.0f;
+    s.xAxis.lineWidth = 1.25f;
+    s.yAxis.lineWidth = 1.25f;
+    s.xAxis.grid = false;
+    s.yAxis.grid = false;
+    s.xAxis.ticks.direction = "out";
+    s.yAxis.ticks.direction = "out";
+    s.lines.lineWidth = 2.0f;
+    s.sketchScale = 1.0f; // path.sketch wobble
+    s.legend.frameOn = false;
+    s.title.font.size = 18.0f;
+    s.title.font.weight = "bold";
+    return s;
+}
+
 // ─── byName ───────────────────────────────────────────────────────────────
 FigureStyle (*byName(const std::string& name))() {
     if (name == "default") return defaultStyle;
@@ -661,6 +697,8 @@ FigureStyle (*byName(const std::string& name))() {
     if (name == "tableau-colorblind10") return tableauColorblind10;
     if (name == "petroff6") return petroff6Style;
     if (name == "petroff8") return petroff8Style;
+    if (name == "petroff10") return petroff10Style;
+    if (name == "xkcd") return xkcdStyle;
     return nullptr;
 }
 

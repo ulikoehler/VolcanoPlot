@@ -2,31 +2,35 @@
 #include "volcano/render/primitives/LineRenderer.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
+#include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace volcano::render::primitives {
 
 namespace {
 
-constexpr const char* kVertGlsl = R"(
+constexpr const char* kVertHead = R"(
 #version 460
 layout(location = 0) in vec2 a_pos;
 layout(push_constant) uniform PC {
     vec4 u_viewMinSpan;
     vec4 u_rect;
     vec4 u_color;
-    vec2 u_log;
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
     float u_width;
 } pc;
 layout(location = 0) out vec4 v_color;
-vec2 applyLog(vec2 p) {
-    if (pc.u_log.x > 0.5) p.x = log(max(p.x,1e-30)) / log(10.0);
-    if (pc.u_log.y > 0.5) p.y = log(max(p.y,1e-30)) / log(10.0);
-    return p;
-}
+)";
+
+constexpr const char* kVertMain = R"(
 void main() {
-    vec2 p = applyLog(a_pos);
+    vec2 p = projFwd(vec2(scaleFwd(a_pos.x, pc.u_scaleX.xyz),
+                          scaleFwd(a_pos.y, pc.u_scaleY.xyz)),
+                     pc.u_proj.xyz);
     // Map data coords to NDC [-1,1] — viewport handles pixel mapping.
     vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
@@ -46,14 +50,16 @@ void main() { outColor = v_color; }
 void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
                         vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
     device_ = device;
-    auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
+    auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
+                   shaders::kProjFn + kVertMain;
+    auto v = core::ShaderModule::compileGlsl(vertSrc, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
     vert_ = core::ShaderModule(device, v);
     frag_ = core::ShaderModule(device, f);
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * 15);
+       .setOffset(0).setSize(sizeof(float) * 25);
     vk::PipelineLayoutCreateInfo plci;
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -143,7 +149,9 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         float viewMinX, viewMinY, viewSpanX, viewSpanY;  // u_viewMinSpan
         float rectX, rectY, rectW, rectH;                // u_rect
         float r, g, b, a;                                 // u_color
-        float logX, logY;                                 // u_log
+        float sxCode, sxP1, sxP2, sxPad;                  // u_scaleX
+        float syCode, syP1, syP2, syPad;                  // u_scaleY
+        float prCode, thetaOff, thetaDir, prPad;          // u_proj
         float width;                                      // u_width
     } pc{};
     pc.viewMinX = transform.view.x.min;
@@ -155,8 +163,15 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.rectW = static_cast<float>(rect.extent.width);
     pc.rectH = static_cast<float>(rect.extent.height);
     pc.r = color_.r; pc.g = color_.g; pc.b = color_.b; pc.a = color_.a;
-    pc.logX = transform.logX ? 1.0f : 0.0f;
-    pc.logY = transform.logY ? 1.0f : 0.0f;
+    pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
+    pc.sxP1 = transform.scaleX.param1;
+    pc.sxP2 = transform.scaleX.param2;
+    pc.syCode = static_cast<float>(static_cast<int>(transform.codeY()));
+    pc.syP1 = transform.scaleY.param1;
+    pc.syP2 = transform.scaleY.param2;
+    pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
+    pc.thetaOff = transform.projection.thetaOffset;
+    pc.thetaDir = transform.projection.thetaDir;
     pc.width = width_;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());

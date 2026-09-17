@@ -62,38 +62,83 @@ void ErrorbarPlot::buildErrorSegments() {
     bool hasYerr = !cfg_.yerr.empty() ||
                    (!cfg_.yerrLower.empty() && !cfg_.yerrUpper.empty());
 
+    auto flag = [](const std::vector<bool>& f, size_t i) {
+        return i < f.size() ? f[i] : false;
+    };
+    uint32_t every = std::max(1u, cfg_.errorevery);
+
     for (size_t i = 0; i < n; ++i) {
+        if (i % every != 0) continue;  // mpl errorevery
+
         // Vertical error bar (y direction).
         if (hasYerr) {
             auto [ylo, yhi] = yerrBounds(i);
-            // Main vertical line: (x, ylo) → (x, yhi)
+            bool up = flag(cfg_.uplims, i);    // upper limit → bar goes down
+            bool lo = flag(cfg_.lolims, i);    // lower limit → bar goes up
+            if (up && !lo) yhi = y_[i];
+            if (lo && !up) ylo = y_[i];
             errorSegments_.push_back({x_[i], ylo});
             errorSegments_.push_back({x_[i], yhi});
 
-            if (cfg_.drawCaps) {
-                // Bottom cap: (x - xCap, ylo) → (x + xCap, ylo)
-                errorSegments_.push_back({x_[i] - xCapData, ylo});
-                errorSegments_.push_back({x_[i] + xCapData, ylo});
-                // Top cap: (x - xCap, yhi) → (x + xCap, yhi)
-                errorSegments_.push_back({x_[i] - xCapData, yhi});
-                errorSegments_.push_back({x_[i] + xCapData, yhi});
+            if (cfg_.drawCaps || up || lo) {
+                if (!lo) {
+                    if (up) {  // arrowhead at the point end (limit)
+                        errorSegments_.push_back({x_[i] - xCapData, yhi - yCapData});
+                        errorSegments_.push_back({x_[i], yhi});
+                        errorSegments_.push_back({x_[i] + xCapData, yhi - yCapData});
+                        errorSegments_.push_back({x_[i], yhi});
+                    } else {
+                        errorSegments_.push_back({x_[i] - xCapData, yhi});
+                        errorSegments_.push_back({x_[i] + xCapData, yhi});
+                    }
+                }
+                if (!up) {
+                    if (lo) {  // arrowhead at the point end
+                        errorSegments_.push_back({x_[i] - xCapData, ylo + yCapData});
+                        errorSegments_.push_back({x_[i], ylo});
+                        errorSegments_.push_back({x_[i] + xCapData, ylo + yCapData});
+                        errorSegments_.push_back({x_[i], ylo});
+                    } else {
+                        errorSegments_.push_back({x_[i] - xCapData, ylo});
+                        errorSegments_.push_back({x_[i] + xCapData, ylo});
+                    }
+                }
             }
         }
 
         // Horizontal error bar (x direction).
         if (hasXerr) {
             auto [xlo, xhi] = xerrBounds(i);
-            // Main horizontal line: (xlo, y) → (xhi, y)
+            bool xu = flag(cfg_.xuplims, i);
+            bool xl = flag(cfg_.xlolims, i);
+            if (xu && !xl) xhi = x_[i];
+            if (xl && !xu) xlo = x_[i];
             errorSegments_.push_back({xlo, y_[i]});
             errorSegments_.push_back({xhi, y_[i]});
 
-            if (cfg_.drawCaps) {
-                // Left cap: (xlo, y - yCap) → (xlo, y + yCap)
-                errorSegments_.push_back({xlo, y_[i] - yCapData});
-                errorSegments_.push_back({xlo, y_[i] + yCapData});
-                // Right cap: (xhi, y - yCap) → (xhi, y + yCap)
-                errorSegments_.push_back({xhi, y_[i] - yCapData});
-                errorSegments_.push_back({xhi, y_[i] + yCapData});
+            if (cfg_.drawCaps || xu || xl) {
+                if (!xl) {
+                    if (xu) {
+                        errorSegments_.push_back({xhi - xCapData, y_[i] - yCapData});
+                        errorSegments_.push_back({xhi, y_[i]});
+                        errorSegments_.push_back({xhi - xCapData, y_[i] + yCapData});
+                        errorSegments_.push_back({xhi, y_[i]});
+                    } else {
+                        errorSegments_.push_back({xhi, y_[i] - yCapData});
+                        errorSegments_.push_back({xhi, y_[i] + yCapData});
+                    }
+                }
+                if (!xu) {
+                    if (xl) {
+                        errorSegments_.push_back({xlo + xCapData, y_[i] - yCapData});
+                        errorSegments_.push_back({xlo, y_[i]});
+                        errorSegments_.push_back({xlo + xCapData, y_[i] + yCapData});
+                        errorSegments_.push_back({xlo, y_[i]});
+                    } else {
+                        errorSegments_.push_back({xlo, y_[i] - yCapData});
+                        errorSegments_.push_back({xlo, y_[i] + yCapData});
+                    }
+                }
             }
         }
     }
@@ -159,10 +204,7 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
 void ErrorbarPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 

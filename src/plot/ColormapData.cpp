@@ -484,6 +484,44 @@ const Colormap& bwr() {
     return cm;
 }
 
+// berlin, managua, vanimo — Crameri scientific colour maps added in
+// matplotlib 3.10. 12 stops subsampled from the 256-entry tables.
+const Colormap& berlin() {
+    static const Colormap cm = { "berlin", {
+        Color::fromRgba8(158,176,255), Color::fromRgba8(103,168,227),
+        Color::fromRgba8(56,137,178),  Color::fromRgba8(36,93,120),
+        Color::fromRgba8(21,53,68),    Color::fromRgba8(17,21,25),
+        Color::fromRgba8(37,12,1),     Color::fromRgba8(68,19,1),
+        Color::fromRgba8(110,40,19),   Color::fromRgba8(160,83,65),
+        Color::fromRgba8(206,127,118), Color::fromRgba8(255,173,173),
+    }};
+    return cm;
+}
+
+const Colormap& managua() {
+    static const Colormap cm = { "managua", {
+        Color::fromRgba8(255,207,103), Color::fromRgba8(227,163,88),
+        Color::fromRgba8(199,124,75),  Color::fromRgba8(168,89,64),
+        Color::fromRgba8(134,60,57),   Color::fromRgba8(99,42,62),
+        Color::fromRgba8(80,47,89),    Color::fromRgba8(76,74,133),
+        Color::fromRgba8(84,108,171),  Color::fromRgba8(98,146,201),
+        Color::fromRgba8(113,186,228), Color::fromRgba8(129,231,255),
+    }};
+    return cm;
+}
+
+const Colormap& vanimo() {
+    static const Colormap cm = { "vanimo", {
+        Color::fromRgba8(255,205,253), Color::fromRgba8(219,142,206),
+        Color::fromRgba8(182,91,163),  Color::fromRgba8(131,54,114),
+        Color::fromRgba8(71,29,61),    Color::fromRgba8(32,20,26),
+        Color::fromRgba8(26,27,17),    Color::fromRgba8(44,59,23),
+        Color::fromRgba8(73,101,35),   Color::fromRgba8(104,144,51),
+        Color::fromRgba8(142,193,88),  Color::fromRgba8(190,253,165),
+    }};
+    return cm;
+}
+
 const Colormap& twilight() {
     static const Colormap cm = { "twilight", {
         Color::fromRgba8(226,217,226), Color::fromRgba8(191,204,211), Color::fromRgba8(142,177,197),
@@ -660,6 +698,22 @@ const Colormap& tab20c() {
         Color::fromRgba8(117,107,177), Color::fromRgba8(158,154,200), Color::fromRgba8(188,189,220),
         Color::fromRgba8(99,99,99), Color::fromRgba8(150,150,150), Color::fromRgba8(189,189,189),
         Color::fromRgba8(217,217,217),
+    }};
+    return cm;
+}
+
+// okabe_ito — Okabe-Ito colorblind-safe qualitative palette
+// (matplotlib 3.11). 8 discrete colors.
+const Colormap& okabe_ito() {
+    static const Colormap cm = { "okabe_ito", {
+        Color::fromRgba8(230,159,0),   // orange
+        Color::fromRgba8(86,180,233),  // sky blue
+        Color::fromRgba8(0,158,115),   // bluish green
+        Color::fromRgba8(240,228,66),  // yellow
+        Color::fromRgba8(0,114,178),   // blue
+        Color::fromRgba8(213,94,0),    // vermillion
+        Color::fromRgba8(204,121,167), // reddish purple
+        Color::fromRgba8(0,0,0),       // black
     }};
     return cm;
 }

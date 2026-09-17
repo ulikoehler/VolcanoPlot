@@ -39,12 +39,11 @@ void BarLabelPlot::generateLabels() {
         generatedLabels_.push_back(formatValue(h));
 }
 
-Point2D BarLabelPlot::dataToPixel(const Viewport& v, const Rect2D& rect,
+Point2D BarLabelPlot::dataToPixel(const Axes& axes, const Rect2D& rect,
                                   float dx, float dy) const {
-    float nx = (dx - v.x.min) / v.x.span();
-    float ny = (dy - v.y.min) / v.y.span();
-    float px = rect.x + nx * rect.width;
-    float py = rect.y + (1.0f - ny) * rect.height;
+    Point2D f = axes.dataToFraction({dx, dy});
+    float px = rect.x + f.x * rect.width;
+    float py = rect.y + (1.0f - f.y) * rect.height;
     return {px, py};
 }
 
@@ -58,7 +57,6 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!prepared_ || generatedLabels_.empty()) return;
 
     auto& text = r.textRenderer();
-    const auto& vp = axes.viewport();
 
     // Use full framebuffer as scissor so labels aren't clipped.
     auto ext = r.backend().extent();
@@ -78,7 +76,7 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         if (config_.horizontal) {
             // Horizontal bars: labels to the right of bar end.
             float barEnd = baseline_ + heights_[i];
-            auto p = dataToPixel(vp, rect, barEnd, x_[i]);
+            auto p = dataToPixel(axes, rect, barEnd, x_[i]);
             if (config_.position == BarLabelPosition::Center) {
                 px = p.x - textWidth * 0.5f;
                 py = p.y - textHeight * 0.5f;
@@ -93,11 +91,11 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         } else {
             // Vertical bars: labels above/below bar top.
             float barTop = baseline_ + heights_[i];
-            auto p = dataToPixel(vp, rect, x_[i], barTop);
+            auto p = dataToPixel(axes, rect, x_[i], barTop);
             if (config_.position == BarLabelPosition::Center) {
                 // Center of the bar.
                 float barMid = baseline_ + heights_[i] * 0.5f;
-                auto pm = dataToPixel(vp, rect, x_[i], barMid);
+                auto pm = dataToPixel(axes, rect, x_[i], barMid);
                 px = pm.x - textWidth * 0.5f;
                 py = pm.y - textHeight * 0.5f;
             } else {

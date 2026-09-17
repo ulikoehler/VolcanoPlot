@@ -164,19 +164,14 @@ void SpecgramPlot::buildGeometry() {
     for (uint32_t k = 0; k < nrows_; ++k) {
         for (uint32_t col = 0; col < ncols_; ++col) {
             float val = data_[k * ncols_ + col];
-            Color color;
-            if (std::isnan(val)) {
-                color = Color::transparent();
+            float t;
+            if (config_.norm) {
+                t = (*config_.norm)(val);
             } else {
-                float t;
-                if (config_.norm) {
-                    t = (*config_.norm)(val);
-                } else {
-                    t = (val - valueRange_.min) / vspan;
-                    t = std::clamp(t, 0.0f, 1.0f);
-                }
-                color = cmap.sample(t);
+                t = (val - valueRange_.min) / vspan;
             }
+            // NaN t -> cmap.bad (or transparent); out-of-range -> under/over.
+            Color color = cmap.sample(t);
             if (color.a == 0.0f) continue;
 
             float x0 = static_cast<float>(col) * timeStep;
@@ -214,10 +209,7 @@ void SpecgramPlot::prepare(render::Renderer& r) {
 void SpecgramPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     fillRenderer_.draw(cmd, vrect, t);

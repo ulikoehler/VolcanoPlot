@@ -79,8 +79,17 @@ void ViolinPlot::buildGeometry() {
     innerSegs_.clear();
 
     for (size_t g = 0; g < groups_.size(); ++g) {
-        float centerX = static_cast<float>(g + 1);  // groups at x=1,2,3,...
-        float halfW = cfg_.width * 0.5f;
+        // matplotlib positions/widths per group.
+        float centerX = g < cfg_.positions.size() ? cfg_.positions[g]
+                                                : static_cast<float>(g + 1);
+        float halfW = (g < cfg_.widths.size() ? cfg_.widths[g]
+                                             : cfg_.width) * 0.5f;
+        Color bodyColor = g < cfg_.bodyColors.size() ? cfg_.bodyColors[g]
+                                                     : cfg_.bodyColor;
+        // vert=false → transpose every emitted vertex (density along x).
+        auto P = [&](float c, float v) -> Point2D {
+            return cfg_.vert ? Point2D{c, v} : Point2D{v, c};
+        };
 
         auto [yEval, density] = computeKde(groups_[g]);
         if (yEval.size() < 2) continue;
@@ -90,14 +99,12 @@ void ViolinPlot::buildGeometry() {
         if (maxD <= 0.0f) maxD = 1.0f;
 
         // Build violin body as left/right contour points.
-        // Right side: (centerX + w*d[i], yEval[i]) for i=0..n-1
-        // Left side:  (centerX - w*d[i], yEval[i]) for i=0..n-1
         size_t n = yEval.size();
         std::vector<Point2D> rightSide(n), leftSide(n);
         for (size_t i = 0; i < n; ++i) {
             float w = halfW * density[i] / maxD;
-            rightSide[i] = {centerX + w, yEval[i]};
-            leftSide[i]  = {centerX - w, yEval[i]};
+            rightSide[i] = P(centerX + w, yEval[i]);
+            leftSide[i]  = P(centerX - w, yEval[i]);
         }
 
         // Strip-triangulate: for each pair of adjacent y values, create
@@ -110,7 +117,7 @@ void ViolinPlot::buildGeometry() {
             bodyFillPos_.push_back(rightSide[i]);
             bodyFillPos_.push_back(leftSide[i + 1]);
             bodyFillPos_.push_back(leftSide[i]);
-            for (int j = 0; j < 6; ++j) bodyFillColors_.push_back(cfg_.bodyColor);
+            for (int j = 0; j < 6; ++j) bodyFillColors_.push_back(bodyColor);
         }
 
         // Edge as line segments: right side top→bottom, bottom across,
@@ -139,39 +146,39 @@ void ViolinPlot::buildGeometry() {
         for (float v : groups_[g]) mean += v;
         mean /= static_cast<float>(groups_[g].size());
 
-        float capHalfW = cfg_.width * 0.25f;  // matplotlib: cap half-width = width * 0.25
+        float capHalfW = halfW * 0.5f;  // matplotlib: cap half-width = width * 0.25
 
         if (cfg_.showExtrema) {
             // Vertical whisker bar from min to max.
-            innerSegs_.push_back({centerX, st.min});
-            innerSegs_.push_back({centerX, st.max});
+            innerSegs_.push_back(P(centerX, st.min));
+            innerSegs_.push_back(P(centerX, st.max));
             // Horizontal caps at min and max.
-            innerSegs_.push_back({centerX - capHalfW, st.min});
-            innerSegs_.push_back({centerX + capHalfW, st.min});
-            innerSegs_.push_back({centerX - capHalfW, st.max});
-            innerSegs_.push_back({centerX + capHalfW, st.max});
+            innerSegs_.push_back(P(centerX - capHalfW, st.min));
+            innerSegs_.push_back(P(centerX + capHalfW, st.min));
+            innerSegs_.push_back(P(centerX - capHalfW, st.max));
+            innerSegs_.push_back(P(centerX + capHalfW, st.max));
         }
 
         if (cfg_.showMean) {
             // Horizontal mean line (same width as caps in matplotlib).
-            float meanHalfW = cfg_.width * 0.25f;
-            innerSegs_.push_back({centerX - meanHalfW, mean});
-            innerSegs_.push_back({centerX + meanHalfW, mean});
+            float meanHalfW = halfW * 0.5f;
+            innerSegs_.push_back(P(centerX - meanHalfW, mean));
+            innerSegs_.push_back(P(centerX + meanHalfW, mean));
         }
 
         if (cfg_.showBox) {
             // Optional IQR box + median (matplotlib: off by default).
             float boxHalfW = halfW * 0.1f;
-            innerSegs_.push_back({centerX - boxHalfW, st.q1});
-            innerSegs_.push_back({centerX - boxHalfW, st.q3});
-            innerSegs_.push_back({centerX + boxHalfW, st.q1});
-            innerSegs_.push_back({centerX + boxHalfW, st.q3});
-            innerSegs_.push_back({centerX - boxHalfW, st.q1});
-            innerSegs_.push_back({centerX + boxHalfW, st.q1});
-            innerSegs_.push_back({centerX - boxHalfW, st.q3});
-            innerSegs_.push_back({centerX + boxHalfW, st.q3});
-            innerSegs_.push_back({centerX - boxHalfW, st.median});
-            innerSegs_.push_back({centerX + boxHalfW, st.median});
+            innerSegs_.push_back(P(centerX - boxHalfW, st.q1));
+            innerSegs_.push_back(P(centerX - boxHalfW, st.q3));
+            innerSegs_.push_back(P(centerX + boxHalfW, st.q1));
+            innerSegs_.push_back(P(centerX + boxHalfW, st.q3));
+            innerSegs_.push_back(P(centerX - boxHalfW, st.q1));
+            innerSegs_.push_back(P(centerX + boxHalfW, st.q1));
+            innerSegs_.push_back(P(centerX - boxHalfW, st.q3));
+            innerSegs_.push_back(P(centerX + boxHalfW, st.q3));
+            innerSegs_.push_back(P(centerX - boxHalfW, st.median));
+            innerSegs_.push_back(P(centerX + boxHalfW, st.median));
         }
     }
 }
@@ -212,10 +219,7 @@ void ViolinPlot::prepare(render::Renderer& r) {
 void ViolinPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
@@ -228,19 +232,19 @@ void ViolinPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
 }
 
 void ViolinPlot::contributeToAutoscale(Viewport& v) const {
-    // X range: groups at x=1..N, with violin width.
-    size_t n = groups_.size();
-    if (n > 0) {
-        float xMin = 1.0f - cfg_.width * 0.5f;
-        float xMax = static_cast<float>(n) + cfg_.width * 0.5f;
-        v.x.min = std::min(v.x.min, xMin);
-        v.x.max = std::max(v.x.max, xMax);
-    }
-    // Y range: min/max of all data.
-    for (const auto& g : groups_) {
-        for (float val : g) {
-            v.y.min = std::min(v.y.min, val);
-            v.y.max = std::max(v.y.max, val);
+    // Position axis: group centers ± half width. Value axis: data range.
+    Range& posAxis = cfg_.vert ? v.x : v.y;
+    Range& valAxis = cfg_.vert ? v.y : v.x;
+    for (size_t g = 0; g < groups_.size(); ++g) {
+        float c = g < cfg_.positions.size() ? cfg_.positions[g]
+                                            : float(g + 1);
+        float hw = (g < cfg_.widths.size() ? cfg_.widths[g]
+                                          : cfg_.width) * 0.5f;
+        posAxis.min = std::min(posAxis.min, c - hw);
+        posAxis.max = std::max(posAxis.max, c + hw);
+        for (float val : groups_[g]) {
+            valAxis.min = std::min(valAxis.min, val);
+            valAxis.max = std::max(valAxis.max, val);
         }
     }
 }

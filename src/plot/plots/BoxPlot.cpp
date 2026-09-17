@@ -1,10 +1,13 @@
 // volcano/plot/plots/BoxPlot.cpp
 #include "volcano/plot/plots/BoxPlot.hpp"
+#include "volcano/plot/Path.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <random>
 
 namespace volcano::plot {
 
@@ -31,7 +34,32 @@ BoxPlot::Stats BoxPlot::computeStats(const std::vector<float>& data) const {
     s.q1 = percentile(sorted, 25.0f);
     s.median = percentile(sorted, 50.0f);
     s.q3 = percentile(sorted, 75.0f);
+    s.mean = std::accumulate(data.begin(), data.end(), 0.0f)
+             / float(data.size());
     float iqr = s.q3 - s.q1;
+
+    // Median CI for notched boxes (matplotlib bxp_stats).
+    if (cfg_.bootstrap > 0) {
+        // Bootstrap resample the median.
+        std::mt19937 rng(0xC0FFEEu + uint32_t(data.size()));
+        std::uniform_int_distribution<size_t> pick(0, data.size() - 1);
+        std::vector<float> meds;
+        meds.reserve(cfg_.bootstrap);
+        for (uint32_t b = 0; b < cfg_.bootstrap; ++b) {
+            std::vector<float> sample(data.size());
+            for (auto& v : sample) v = data[pick(rng)];
+            std::sort(sample.begin(), sample.end());
+            meds.push_back(percentile(sample, 50.0f));
+        }
+        std::sort(meds.begin(), meds.end());
+        s.notchLo = percentile(meds, 2.5f);
+        s.notchHi = percentile(meds, 97.5f);
+    } else {
+        // Gaussian approximation: med ± 1.57·IQR/√n.
+        float half = 1.57f * iqr / std::sqrt(float(data.size()));
+        s.notchLo = s.median - half;
+        s.notchHi = s.median + half;
+    }
 
     // Compute whisker bounds.
     if (cfg_.whisker == BoxWhiskerType::MinMax) {
@@ -82,44 +110,96 @@ void BoxPlot::buildGeometry() {
     float halfWidth = cfg_.boxWidth * 0.5f;
     float capHalf = cfg_.capSize * 0.5f;
 
+    meanSegs_.clear();
+
     for (size_t i = 0; i < nGroups; ++i) {
         float x = static_cast<float>(i + 1);  // x position (1-based like matplotlib)
         const auto& s = stats_[i];
         if (s.q3 <= s.q1) continue;  // degenerate
 
-        // Box fill: 2 triangles for the Q1-Q3 rectangle.
-        if (cfg_.fillBox) {
-            Point2D bl{x - halfWidth, s.q1}, br{x + halfWidth, s.q1};
-            Point2D tl{x - halfWidth, s.q3}, tr{x + halfWidth, s.q3};
-            boxFillVerts_.insert(boxFillVerts_.end(), {bl, br, tl, br, tr, tl});
-            for (int j = 0; j < 6; ++j) boxFillColors_.push_back(cfg_.boxColor);
+        if (cfg_.notch) {
+            // Notched box polygon (matplotlib bxp notch shape).
+            float nw = halfWidth * 0.5f;
+            float nLo = std::max(s.notchLo, s.q1);
+            float nHi = std::min(s.notchHi, s.q3);
+            std::vector<Point2D> poly{
+                {x - halfWidth, s.q1}, {x + halfWidth, s.q1},
+                {x + halfWidth, nLo},  {x + nw, s.median},
+                {x + halfWidth, nHi},  {x + halfWidth, s.q3},
+                {x - halfWidth, s.q3}, {x - halfWidth, nHi},
+                {x - nw, s.median},    {x - halfWidth, nLo},
+            };
+            if (cfg_.fillBox) {
+                auto tris = earClip(poly);
+                boxFillVerts_.insert(boxFillVerts_.end(),
+                                     tris.begin(), tris.end());
+                for (size_t j = 0; j < tris.size(); ++j)
+                    boxFillColors_.push_back(cfg_.boxColor);
+            }
+            for (size_t k = 0; k < poly.size(); ++k) {
+                boxEdgeSegs_.push_back(poly[k]);
+                boxEdgeSegs_.push_back(poly[(k + 1) % poly.size()]);
+            }
+            // Whiskers connect at the notch waist.
+            boxEdgeSegs_.push_back({x, nLo});
+            boxEdgeSegs_.push_back({x, s.whiskerLo});
+            boxEdgeSegs_.push_back({x - capHalf, s.whiskerLo});
+            boxEdgeSegs_.push_back({x + capHalf, s.whiskerLo});
+            boxEdgeSegs_.push_back({x, nHi});
+            boxEdgeSegs_.push_back({x, s.whiskerHi});
+            boxEdgeSegs_.push_back({x - capHalf, s.whiskerHi});
+            boxEdgeSegs_.push_back({x + capHalf, s.whiskerHi});
+            // Median drawn across the notch waist only.
+            medianSegs_.push_back({x - nw, s.median});
+            medianSegs_.push_back({x + nw, s.median});
+        } else {
+            // Box fill: 2 triangles for the Q1-Q3 rectangle.
+            if (cfg_.fillBox) {
+                Point2D bl{x - halfWidth, s.q1}, br{x + halfWidth, s.q1};
+                Point2D tl{x - halfWidth, s.q3}, tr{x + halfWidth, s.q3};
+                boxFillVerts_.insert(boxFillVerts_.end(), {bl, br, tl, br, tr, tl});
+                for (int j = 0; j < 6; ++j) boxFillColors_.push_back(cfg_.boxColor);
+            }
+
+            // Box edges: left, right, top, bottom (4 line segments).
+            boxEdgeSegs_.push_back({x - halfWidth, s.q1});
+            boxEdgeSegs_.push_back({x - halfWidth, s.q3});
+            boxEdgeSegs_.push_back({x + halfWidth, s.q1});
+            boxEdgeSegs_.push_back({x + halfWidth, s.q3});
+
+            // Lower whisker: (x, q1) → (x, whiskerLo)
+            boxEdgeSegs_.push_back({x, s.q1});
+            boxEdgeSegs_.push_back({x, s.whiskerLo});
+            // Lower cap: (x-capHalf, whiskerLo) → (x+capHalf, whiskerLo)
+            boxEdgeSegs_.push_back({x - capHalf, s.whiskerLo});
+            boxEdgeSegs_.push_back({x + capHalf, s.whiskerLo});
+
+            // Upper whisker: (x, q3) → (x, whiskerHi)
+            boxEdgeSegs_.push_back({x, s.q3});
+            boxEdgeSegs_.push_back({x, s.whiskerHi});
+            // Upper cap: (x-capHalf, whiskerHi) → (x+capHalf, whiskerHi)
+            boxEdgeSegs_.push_back({x - capHalf, s.whiskerHi});
+            boxEdgeSegs_.push_back({x + capHalf, s.whiskerHi});
+
+            // Median line: (x-hw, median) → (x+hw, median)
+            medianSegs_.push_back({x - halfWidth, s.median});
+            medianSegs_.push_back({x + halfWidth, s.median});
         }
 
-        // Box edges: left, right, top, bottom (4 line segments).
-        // Left edge: (x-hw, q1) → (x-hw, q3)
-        boxEdgeSegs_.push_back({x - halfWidth, s.q1});
-        boxEdgeSegs_.push_back({x - halfWidth, s.q3});
-        // Right edge: (x+hw, q1) → (x+hw, q3)
-        boxEdgeSegs_.push_back({x + halfWidth, s.q1});
-        boxEdgeSegs_.push_back({x + halfWidth, s.q3});
-
-        // Lower whisker: (x, q1) → (x, whiskerLo)
-        boxEdgeSegs_.push_back({x, s.q1});
-        boxEdgeSegs_.push_back({x, s.whiskerLo});
-        // Lower cap: (x-capHalf, whiskerLo) → (x+capHalf, whiskerLo)
-        boxEdgeSegs_.push_back({x - capHalf, s.whiskerLo});
-        boxEdgeSegs_.push_back({x + capHalf, s.whiskerLo});
-
-        // Upper whisker: (x, q3) → (x, whiskerHi)
-        boxEdgeSegs_.push_back({x, s.q3});
-        boxEdgeSegs_.push_back({x, s.whiskerHi});
-        // Upper cap: (x-capHalf, whiskerHi) → (x+capHalf, whiskerHi)
-        boxEdgeSegs_.push_back({x - capHalf, s.whiskerHi});
-        boxEdgeSegs_.push_back({x + capHalf, s.whiskerHi});
-
-        // Median line: (x-hw, median) → (x+hw, median)
-        medianSegs_.push_back({x - halfWidth, s.median});
-        medianSegs_.push_back({x + halfWidth, s.median});
+        // Mean marker (matplotlib showmeans/meanline).
+        if (cfg_.showMeans) {
+            if (cfg_.meanLine) {
+                meanSegs_.push_back({x - halfWidth, s.mean});
+                meanSegs_.push_back({x + halfWidth, s.mean});
+            } else {
+                // Small X marker at (x, mean).
+                float d = halfWidth * 0.3f;
+                meanSegs_.push_back({x - d, s.mean - d});
+                meanSegs_.push_back({x + d, s.mean + d});
+                meanSegs_.push_back({x - d, s.mean + d});
+                meanSegs_.push_back({x + d, s.mean - d});
+            }
+        }
 
         // Outlier points.
         for (float o : s.outliers) {
@@ -132,6 +212,7 @@ void BoxPlot::buildGeometry() {
     boxFillCount_ = static_cast<uint32_t>(boxFillVerts_.size());
     boxEdgeCount_ = static_cast<uint32_t>(boxEdgeSegs_.size());
     medianCount_ = static_cast<uint32_t>(medianSegs_.size());
+    meanCount_ = static_cast<uint32_t>(meanSegs_.size());
     outlierCount_ = static_cast<uint32_t>(outlierPoints_.size());
 }
 
@@ -175,6 +256,13 @@ void BoxPlot::prepare(render::Renderer& r) {
             cfg_.medianColor, cfg_.medianWidth);
     }
 
+    if (cfg_.showMeans && meanCount_ >= 2) {
+        meanRenderer_.init(device, renderPass, samples, r.pipelineCache());
+        meanRenderer_.upload(device, queue, pool, allocator,
+            std::span{meanSegs_.data(), meanSegs_.size()},
+            cfg_.meanColor, cfg_.medianWidth);
+    }
+
     if (cfg_.showOutliers && outlierCount_ > 0) {
         outlierRenderer_.init(device, renderPass, samples,
             r.descriptorPool(), r.pipelineCache());
@@ -190,10 +278,7 @@ void BoxPlot::prepare(render::Renderer& r) {
 void BoxPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
@@ -206,6 +291,9 @@ void BoxPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
 
     if (medianCount_ >= 2)
         medianRenderer_.draw(cmd, vrect, t, medianCount_);
+
+    if (cfg_.showMeans && meanCount_ >= 2)
+        meanRenderer_.draw(cmd, vrect, t, meanCount_);
 
     if (cfg_.showOutliers && outlierCount_ > 0)
         outlierRenderer_.draw(cmd, vrect, t, outlierCount_);

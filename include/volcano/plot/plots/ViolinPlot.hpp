@@ -20,6 +20,15 @@ struct ViolinConfig {
     bool showPoints = false;  ///< draw individual data points
     Color bodyColor = Color::fromRgba8(31, 119, 180, 77);  ///< violin fill (alpha=0.3)
     Color edgeColor = Color::fromRgba8(31, 119, 180, 255);  ///< violin edge
+    /// matplotlib `positions`: x (or y when !vert) of each violin center.
+    /// Empty → 1..N.
+    std::vector<float> positions;
+    /// matplotlib `widths`: per-group violin width (empty → `width`).
+    std::vector<float> widths;
+    /// matplotlib `vert`: false → horizontal violins (density along x).
+    bool vert = true;
+    /// Per-group body fill colors (empty → `bodyColor` for all).
+    std::vector<Color> bodyColors;
     Color meanColor = Color::fromRgba8(31, 119, 180, 255);  ///< mean line color
     Color whiskerColor = Color::fromRgba8(31, 119, 180, 255); ///< whisker line color
     float lineWidth = 1.5f;   ///< edge/whisker line width

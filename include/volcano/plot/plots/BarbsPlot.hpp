@@ -62,7 +62,7 @@ private:
     std::vector<Point2D> segments_;
     bool prepared_ = false;
 
-    void buildBarbs(const Viewport& vp, const Rect2D& rect);
+    void buildBarbs(const Axes& axes, const Rect2D& rect);
 };
 
 } // namespace volcano::plot

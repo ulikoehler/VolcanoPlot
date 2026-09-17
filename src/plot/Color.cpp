@@ -277,6 +277,22 @@ std::optional<Color> parseCycle(std::string_view s) {
     return ColorCycle::at(static_cast<size_t>(s[1] - '0'));
 }
 
+/// xkcd color survey names → #RRGGBB (matplotlib XKCD_COLORS).
+const std::map<std::string, Color, std::less<>>& xkcdColors() {
+    static const std::map<std::string, Color, std::less<>> table = [] {
+        std::map<std::string, Color, std::less<>> m;
+        for (auto& [name, hex] : std::initializer_list<
+                 std::pair<const char*, const char*>>{
+#include "XkcdColors.inc"
+        }) {
+            auto c = Color::parse(hex);
+            if (c) m.emplace(name, *c);
+        }
+        return m;
+    }();
+    return table;
+}
+
 /// Parse a grayscale string ("0.0" through "1.0").
 std::optional<Color> parseGrayscale(std::string_view s) {
     // Must look like a float in [0, 1].
@@ -326,6 +342,13 @@ std::optional<Color> Color::parse(std::string_view s) {
     const auto& table = namedColors();
     auto it = table.find(lower);
     if (it != table.end()) return it->second;
+
+    // xkcd survey colors: "xkcd:<name>" (e.g. "xkcd:sea blue")
+    if (lower.starts_with("xkcd:")) {
+        const auto& xt = xkcdColors();
+        auto xit = xt.find(lower.substr(5));
+        if (xit != xt.end()) return xit->second;
+    }
 
     return std::nullopt;
 }

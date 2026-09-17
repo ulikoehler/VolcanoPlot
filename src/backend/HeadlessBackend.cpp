@@ -219,7 +219,8 @@ vk::CommandBuffer HeadlessBackend::beginFrame() {
     cb.begin(bi);
 
     std::array<vk::ClearValue, 2> clears{};
-    clears[0].color.setFloat32({1.0f, 1.0f, 1.0f, 1.0f});
+    clears[0].color.setFloat32({clearColor_[0], clearColor_[1],
+                                clearColor_[2], clearColor_[3]});
     clears[1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPass_.get())

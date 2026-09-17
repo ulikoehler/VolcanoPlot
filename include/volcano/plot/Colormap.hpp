@@ -3,6 +3,7 @@
 
 #include "volcano/plot/Types.hpp"
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,11 +15,32 @@ struct Colormap {
     std::string name;
     std::vector<Color> stops;
 
-    /// Sample the colormap at t in [0,1].
+    /// When true, sample() picks the discrete stop at floor(t*N) instead of
+    /// interpolating — ListedColormap behavior.
+    bool discrete = false;
+
+    /// Colors for special values (matplotlib set_bad/set_under/set_over):
+    ///   bad:   NaN input (default: transparent — i.e. not drawn)
+    ///   under: t < 0 (default: clamp to stops.front())
+    ///   over:  t > 1 (default: clamp to stops.back())
+    std::optional<Color> bad, under, over;
+
+    /// Sample the colormap at t in [0,1]. Honors bad/under/over for
+    /// NaN / t<0 / t>1 inputs, and `discrete` for ListedColormap-style
+    /// bin sampling.
     [[nodiscard]] Color sample(float t) const;
 
     /// Sample the reversed colormap at t in [0,1] (i.e., sample(1-t)).
     [[nodiscard]] Color sampleReversed(float t) const { return sample(1.0f - t); }
+
+    /// Return a copy with the bad color set (matplotlib set_bad).
+    [[nodiscard]] Colormap withBad(Color c) const { Colormap m = *this; m.bad = c; return m; }
+    /// Return a copy with the under color set (matplotlib set_under).
+    [[nodiscard]] Colormap withUnder(Color c) const { Colormap m = *this; m.under = c; return m; }
+    /// Return a copy with the over color set (matplotlib set_over).
+    [[nodiscard]] Colormap withOver(Color c) const { Colormap m = *this; m.over = c; return m; }
+    /// Return a reversed copy (sample(1-t) equivalent as a real map).
+    [[nodiscard]] Colormap reversed() const;
 
     /// Lookup a named colormap (viridis, plasma, inferno, magma, cividis,
     /// turbo, jet, coolwarm, RdBu, etc.). Supports reversed variants
@@ -29,6 +51,30 @@ struct Colormap {
 
     /// List of available colormap names (without the "_r" suffix).
     static std::vector<std::string> availableNames();
+
+    /// ListedColormap equivalent — a colormap from an explicit color list.
+    /// When `discreteSampling` is true (default), sample() picks
+    /// stops[floor(t*N)] like matplotlib's ListedColormap.
+    [[nodiscard]] static Colormap listed(std::string name,
+                                         std::vector<Color> colors,
+                                         bool discreteSampling = true) {
+        Colormap cm;
+        cm.name = std::move(name);
+        cm.stops = std::move(colors);
+        cm.discrete = discreteSampling;
+        return cm;
+    }
+
+    /// LinearSegmentedColormap equivalent — per-channel segment lists.
+    /// Each channel is a list of (x, y0, y1) rows: x is the segment
+    /// position in [0,1], y0 the value left of x, y1 right of x.
+    /// Rasterized to `n` uniform stops (matplotlib uses a 256-entry LUT).
+    struct SegPoint { float x, y0, y1; };
+    [[nodiscard]] static Colormap segmented(std::string name,
+                                            std::vector<SegPoint> r,
+                                            std::vector<SegPoint> g,
+                                            std::vector<SegPoint> b,
+                                            size_t n = 256);
 };
 
 namespace colormaps {
@@ -90,6 +136,9 @@ namespace colormaps {
     const Colormap& RdYlGn();
     const Colormap& Spectral();
     const Colormap& bwr();
+    const Colormap& berlin();
+    const Colormap& managua();
+    const Colormap& vanimo();
 
     // ─── Cyclic (§3.4) ───────────────────────────────────────────────
     const Colormap& twilight();
@@ -109,6 +158,7 @@ namespace colormaps {
     const Colormap& tab20();
     const Colormap& tab20b();
     const Colormap& tab20c();
+    const Colormap& okabe_ito();
 
     // ─── Miscellaneous (§3.6) ────────────────────────────────────────
     const Colormap& flag();

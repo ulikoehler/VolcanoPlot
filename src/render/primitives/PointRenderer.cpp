@@ -4,9 +4,11 @@
 #include "volcano/core/DescriptorPool.hpp"
 
 #include <volcano/plot/Transform.hpp>
+#include "../shaders/TransformGlsl.hpp"
 
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace volcano::render::primitives {
 
@@ -14,7 +16,7 @@ namespace {
 
 // Embedded SPIR-V source (compiled at runtime via shaderc if available,
 // otherwise loaded from precompiled .spv files).
-constexpr const char* kVertGlsl = R"(
+constexpr const char* kVertHead = R"(
 #version 460
 
 layout(location = 0) in vec2 a_pos;       // data coords
@@ -24,22 +26,22 @@ layout(location = 2) in float a_size;     // pixel size
 layout(push_constant) uniform PC {
     vec4 u_viewMinSpan;   // xy = min, zw = span
     vec4 u_rect;          // xy = offset, zw = extent (for point size scaling)
-    vec2 u_log;           // x = logX, y = logY
-};
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
+} pc;
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out float v_size;
+)";
 
-vec2 applyLog(vec2 p) {
-    if (u_log.x > 0.5) p.x = log(p.x) / log(10.0);
-    if (u_log.y > 0.5) p.y = log(p.y) / log(10.0);
-    return p;
-}
-
+constexpr const char* kVertMain = R"(
 void main() {
-    vec2 p = applyLog(a_pos);
+    vec2 p = projFwd(vec2(scaleFwd(a_pos.x, pc.u_scaleX.xyz),
+                          scaleFwd(a_pos.y, pc.u_scaleY.xyz)),
+                     pc.u_proj.xyz);
     // Map data coords to NDC [-1,1] — viewport handles pixel mapping.
-    vec2 ndc = (p - u_viewMinSpan.xy) / u_viewMinSpan.zw * 2.0 - 1.0;
+    vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     // Vulkan Y is down, flip to conventional math Y-up.
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     gl_PointSize = a_size;
@@ -52,15 +54,165 @@ constexpr const char* kFragGlsl = R"(
 #version 460
 layout(location = 0) in vec4 v_color;
 layout(location = 1) in float v_size;
+layout(push_constant) uniform PC {
+    vec4 u_viewMinSpan;
+    vec4 u_rect;
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
+    vec4 u_marker;      // x=style code, y=fill, z=numsides, w=angle rad
+} pc;
 layout(location = 0) out vec4 outColor;
 
+const float PI = 3.14159265359;
+
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+// iq's regular n-gon SDF. r = circumradius; rot rotates the marker.
+float sdPoly(vec2 p, float r, int n, float rot) {
+    float c = cos(rot), s = sin(rot);
+    p = mat2(c, s, -s, c) * p;
+    float an = PI / float(n);
+    vec2 acs = vec2(cos(an), sin(an));
+    float bn = mod(atan(p.x, p.y), 2.0 * an) - an;
+    p = length(p) * vec2(cos(bn), abs(sin(bn)));
+    p -= r * acs;
+    p.y += clamp(-p.y, 0.0, r * acs.y);
+    return length(p) * sign(p.x);
+}
+
+// iq's n-star SDF (m controls dent depth).
+float sdStar(vec2 p, float r, int n, float m, float rot) {
+    float c = cos(rot), s = sin(rot);
+    p = mat2(c, s, -s, c) * p;
+    float an = PI / float(n);
+    float en = PI / m;
+    vec2 acs = vec2(cos(an), sin(an));
+    vec2 ecs = vec2(cos(en), sin(en));
+    float bn = mod(atan(p.x, p.y), 2.0 * an) - an;
+    p = length(p) * vec2(cos(bn), abs(sin(bn)));
+    p -= r * acs;
+    p.y += clamp(-p.y, 0.0, r * acs.y);
+    p = abs(p);
+    p -= ecs;
+    p += vec2(p.y, -p.x) * clamp(-p.x * ecs.y - p.y * ecs.x, 0.0, r);
+    return length(p) * sign(p.x);
+}
+
+float sdBox(vec2 p, vec2 b) {
+    vec2 d = abs(p) - b;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+
+// Filled-plus ('P') or filled-x ('X', rot = PI/4) SDF.
+float sdCross(vec2 p, float rot) {
+    float c = cos(rot), s = sin(rot);
+    p = mat2(c, s, -s, c) * p;
+    return min(sdBox(p, vec2(0.8, 0.28)), sdBox(p, vec2(0.28, 0.8)));
+}
+
+// n spokes from the center (asterisk / tripod family).
+float sdSpokes(vec2 p, int n, float len, float rot, float phase) {
+    float d = 1e9;
+    for (int i = 0; i < 12; ++i) {
+        if (i >= n) break;
+        float a = rot + phase + float(i) * (2.0 * PI / float(n));
+        d = min(d, sdSeg(p, vec2(0.0), vec2(cos(a), sin(a)) * len));
+    }
+    return d;
+}
+
+// Chevron caret pointing in direction `rot` (0 = up).
+float sdCaret(vec2 p, float rot) {
+    float c = cos(rot), s = sin(rot);
+    p = mat2(c, s, -s, c) * p;
+    return min(sdSeg(p, vec2(-0.55, 0.25), vec2(0.0, -0.45)),
+               sdSeg(p, vec2(0.0, -0.45), vec2(0.55, 0.25)));
+}
+
+float markerDist(vec2 c, int code, int nside, float rot) {
+    switch (code) {
+    case 0:  return length(c) - 0.30;                    // '.' point
+    case 1:  return length(c) - 1.00;                    // 'o' circle
+    case 2:  return sdBox(c, vec2(0.75));                // 's' square
+    case 3:  return sdPoly(c, 0.9, 4, PI / 4.0);         // 'D' diamond
+    case 4:  return sdPoly(vec2(c.x, c.y * 0.6), 0.9, 4, PI / 4.0); // 'd'
+    case 5:  return sdPoly(c, 0.95, 3, PI);              // '^'
+    case 6:  return sdPoly(c, 0.95, 3, 0.0);             // 'v'
+    case 7:  return sdPoly(c, 0.95, 3, PI / 2.0);        // '<'
+    case 8:  return sdPoly(c, 0.95, 3, -PI / 2.0);       // '>'
+    case 9:  return sdSpokes(c, 3, 0.9, PI / 2.0, 0.0) - 0.10;      // '1'
+    case 10: return sdSpokes(c, 3, 0.9, -PI / 2.0, 0.0) - 0.10;     // '2'
+    case 11: return sdSpokes(c, 3, 0.9, 0.0, 0.0) - 0.10;           // '3'
+    case 12: return sdSpokes(c, 3, 0.9, PI, 0.0) - 0.10;            // '4'
+    case 13: return min(sdSeg(c, vec2(-0.7, 0.0), vec2(0.7, 0.0)),
+                        sdSeg(c, vec2(0.0, -0.7), vec2(0.0, 0.7))) - 0.08; // '+'
+    case 14: return min(sdSeg(c, vec2(-0.5, -0.5), vec2(0.5, 0.5)),
+                        sdSeg(c, vec2(-0.5, 0.5), vec2(0.5, -0.5))) - 0.08; // 'x'
+    case 15: return sdCross(c, 0.0);                     // 'P'
+    case 16: return sdCross(c, PI / 4.0);                // 'X'
+    case 17: return sdStar(c, 0.95, 5, 3.0, PI);         // '*'
+    case 18: return sdPoly(c, 0.9, 5, PI);               // 'p'
+    case 19: return sdPoly(c, 0.9, 6, 0.0);              // 'h'
+    case 20: return sdPoly(c, 0.9, 6, PI / 6.0);         // 'H'
+    case 21: return sdPoly(c, 0.9, 8, PI / 8.0);         // '8'
+    case 22: return sdSeg(c, vec2(0.0, -0.8), vec2(0.0, 0.8)) - 0.10;   // '|'
+    case 23: return sdSeg(c, vec2(-0.8, 0.0), vec2(0.8, 0.0)) - 0.10;   // '_'
+    case 24: return sdSeg(c, vec2(-0.8, 0.0), vec2(0.0, 0.0)) - 0.08;   // TICKLEFT
+    case 25: return sdSeg(c, vec2(0.0, 0.0), vec2(0.8, 0.0)) - 0.08;    // TICKRIGHT
+    case 26: return sdSeg(c, vec2(0.0, -0.8), vec2(0.0, 0.0)) - 0.08;   // TICKUP
+    case 27: return sdSeg(c, vec2(0.0, 0.0), vec2(0.0, 0.8)) - 0.08;    // TICKDOWN
+    case 28: return sdCaret(c, -PI / 2.0) - 0.08;        // CARETLEFT
+    case 29: return sdCaret(c, PI / 2.0) - 0.08;         // CARETRIGHT
+    case 30: return sdCaret(c, 0.0) - 0.08;              // CARETUP
+    case 31: return sdCaret(c, PI) - 0.08;               // CARETDOWN
+    case 32: return min(sdCaret(c, -PI / 2.0),
+                        sdSeg(c, vec2(0.3, 0.0), vec2(0.8, 0.0))) - 0.08;
+    case 33: return min(sdCaret(c, PI / 2.0),
+                        sdSeg(c, vec2(-0.8, 0.0), vec2(-0.3, 0.0))) - 0.08;
+    case 34: return min(sdCaret(c, 0.0),
+                        sdSeg(c, vec2(0.0, 0.3), vec2(0.0, 0.8))) - 0.08;
+    case 35: return min(sdCaret(c, PI),
+                        sdSeg(c, vec2(0.0, -0.8), vec2(0.0, -0.3))) - 0.08;
+    case 36: return sdPoly(c, 0.9, max(nside, 3), rot);       // (n,0)
+    case 37: return sdStar(c, 0.95, max(nside, 3),
+                           float(max(nside, 3)) * 0.5 + 0.5, rot);    // (n,1)
+    case 38: return sdSpokes(c, max(nside, 3), 0.85, rot, 0.0) - 0.06; // (n,2)
+    case 39: return length(c) - 0.85;                    // (n,3) ≈ circle
+    default: return 1.0;                                 // none / unknown
+    }
+}
+
 void main() {
-    // Circular marker via gl_PointCoord
-    vec2 c = gl_PointCoord * 2.0 - 1.0;
-    float r = dot(c, c);
-    if (r > 1.0) discard;
-    // Anti-alias edge
-    float alpha = smoothstep(1.0, 0.9, r);
+    int code = int(pc.u_marker.x + 0.5);
+    if (code == 40) discard;                             // MarkerStyle::None
+    int fill = int(pc.u_marker.y + 0.5);
+    int nside = int(pc.u_marker.z + 0.5);
+    float rot = pc.u_marker.w;
+
+    vec2 c = gl_PointCoord * 2.0 - 1.0;                  // Y down, [-1,1]
+    float d = markerDist(c, code, nside, rot);
+
+    // Anti-alias width ~1.2px in marker space (1 unit = size/2 px),
+    // clamped so small markers keep most of their area.
+    float aa = min(2.4 / max(v_size, 1.0), 0.12);
+    float alpha;
+    if (fill == 5) {
+        // Outline only (fillstyle 'none').
+        float sw = min(3.6 / max(v_size, 1.0), 0.25);
+        alpha = 1.0 - smoothstep(sw - aa, sw + aa, abs(d));
+    } else {
+        // Half fills keep only one side of the marker.
+        if ((fill == 1 && c.x > 0.0) || (fill == 2 && c.x < 0.0) ||
+            (fill == 4 && c.y > 0.0) || (fill == 3 && c.y < 0.0))
+            discard;
+        alpha = 1.0 - smoothstep(-aa, aa, d);
+    }
+    if (alpha <= 0.0) discard;
     outColor = vec4(v_color.rgb, v_color.a * alpha);
 }
 )";
@@ -71,15 +223,18 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
                          vk::SampleCountFlagBits samples, core::DescriptorPool& /*descPool*/,
                          core::PipelineCache& cache) {
     device_ = device;
-    auto vertSpv = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
+    auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
+                   shaders::kProjFn + kVertMain;
+    auto vertSpv = core::ShaderModule::compileGlsl(vertSrc, "vert");
     auto fragSpv = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
     vert_ = core::ShaderModule(device, vertSpv);
     frag_ = core::ShaderModule(device, fragSpv);
 
     vk::PipelineLayoutCreateInfo plci{};
     vk::PushConstantRange pc{};
-    pc.setStageFlags(vk::ShaderStageFlagBits::eVertex)
-       .setOffset(0).setSize(sizeof(float) * 10);
+    pc.setStageFlags(vk::ShaderStageFlagBits::eVertex |
+                     vk::ShaderStageFlagBits::eFragment)
+       .setOffset(0).setSize(sizeof(float) * 24);
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
 
@@ -188,13 +343,17 @@ void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool p
 }
 
 void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-                         const plot::Transform2D& transform, uint32_t pointCount) const {
+                         const plot::Transform2D& transform, uint32_t pointCount,
+                         MarkerParams marker) const {
     if (!inited_ || pointCount == 0) return;
 
     struct PC {
         float viewMinX, viewMinY, viewSpanX, viewSpanY;
         float rectX, rectY, rectW, rectH;
-        float logX, logY;
+        float sxCode, sxP1, sxP2, sxPad;
+        float syCode, syP1, syP2, syPad;
+        float prCode, thetaOff, thetaDir, prPad;
+        float mCode, mFill, mSides, mAngle;
     } pc;
     pc.viewMinX = transform.view.x.min;
     pc.viewMinY = transform.view.y.min;
@@ -204,11 +363,25 @@ void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.rectY = static_cast<float>(rect.offset.y);
     pc.rectW = static_cast<float>(rect.extent.width);
     pc.rectH = static_cast<float>(rect.extent.height);
-    pc.logX = transform.logX ? 1.0f : 0.0f;
-    pc.logY = transform.logY ? 1.0f : 0.0f;
+    pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
+    pc.sxP1 = transform.scaleX.param1;
+    pc.sxP2 = transform.scaleX.param2;
+    pc.syCode = static_cast<float>(static_cast<int>(transform.codeY()));
+    pc.syP1 = transform.scaleY.param1;
+    pc.syP2 = transform.scaleY.param2;
+    pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
+    pc.thetaOff = transform.projection.thetaOffset;
+    pc.thetaDir = transform.projection.thetaDir;
+    pc.mCode = marker.code;
+    pc.mFill = marker.fill;
+    pc.mSides = marker.numsides;
+    pc.mAngle = marker.angle;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
-    cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex, 0, sizeof(PC), &pc);
+    cmd.pushConstants(pipelineLayout_.get(),
+                      vk::ShaderStageFlagBits::eVertex |
+                      vk::ShaderStageFlagBits::eFragment,
+                      0, sizeof(PC), &pc);
 
     vk::Viewport vp;
     vp.setX(static_cast<float>(rect.offset.x))

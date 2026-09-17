@@ -10,10 +10,14 @@
 #include <volcano/text/TextRenderer.hpp>
 
 #include <volcano/plot/Plot.hpp>
+#include <volcano/encode/ImageEncoder.hpp>
 
 #include <vulkan/vulkan.hpp>
 
+#include <filesystem>
 #include <memory>
+
+namespace volcano::plot { class Animation; }
 
 namespace volcano::render {
 
@@ -28,12 +32,48 @@ public:
     /// Render one frame of the figure.
     void renderFrame(plot::Figure& figure);
 
+    /// Drain backend input events and dispatch them into the figure's
+    /// interaction system (canvas callbacks, widgets, navigation).
+    /// Returns false when a quit event was received.
+    bool processInput(plot::Figure& figure);
+
+    /// matplotlib anim.save: render every frame and encode via a
+    /// MovieWriter inferred from the extension (.apng/.gif/.mp4/...) or
+    /// an explicit writer name ("apng","pillow"/"gif","ffmpeg",
+    /// "imagemagick").
+    [[nodiscard]] bool saveAnimation(plot::Animation& anim,
+                                     const std::filesystem::path& path,
+                                     double fps = 10.0,
+                                     std::string_view writer = {});
+
+    /// anim.to_jshtml: render all frames → standalone HTML page with
+    /// embedded base64 PNG frames and a JS player.
+    [[nodiscard]] std::string toJsHtml(plot::Animation& anim,
+                                       double fps = 10.0);
+
+    /// anim.to_html5_video: mp4 via ffmpeg (if available) wrapped in a
+    /// <video> tag; falls back to the jshtml player.
+    [[nodiscard]] std::string toHtml5Video(plot::Animation& anim,
+                                           double fps = 10.0);
+
+    /// matplotlib figure.savefig: prepare, render (with transparent
+    /// clear if requested), read back, and encode to `path` — format
+    /// inferred from the extension (png/webp/bmp/raw/jpg/tiff/pdf/svg/
+    /// svgz/eps/ps) or options.format. Headless backends only.
+    [[nodiscard]] bool savefig(plot::Figure& figure,
+                               const std::filesystem::path& path,
+                               const encode::SaveOptions& options = {});
+
     [[nodiscard]] backend::IBackend& backend() noexcept { return backend_; }
     [[nodiscard]] core::PipelineCache& pipelineCache() noexcept { return *pipelineCache_; }
     [[nodiscard]] core::DescriptorPool& descriptorPool() noexcept { return *descriptorPool_; }
     [[nodiscard]] text::TextRenderer& textRenderer() noexcept { return textRenderer_; }
     [[nodiscard]] primitives::ReduceRenderer& reduceRenderer() noexcept { return reduceRenderer_; }
     [[nodiscard]] primitives::SpineRenderer& spineRenderer() noexcept { return spineRenderer_; }
+    /// True when the text renderer pipeline + atlas are ready to draw.
+    [[nodiscard]] bool textReady() const noexcept { return textInited_ && textReady_; }
+    /// True when the spine renderer pipeline is ready.
+    [[nodiscard]] bool spineReady() const noexcept { return spineInited_; }
 
 private:
     backend::IBackend& backend_;
@@ -69,6 +109,19 @@ private:
     /// Draw text annotations and arrow annotations for one axes.
     void drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                          plot::Rect2D rect);
+
+    /// Draw a text string that may contain $...$ math segments, multi-line
+    /// text, rotation and per-line alignment. (x, y) is the baseline-left
+    /// origin of the block in pixel coordinates.
+    void drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
+                      std::string_view text, float x, float y,
+                      plot::Color color, float scale, float rotation = 0.0f,
+                      plot::HAlign lineAlign = plot::HAlign::Left);
+
+    /// Measure a rich text string (math-aware). Returns
+    /// {width, height, ascent} in pixels.
+    text::TextRenderer::TextMetrics measureRichText(std::string_view text,
+                                                    float scale);
 };
 
 } // namespace volcano::render

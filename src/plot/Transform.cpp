@@ -1,31 +1,260 @@
 // volcano/plot/Transform.cpp
 #include "volcano/plot/Transform.hpp"
+#include "volcano/plot/Axes.hpp"
+#include "volcano/plot/Plot.hpp"
 
 #include <cmath>
 
 namespace volcano::plot {
 
+// ─── Transform base ───────────────────────────────────────────────────────
+
+std::vector<Point2D> Transform::apply(std::span<const Point2D> pts) const {
+    std::vector<Point2D> out;
+    out.reserve(pts.size());
+    for (auto p : pts) out.push_back(apply(p));
+    return out;
+}
+
+TransformPtr Transform::then(TransformPtr after) const {
+    if (isAffine() && after->isAffine()) {
+        if (auto* a = dynamic_cast<const Affine2D*>(this)) {
+            if (auto* b = dynamic_cast<Affine2D*>(after.get()))
+                return std::make_shared<CompositeAffine2D>(*a, *b);
+        }
+    }
+    return std::make_shared<CompositeGenericTransform>(clone(), after);
+}
+
+// ─── Affine2D ─────────────────────────────────────────────────────────────
+
+Affine2D Affine2D::rotate(float rad) {
+    float s = std::sin(rad), c = std::cos(rad);
+    return {c, s, -s, c, 0, 0};
+}
+
+Affine2D Affine2D::skew(float xShear, float yShear) {
+    return {1, std::tan(yShear), std::tan(xShear), 1, 0, 0};
+}
+
+Affine2D Affine2D::skewDeg(float xDeg, float yDeg) {
+    return skew(xDeg * 0.017453292519943295f, yDeg * 0.017453292519943295f);
+}
+
+Affine2D Affine2D::concat(const Affine2D& o) const noexcept {
+    // (*this) ∘ o : apply o first, then *this.
+    return {a * o.a + c * o.b,  b * o.a + d * o.b,
+            a * o.c + c * o.d,  b * o.c + d * o.d,
+            a * o.e + c * o.f + e, b * o.e + d * o.f + f};
+}
+
+TransformPtr Affine2D::inverted() const {
+    float det = a * d - b * c;
+    if (std::abs(det) < 1e-12f) return nullptr;
+    float inv = 1.0f / det;
+    return std::make_shared<Affine2D>(
+        d * inv, -b * inv, -c * inv, a * inv,
+        (c * f - d * e) * inv, (b * e - a * f) * inv);
+}
+
+// ─── Identity / composite / blended ───────────────────────────────────────
+
+TransformPtr IdentityTransform::inverted() const {
+    return std::make_shared<IdentityTransform>();
+}
+
+TransformPtr transDisplay() {
+    static TransformPtr inst = std::make_shared<IdentityTransform>();
+    return inst;
+}
+
+TransformPtr CompositeGenericTransform::inverted() const {
+    auto a = first_->inverted(), b = second_->inverted();
+    if (!a || !b) return nullptr;
+    return b->then(a);
+}
+
+TransformPtr BlendedGenericTransform::inverted() const {
+    auto a = x_->inverted(), b = y_->inverted();
+    if (!a || !b) return nullptr;
+    return blendedTransformFactory(a, b);
+}
+
+TransformPtr blendedTransformFactory(TransformPtr x, TransformPtr y) {
+    if (x->isAffine() && y->isAffine())
+        if (auto* xa = dynamic_cast<Affine2D*>(x.get()))
+            if (auto* ya = dynamic_cast<Affine2D*>(y.get()))
+                return std::make_shared<BlendedAffine2D>(*xa, *ya);
+    return std::make_shared<BlendedGenericTransform>(std::move(x), std::move(y));
+}
+
+TransformPtr offsetCopy(const Transform& base, float dpi, float dx, float dy,
+                        std::string_view units) {
+    float scale = dpi / 72.0f; // points
+    if (units == "pixels" || units == "dots") scale = 1.0f;
+    else if (units == "inches") scale = dpi;
+    // Offset direction: positive y = up → subtract in Y-down display space.
+    auto off = std::make_shared<ScaledTranslation>(dx, -dy,
+                                                   Affine2D::scale(scale));
+    return base.clone()->then(off);
+}
+
+// ─── Bound transforms ─────────────────────────────────────────────────────
+
 namespace {
 
-float applyLog(float v, bool log) { return log ? std::log10(std::max(v, 1e-30f)) : v; }
-float unapplyLog(float v, bool log) { return log ? std::pow(10.0f, v) : v; }
+/// transAxes: axes fraction → display px (Y-up input, Y-down output).
+class AxesToPixels final : public Transform {
+public:
+    explicit AxesToPixels(const Axes& a) : axes_(&a) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = axes_->rect;
+        return {r.x + p.x * float(r.width),
+                r.y + (1.0f - p.y) * float(r.height)};
+    }
+    bool isAffine() const noexcept override { return true; }
+    TransformPtr inverted() const override;
+    TransformPtr clone() const override {
+        return std::make_shared<AxesToPixels>(*this);
+    }
+private:
+    const Axes* axes_;
+};
+
+class PixelsToAxes final : public Transform {
+public:
+    explicit PixelsToAxes(const Axes& a) : axes_(&a) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = axes_->rect;
+        float w = r.width ? float(r.width) : 1.0f;
+        float h = r.height ? float(r.height) : 1.0f;
+        return {(p.x - r.x) / w, 1.0f - (p.y - r.y) / h};
+    }
+    bool isAffine() const noexcept override { return true; }
+    TransformPtr inverted() const override {
+        return std::make_shared<AxesToPixels>(*axes_);
+    }
+    TransformPtr clone() const override {
+        return std::make_shared<PixelsToAxes>(*this);
+    }
+private:
+    const Axes* axes_;
+};
+
+TransformPtr AxesToPixels::inverted() const {
+    return std::make_shared<PixelsToAxes>(*axes_);
+}
+
+/// transFigure: figure fraction → display px.
+class FigureToPixels final : public Transform {
+public:
+    explicit FigureToPixels(const Figure& f) : fig_(&f) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = fig_->figRect();
+        return {r.x + p.x * float(r.width),
+                r.y + (1.0f - p.y) * float(r.height)};
+    }
+    bool isAffine() const noexcept override { return true; }
+    TransformPtr inverted() const override;
+    TransformPtr clone() const override {
+        return std::make_shared<FigureToPixels>(*this);
+    }
+private:
+    const Figure* fig_;
+};
+
+class PixelsToFigure final : public Transform {
+public:
+    explicit PixelsToFigure(const Figure& f) : fig_(&f) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = fig_->figRect();
+        float w = r.width ? float(r.width) : 1.0f;
+        float h = r.height ? float(r.height) : 1.0f;
+        return {(p.x - r.x) / w, 1.0f - (p.y - r.y) / h};
+    }
+    bool isAffine() const noexcept override { return true; }
+    TransformPtr inverted() const override {
+        return std::make_shared<FigureToPixels>(*fig_);
+    }
+    TransformPtr clone() const override {
+        return std::make_shared<PixelsToFigure>(*this);
+    }
+private:
+    const Figure* fig_;
+};
+
+TransformPtr FigureToPixels::inverted() const {
+    return std::make_shared<PixelsToFigure>(*fig_);
+}
+
+/// transData: data coords → display px (scales + projection + viewport).
+class DataToPixels final : public Transform {
+public:
+    explicit DataToPixels(const Axes& a) : axes_(&a) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = axes_->rect;
+        Point2D fr = axes_->dataToFraction(p);
+        return {r.x + fr.x * float(r.width),
+                r.y + (1.0f - fr.y) * float(r.height)};
+    }
+    TransformPtr inverted() const override;
+    TransformPtr clone() const override {
+        return std::make_shared<DataToPixels>(*this);
+    }
+private:
+    const Axes* axes_;
+};
+
+class PixelsToData final : public Transform {
+public:
+    explicit PixelsToData(const Axes& a) : axes_(&a) {}
+    Point2D apply(Point2D p) const override {
+        const Rect2D& r = axes_->rect;
+        float w = r.width ? float(r.width) : 1.0f;
+        float h = r.height ? float(r.height) : 1.0f;
+        return axes_->fractionToData(
+            {(p.x - r.x) / w, 1.0f - (p.y - r.y) / h});
+    }
+    TransformPtr inverted() const override {
+        return std::make_shared<DataToPixels>(*axes_);
+    }
+    TransformPtr clone() const override {
+        return std::make_shared<PixelsToData>(*this);
+    }
+private:
+    const Axes* axes_;
+};
+
+TransformPtr DataToPixels::inverted() const {
+    return std::make_shared<PixelsToData>(*axes_);
+}
 
 } // namespace
 
+TransformPtr transAxes(const Axes& axes) {
+    return std::make_shared<AxesToPixels>(axes);
+}
+TransformPtr transFigure(const Figure& fig) {
+    return std::make_shared<FigureToPixels>(fig);
+}
+TransformPtr transData(const Axes& axes) {
+    return std::make_shared<DataToPixels>(axes);
+}
+
 Point2D Transform2D::toNdc(Point2D p) const noexcept {
-    float x = applyLog(p.x, logX);
-    float y = applyLog(p.y, logY);
-    float nx = (x - view.x.min) / (view.x.span() != 0 ? view.x.span() : 1);
-    float ny = (y - view.y.min) / (view.y.span() != 0 ? view.y.span() : 1);
+    Point2D d = projection.forward({scaleFwdX(p.x), scaleFwdY(p.y)});
+    float nx = (d.x - view.x.min) / (view.x.span() != 0 ? view.x.span() : 1);
+    float ny = (d.y - view.y.min) / (view.y.span() != 0 ? view.y.span() : 1);
     return { nx * 2.0f - 1.0f, ny * 2.0f - 1.0f };
 }
 
 Point2D Transform2D::fromNdc(Point2D p) const noexcept {
     float nx = (p.x + 1.0f) * 0.5f;
     float ny = (p.y + 1.0f) * 0.5f;
-    float x = view.x.min + nx * view.x.span();
-    float y = view.y.min + ny * view.y.span();
-    return { unapplyLog(x, logX), unapplyLog(y, logY) };
+    Point2D d{ view.x.min + nx * view.x.span(),
+               view.y.min + ny * view.y.span() };
+    Point2D raw = projection.inverse(d);
+    return { scaleX.inverse(raw.x), scaleY.inverse(raw.y) };
 }
 
 namespace {

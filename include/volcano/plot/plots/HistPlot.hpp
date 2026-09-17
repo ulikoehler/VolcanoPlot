@@ -3,6 +3,8 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include "volcano/render/primitives/LineSegmentRenderer.hpp"
+#include <memory>
 #include <vector>
 #include <string>
 
@@ -27,6 +29,14 @@ enum class HistNorm {
     Cumulative, ///< cumulative count
 };
 
+/// Histogram rendering style (matplotlib `histtype`).
+enum class HistType {
+    Bar,        ///< filled bars; multiple datasets side-by-side (default)
+    BarStacked, ///< filled bars stacked on top of each other
+    Step,       ///< unfilled step outline
+    StepFilled, ///< filled step outline down to the baseline
+};
+
 /// Histogram configuration.
 struct HistConfig {
     HistBinMethod bins = HistBinMethod::Auto;
@@ -34,8 +44,13 @@ struct HistConfig {
     std::vector<float> binEdges; ///< used when bins = Edges
     std::optional<Range> range;  ///< data range; auto if unset
     HistNorm norm = HistNorm::Count;
+    HistType histtype = HistType::Bar;
     Color color = Color::fromRgba8(31, 119, 180, 128);
+    /// Per-dataset colors (multi-dataset hist); empty → `color` for all.
+    std::vector<Color> colors;
     std::string label;
+    /// Step outline line width (histtype=step).
+    float stepLineWidth = 1.5f;
     bool horizontal = false;     ///< horizontal histogram (bars along X)
 };
 
@@ -53,7 +68,12 @@ class HistPlot : public IPlot {
 public:
     /// Construct from raw samples.
     explicit HistPlot(std::vector<float> samples, HistConfig cfg = {})
-        : samples_(std::move(samples)), cfg_(std::move(cfg)) {}
+        : datasets_{std::move(samples)}, cfg_(std::move(cfg)) {}
+
+    /// Construct from multiple datasets (matplotlib hist([a, b, ...])).
+    /// Shared bin edges; rendering depends on cfg.histtype.
+    HistPlot(std::vector<std::vector<float>> datasets, HistConfig cfg = {})
+        : datasets_(std::move(datasets)), cfg_(std::move(cfg)) {}
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
@@ -66,24 +86,33 @@ public:
 
     /// Access computed bin edges (valid after prepare()).
     [[nodiscard]] const std::vector<float>& binEdges() const { return binEdges_; }
-    /// Access computed bin heights (valid after prepare()).
-    [[nodiscard]] const std::vector<float>& binHeights() const { return heights_; }
+    /// Access computed bin heights of the first dataset (valid after prepare()).
+    [[nodiscard]] const std::vector<float>& binHeights() const { return heights_.front(); }
+    /// Per-dataset bin heights (valid after prepare()).
+    [[nodiscard]] const std::vector<std::vector<float>>& binHeightsAll() const { return heights_; }
 
 private:
-    std::vector<float> samples_;
+    std::vector<std::vector<float>> datasets_;
     HistConfig cfg_;
-    std::vector<float> binEdges_;  // computed in prepare()
-    std::vector<float> heights_;   // computed in prepare()
+    std::vector<float> binEdges_;                  // shared, computed in prepare()
+    std::vector<std::vector<float>> heights_;      // per-dataset heights
     render::primitives::FillRenderer renderer_;
+    /// One segment renderer per dataset (histtype=step, uniform color each).
+    std::vector<std::unique_ptr<render::primitives::LineSegmentRenderer>>
+        stepRenderers_;
+    std::vector<uint32_t> stepCounts_;
+    std::vector<std::vector<Point2D>> stepSegs_;   // per-dataset segments
     std::vector<Point2D> uploadedPoints_;  // for GPU autoscale
     bool prepared_ = false;
 
-    /// Compute bin edges and heights from samples_.
+    /// Compute shared bin edges and per-dataset heights.
     void computeBins();
 
-    /// Build triangle vertices for the histogram bars.
+    /// Build triangle vertices for the histogram bars / step fills.
     void buildBarVertices(std::vector<Point2D>& positions,
                           std::vector<Color>& colors) const;
+    /// Build step outline segments (histtype=step).
+    void buildStepSegments();
 };
 
 } // namespace volcano::plot

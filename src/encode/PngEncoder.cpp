@@ -40,6 +40,22 @@ EncodeResult CpuPngEncoder::encode(std::span<const uint8_t> rgba, uint32_t width
     png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGBA,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
                  PNG_FILTER_TYPE_DEFAULT);
+
+#ifdef PNG_WRITE_TEXT_SUPPORTED
+    // Metadata → tEXt chunks (must precede png_write_info).
+    std::vector<png_text> texts;
+    texts.reserve(metadata_.size());
+    for (auto& [k, v] : metadata_) {
+        png_text t{};
+        t.compression = PNG_TEXT_COMPRESSION_NONE;
+        t.key = const_cast<char*>(k.c_str());
+        t.text = const_cast<char*>(v.c_str());
+        texts.push_back(t);
+    }
+    if (!texts.empty())
+        png_set_text(png, info, texts.data(), int(texts.size()));
+#endif
+
     png_write_info(png, info);
 
     std::vector<png_bytep> rows(height);

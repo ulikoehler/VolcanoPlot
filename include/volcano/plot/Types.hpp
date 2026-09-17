@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,11 +13,36 @@ namespace volcano::plot {
 struct Point2D { float x; float y; };
 struct Point3D { float x; float y; float z; };
 
+/// Horizontal alignment (shared by text, annotations, and font properties).
+enum class HAlign { Left, Center, Right };
+
+/// Vertical alignment (shared by text, annotations, and font properties).
+enum class VAlign { Bottom, Center, Top, Baseline };
+
+/// Coordinate system for text/annotation/legend-anchor positioning.
+enum class CoordSystem {
+    /// Data coordinates — transformed by the axes viewport.
+    Data,
+    /// Axes fraction — (0,0) = bottom-left, (1,1) = top-right of axes rect.
+    Axes,
+    /// Figure fraction — (0,0) = bottom-left, (1,1) = top-right of figure.
+    Figure,
+    /// Display/pixel coordinates — (0,0) = top-left of framebuffer.
+    Display,
+    /// Offset in points from a data coordinate position.
+    /// The position is in data coords; xyOffset is in points (1pt = 1/72 inch
+    /// at the figure DPI). Positive x = right, positive y = up.
+    OffsetPoints,
+};
+
 /// 2D extent (width, height) in pixels.
 struct Extent2D { uint32_t width = 0; uint32_t height = 0; };
 
 /// 2D rectangle (offset + extent) in pixels.
 struct Rect2D { int32_t x = 0; int32_t y = 0; uint32_t width = 0; uint32_t height = 0; };
+
+/// Float rectangle in arbitrary units (treemap/layout helpers).
+struct Rect2Df { float x = 0, y = 0, w = 0, h = 0; };
 
 /// RGBA color, normalized [0,1].
 struct Color {
@@ -70,14 +96,104 @@ struct Viewport {
     Range z{0,1}; // for 3D
 };
 
-/// Marker style for scatter plots.
+/// Marker style for scatter plots. Codes mirror matplotlib's marker set;
+/// numeric codes are passed to the SDF marker shader as floats.
 enum class MarkerStyle {
-    Circle, Square, Diamond, Triangle, Plus, X, Star, Point
+    Point = 0,        ///< '.'
+    Circle = 1,       ///< 'o'
+    Square = 2,       ///< 's'
+    Diamond = 3,      ///< 'D'
+    ThinDiamond = 4,  ///< 'd'
+    Triangle = 5,     ///< '^'
+    TriDown = 6,      ///< 'v'
+    TriLeft = 7,      ///< '<'
+    TriRight = 8,     ///< '>'
+    Tri1 = 9,         ///< '1' tripod (Y)
+    Tri2 = 10,        ///< '2'
+    Tri3 = 11,        ///< '3'
+    Tri4 = 12,        ///< '4'
+    Plus = 13,        ///< '+' (stroked)
+    X = 14,           ///< 'x' (stroked)
+    PlusFilled = 15,  ///< 'P' (filled)
+    XFilled = 16,     ///< 'X' (filled)
+    Star = 17,        ///< '*'
+    Pentagon = 18,    ///< 'p'
+    Hexagon1 = 19,    ///< 'h'
+    Hexagon2 = 20,    ///< 'H'
+    Octagon = 21,     ///< '8'
+    VLine = 22,       ///< '|'
+    HLine = 23,       ///< '_'
+    TickLeft = 24,    ///< TICKLEFT  ('0')
+    TickRight = 25,   ///< TICKRIGHT ('1' — note: distinct from Tri1)
+    TickUp = 26,      ///< TICKUP    ('2')
+    TickDown = 27,    ///< TICKDOWN  ('3')
+    CaretLeft = 28,       ///< CARETLEFT    ('4')
+    CaretRight = 29,      ///< CARETRIGHT   ('5')
+    CaretUp = 30,         ///< CARETUP      ('6')
+    CaretDown = 31,       ///< CARETDOWN    ('7')
+    CaretLeftBase = 32,   ///< CARETLEFTBASE  ('8')
+    CaretRightBase = 33,  ///< CARETRIGHTBASE ('9')
+    CaretUpBase = 34,     ///< CARETUPBASE    ('10')
+    CaretDownBase = 35,   ///< CARETDOWNBASE  ('11')
+    Polygon = 36,     ///< (numsides, 0, angle) regular polygon
+    StarN = 37,       ///< (numsides, 1, angle) star-like polygon
+    AsteriskN = 38,   ///< (numsides, 2, angle) asterisk
+    CircledN = 39,    ///< (numsides, 3, angle) circle approx by n-gon
+    None = 40,
 };
+
+/// Marker fill style (matplotlib fillstyle).
+enum class MarkerFill {
+    Full = 0, Left = 1, Right = 2, Bottom = 3, Top = 4, None = 5,
+};
+
+/// Parse a single-character matplotlib marker spec ('o', '^', '<', ...).
+/// Returns nullopt for unknown characters.
+std::optional<MarkerStyle> markerFromChar(char c);
+
+/// Parse a matplotlib fillstyle name: "full", "left", "right", "bottom",
+/// "top", "none".
+std::optional<MarkerFill> markerFillFromString(std::string_view s);
 
 /// Line style.
 enum class LineStyle {
     Solid, Dashed, Dotted, DashDot, None
 };
+
+/// Parse a matplotlib linestyle spec: "-", "--", "-.", ":", "solid",
+/// "dashed", "dashdot", "dotted", "none"/"None"/"" (empty → None).
+std::optional<LineStyle> lineStyleFromString(std::string_view s);
+
+/// Standard dash pattern for a named line style, scaled by line width
+/// (matplotlib: dash lengths are in points × linewidth). Returns empty for
+/// Solid/None.
+std::vector<float> dashPattern(LineStyle style, float width);
+
+/// How a polyline's vertices are joined (matplotlib joinstyle).
+enum class JoinStyle { Miter, Round, Bevel };
+
+/// How open polyline ends are capped (matplotlib capstyle).
+enum class CapStyle { Butt, Round, Projecting };
+
+/// Parse "miter"/"round"/"bevel" / "butt"/"round"/"projecting".
+std::optional<JoinStyle> joinStyleFromString(std::string_view s);
+std::optional<CapStyle> capStyleFromString(std::string_view s);
+
+/// Draw style: how points are connected (matplotlib drawstyle).
+enum class DrawStyle {
+    Default,    ///< straight line segments
+    StepsPre,   ///< step, y value continued to the left  ("steps-pre")
+    StepsMid,   ///< step, change at midpoint            ("steps-mid")
+    StepsPost,  ///< step, y value continued to the right ("steps-post")
+};
+
+/// Parse "default"/"steps"/"steps-pre"/"steps-mid"/"steps-post".
+/// ("steps" is an alias for "steps-pre".)
+std::optional<DrawStyle> drawStyleFromString(std::string_view s);
+
+/// Expand a point sequence for a step draw style. Returns `points`
+/// unchanged for DrawStyle::Default.
+std::vector<Point2D> applyDrawStyle(std::span<const Point2D> points,
+                                    DrawStyle style);
 
 } // namespace volcano::plot

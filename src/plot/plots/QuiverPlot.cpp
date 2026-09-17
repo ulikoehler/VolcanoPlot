@@ -10,23 +10,12 @@ namespace volcano::plot {
 
 namespace {
 
-/// Convert data coordinates to pixel coordinates.
-Point2D dataToPixel(float dx, float dy, const Viewport& vp, const Rect2D& rect) {
-    float nx = (dx - vp.x.min) / vp.x.span();
-    float ny = (dy - vp.y.min) / vp.y.span();
+/// Convert data coordinates to pixel coordinates (scale/projection aware).
+Point2D dataToPixel(const Axes& axes, float dx, float dy, const Rect2D& rect) {
+    Point2D f = axes.dataToFraction({dx, dy});
     return {
-        rect.x + nx * rect.width,
-        rect.y + (1.0f - ny) * rect.height
-    };
-}
-
-/// Convert pixel coordinates back to data coordinates.
-Point2D pixelToData(float px, float py, const Viewport& vp, const Rect2D& rect) {
-    float nx = (px - rect.x) / rect.width;
-    float ny = 1.0f - (py - rect.y) / rect.height;
-    return {
-        vp.x.min + nx * vp.x.span(),
-        vp.y.min + ny * vp.y.span()
+        rect.x + f.x * rect.width,
+        rect.y + (1.0f - f.y) * rect.height
     };
 }
 
@@ -73,8 +62,8 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
         shaftSegs_.push_back({ex, ey});
 
         // Arrowhead in pixel space, then convert back to data space.
-        Point2D pStart = dataToPixel(sx, sy, vp, rect);
-        Point2D pEnd = dataToPixel(ex, ey, vp, rect);
+        Point2D pStart = dataToPixel(axes, sx, sy, rect);
+        Point2D pEnd = dataToPixel(axes, ex, ey, rect);
         float dx = pEnd.x - pStart.x;
         float dy = pEnd.y - pStart.y;
         float len = std::sqrt(dx * dx + dy * dy);
@@ -91,14 +80,11 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
         Point2D base1 = {pEnd.x - ux * hl + px * hw, pEnd.y - uy * hl + py * hw};
         Point2D base2 = {pEnd.x - ux * hl - px * hw, pEnd.y - uy * hl - py * hw};
 
-        // Convert back to data space for FillRenderer.
-        Point2D dTip = pixelToData(tip.x, tip.y, vp, rect);
-        Point2D dBase1 = pixelToData(base1.x, base1.y, vp, rect);
-        Point2D dBase2 = pixelToData(base2.x, base2.y, vp, rect);
-
-        headFillPos_.push_back(dTip);
-        headFillPos_.push_back(dBase1);
-        headFillPos_.push_back(dBase2);
+        // Keep arrowheads in pixel space — drawn with an identity
+        // transform so non-linear scales don't warp the head shape.
+        headFillPos_.push_back(tip);
+        headFillPos_.push_back(base1);
+        headFillPos_.push_back(base2);
         for (int j = 0; j < 3; ++j) headFillColors_.push_back(cfg_.color);
     }
 }
@@ -129,10 +115,7 @@ void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     buildGeometry(axes, rect);
 
     auto& ctx = r.backend().context();
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
@@ -144,12 +127,18 @@ void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         shaftRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
     }
 
-    // Upload arrowhead triangles.
+    // Upload arrowhead triangles (pixel space → identity transform).
     if (cfg_.filledHeads && !headFillPos_.empty()) {
         headRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
                              std::span{headFillPos_}, std::span{headFillColors_});
-        headRenderer_.draw(cmd, vrect, t);
+        auto ext = r.backend().extent();
+        Transform2D tpix;
+        tpix.view.x = {0.0f, static_cast<float>(ext.width)};
+        tpix.view.y = {static_cast<float>(ext.height), 0.0f};
+        tpix.view.z = {0, 1};
+        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        headRenderer_.draw(cmd, fullRect, tpix);
     }
 }
 

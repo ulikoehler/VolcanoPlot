@@ -86,13 +86,13 @@ void TripcolorPlot::buildGeometry() {
     float vspan = valueRange_.span();
     if (vspan <= 0.0f) vspan = 1.0f;
 
+    // NaN v -> NaN t -> cmap.bad (or transparent); out-of-range -> under/over.
     auto sampleColor = [&](float v) {
-        if (std::isnan(v)) return Color::transparent();
         float t;
         if (config_.norm) {
             t = (*config_.norm)(v);
         } else {
-            t = std::clamp((v - valueRange_.min) / vspan, 0.0f, 1.0f);
+            t = (v - valueRange_.min) / vspan;
         }
         return cmap.sample(t);
     };
@@ -158,10 +158,7 @@ void TripcolorPlot::prepare(render::Renderer& r) {
 void TripcolorPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                          const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     fillRenderer_.draw(cmd, vrect, t);

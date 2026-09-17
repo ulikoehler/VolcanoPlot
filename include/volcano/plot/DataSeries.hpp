@@ -18,8 +18,25 @@ struct Series2D {
     Color color = Color::blue();
     float size = 6.0f;          // marker size in pixels
     MarkerStyle marker = MarkerStyle::Circle;
+    MarkerFill markerFill = MarkerFill::Full;
+    int markerNumsides = 5;     ///< for Polygon/StarN/AsteriskN/CircledN
+    float markerAngle = 0.0f;   ///< rotation in radians
     LineStyle lineStyle = LineStyle::Solid;
+    /// Custom dash tuple (on, off, ...) in pixels. Empty → derived from
+    /// lineStyle via dashPattern().
+    std::vector<float> dashes;
+    float dashOffset = 0.0f;
     float lineWidth = 1.5f;
+    DrawStyle drawStyle = DrawStyle::Default;
+    JoinStyle joinStyle = JoinStyle::Round;
+    CapStyle capStyle = CapStyle::Butt;
+    /// Color of the gaps between dashes (alpha 0 → no gap color).
+    Color gapColor = Color::transparent();
+    /// When true, Axes::addPlot applies the axes' prop_cycle entry to
+    /// this series (color/lineStyle/lineWidth/marker when the cycle
+    /// provides them) and advances the cycle. Set before addPlot;
+    /// fields may still be overridden after addPlot via series().
+    bool usePropCycle = false;
 };
 
 /// A series of 3D points (3D scatter, surface).

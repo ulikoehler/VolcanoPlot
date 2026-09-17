@@ -2,7 +2,9 @@
 #include "volcano/plot/plots/LinePlot.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
+#include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include "volcano/plot/Stroke.hpp"
 #include <algorithm>
 namespace volcano::plot {
 void LinePlot::prepare(render::Renderer& r) {
@@ -14,11 +16,48 @@ void LinePlot::prepare(render::Renderer& r) {
                      std::span{series_.points}, series_.color, series_.lineWidth);
     prepared_ = true;
 }
-void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer&, const Axes& axes, Rect2D rect) {
-    if (!prepared_) return;
-    Transform2D t; t.view = axes.viewport(); t.logX = axes.logX(); t.logY = axes.logY();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y}, vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(series_.points.size()));
+void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+                    const Axes& axes, Rect2D rect) {
+    if (!prepared_ || series_.points.size() < 2 ||
+        series_.lineStyle == LineStyle::None) return;
+
+    // Expand the point sequence for step draw styles, then map data → pixels.
+    auto pts = applyDrawStyle(series_.points, series_.drawStyle);
+    std::vector<Point2D> px;
+    px.reserve(pts.size());
+    for (const auto& p : pts) {
+        auto f = axes.dataToFraction(p);
+        px.push_back({rect.x + f.x * float(rect.width),
+                      rect.y + (1.0f - f.y) * float(rect.height)});
+    }
+    // xkcd-style sketch wobble (path.sketch).
+    if (axes.style().sketchScale > 0.0f)
+        px = sketchPolyline(px, axes.style().sketchScale * 2.0f);
+
+    StrokeParams sp;
+    sp.width = series_.lineWidth;
+    sp.dashes = series_.dashes.empty()
+                    ? dashPattern(series_.lineStyle, series_.lineWidth)
+                    : series_.dashes;
+    sp.dashOffset = series_.dashOffset;
+    sp.join = series_.joinStyle;
+    sp.cap = series_.capStyle;
+
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    vk::Extent2D res = r.backend().extent();
+    auto& spine = r.spineRenderer();
+
+    // gapcolor: solid underlay first, dashed line on top.
+    if (series_.gapColor.a > 0.0f && !sp.dashes.empty()) {
+        StrokeParams solid = sp;
+        solid.dashes.clear();
+        auto under = strokePolyline(px, solid);
+        spine.drawTriangles(cmd, clip, res, under.verts, series_.gapColor);
+    }
+
+    auto mesh = strokePolyline(px, sp);
+    spine.drawTriangles(cmd, clip, res, mesh.verts, series_.color);
 }
 void LinePlot::contributeToAutoscale(Viewport& v) const {
     for (const auto& p : series_.points) {

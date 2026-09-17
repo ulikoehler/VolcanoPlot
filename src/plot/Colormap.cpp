@@ -10,7 +10,15 @@ namespace volcano::plot {
 
 Color Colormap::sample(float t) const {
     if (stops.empty()) return Color::black();
+    if (std::isnan(t)) return bad.value_or(Color::transparent());
+    if (t < 0.0f && under) return *under;
+    if (t > 1.0f && over) return *over;
     t = std::clamp(t, 0.0f, 1.0f);
+    if (discrete) {
+        // ListedColormap behavior: quantize t into N bins.
+        size_t i = static_cast<size_t>(t * stops.size());
+        return stops[std::min(i, stops.size() - 1)];
+    }
     if (stops.size() == 1) return stops.front();
     float scaled = t * (stops.size() - 1);
     size_t i = static_cast<size_t>(scaled);
@@ -20,6 +28,57 @@ Color Colormap::sample(float t) const {
     const auto& b = stops[i + 1];
     return { a.r + (b.r - a.r) * f, a.g + (b.g - a.g) * f,
              a.b + (b.b - a.b) * f, a.a + (b.a - a.a) * f };
+}
+
+Colormap Colormap::reversed() const {
+    Colormap rev;
+    rev.name = name + "_r";
+    rev.discrete = discrete;
+    rev.bad = bad;
+    // Swap under/over for the reversed map.
+    rev.under = over;
+    rev.over = under;
+    rev.stops.assign(stops.rbegin(), stops.rend());
+    return rev;
+}
+
+namespace {
+
+/// Evaluate one channel of a LinearSegmentedColormap segment list at t.
+/// seg is sorted by x; value = linear interpolation between rows,
+/// using y1 of the left row and y0 of the right row.
+float evalChannel(const std::vector<Colormap::SegPoint>& seg, float t) {
+    if (seg.empty()) return 0.0f;
+    if (t <= seg.front().x) return seg.front().y0;
+    if (t >= seg.back().x) return seg.back().y1;
+    for (size_t i = 1; i < seg.size(); ++i) {
+        if (t < seg[i].x) {
+            const auto& a = seg[i - 1];
+            const auto& b = seg[i];
+            float f = (t - a.x) / (b.x - a.x);
+            return a.y1 + (b.y0 - a.y1) * f;
+        }
+    }
+    return seg.back().y1;
+}
+
+} // namespace
+
+Colormap Colormap::segmented(std::string name,
+                             std::vector<SegPoint> r,
+                             std::vector<SegPoint> g,
+                             std::vector<SegPoint> b,
+                             size_t n) {
+    Colormap cm;
+    cm.name = std::move(name);
+    if (n < 2) n = 2;
+    cm.stops.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        float t = float(i) / float(n - 1);
+        cm.stops.push_back({evalChannel(r, t), evalChannel(g, t),
+                            evalChannel(b, t), 1.0f});
+    }
+    return cm;
 }
 
 namespace colormaps {
@@ -205,6 +264,9 @@ const std::vector<NameEntry>& colormapTable() {
         {"RdYlGn",   colormaps::RdYlGn},
         {"Spectral", colormaps::Spectral},
         {"bwr",      colormaps::bwr},
+        {"berlin",   colormaps::berlin},
+        {"managua",  colormaps::managua},
+        {"vanimo",   colormaps::vanimo},
         // Cyclic (§3.4)
         {"twilight",         colormaps::twilight},
         {"twilight_shifted", colormaps::twilight_shifted},
@@ -222,6 +284,7 @@ const std::vector<NameEntry>& colormapTable() {
         {"tab20",    colormaps::tab20},
         {"tab20b",   colormaps::tab20b},
         {"tab20c",   colormaps::tab20c},
+        {"okabe_ito",colormaps::okabe_ito},
         // Miscellaneous (§3.6)
         {"flag",          colormaps::flag},
         {"prism",         colormaps::prism},
@@ -266,13 +329,9 @@ const Colormap& getReversed(std::string_view baseName) {
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
 
-    // Create the reversed colormap.
-    Colormap rev;
-    rev.name = std::string(baseName) + "_r";
-    rev.stops.reserve(base->stops.size());
-    for (auto it2 = base->stops.rbegin(); it2 != base->stops.rend(); ++it2)
-        rev.stops.push_back(*it2);
-    auto [inserted, _] = cache.emplace(std::move(key), std::move(rev));
+    // Create the reversed colormap (preserves discrete flag and
+    // bad color; under/over are swapped by reversed()).
+    auto [inserted, _] = cache.emplace(std::move(key), base->reversed());
     return inserted->second;
 }
 

@@ -3,6 +3,7 @@
 
 set(VOLCANO_TEXT_SOURCES
     ${VOLCANO_ROOT}/src/text/TextRenderer.cpp
+    ${VOLCANO_ROOT}/src/text/MathText.cpp
 )
 
 volcano_add_component(volcano_text

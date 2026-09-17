@@ -2,33 +2,35 @@
 #include "volcano/render/primitives/BarRenderer.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
+#include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace volcano::render::primitives {
 
 namespace {
 
-constexpr const char* kVertGlsl = R"(
+constexpr const char* kVertHead = R"(
 #version 460
 layout(location = 0) in vec2 a_pos;    // data coords (bar corner)
 layout(location = 1) in vec4 a_color;  // per-bar color
 
 layout(push_constant) uniform PC {
     vec4 u_viewMinSpan;  // xy = min, zw = span
-    vec2 u_log;
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
 } pc;
 
 layout(location = 0) out vec4 v_color;
+)";
 
-vec2 applyLog(vec2 p) {
-    if (pc.u_log.x > 0.5) p.x = log(max(p.x,1e-30)) / log(10.0);
-    if (pc.u_log.y > 0.5) p.y = log(max(p.y,1e-30)) / log(10.0);
-    return p;
-}
-
+constexpr const char* kVertMain = R"(
 void main() {
-    vec2 p = applyLog(a_pos);
+    vec2 p = projFwd(vec2(scaleFwd(a_pos.x, pc.u_scaleX.xyz),
+                          scaleFwd(a_pos.y, pc.u_scaleY.xyz)),
+                     pc.u_proj.xyz);
     vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     v_color = a_color;
@@ -47,14 +49,16 @@ void main() { outColor = v_color; }
 void BarRenderer::init(vk::Device device, vk::RenderPass renderPass,
                        vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
     device_ = device;
-    auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
+    auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
+                   shaders::kProjFn + kVertMain;
+    auto v = core::ShaderModule::compileGlsl(vertSrc, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
     vert_ = core::ShaderModule(device, v);
     frag_ = core::ShaderModule(device, f);
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex)
-       .setOffset(0).setSize(sizeof(float) * 6);
+       .setOffset(0).setSize(sizeof(float) * 16);
     vk::PipelineLayoutCreateInfo plci;
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -169,14 +173,23 @@ void BarRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
 
     struct PC {
         float viewMinX, viewMinY, viewSpanX, viewSpanY;
-        float logX, logY;
+        float sxCode, sxP1, sxP2, sxPad;
+        float syCode, syP1, syP2, syPad;
+        float prCode, thetaOff, thetaDir, prPad;
     } pc;
     pc.viewMinX = transform.view.x.min;
     pc.viewMinY = transform.view.y.min;
     pc.viewSpanX = transform.view.x.span();
     pc.viewSpanY = transform.view.y.span();
-    pc.logX = transform.logX ? 1.0f : 0.0f;
-    pc.logY = transform.logY ? 1.0f : 0.0f;
+    pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
+    pc.sxP1 = transform.scaleX.param1;
+    pc.sxP2 = transform.scaleX.param2;
+    pc.syCode = static_cast<float>(static_cast<int>(transform.codeY()));
+    pc.syP1 = transform.scaleY.param1;
+    pc.syP2 = transform.scaleY.param2;
+    pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
+    pc.thetaOff = transform.projection.thetaOffset;
+    pc.thetaDir = transform.projection.thetaDir;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex, 0, sizeof(PC), &pc);

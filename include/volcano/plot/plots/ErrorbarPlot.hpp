@@ -30,6 +30,16 @@ struct ErrorbarConfig {
     bool drawLine = true;          ///< draw connecting line between points
     bool drawMarker = true;        ///< draw markers at each point
     bool drawCaps = true;          ///< draw caps at error bar ends
+    /// matplotlib `errorevery`: draw error bars on every Nth point only
+    /// (1 = all points).
+    uint32_t errorevery = 1;
+    /// matplotlib `lolims`/`uplims`/`xlolims`/`xuplims`: per-point flags
+    /// marking the point as a one-sided limit — draws only the reachable
+    /// side of the error bar plus an arrowhead instead of a cap.
+    std::vector<bool> lolims;
+    std::vector<bool> uplims;
+    std::vector<bool> xlolims;
+    std::vector<bool> xuplims;
     std::string label;
 };
 

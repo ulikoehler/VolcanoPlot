@@ -21,6 +21,6 @@ set(VOLCANO_RENDER_SOURCES
 
 volcano_add_component(volcano_render
     SOURCES ${VOLCANO_RENDER_SOURCES}
-    PUBLIC_LINK volcano_core volcano_plot volcano_text
+    PUBLIC_LINK volcano_core volcano_plot volcano_text volcano_encode
     PUBLIC_INC include/volcano/render
 )

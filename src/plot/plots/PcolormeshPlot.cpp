@@ -68,7 +68,7 @@ void PcolormeshPlot::buildGeometry() {
     for (uint32_t j = 0; j < nRows_; ++j) {
         for (uint32_t i = 0; i < nCols_; ++i) {
             float val = C_[j * nCols_ + i];
-            if (config_.skipNaN && std::isnan(val)) continue;
+            if (config_.skipNaN && std::isnan(val) && !cmap.bad) continue;
 
             // Cell corners.
             float x0 = x_[i], x1 = x_[i + 1];
@@ -80,8 +80,8 @@ void PcolormeshPlot::buildGeometry() {
                 t = (*config_.norm)(val);
             } else {
                 t = (val - valueRange_.min) / vspan;
-                t = std::clamp(t, 0.0f, 1.0f);
             }
+            // NaN t -> cmap.bad (or transparent); out-of-range -> under/over.
             Color color = cmap.sample(t);
 
             // Two triangles per cell.
@@ -116,10 +116,7 @@ void PcolormeshPlot::prepare(render::Renderer& r) {
 void PcolormeshPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     fillRenderer_.draw(cmd, vrect, t);

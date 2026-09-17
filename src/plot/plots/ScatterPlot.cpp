@@ -25,12 +25,16 @@ void ScatterPlot::prepare(render::Renderer& r) {
 void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& /*r*/,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y}, vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(series_.points.size()));
+    render::primitives::MarkerParams mp{
+        .code = static_cast<float>(static_cast<int>(series_.marker)),
+        .fill = static_cast<float>(static_cast<int>(series_.markerFill)),
+        .numsides = static_cast<float>(series_.markerNumsides),
+        .angle = series_.markerAngle,
+    };
+    renderer_.draw(cmd, vrect, t,
+                   static_cast<uint32_t>(series_.points.size()), mp);
 }
 
 void ScatterPlot::contributeToAutoscale(Viewport& v) const {

@@ -4,33 +4,43 @@
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/core/CommandBuffer.hpp>
 #include <volcano/plot/Transform.hpp>
+#include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace volcano::render::primitives {
 
 namespace {
 
-constexpr const char* kVertGlsl = R"(
+constexpr const char* kVertHead = R"(
 #version 460
 layout(location = 0) in vec2 a_pos;  // fullscreen quad [-1,1]
 
 layout(push_constant) uniform PC {
-    vec4 u_viewMinSpan;  // xy = min, zw = span (data coords)
+    vec4 u_viewMinSpan;  // xy = min, zw = span (display space)
     vec4 u_gridRange;    // xy = xRange, zw = yRange (data coords of grid)
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
     vec2 u_valueRange;   // min, max of scalar values
 } pc;
 
 layout(location = 0) out vec2 v_uv;  // texture coords [0,1]
+)";
 
+constexpr const char* kVertMain = R"(
 void main() {
     // u_gridRange = (xMin, xMax, yMin, yMax)
     // Map NDC quad position to data coords within the grid range.
     vec2 data = vec2(pc.u_gridRange.x, pc.u_gridRange.z) +
                 (a_pos * 0.5 + 0.5) * vec2(pc.u_gridRange.y - pc.u_gridRange.x,
                                            pc.u_gridRange.w - pc.u_gridRange.z);
-    // Map data coords to NDC for the viewport.
-    vec2 ndc = (data - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
+    // Apply scales + projection, then map display coords to NDC.
+    vec2 p = projFwd(vec2(scaleFwd(data.x, pc.u_scaleX.xyz),
+                          scaleFwd(data.y, pc.u_scaleY.xyz)),
+                     pc.u_proj.xyz);
+    vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     // UV into grid texture: flip Y for Vulkan texture origin.
     v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
@@ -48,6 +58,9 @@ layout(location = 0) out vec4 outColor;
 layout(push_constant) uniform PC {
     vec4 u_viewMinSpan;
     vec4 u_gridRange;
+    vec4 u_scaleX;
+    vec4 u_scaleY;
+    vec4 u_proj;
     vec2 u_valueRange;
 } pc;
 
@@ -70,7 +83,9 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
                            vk::SampleCountFlagBits samples, core::PipelineCache& cache,
                            core::DescriptorPool& descPool) {
     device_ = device;
-    auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
+    auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
+                   shaders::kProjFn + kVertMain;
+    auto v = core::ShaderModule::compileGlsl(vertSrc, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
     vert_ = core::ShaderModule(device, v);
     frag_ = core::ShaderModule(device, f);
@@ -87,7 +102,7 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * 10);
+       .setOffset(0).setSize(sizeof(float) * 22);
     vk::PipelineLayoutCreateInfo plci;
     plci.setSetLayouts(descLayout_.get()).setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -309,6 +324,9 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     struct PC {
         float viewMinX, viewMinY, viewSpanX, viewSpanY;
         float gridXMin, gridXMax, gridYMin, gridYMax;
+        float sxCode, sxP1, sxP2, sxPad;
+        float syCode, syP1, syP2, syPad;
+        float prCode, thetaOff, thetaDir, prPad;
         float valueMin, valueMax;
     } pc;
     pc.viewMinX = transform.view.x.min;
@@ -319,6 +337,15 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.gridXMax = gridXRange_.max;
     pc.gridYMin = gridYRange_.min;
     pc.gridYMax = gridYRange_.max;
+    pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
+    pc.sxP1 = transform.scaleX.param1;
+    pc.sxP2 = transform.scaleX.param2;
+    pc.syCode = static_cast<float>(static_cast<int>(transform.codeY()));
+    pc.syP1 = transform.scaleY.param1;
+    pc.syP2 = transform.scaleY.param2;
+    pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
+    pc.thetaOff = transform.projection.thetaOffset;
+    pc.thetaDir = transform.projection.thetaDir;
     pc.valueMin = valueMin_;
     pc.valueMax = valueMax_;
 

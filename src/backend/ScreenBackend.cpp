@@ -310,14 +310,185 @@ void ScreenBackend::recreateSwapchain() {
     resized_ = false;
 }
 
+namespace {
+
+/// SDL button number → mpl convention (1=left, 2=middle, 3=right).
+int toMplButton(uint8_t b) {
+    if (b == SDL_BUTTON_LEFT) return 1;
+    if (b == SDL_BUTTON_MIDDLE) return 2;
+    if (b == SDL_BUTTON_RIGHT) return 3;
+    return int(b) + 3; // X1/X2 → 4/5
+}
+
+/// SDL button state mask → bit-per-button mask (bit0=left...).
+int toButtonMask(uint32_t m) {
+    int out = 0;
+    if (m & SDL_BUTTON_LMASK) out |= 1;
+    if (m & SDL_BUTTON_MMASK) out |= 2;
+    if (m & SDL_BUTTON_RMASK) out |= 4;
+    if (m & SDL_BUTTON_X1MASK) out |= 8;
+    if (m & SDL_BUTTON_X2MASK) out |= 16;
+    return out;
+}
+
+void fillMods(InputEvent& ev, SDL_Keymod mod) {
+    ev.shift = (mod & SDL_KMOD_SHIFT) != 0;
+    ev.ctrl = (mod & SDL_KMOD_CTRL) != 0;
+    ev.alt = (mod & SDL_KMOD_ALT) != 0;
+}
+
+/// SDL_Keycode → printable ASCII. SDL3 keycodes for letters are already
+/// the lowercase ASCII codes; digits are the ASCII digits.
+char toAscii(SDL_Keycode kc, bool shift) {
+    if (kc >= SDLK_A && kc <= SDLK_Z) return char(kc);
+    if (kc >= SDLK_0 && kc <= SDLK_9) {
+        static constexpr char shifted[] = ")!@#$%^&*(";
+        return shift ? shifted[kc - SDLK_0] : char(kc);
+    }
+    switch (kc) {
+        case SDLK_SPACE: return ' ';
+        case SDLK_MINUS: return shift ? '_' : '-';
+        case SDLK_EQUALS: return shift ? '+' : '=';
+        case SDLK_LEFTBRACKET: return shift ? '{' : '[';
+        case SDLK_RIGHTBRACKET: return shift ? '}' : ']';
+        case SDLK_SEMICOLON: return shift ? ':' : ';';
+        case SDLK_APOSTROPHE: return shift ? '"' : '\'';
+        case SDLK_COMMA: return shift ? '<' : ',';
+        case SDLK_PERIOD: return shift ? '>' : '.';
+        case SDLK_SLASH: return shift ? '?' : '/';
+        case SDLK_BACKSLASH: return shift ? '|' : '\\';
+        case SDLK_GRAVE: return shift ? '~' : '`';
+        default: return 0;
+    }
+}
+
+/// SDL_Keycode → mpl key name for non-printable keys.
+const char* keyName(SDL_Keycode kc) {
+    switch (kc) {
+        case SDLK_RETURN: case SDLK_KP_ENTER: return "enter";
+        case SDLK_ESCAPE: return "escape";
+        case SDLK_BACKSPACE: return "backspace";
+        case SDLK_TAB: return "tab";
+        case SDLK_DELETE: return "delete";
+        case SDLK_LEFT: return "left";
+        case SDLK_RIGHT: return "right";
+        case SDLK_UP: return "up";
+        case SDLK_DOWN: return "down";
+        case SDLK_HOME: return "home";
+        case SDLK_END: return "end";
+        case SDLK_PAGEUP: return "pageup";
+        case SDLK_PAGEDOWN: return "pagedown";
+        case SDLK_LSHIFT: case SDLK_RSHIFT: return "shift";
+        case SDLK_LCTRL: case SDLK_RCTRL: return "control";
+        case SDLK_LALT: case SDLK_RALT: return "alt";
+        default: return nullptr;
+    }
+}
+
+} // namespace
+
 bool ScreenBackend::pollEvents() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_EVENT_QUIT) return false;
-        if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
-        if (e.type == SDL_EVENT_WINDOW_RESIZED) resized_ = true;
+        switch (e.type) {
+        case SDL_EVENT_QUIT:
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            return false;
+
+        case SDL_EVENT_WINDOW_RESIZED:
+            resized_ = true;
+            {
+                InputEvent ev{};
+                ev.type = InputEvent::Type::Resize;
+                ev.width = uint32_t(e.window.data1);
+                ev.height = uint32_t(e.window.data2);
+                pendingEvents_.push_back(ev);
+            }
+            break;
+
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            InputEvent ev{};
+            ev.type = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN
+                ? InputEvent::Type::ButtonPress : InputEvent::Type::ButtonRelease;
+            ev.x = e.button.x;
+            ev.y = e.button.y;
+            ev.button = toMplButton(e.button.button);
+            ev.buttons = toButtonMask(SDL_GetMouseState(nullptr, nullptr));
+            ev.dblclick = e.button.clicks == 2;
+            fillMods(ev, SDL_GetModState());
+            pendingEvents_.push_back(ev);
+            break;
+        }
+
+        case SDL_EVENT_MOUSE_MOTION: {
+            InputEvent ev{};
+            ev.type = InputEvent::Type::Motion;
+            ev.x = e.motion.x;
+            ev.y = e.motion.y;
+            ev.buttons = toButtonMask(e.motion.state);
+            fillMods(ev, SDL_GetModState());
+            pendingEvents_.push_back(ev);
+            break;
+        }
+
+        case SDL_EVENT_MOUSE_WHEEL: {
+            InputEvent ev{};
+            ev.type = InputEvent::Type::Scroll;
+            ev.step = e.wheel.y;
+            float mx, my;
+            ev.buttons = toButtonMask(SDL_GetMouseState(&mx, &my));
+            ev.x = mx; ev.y = my;
+            fillMods(ev, SDL_GetModState());
+            pendingEvents_.push_back(ev);
+            break;
+        }
+
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP: {
+            InputEvent ev{};
+            ev.type = e.type == SDL_EVENT_KEY_DOWN
+                ? InputEvent::Type::KeyPress : InputEvent::Type::KeyRelease;
+            fillMods(ev, e.key.mod);
+            ev.keycode = uint32_t(e.key.key);
+            ev.key = toAscii(e.key.key, ev.shift);
+            if (ev.key == 0)
+                if (const char* n = keyName(e.key.key)) ev.text = n;
+            float mx, my;
+            ev.buttons = toButtonMask(SDL_GetMouseState(&mx, &my));
+            ev.x = mx; ev.y = my;
+            pendingEvents_.push_back(ev);
+            break;
+        }
+
+        case SDL_EVENT_TEXT_INPUT: {
+            InputEvent ev{};
+            ev.type = InputEvent::Type::TextInput;
+            ev.text = e.text.text ? e.text.text : "";
+            pendingEvents_.push_back(ev);
+            break;
+        }
+
+        default:
+            break;
+        }
     }
     return true;
+}
+
+std::vector<InputEvent> ScreenBackend::takeEvents() {
+    auto out = std::move(pendingEvents_);
+    pendingEvents_.clear();
+    return out;
+}
+
+void ScreenBackend::setWindowTitle(std::string_view title) {
+    SDL_SetWindowTitle(window_, std::string(title).c_str());
+}
+
+void ScreenBackend::toggleFullscreen() {
+    bool full = (SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0;
+    SDL_SetWindowFullscreen(window_, !full);
 }
 
 vk::CommandBuffer ScreenBackend::beginFrame() {
@@ -341,7 +512,8 @@ vk::CommandBuffer ScreenBackend::beginFrame() {
     cb.begin(bi);
 
     std::array<vk::ClearValue, 2> clears{};
-    clears[0].color.setFloat32({0.95f, 0.95f, 0.95f, 1.0f});
+    clears[0].color.setFloat32({clearColor_[0], clearColor_[1],
+                                clearColor_[2], clearColor_[3]});
     clears[1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPass_.get())

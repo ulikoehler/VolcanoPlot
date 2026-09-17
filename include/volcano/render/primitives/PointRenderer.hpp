@@ -17,8 +17,15 @@ namespace volcano::render { struct RenderContext; }
 
 namespace volcano::render::primitives {
 
-/// Renders scatter points as instanced quads with per-marker SDF shading.
-/// Supports circle, square, diamond, triangle, plus, x, star markers.
+/// Renders scatter points as point sprites with per-marker SDF shading.
+/// Supports the matplotlib marker set (polygons, stars, tripods, carets,
+/// ticks) plus fill styles via `MarkerParams`.
+struct MarkerParams {
+    float code = 1.0f;      ///< plot::MarkerStyle value
+    float fill = 0.0f;      ///< plot::MarkerFill value
+    float numsides = 5.0f;  ///< for Polygon/StarN/AsteriskN/CircledN
+    float angle = 0.0f;     ///< marker rotation, radians
+};
 class PointRenderer {
 public:
     PointRenderer() = default;
@@ -29,7 +36,7 @@ public:
                 VmaAllocator allocator, std::span<const plot::Point2D> points,
                 std::span<const plot::Color> colors, std::span<const float> sizes);
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Transform2D& transform,
-              uint32_t pointCount) const;
+              uint32_t pointCount, MarkerParams marker = {}) const;
 
     /// GPU handle to the uploaded point buffer (vec2 data), for GPU autoscale.
     [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }

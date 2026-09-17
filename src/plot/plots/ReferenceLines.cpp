@@ -20,9 +20,8 @@ void AxhLine::prepare(render::Renderer& /*r*/) {
 void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    const auto& vp = axes.viewport();
     // Convert data y to pixel y (Y-up data → Y-down pixel).
-    float py = rect.y + (1.0f - (y_ - vp.y.min) / vp.y.span()) * rect.height;
+    float py = rect.y + (1.0f - axes.dataToFraction({0.0f, y_}).y) * rect.height;
     // Line spans the axes rect in pixel x. Extend slightly beyond to
     // ensure full pixel coverage at edges.
     Point2D pts[] = {
@@ -51,9 +50,8 @@ void AxvLine::prepare(render::Renderer& /*r*/) {
 void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    const auto& vp = axes.viewport();
     // Convert data x to pixel x.
-    float px = rect.x + (x_ - vp.x.min) / vp.x.span() * rect.width;
+    float px = rect.x + axes.dataToFraction({x_, 0.0f}).x * rect.width;
     // Line spans the axes rect in pixel y. Extend slightly beyond to
     // ensure full pixel coverage at edges.
     Point2D pts[] = {
@@ -96,10 +94,7 @@ void AxhSpan::prepare(render::Renderer& r) {
 void AxhSpan::draw(vk::CommandBuffer cmd, render::Renderer&,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t);
@@ -135,10 +130,7 @@ void AxvSpan::prepare(render::Renderer& r) {
 void AxvSpan::draw(vk::CommandBuffer cmd, render::Renderer&,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t);
@@ -174,10 +166,7 @@ void Vlines::prepare(render::Renderer& r) {
 void Vlines::draw(vk::CommandBuffer cmd, render::Renderer&,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t, vertexCount_);
@@ -217,10 +206,7 @@ void Hlines::prepare(render::Renderer& r) {
 void Hlines::draw(vk::CommandBuffer cmd, render::Renderer&,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t, vertexCount_);

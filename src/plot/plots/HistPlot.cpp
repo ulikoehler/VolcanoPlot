@@ -46,15 +46,22 @@ int fdBins(const std::vector<float>& sorted, float dataMin, float dataMax) {
 } // namespace
 
 void HistPlot::computeBins() {
-    if (samples_.empty()) {
+    // Merge all samples for shared bin-edge computation.
+    std::vector<float> all;
+    size_t total = 0;
+    for (const auto& d : datasets_) total += d.size();
+    all.reserve(total);
+    for (const auto& d : datasets_)
+        all.insert(all.end(), d.begin(), d.end());
+
+    if (all.empty()) {
         binEdges_ = {0.0f, 1.0f};
-        heights_ = {0.0f};
+        heights_.assign(std::max<size_t>(datasets_.size(), 1), {0.0f});
         return;
     }
 
     // Sort samples for quantile computation.
-    std::vector<float> sorted = samples_;
-    std::sort(sorted.begin(), sorted.end());
+    std::sort(all.begin(), all.end());
 
     // Determine data range.
     float dataMin, dataMax;
@@ -62,26 +69,32 @@ void HistPlot::computeBins() {
         dataMin = cfg_.range->min;
         dataMax = cfg_.range->max;
     } else {
-        dataMin = sorted.front();
-        dataMax = sorted.back();
+        dataMin = all.front();
+        dataMax = all.back();
     }
     if (dataMax <= dataMin) dataMax = dataMin + 1.0f;
 
-    // Determine bin edges.
+    // Determine bin edges (shared across datasets — required for
+    // barstacked stacking, matching matplotlib).
     if (cfg_.bins == HistBinMethod::Edges && cfg_.binEdges.size() >= 2) {
         binEdges_ = cfg_.binEdges;
     } else {
+        // Bin count from the largest dataset (matplotlib uses per-dataset
+        // counts for "auto"; shared edges use the max count).
+        size_t maxN = 0;
+        for (const auto& d : datasets_) maxN = std::max(maxN, d.size());
+        std::vector<float> largest = all; // for IQR use merged samples
         int nBins;
         switch (cfg_.bins) {
-            case HistBinMethod::Sturges: nBins = sturgesBins(sorted.size()); break;
-            case HistBinMethod::FD:      nBins = fdBins(sorted, dataMin, dataMax); break;
-            case HistBinMethod::Rice:    nBins = riceBins(sorted.size()); break;
-            case HistBinMethod::Square:  nBins = squareBins(sorted.size()); break;
+            case HistBinMethod::Sturges: nBins = sturgesBins(maxN); break;
+            case HistBinMethod::FD:      nBins = fdBins(largest, dataMin, dataMax); break;
+            case HistBinMethod::Rice:    nBins = riceBins(maxN); break;
+            case HistBinMethod::Square:  nBins = squareBins(maxN); break;
             case HistBinMethod::Fixed:   nBins = cfg_.binCount; break;
             case HistBinMethod::Auto:
             default:
-                nBins = std::max(sturgesBins(sorted.size()),
-                                 fdBins(sorted, dataMin, dataMax));
+                nBins = std::max(sturgesBins(maxN),
+                                 fdBins(largest, dataMin, dataMax));
                 break;
         }
         nBins = std::max(1, nBins);
@@ -91,72 +104,146 @@ void HistPlot::computeBins() {
             binEdges_[i] = dataMin + i * binWidth;
     }
 
-    // Count samples in each bin.
+    // Count samples per dataset in the shared bins.
     size_t nBins = binEdges_.size() - 1;
-    heights_.assign(nBins, 0.0f);
-    for (float s : samples_) {
-        if (s < binEdges_.front() || s > binEdges_.back()) continue;
-        // Find bin index via binary search on edges.
-        auto it = std::upper_bound(binEdges_.begin(), binEdges_.end(), s);
-        size_t idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
-        if (idx >= nBins) idx = nBins - 1;  // last bin includes right edge
-        heights_[idx] += 1.0f;
-    }
-
-    // Apply normalization.
-    float total = static_cast<float>(samples_.size());
-    if (total <= 0) total = 1.0f;
-
-    switch (cfg_.norm) {
-        case HistNorm::Density:
-            for (size_t i = 0; i < nBins; ++i) {
-                float w = binEdges_[i + 1] - binEdges_[i];
-                if (w > 0) heights_[i] /= (total * w);
-            }
-            break;
-        case HistNorm::Probability:
-            for (size_t i = 0; i < nBins; ++i)
-                heights_[i] /= total;
-            break;
-        case HistNorm::Cumulative: {
-            float cum = 0;
-            for (size_t i = 0; i < nBins; ++i) {
-                cum += heights_[i];
-                heights_[i] = cum;
-            }
-            break;
+    heights_.assign(datasets_.size(), std::vector<float>(nBins, 0.0f));
+    for (size_t d = 0; d < datasets_.size(); ++d) {
+        for (float s : datasets_[d]) {
+            if (s < binEdges_.front() || s > binEdges_.back()) continue;
+            auto it = std::upper_bound(binEdges_.begin(), binEdges_.end(), s);
+            size_t idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
+            if (idx >= nBins) idx = nBins - 1;  // last bin includes right edge
+            heights_[d][idx] += 1.0f;
         }
-        case HistNorm::Count:
-        default:
-            break;  // raw counts
+
+        // Apply normalization (per dataset, like matplotlib).
+        float n = static_cast<float>(datasets_[d].size());
+        if (n <= 0) n = 1.0f;
+        auto& h = heights_[d];
+        switch (cfg_.norm) {
+            case HistNorm::Density:
+                for (size_t i = 0; i < nBins; ++i) {
+                    float w = binEdges_[i + 1] - binEdges_[i];
+                    if (w > 0) h[i] /= (n * w);
+                }
+                break;
+            case HistNorm::Probability:
+                for (auto& v : h) v /= n;
+                break;
+            case HistNorm::Cumulative: {
+                float cum = 0;
+                for (auto& v : h) { cum += v; v = cum; }
+                break;
+            }
+            case HistNorm::Count:
+            default:
+                break;
+        }
     }
+    if (heights_.empty()) heights_.push_back(std::vector<float>(nBins, 0.0f));
 }
+
+namespace {
+
+/// Emit a filled axis-aligned rectangle as two triangles.
+void emitQuad(std::vector<Point2D>& pos, float x0, float y0,
+              float x1, float y1) {
+    pos.insert(pos.end(), {{x0, y0}, {x1, y0}, {x0, y1},
+                           {x1, y0}, {x1, y1}, {x0, y1}});
+}
+
+} // namespace
 
 void HistPlot::buildBarVertices(std::vector<Point2D>& positions,
                                 std::vector<Color>& colors) const {
     size_t nBins = binEdges_.size() - 1;
     if (nBins == 0) return;
-    positions.reserve(nBins * 6);
-    colors.reserve(nBins * 6);
+    size_t nSets = heights_.size();
+    auto setColor = [&](size_t d) {
+        return d < cfg_.colors.size() ? cfg_.colors[d] : cfg_.color;
+    };
 
-    for (size_t i = 0; i < nBins; ++i) {
-        float x0 = binEdges_[i];
-        float x1 = binEdges_[i + 1];
-        float h = heights_[i];
-
-        if (cfg_.horizontal) {
-            // Horizontal: bars along X, height is bar width along Y.
-            float y0 = x0;
-            float y1 = x1;
-            float w = h;
-            Point2D bl{0, y0}, br{0, y1}, tl{w, y0}, tr{w, y1};
-            positions.insert(positions.end(), {bl, br, tl, br, tr, tl});
-        } else {
-            // Vertical: bars along Y, baseline at y=0.
-            Point2D bl{x0, 0}, br{x1, 0}, tl{x0, h}, tr{x1, h};
-            positions.insert(positions.end(), {bl, br, tl, br, tr, tl});
+    if (cfg_.histtype == HistType::StepFilled) {
+        // Filled step polygon per dataset down to the baseline.
+        for (size_t d = 0; d < nSets; ++d) {
+            Color c = setColor(d);
+            for (size_t i = 0; i < nBins; ++i) {
+                float e0 = binEdges_[i], e1 = binEdges_[i + 1];
+                float h = heights_[d][i];
+                if (cfg_.horizontal) emitQuad(positions, 0, e0, h, e1);
+                else                 emitQuad(positions, e0, 0, e1, h);
+                for (int k = 0; k < 6; ++k) colors.push_back(c);
+            }
         }
-        for (int j = 0; j < 6; ++j) colors.push_back(cfg_.color);
+        return;
+    }
+
+    if (cfg_.histtype == HistType::BarStacked) {
+        // Stack datasets in each bin.
+        for (size_t i = 0; i < nBins; ++i) {
+            float base = 0.0f;
+            for (size_t d = 0; d < nSets; ++d) {
+                float h = heights_[d][i];
+                if (cfg_.horizontal)
+                    emitQuad(positions, base, binEdges_[i],
+                             base + h, binEdges_[i + 1]);
+                else
+                    emitQuad(positions, binEdges_[i], base,
+                             binEdges_[i + 1], base + h);
+                base += h;
+                Color c = setColor(d);
+                for (int k = 0; k < 6; ++k) colors.push_back(c);
+            }
+        }
+        return;
+    }
+
+    // HistType::Bar — side-by-side bars for multiple datasets.
+    positions.reserve(nBins * 6 * nSets);
+    colors.reserve(nBins * 6 * nSets);
+    for (size_t i = 0; i < nBins; ++i) {
+        float e0 = binEdges_[i], e1 = binEdges_[i + 1];
+        float w = (e1 - e0) / float(std::max<size_t>(nSets, 1));
+        for (size_t d = 0; d < nSets; ++d) {
+            float h = heights_[d][i];
+            if (cfg_.horizontal)
+                emitQuad(positions, 0, e0 + w * float(d),
+                         h, e0 + w * float(d + 1));
+            else
+                emitQuad(positions, e0 + w * float(d), 0,
+                         e0 + w * float(d + 1), h);
+            Color c = setColor(d);
+            for (int k = 0; k < 6; ++k) colors.push_back(c);
+        }
+    }
+}
+
+void HistPlot::buildStepSegments() {
+    // Unfilled step outlines (matplotlib histtype="step").
+    stepSegs_.assign(heights_.size(), {});
+    size_t nBins = binEdges_.size() - 1;
+    for (size_t d = 0; d < heights_.size(); ++d) {
+        auto& segs = stepSegs_[d];
+        const auto& h = heights_[d];
+        for (size_t i = 0; i < nBins; ++i) {
+            float e0 = binEdges_[i], e1 = binEdges_[i + 1];
+            // Horizontal top of the bin + vertical riser to the next bin.
+            if (cfg_.horizontal) {
+                segs.push_back({h[i], e0});
+                segs.push_back({h[i], e1});
+                if (i + 1 < nBins) {
+                    segs.push_back({h[i], e1});
+                    segs.push_back({h[i + 1], e1});
+                }
+            } else {
+                segs.push_back({e0, h[i]});
+                segs.push_back({e1, h[i]});
+                if (i + 1 < nBins) {
+                    segs.push_back({e1, h[i]});
+                    segs.push_back({e1, h[i + 1]});
+                }
+            }
+        }
     }
 }
 
@@ -167,15 +254,42 @@ void HistPlot::prepare(render::Renderer& r) {
 
     computeBins();
 
-    std::vector<Point2D> positions;
-    std::vector<Color> colors;
-    buildBarVertices(positions, colors);
+    if (cfg_.histtype == HistType::Step) {
+        buildStepSegments();
+        stepRenderers_.clear();
+        stepCounts_.clear();
+        for (size_t d = 0; d < stepSegs_.size(); ++d) {
+            if (stepSegs_[d].empty()) continue;
+            auto sr = std::make_unique<render::primitives::LineSegmentRenderer>();
+            sr->init(ctx.device.handle(), r.backend().renderPass(),
+                     r.backend().sampleCount(), r.pipelineCache());
+            Color c = d < cfg_.colors.size() ? cfg_.colors[d] : cfg_.color;
+            c.a = 1.0f; // step outlines are opaque (matplotlib)
+            sr->upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                       std::span{stepSegs_[d]}, c, cfg_.stepLineWidth);
+            stepCounts_.push_back(uint32_t(stepSegs_[d].size()));
+            stepRenderers_.push_back(std::move(sr));
+        }
+    } else {
+        std::vector<Point2D> positions;
+        std::vector<Color> colors;
+        buildBarVertices(positions, colors);
+        if (!positions.empty())
+            renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                             std::span{positions}, std::span{colors});
+    }
 
     // Store unique data points for GPU autoscale (corners of each bar).
     uploadedPoints_.clear();
-    uploadedPoints_.reserve(binEdges_.size() * 2);
     for (size_t i = 0; i < binEdges_.size(); ++i) {
-        float h = (i < heights_.size()) ? heights_[i] : 0.0f;
+        float h = 0.0f;
+        for (const auto& set : heights_)
+            if (i < set.size())
+                h = (cfg_.histtype == HistType::BarStacked)
+                        ? h + set[i]           // stacked top
+                        : std::max(h, set[i]); // tallest bar
         if (cfg_.horizontal) {
             uploadedPoints_.push_back({0.0f, binEdges_[i]});
             uploadedPoints_.push_back({h, binEdges_[i]});
@@ -184,37 +298,43 @@ void HistPlot::prepare(render::Renderer& r) {
             uploadedPoints_.push_back({binEdges_[i], h});
         }
     }
-
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{positions.data(), positions.size()},
-                     std::span{colors.data(), colors.size()});
     prepared_ = true;
 }
 
 void HistPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t);
+    if (cfg_.histtype == HistType::Step) {
+        for (size_t i = 0; i < stepRenderers_.size(); ++i)
+            stepRenderers_[i]->draw(cmd, vrect, t, stepCounts_[i]);
+    } else {
+        renderer_.draw(cmd, vrect, t);
+    }
 }
 
 void HistPlot::contributeToAutoscale(Viewport& v) const {
-    if (binEdges_.empty() || heights_.empty()) {
-        // Use sample range if bins not yet computed.
-        for (float s : samples_) {
-            v.x.min = std::min(v.x.min, s);
-            v.x.max = std::max(v.x.max, s);
-        }
+    if (binEdges_.empty() || heights_.empty() || heights_.front().empty()) {
+        for (const auto& d : datasets_)
+            for (float s : d) {
+                v.x.min = std::min(v.x.min, s);
+                v.x.max = std::max(v.x.max, s);
+            }
         return;
     }
 
-    float maxH = *std::max_element(heights_.begin(), heights_.end());
+    float maxH = 0.0f;
+    size_t nBins = heights_.front().size();
+    for (size_t i = 0; i < nBins; ++i) {
+        float h = 0.0f;
+        for (const auto& set : heights_)
+            if (i < set.size())
+                h = (cfg_.histtype == HistType::BarStacked)
+                        ? h + set[i] : std::max(h, set[i]);
+        maxH = std::max(maxH, h);
+    }
     if (cfg_.horizontal) {
         v.y.min = std::min(v.y.min, binEdges_.front());
         v.y.max = std::max(v.y.max, binEdges_.back());

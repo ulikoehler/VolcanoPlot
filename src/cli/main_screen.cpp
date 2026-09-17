@@ -4,10 +4,12 @@
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
+#include <volcano/plot/Interaction.hpp>
 #include <volcano/plot/Style.hpp>
 
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <iostream>
 
 int main() {
@@ -59,7 +61,25 @@ int main() {
 
     renderer.prepare(figure);
 
-    while (backend->pollEvents()) {
+    // Interactive navigation (mpl keymap): p=pan, o=zoom-rect, h/r=home,
+    // s=save, g=grid, l=y-log, k=x-log, f=fullscreen, q=quit.
+    auto& nav = figure.nav();
+    nav.scrollZoom = true;
+    bool running = true;
+    nav.onQuitRequest = [&] { running = false; };
+    nav.onFullscreenToggle = [&] { backend->toggleFullscreen(); };
+    nav.onSaveRequest = [&] {
+        if (renderer.savefig(figure, "volcano_screen.png"))
+            std::cout << "Saved volcano_screen.png\n";
+        else
+            std::cerr << "savefig unsupported on this backend\n";
+    };
+    nav.onCursorMove = [&](std::string_view s) {
+        backend->setWindowTitle(std::format("VolcanoPlot — {}", s));
+    };
+
+    while (running && backend->pollEvents()) {
+        if (!renderer.processInput(figure)) break;
         renderer.renderFrame(figure);
     }
     return 0;

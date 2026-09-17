@@ -2,10 +2,14 @@
 #pragma once
 
 #include "volcano/plot/Axes.hpp"
+#include "volcano/plot/Cycler.hpp"
+#include "volcano/plot/Events.hpp"
+#include "volcano/plot/GridSpec.hpp"
 #include "volcano/plot/Style.hpp"
 
 #include <vulkan/vulkan.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -15,6 +19,9 @@ namespace volcano::render { class Renderer; }
 namespace volcano::render::primitives { class ReduceRenderer; }
 
 namespace volcano::plot {
+
+class Navigation;
+class Widget;
 
 /// Legend marker shape for a plot layer.
 enum class LegendMarker {
@@ -46,33 +53,177 @@ public:
     [[nodiscard]] virtual Color legendColor() const { return Color::black(); }
     /// Legend marker shape (default: filled square).
     [[nodiscard]] virtual LegendMarker legendMarker() const { return LegendMarker::Square; }
+    /// Apply one entry of the axes' property cycler (matplotlib
+    /// axes.prop_cycle). Return true when the entry was consumed — the
+    /// cycle position only advances for consuming plots. Called by
+    /// Axes::addPlot before the plot is stored.
+    virtual bool applyCycleProps(const CycleProps&) { return false; }
+
+    /// matplotlib `zorder`: plots are drawn in ascending zorder
+    /// (stable — equal zorder keeps insertion order).
+    float zorder = 0.0f;
+    /// matplotlib `rasterized`: stored for vector backends (PDF/SVG) which
+    /// may embed the layer as a bitmap. No effect on raster rendering.
+    bool rasterized = false;
+    /// Hit-test (matplotlib `contains` / pick): true when the data-space
+    /// point hits this layer. Default: never hit.
+    virtual bool contains(const Axes&, Point2D) const { return false; }
 };
 
 /// A Figure holds one or more Axes arranged in a grid.
-struct AxesPlacement { std::unique_ptr<Axes> axes; uint32_t r, c, rs, cs; };
+enum class PlacementMode {
+    Grid,            ///< Positioned via SubplotSpec in a GridSpec
+    FigureFraction,  ///< Fraction of the figure rect (matplotlib add_axes([l,b,w,h]))
+    Inset,           ///< Fraction of a parent axes' rect (inset_axes)
+    Overlay,         ///< Same rect as a parent axes (twinx/twiny)
+    Located,         ///< Adjacent to a parent axes (make_axes_locatable)
+};
+
+/// Side for located axes / twin ticks.
+enum class Side { Left, Right, Bottom, Top };
+
+struct AxesPlacement {
+    std::unique_ptr<Axes> axes;
+    SubplotSpec spec{};               ///< used when mode == Grid
+    PlacementMode mode = PlacementMode::Grid;
+    Axes* relTo = nullptr;            ///< parent axes for Inset/Overlay/Located
+    // FigureFraction / Inset: fractional rect (of figure / parent rect)
+    float fx = 0, fy = 0, fw = 0, fh = 0;
+    // Located: which side of the parent, size fraction of parent extent,
+    // pad fraction of figure.
+    Side side = Side::Right;
+    float locatedSize = 0.05f, locatedPad = 0.02f;
+};
+
+struct SubfigPlacement {
+    std::unique_ptr<Figure> figure;
+    SubplotSpec spec;
+};
 
 class Figure {
 public:
-    Figure() = default;
+    Figure();
     explicit Figure(uint32_t rows, uint32_t cols);
+    explicit Figure(std::shared_ptr<GridSpec> grid);
+    ~Figure(); // out-of-line: unique_ptrs to incomplete types
 
     /// Add an Axes at grid position (row, col), spanning rowSpan×colSpan.
     Axes* addAxes(uint32_t row = 0, uint32_t col = 0,
                   uint32_t rowSpan = 1, uint32_t colSpan = 1);
+    /// Add an Axes for a SubplotSpec (from any GridSpec, incl. nested).
+    Axes* addAxes(const SubplotSpec& spec);
+    /// Add an Axes at a figure-fraction rect [left, bottom, width, height]
+    /// (matplotlib fig.add_axes([l, b, w, h])).
+    Axes* addAxesFraction(float l, float b, float w, float h);
+
+    /// matplotlib subplot2grid: create/reset the top grid to `shape` and
+    /// add an axes at `loc` spanning (rowSpan, colSpan).
+    Axes* subplot2grid(std::pair<uint32_t, uint32_t> shape,
+                       std::pair<uint32_t, uint32_t> loc,
+                       uint32_t rowSpan = 1, uint32_t colSpan = 1);
+
+    /// matplotlib subplot_mosaic: grid of string labels. Each unique label
+    /// becomes an axes spanning its cells; "." leaves a cell empty.
+    /// Returns label → Axes* in insertion order.
+    std::map<std::string, Axes*>
+    subplotMosaic(const std::vector<std::vector<std::string>>& layout);
+
+    /// Add a nested figure covering `spec` (matplotlib subfigures).
+    Figure* addSubfigure(const SubplotSpec& spec,
+                         uint32_t rows = 1, uint32_t cols = 1);
+    /// Split the whole figure into rows×cols subfigures.
+    std::vector<Figure*> subfigures(uint32_t rows, uint32_t cols);
+
+    /// Overlay axes sharing `parent`'s rect; sharesX links the x viewport
+    /// (twinx: shared x, y ticks on right) or the y viewport (twiny).
+    Axes* twinx(Axes& parent);
+    Axes* twiny(Axes& parent);
+    /// Inset axes: fraction rect (x, y, w, h) inside `parent` (inset_axes).
+    Axes* insetAxes(Axes& parent, float x, float y, float w, float h);
+    /// Axes adjacent to `parent` (make_axes_locatable append_axes).
+    /// `size` is a fraction of the parent's extent, `pad` a fraction of the
+    /// figure extent.
+    Axes* appendAxes(Axes& parent, Side side, float size, float pad);
 
     /// Layout all axes within the given pixel extent.
     void layout(Extent2D extent);
+    /// Layout within an explicit rect (used for subfigures).
+    void layoutInRect(Rect2D rect);
+
+    /// matplotlib subplots_adjust: set the top-level grid margins and gaps.
+    void subplotsAdjust(float left, float bottom, float right, float top,
+                        float wspace, float hspace);
+    /// matplotlib tight_layout / constrained_layout toggles.
+    void setTightLayout(bool on) { tightLayout_ = on; }
+    void setConstrainedLayout(bool on) { constrainedLayout_ = on; }
 
     [[nodiscard]] const std::vector<AxesPlacement>& placements() const noexcept { return placements_; }
+    [[nodiscard]] const std::vector<SubfigPlacement>& subfigs() const noexcept { return subfigs_; }
+    [[nodiscard]] GridSpec& grid() noexcept { return *grid_; }
+    [[nodiscard]] const GridSpec& grid() const noexcept { return *grid_; }
     [[nodiscard]] FigureStyle& style() noexcept { return style_; }
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
 
     void setTitle(std::string t) { style_.title.text = std::move(t); }
 
+    /// Merge viewports of axes linked via shareX/shareY. Called by layout().
+    void syncSharedAxes();
+
+    // --- Interaction (§11) ---
+    /// Flat list of every axes (including subfigures), layout order.
+    [[nodiscard]] std::vector<Axes*> allAxes();
+    [[nodiscard]] std::vector<const Axes*> allAxes() const;
+    /// Event canvas — mpl's `fig.canvas.mpl_connect(...)`.
+    [[nodiscard]] EventCanvas& canvas() noexcept { return canvas_; }
+    /// Navigation toolbar controller (lazily created).
+    [[nodiscard]] Navigation& nav();
+    /// True once nav() has created the controller (renderers draw the
+    /// zoom rubber-band only when interaction is in use).
+    [[nodiscard]] bool navCreated() const noexcept { return nav_ != nullptr; }
+    /// Add an interactive widget; the figure owns it.
+    template <class T, class... Args>
+    T* addWidget(Args&&... args) {
+        auto w = std::make_unique<T>(std::forward<Args>(args)...);
+        auto* p = w.get();
+        widgets_.push_back(std::move(w));
+        return p;
+    }
+    [[nodiscard]] std::vector<std::unique_ptr<Widget>>& widgets() noexcept {
+        return widgets_;
+    }
+    /// Pixel rect the figure was last laid out into (transFigure space).
+    [[nodiscard]] const Rect2D& figRect() const noexcept { return figRect_; }
+    /// Figure DPI (style.dpi) — used by offset_copy / point conversions.
+    [[nodiscard]] float dpi() const noexcept { return style_.dpi; }
+    /// mpl `fig.transFigure`: figure fraction → display pixels.
+    [[nodiscard]] TransformPtr transFigure() const;
+
+    /// Hit-test: topmost axes containing canvas pixel (x, y), or nullptr.
+    [[nodiscard]] Axes* axesAt(float x, float y);
+    /// Dispatch a raw event: fills `inaxes`/`dataPos`, emits on the canvas,
+    /// then feeds widgets and the navigation controller.
+    void dispatch(Event e);
+
 private:
-    uint32_t rows_ = 1, cols_ = 1;
+    std::shared_ptr<GridSpec> grid_;
+    /// Grids replaced by subplotMosaic/subplot2grid/subfigures — kept alive
+    /// because existing SubplotSpecs hold raw GridSpec pointers.
+    std::vector<std::shared_ptr<GridSpec>> retiredGrids_;
     FigureStyle style_;
     std::vector<AxesPlacement> placements_;
+    std::vector<SubfigPlacement> subfigs_;
+    bool tightLayout_ = false;
+    bool constrainedLayout_ = false;
+    Rect2D figRect_{};
+
+    EventCanvas canvas_;
+    std::unique_ptr<Navigation> nav_;
+    std::vector<std::unique_ptr<Widget>> widgets_;
+
+    /// Compute effective grid margins for tight/constrained layout.
+    void computeTightMargins(Extent2D extent);
+    /// Apply aspect-ratio adjustment to axes rects after grid layout.
+    void applyAspect();
 };
 
 } // namespace volcano::plot

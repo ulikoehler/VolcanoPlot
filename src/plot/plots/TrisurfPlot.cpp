@@ -114,7 +114,7 @@ void TrisurfPlot::projectSurface() {
         if (config_.norm) {
             t = (*config_.norm)(avgZ);
         } else {
-            t = std::clamp((avgZ - zRange.min) / zSpan, 0.0f, 1.0f);
+            t = (avgZ - zRange.min) / zSpan;
         }
         Color color = cmap.sample(t);
 

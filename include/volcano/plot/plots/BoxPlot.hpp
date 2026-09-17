@@ -34,6 +34,18 @@ struct BoxPlotConfig {
     float capSize = 0.2f;      ///< cap width in data units
     bool showOutliers = true;  ///< draw outlier points
     bool fillBox = true;       ///< fill the box with boxColor
+    /// matplotlib `notch`: narrow the box at the median confidence interval
+    /// (med ± 1.57·IQR/√n, or bootstrap CI when bootstrap > 0).
+    bool notch = false;
+    /// matplotlib `bootstrap`: number of bootstrap resamples for the median
+    /// CI used by `notch`. 0 → Gaussian approximation 1.57·IQR/√n.
+    uint32_t bootstrap = 0;
+    /// matplotlib `showmeans`: draw a mean marker/line inside the box.
+    bool showMeans = false;
+    /// matplotlib `meanline`: draw the mean as a dashed line instead of a
+    /// point marker.
+    bool meanLine = false;
+    Color meanColor = Color::fromRgba8(44, 160, 44, 255); ///< mean line/marker
     std::vector<std::string> labels; ///< per-group labels for legend
     std::string label;         ///< overall legend label
 };
@@ -67,6 +79,9 @@ public:
         float q1, median, q3;
         float whiskerLo, whiskerHi;
         float min, max;
+        float mean;
+        /// Median CI for notched boxes (computed when cfg.notch).
+        float notchLo, notchHi;
         std::vector<float> outliers;
     };
     [[nodiscard]] const std::vector<Stats>& stats() const { return stats_; }
@@ -80,6 +95,7 @@ private:
     render::primitives::FillRenderer boxFillRenderer_;       // box fills
     render::primitives::LineSegmentRenderer boxEdgeRenderer_; // box edges + whiskers + caps
     render::primitives::LineSegmentRenderer medianRenderer_;  // median lines
+    render::primitives::LineSegmentRenderer meanRenderer_;    // mean lines/markers
     render::primitives::PointRenderer outlierRenderer_;       // outlier points
 
     // Computed geometry.
@@ -87,12 +103,14 @@ private:
     std::vector<Color> boxFillColors_;
     std::vector<Point2D> boxEdgeSegs_;
     std::vector<Point2D> medianSegs_;
+    std::vector<Point2D> meanSegs_;
     std::vector<Point2D> outlierPoints_;
     std::vector<Color> outlierColors_;
     std::vector<float> outlierSizes_;
     uint32_t boxFillCount_ = 0;
     uint32_t boxEdgeCount_ = 0;
     uint32_t medianCount_ = 0;
+    uint32_t meanCount_ = 0;
     uint32_t outlierCount_ = 0;
 
     bool prepared_ = false;

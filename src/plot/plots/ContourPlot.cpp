@@ -1,11 +1,14 @@
 // volcano/plot/plots/ContourPlot.cpp — contour and contourf implementation
 #include "volcano/plot/plots/ContourPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/text/TextRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <limits>
+#include <map>
 
 namespace volcano::plot {
 
@@ -188,6 +191,7 @@ void ContourPlot::computeLevels() {
 
 void ContourPlot::marchingSquares() {
     segments_.clear();
+    segLevels_.clear();
     const auto& g = grid_;
     if (g.width < 2 || g.height < 2) return;
 
@@ -227,6 +231,7 @@ void ContourPlot::marchingSquares() {
                     segments_.push_back(interpEdge(pairs[code].e1, level,
                                                    x0, y0, x1, y1,
                                                    vBL, vBR, vTR, vTL));
+                    segLevels_.push_back(level);
                 }
             }
         }
@@ -248,16 +253,58 @@ void ContourPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    if (config_.clabel) drawClabels(cmd, r, axes, rect);
+}
+
+void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
+                              const Axes& axes, Rect2D rect) {
+    // One label per level: midpoint of the segment closest to the level's
+    // centroid of segment midpoints (lands on the contour ring).
+    std::map<float, std::vector<Point2D>> byLevel;
+    for (size_t i = 0; i + 1 < segments_.size(); i += 2)
+        byLevel[segLevels_[i / 2]].push_back(
+            {(segments_[i].x + segments_[i + 1].x) * 0.5f,
+             (segments_[i].y + segments_[i + 1].y) * 0.5f});
+
+    Color color = config_.clabelColor.a > 0 ? config_.clabelColor
+                                            : config_.lineColor;
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    auto& text = r.textRenderer();
+
+    for (const auto& [level, mids] : byLevel) {
+        if (!config_.clabelLevels.empty() &&
+            std::find(config_.clabelLevels.begin(),
+                      config_.clabelLevels.end(), level) ==
+                config_.clabelLevels.end())
+            continue;
+        if (mids.empty()) continue;
+        // Centroid of midpoints.
+        Point2D c{0, 0};
+        for (auto& m : mids) { c.x += m.x; c.y += m.y; }
+        c.x /= float(mids.size()); c.y /= float(mids.size());
+        const Point2D* best = &mids[0];
+        float bestD = 1e30f;
+        for (const auto& m : mids) {
+            float d = (m.x - c.x) * (m.x - c.x) + (m.y - c.y) * (m.y - c.y);
+            if (d < bestD) { bestD = d; best = &m; }
+        }
+        // Data → pixel.
+        auto f = axes.dataToFraction(*best);
+        float px = rect.x + f.x * float(rect.width);
+        float py = rect.y + (1.0f - f.y) * float(rect.height);
+        std::string s = std::format("{:g}", level);
+        auto m = text.measureText(s, config_.clabelFontScale);
+        text.draw(cmd, clip, s, px - m.width * 0.5f,
+                  py - m.height * 0.5f, color, config_.clabelFontScale);
+    }
 }
 
 void ContourPlot::contributeToAutoscale(Viewport& v) const {
@@ -377,10 +424,7 @@ void ContourfPlot::prepare(render::Renderer& r) {
 void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t);

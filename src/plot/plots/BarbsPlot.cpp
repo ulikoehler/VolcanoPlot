@@ -17,10 +17,11 @@ BarbsPlot::BarbsPlot(std::vector<float> x, std::vector<float> y,
         throw std::invalid_argument("BarbsPlot: x, y, u, v must have the same size");
 }
 
-void BarbsPlot::buildBarbs(const Viewport& vp, const Rect2D& rect) {
+void BarbsPlot::buildBarbs(const Axes& axes, const Rect2D& rect) {
     segments_.clear();
 
-    // Compute pixel scaling: how many pixels per data unit.
+    // Compute pixel scaling: pixels per display-space unit.
+    const auto& vp = axes.transform().view;
     float pxPerDataX = rect.width / vp.x.span();
     float pxPerDataY = rect.height / vp.y.span();
 
@@ -40,11 +41,10 @@ void BarbsPlot::buildBarbs(const Viewport& vp, const Rect2D& rect) {
         float speed = std::sqrt(u * u + v * v);
         if (speed < 0.01f) continue;  // calm — no barb
 
-        // Convert (x, y) data to pixel coordinates.
-        float nx = (x_[i] - vp.x.min) / vp.x.span();
-        float ny = (y_[i] - vp.y.min) / vp.y.span();
-        float px = rect.x + nx * rect.width;
-        float py = rect.y + (1.0f - ny) * rect.height;
+        // Convert (x, y) data to pixel coordinates (scale/projection aware).
+        Point2D f = axes.dataToFraction({x_[i], y_[i]});
+        float px = rect.x + f.x * rect.width;
+        float py = rect.y + (1.0f - f.y) * rect.height;
 
         // Wind direction: barb points FROM where wind comes.
         // In meteorological convention, the barb points in the direction
@@ -133,7 +133,7 @@ void BarbsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!prepared_) return;
 
     // Build barbs in pixel space using the current viewport and rect.
-    buildBarbs(axes.viewport(), rect);
+    buildBarbs(axes, rect);
 
     if (segments_.empty()) return;
 

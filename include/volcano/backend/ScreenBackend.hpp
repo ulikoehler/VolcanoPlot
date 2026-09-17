@@ -20,6 +20,9 @@ public:
     ~ScreenBackend() override;
 
     bool pollEvents() override;
+    std::vector<InputEvent> takeEvents() override;
+    void setWindowTitle(std::string_view title) override;
+    void toggleFullscreen() override;
     vk::CommandBuffer beginFrame() override;
     void endFrame() override;
 
@@ -69,6 +72,8 @@ private:
     uint32_t currentFrame_ = 0;
     uint32_t imageIndex_ = 0;
     bool resized_ = false;
+    /// Queued input events translated during pollEvents().
+    std::vector<InputEvent> pendingEvents_;
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 };
 

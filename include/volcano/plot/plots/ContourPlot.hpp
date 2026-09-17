@@ -26,6 +26,14 @@ struct ContourConfig {
     Color lineColor = Color::black();
     /// Line width for contour lines.
     float lineWidth = 1.0f;
+    /// matplotlib `clabel`: draw level-value labels on the contour lines.
+    bool clabel = false;
+    /// Label text scale for clabel (TextRenderer scale, ~0.6 default size).
+    float clabelFontScale = 0.45f;
+    /// Label color (default: lineColor).
+    Color clabelColor = Color{0, 0, 0, 0};   // alpha 0 → use lineColor
+    /// Which levels get labels (empty → all levels).
+    std::vector<float> clabelLevels;
 };
 
 /// Contour plot — isolines of a 2D scalar field.
@@ -49,10 +57,14 @@ private:
     std::string label_;
     render::primitives::LineSegmentRenderer renderer_;
     std::vector<Point2D> segments_;  // computed in prepare()
+    std::vector<float> segLevels_;   // level of each segment pair (size = segments_/2)
     bool prepared_ = false;
 
     void computeLevels();
     void marchingSquares();
+    /// Draw clabel text at the representative midpoint of each level.
+    void drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
+                     const Axes& axes, Rect2D rect);
 };
 
 /// Filled contour plot — filled bands between contour levels.

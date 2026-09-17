@@ -30,11 +30,13 @@ layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform PC {
     vec4 u_rect;
-    vec4 u_viewMinSpanX; // xy = min, z = span, w = logX
-    vec4 u_viewMinSpanY; // xy = min, z = span, w = logY
-    vec4 u_gridColorX;   // rgb + alpha
+    vec4 u_viewMinSpan;  // xy = min, zw = span (display space)
+    vec4 u_gridColorX;   // major rgb + alpha
     vec4 u_gridColorY;
+    vec4 u_minorColorX;  // minor rgb + alpha
+    vec4 u_minorColorY;
     vec2 u_gridPxPerWorld; // x,y
+    vec2 u_minorDiv;     // subdivisions per major step (x,y)
 } pc;
 
 float gridLineDistPx(float base, float delta, float step, float pxPerWorld) {
@@ -47,24 +49,37 @@ float gridLineDistPx(float base, float delta, float step, float pxPerWorld) {
 }
 
 void main() {
-    // Convert framebuffer pixel to data coords.
+    // Convert framebuffer pixel to display coords (view is already
+    // scale-transformed; for log axes this is log10 space so a step of
+    // 1 produces decade lines).
     vec2 ndc = (v_fb - pc.u_rect.xy) / pc.u_rect.zw * 2.0 - 1.0;
-    vec2 data = pc.u_viewMinSpanX.xy + (ndc * 0.5 + 0.5) * pc.u_viewMinSpanX.zw;
-    // Log scale
-    if (pc.u_viewMinSpanX.w > 0.5) data.x = log(max(data.x, 1e-30)) / log(10.0);
-    if (pc.u_viewMinSpanY.w > 0.5) data.y = log(max(data.y, 1e-30)) / log(10.0);
+    vec2 data = pc.u_viewMinSpan.xy + (ndc * 0.5 + 0.5) * pc.u_viewMinSpan.zw;
 
-    // Compute nice tick step (1, 2, 5 × 10^n).
-    float stepX = pow(10.0, floor(log(abs(pc.u_viewMinSpanX.z)) / log(10.0)));
-    float stepY = pow(10.0, floor(log(abs(pc.u_viewMinSpanY.z)) / log(10.0)));
+    // Compute nice tick step (1, 2, 5 × 10^n) in display space.
+    float stepX = pow(10.0, floor(log(abs(pc.u_viewMinSpan.z)) / log(10.0)));
+    float stepY = pow(10.0, floor(log(abs(pc.u_viewMinSpan.w)) / log(10.0)));
 
-    float dx = gridLineDistPx(pc.u_viewMinSpanX.x, data.x - pc.u_viewMinSpanX.x, stepX, pc.u_gridPxPerWorld.x);
-    float dy = gridLineDistPx(pc.u_viewMinSpanY.x, data.y - pc.u_viewMinSpanY.x, stepY, pc.u_gridPxPerWorld.y);
+    float dx = gridLineDistPx(pc.u_viewMinSpan.x, data.x - pc.u_viewMinSpan.x, stepX, pc.u_gridPxPerWorld.x);
+    float dy = gridLineDistPx(pc.u_viewMinSpan.y, data.y - pc.u_viewMinSpan.y, stepY, pc.u_gridPxPerWorld.y);
 
     float aX = smoothstep(1.0, 0.0, dx);
     float aY = smoothstep(1.0, 0.0, dy);
-    vec3 c = pc.u_gridColorX.rgb * aX + pc.u_gridColorY.rgb * aY;
-    float a = max(aX * pc.u_gridColorX.a, aY * pc.u_gridColorY.a);
+    vec3 cMaj = pc.u_gridColorX.rgb * aX + pc.u_gridColorY.rgb * aY;
+    float aMaj = max(aX * pc.u_gridColorX.a, aY * pc.u_gridColorY.a);
+
+    // Minor grid: subdivisions of the major step (auto minor locator).
+    float mdx = gridLineDistPx(pc.u_viewMinSpan.x, data.x - pc.u_viewMinSpan.x,
+                               stepX / pc.u_minorDiv.x, pc.u_gridPxPerWorld.x);
+    float mdy = gridLineDistPx(pc.u_viewMinSpan.y, data.y - pc.u_viewMinSpan.y,
+                               stepY / pc.u_minorDiv.y, pc.u_gridPxPerWorld.y);
+    float amX = smoothstep(0.8, 0.0, mdx);
+    float amY = smoothstep(0.8, 0.0, mdy);
+    vec3 cMin = pc.u_minorColorX.rgb * amX + pc.u_minorColorY.rgb * amY;
+    float aMin = max(amX * pc.u_minorColorX.a, amY * pc.u_minorColorY.a);
+
+    // Composite major lines over minor lines.
+    vec3 c = cMaj + cMin * (1.0 - aMaj);
+    float a = aMaj + aMin * (1.0 - aMaj);
     outColor = vec4(c, a);
 }
 )";
@@ -90,7 +105,7 @@ void GridRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * 24);
+       .setOffset(0).setSize(sizeof(float) * 28);
     vk::PipelineLayoutCreateInfo plci;
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -157,13 +172,24 @@ void GridRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     static const float verts[] = { -1,-1, 3,-1, -1,3 };
     // (In a real impl, upload these once to a static buffer.)
 
+    // gridWhich: "major" → major only, "minor" → minor only, "both" → both.
+    // Axis `grid` flag gates that axis's lines entirely (grid(axis="x")).
+    auto whichMajor = [](const plot::AxisStyle& a) {
+        return a.grid && a.gridWhich != "minor";
+    };
+    auto whichMinor = [](const plot::AxisStyle& a) {
+        return a.grid && (a.gridWhich == "minor" || a.gridWhich == "both");
+    };
+
     struct PC {
         float rectX, rectY, rectW, rectH;
         float viewMinX, viewMinY, viewSpanX, viewSpanY;
-        float logX, logY;
         float xR, xG, xB, xA;
         float yR, yG, yB, yA;
+        float mxR, mxG, mxB, mxA;
+        float myR, myG, myB, myA;
         float pxPerWorldX, pxPerWorldY;
+        float minorDivX, minorDivY;
     } pc{};
     pc.rectX = static_cast<float>(rect.offset.x);
     pc.rectY = static_cast<float>(rect.offset.y);
@@ -173,12 +199,19 @@ void GridRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.viewMinY = transform.view.y.min;
     pc.viewSpanX = transform.view.x.span();
     pc.viewSpanY = transform.view.y.span();
-    pc.logX = transform.logX ? 1.0f : 0.0f;
-    pc.logY = transform.logY ? 1.0f : 0.0f;
-    pc.xR = xAxis.gridColor.r; pc.xG = xAxis.gridColor.g; pc.xB = xAxis.gridColor.b; pc.xA = xAxis.gridColor.a;
-    pc.yR = yAxis.gridColor.r; pc.yG = yAxis.gridColor.g; pc.yB = yAxis.gridColor.b; pc.yA = yAxis.gridColor.a;
+    pc.xR = xAxis.gridColor.r; pc.xG = xAxis.gridColor.g; pc.xB = xAxis.gridColor.b;
+    pc.xA = xAxis.gridColor.a * (whichMajor(xAxis) ? 1.0f : 0.0f);
+    pc.yR = yAxis.gridColor.r; pc.yG = yAxis.gridColor.g; pc.yB = yAxis.gridColor.b;
+    pc.yA = yAxis.gridColor.a * (whichMajor(yAxis) ? 1.0f : 0.0f);
+    pc.mxR = xAxis.minorGridColor.r; pc.mxG = xAxis.minorGridColor.g;
+    pc.mxB = xAxis.minorGridColor.b;
+    pc.mxA = xAxis.minorGridColor.a * (whichMinor(xAxis) ? 1.0f : 0.0f);
+    pc.myR = yAxis.minorGridColor.r; pc.myG = yAxis.minorGridColor.g;
+    pc.myB = yAxis.minorGridColor.b;
+    pc.myA = yAxis.minorGridColor.a * (whichMinor(yAxis) ? 1.0f : 0.0f);
     pc.pxPerWorldX = rect.extent.width / std::max(transform.view.x.span(), 1e-30f);
     pc.pxPerWorldY = rect.extent.height / std::max(transform.view.y.span(), 1e-30f);
+    pc.minorDivX = pc.minorDivY = 5.0f; // AutoMinorLocator default
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.pushConstants(pipelineLayout_.get(),

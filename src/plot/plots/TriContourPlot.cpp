@@ -130,10 +130,7 @@ void TriContourPlot::prepare(render::Renderer& r) {
 void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
@@ -304,10 +301,7 @@ void TriContourfPlot::prepare(render::Renderer& r) {
 void TriContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                            const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     fillRenderer_.draw(cmd, vrect, t);

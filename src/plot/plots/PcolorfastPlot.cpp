@@ -87,15 +87,15 @@ void PcolorfastPlot::buildGeometry() {
     for (uint32_t j = 0; j < nRows_; ++j) {
         for (uint32_t i = 0; i < nCols_; ++i) {
             float val = C_[j * nCols_ + i];
-            if (config_.skipNaN && std::isnan(val)) continue;
+            if (config_.skipNaN && std::isnan(val) && !cmap.bad) continue;
 
             float t;
             if (config_.norm) {
                 t = (*config_.norm)(val);
             } else {
-                t = std::isnan(val) ? 0.0f : (val - valueRange_.min) / vspan;
-                t = std::clamp(t, 0.0f, 1.0f);
+                t = (val - valueRange_.min) / vspan;
             }
+            // NaN t -> cmap.bad (or transparent); out-of-range -> under/over.
             Color color = cmap.sample(t);
 
             float x0 = x_[i];
@@ -132,10 +132,7 @@ void PcolorfastPlot::prepare(render::Renderer& r) {
 void PcolorfastPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
-    Transform2D t;
-    t.view = axes.viewport();
-    t.logX = axes.logX();
-    t.logY = axes.logY();
+    Transform2D t = axes.transform();
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     fillRenderer_.draw(cmd, vrect, t);
