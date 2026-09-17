@@ -4,6 +4,7 @@
 #include "volcano/plot/DataSeries.hpp"
 #include "volcano/plot/Colormap.hpp"
 #include "volcano/render/primitives/HeatmapRenderer.hpp"
+#include "volcano/render/primitives/KdeEvalRenderer.hpp"
 namespace volcano::plot {
 
 /// KDE plot: streams raw samples to the GPU, which evaluates a kernel density
@@ -26,7 +27,9 @@ private:
     float bandwidth_; // 0 = auto (Silverman's rule)
     Grid2D grid_;
     render::primitives::HeatmapRenderer renderer_;
+    render::primitives::KdeEvalRenderer kde_;
     bool prepared_ = false;
+    bool kdeInited_ = false;
 
     void evaluateKdeOnGpu(render::Renderer& r);
 };

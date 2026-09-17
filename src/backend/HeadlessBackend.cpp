@@ -55,17 +55,29 @@ HeadlessBackend::~HeadlessBackend() {
 }
 
 void HeadlessBackend::createRenderPass() {
-    bool msaa = samples_ != vk::SampleCountFlagBits::e1;
     depthFormat_ = findDepthFormat(ctx_.physical.handle());
+    renderPass_ = makeRenderPass(vk::AttachmentLoadOp::eClear,
+                                 vk::ImageLayout::eUndefined);
+    // eLoad variant for blit frames: color attachment starts in
+    // eColorAttachmentOptimal holding the restored snapshot.
+    if (samples_ == vk::SampleCountFlagBits::e1)
+        renderPassLoad_ = makeRenderPass(vk::AttachmentLoadOp::eLoad,
+                                vk::ImageLayout::eColorAttachmentOptimal);
+}
+
+vk::UniqueRenderPass
+HeadlessBackend::makeRenderPass(vk::AttachmentLoadOp colorLoad,
+                                vk::ImageLayout colorInitial) {
+    bool msaa = samples_ != vk::SampleCountFlagBits::e1;
 
     vk::AttachmentDescription colorAtt{};
     colorAtt.setFormat(colorFormat_)
         .setSamples(samples_)
-        .setLoadOp(vk::AttachmentLoadOp::eClear)
+        .setLoadOp(colorLoad)
         .setStoreOp(msaa ? vk::AttachmentStoreOp::eDontCare : vk::AttachmentStoreOp::eStore)
         .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
         .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
-        .setInitialLayout(vk::ImageLayout::eUndefined)
+        .setInitialLayout(colorInitial)
         .setFinalLayout(vk::ImageLayout::eTransferSrcOptimal);
 
     vk::AttachmentDescription resolveAtt{};
@@ -127,7 +139,7 @@ void HeadlessBackend::createRenderPass() {
 
     vk::RenderPassCreateInfo ci{};
     ci.setAttachments(atts).setSubpasses(sub).setDependencies(deps);
-    renderPass_ = ctx_.device.handle().createRenderPassUnique(ci);
+    return ctx_.device.handle().createRenderPassUnique(ci);
 }
 
 void HeadlessBackend::createFramebuffer() {
@@ -243,6 +255,89 @@ void HeadlessBackend::endFrame() {
     si.setCommandBuffers(cb);
     ctx_.device.graphicsQueue().submit(si, renderFence_.get());
     ctx_.device.waitIdle();
+}
+
+// ─── Blitting (mpl restore_region) ──────────────────────────────────────────
+
+bool HeadlessBackend::blitCapture() {
+    // Only single-sampled colorImage_ can be snapshotted — with MSAA the
+    // resolve target is rewritten by the render pass resolve each frame.
+    if (samples_ != vk::SampleCountFlagBits::e1) return false;
+
+    if (!blitImage_.handle()) {
+        core::ImageDesc bdesc{};
+        bdesc.format = colorFormat_;
+        bdesc.extent = extent_;
+        bdesc.usage = vk::ImageUsageFlagBits::eTransferSrc |
+                      vk::ImageUsageFlagBits::eTransferDst;
+        blitImage_ = core::Image(ctx_.allocator.handle(), bdesc);
+        // First transition: undefined → transfer dst.
+        core::OneTimeCommands init(ctx_.device.handle(),
+                                   ctx_.graphicsPool.handle(),
+                                   ctx_.device.graphicsQueue());
+        core::Image::transitionLayout(init.handle(), blitImage_.handle(),
+            colorFormat_, vk::ImageLayout::eUndefined,
+            vk::ImageLayout::eTransferDstOptimal);
+    }
+
+    // colorImage_ sits in eTransferSrcOptimal after endFrame(); copy it
+    // into the snapshot (kept in eTransferDstOptimal between frames).
+    core::OneTimeCommands cmd(ctx_.device.handle(),
+                              ctx_.graphicsPool.handle(),
+                              ctx_.device.graphicsQueue());
+    vk::ImageCopy region{};
+    region.setSrcSubresource({vk::ImageAspectFlagBits::eColor, 0, 0, 1})
+          .setDstSubresource({vk::ImageAspectFlagBits::eColor, 0, 0, 1})
+          .setExtent({extent_.width, extent_.height, 1});
+    cmd.handle().copyImage(colorImage_.handle(), vk::ImageLayout::eTransferSrcOptimal,
+                           blitImage_.handle(), vk::ImageLayout::eTransferDstOptimal,
+                           region);
+    blitCaptured_ = true;
+    return true;
+}
+
+vk::CommandBuffer HeadlessBackend::beginFrameLoad() {
+    if (!blitCaptured_ || !renderPassLoad_) return beginFrame();
+
+    auto cb = commandBuffer_.get();
+    cb.reset();
+    vk::CommandBufferBeginInfo bi{};
+    bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
+    cb.begin(bi);
+
+    // Restore: snapshot (TransferDst) → color attachment.
+    core::Image::transitionLayout(cb, blitImage_.handle(), colorFormat_,
+        vk::ImageLayout::eTransferDstOptimal,
+        vk::ImageLayout::eTransferSrcOptimal);
+    core::Image::transitionLayout(cb, colorImage_.handle(), colorFormat_,
+        vk::ImageLayout::eTransferSrcOptimal,
+        vk::ImageLayout::eTransferDstOptimal);
+    vk::ImageCopy region{};
+    region.setSrcSubresource({vk::ImageAspectFlagBits::eColor, 0, 0, 1})
+          .setDstSubresource({vk::ImageAspectFlagBits::eColor, 0, 0, 1})
+          .setExtent({extent_.width, extent_.height, 1});
+    cb.copyImage(blitImage_.handle(), vk::ImageLayout::eTransferSrcOptimal,
+                 colorImage_.handle(), vk::ImageLayout::eTransferDstOptimal,
+                 region);
+    core::Image::transitionLayout(cb, colorImage_.handle(), colorFormat_,
+        vk::ImageLayout::eTransferDstOptimal,
+        vk::ImageLayout::eColorAttachmentOptimal);
+    core::Image::transitionLayout(cb, blitImage_.handle(), colorFormat_,
+        vk::ImageLayout::eTransferSrcOptimal,
+        vk::ImageLayout::eTransferDstOptimal);
+
+    // Begin the load-variant pass (clear values are ignored but the
+    // count must match the attachment list).
+    std::array<vk::ClearValue, 2> clears{};
+    clears[1].depthStencil.setDepth(1.0f).setStencil(0);
+    vk::RenderPassBeginInfo rpi{};
+    rpi.setRenderPass(renderPassLoad_.get())
+       .setFramebuffer(framebuffer_.get())
+       .setRenderArea(vk::Rect2D{}.setOffset({0,0}).setExtent(extent_))
+       .setClearValues(clears);
+    cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
+    frameBegun_ = true;
+    return cb;
 }
 
 std::vector<uint8_t> HeadlessBackend::readbackRgba8() {

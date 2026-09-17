@@ -281,4 +281,267 @@ void treemap(Axes& axes, std::span<const float> sizes,
     axes.setViewport({{0, 1}, {0, 1}});
 }
 
+// ─── WordCloudPlot ──────────────────────────────────────────────────────────
+
+namespace {
+
+/// Deterministic PRNG for wordcloud/network layout reproducibility.
+struct Lcg {
+    uint64_t s;
+    explicit Lcg(uint64_t seed) : s(seed * 6364136223846793005ull + 1442695040888963407ull) {}
+    uint32_t next() { s = s * 6364136223846793005ull + 1442695040888963407ull;
+                      return uint32_t(s >> 33); }
+    float uniform() { return float(next()) / float(UINT32_MAX); }
+};
+
+bool boxesOverlap(float ax, float ay, float aw, float ah,
+                  float bx, float by, float bw, float bh, float margin) {
+    return ax - margin < bx + bw && ax + aw + margin > bx &&
+           ay - margin < by + bh && ay + ah + margin > by;
+}
+
+} // namespace
+
+void WordCloudPlot::layout(render::Renderer& r, Rect2D rect) {
+    placed_.clear();
+    laidOut_ = true;
+    if (words.empty() || !r.textReady()) return;
+
+    // Sort by weight descending, cap at maxWords.
+    std::vector<size_t> order(words.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return words[a].weight > words[b].weight;
+    });
+    if (order.size() > maxWords) order.resize(maxWords);
+
+    double wMin = words[order.back()].weight;
+    double wMax = words[order.front()].weight;
+    auto toSize = [&](double w) {
+        double t = (wMax > wMin) ? (w - wMin) / (wMax - wMin) : 1.0;
+        if (logScale) {
+            double lw = std::log(std::max(w, 1e-12));
+            double l0 = std::log(std::max(wMin, 1e-12));
+            double l1 = std::log(std::max(wMax, 1e-12));
+            t = (l1 > l0) ? (lw - l0) / (l1 - l0) : 1.0;
+        }
+        return minFontScale + float(t) * (maxFontScale - minFontScale);
+    };
+
+    const Colormap& cm = cmap ? *cmap : colormaps::viridis();
+    Lcg rng(seed);
+    const float cx = float(rect.x) + float(rect.width) * 0.5f;
+    const float cy = float(rect.y) + float(rect.height) * 0.5f;
+
+    struct Box { float x, y, w, h; };
+    std::vector<Box> boxes;
+
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+        size_t wi = order[rank];
+        const auto& word = words[wi];
+        float scale = toSize(word.weight);
+        auto m = r.textRenderer().measureText(word.text, scale);
+        float w = m.width, h = m.height;
+        bool vertical = rotationRatio > 0.0f && rng.uniform() < rotationRatio;
+        float bw = vertical ? h : w;
+        float bh = vertical ? w : h;
+        if (bw < 1.0f || bh < 1.0f) continue;
+        if (bw > float(rect.width) * 0.95f || bh > float(rect.height) * 0.95f)
+            continue;  // too big to ever fit
+
+        // Archimedean spiral from the axes centre.
+        bool placed = false;
+        float px = 0, py = 0;
+        constexpr uint32_t kMaxSteps = 1200;
+        for (uint32_t s = 0; s < kMaxSteps; ++s) {
+            float theta = float(s) * 0.25f;                 // radians
+            float radius = 2.0f + theta * 3.0f;             // px growth
+            px = cx + radius * std::cos(theta) - bw * 0.5f;
+            py = cy + radius * std::sin(theta) - bh * 0.5f;
+            // Must fit fully inside the axes rect.
+            if (px < float(rect.x) || py < float(rect.y) ||
+                px + bw > float(rect.x) + float(rect.width) ||
+                py + bh > float(rect.y) + float(rect.height))
+                continue;
+            bool hit = false;
+            for (const auto& b : boxes)
+                if (boxesOverlap(px, py, bw, bh, b.x, b.y, b.w, b.h, margin)) {
+                    hit = true; break;
+                }
+            if (!hit) { placed = true; break; }
+        }
+        if (!placed) continue;
+
+        boxes.push_back({px, py, bw, bh});
+        float t = order.size() > 1 ? float(rank) / float(order.size() - 1) : 0.0f;
+        placed_.push_back({wi, px, py, w, h, scale, vertical,
+                           cm.sample(0.15f + 0.7f * t)});
+    }
+}
+
+void WordCloudPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+                         const Axes&, Rect2D rect) {
+    if (!laidOut_) layout(r, rect);
+    if (placed_.empty() || !r.textReady()) return;
+
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    for (const auto& p : placed_) {
+        const auto& word = words[p.word];
+        auto m = r.textRenderer().measureText(word.text, p.scale);
+        if (p.vertical) {
+            // Rotated −90° (reads bottom→top): baseline origin at the
+            // box's bottom-right corner.
+            r.textRenderer().draw(cmd, clip, word.text,
+                                  p.x + m.height, p.y + p.w,
+                                  p.color, p.scale, -float(M_PI_2));
+        } else {
+            // (x, y) is the baseline origin: box top + ascent.
+            r.textRenderer().draw(cmd, clip, word.text,
+                                  p.x, p.y + m.ascent,
+                                  p.color, p.scale);
+        }
+    }
+}
+
+// ─── NetworkPlot ────────────────────────────────────────────────────────────
+
+NetworkPlot::NetworkPlot(uint32_t nodeCount,
+                         std::vector<std::pair<uint32_t, uint32_t>> edges,
+                         Options opts)
+    : n_(nodeCount), edges_(std::move(edges)), opts_(std::move(opts)) {}
+
+void NetworkPlot::computeLayout() {
+    pos_.assign(n_, {0.5f, 0.5f});
+    if (n_ == 0) { laidOut_ = true; return; }
+    Lcg rng(opts_.seed);
+
+    switch (opts_.layout) {
+    case Layout::Given:
+        if (opts_.positions.size() == n_) pos_ = opts_.positions;
+        break;
+    case Layout::Circular:
+        for (uint32_t i = 0; i < n_; ++i) {
+            float a = 2.0f * float(M_PI) * float(i) / float(n_);
+            pos_[i] = {0.5f + 0.45f * std::cos(a),
+                       0.5f + 0.45f * std::sin(a)};
+        }
+        break;
+    case Layout::Random:
+        for (auto& p : pos_) p = {0.05f + 0.9f * rng.uniform(),
+                                  0.05f + 0.9f * rng.uniform()};
+        break;
+    case Layout::Spring: {
+        // Fruchterman–Reingold: repulsion between all pairs, attraction
+        // along edges, temperature-decayed displacement.
+        for (auto& p : pos_) p = {0.1f + 0.8f * rng.uniform(),
+                                  0.1f + 0.8f * rng.uniform()};
+        const float k = std::sqrt(1.0f / float(std::max(n_, 1u)));
+        std::vector<Point2D> disp(n_);
+        int iters = std::max(opts_.iterations, 1);
+        for (int it = 0; it < iters; ++it) {
+            std::fill(disp.begin(), disp.end(), Point2D{0, 0});
+            // Repulsion.
+            for (uint32_t i = 0; i < n_; ++i) {
+                for (uint32_t j = i + 1; j < n_; ++j) {
+                    float dx = pos_[i].x - pos_[j].x;
+                    float dy = pos_[i].y - pos_[j].y;
+                    float d2 = dx * dx + dy * dy + 1e-6f;
+                    float f = k * k / d2;
+                    float fx = f * dx, fy = f * dy;
+                    disp[i].x += fx; disp[i].y += fy;
+                    disp[j].x -= fx; disp[j].y -= fy;
+                }
+            }
+            // Attraction along edges.
+            for (auto [a, b] : edges_) {
+                if (a >= n_ || b >= n_) continue;
+                float dx = pos_[a].x - pos_[b].x;
+                float dy = pos_[a].y - pos_[b].y;
+                float d = std::sqrt(dx * dx + dy * dy) + 1e-6f;
+                float f = d * d / k / d;   // = d/k
+                disp[a].x -= f * dx; disp[a].y -= f * dy;
+                disp[b].x += f * dx; disp[b].y += f * dy;
+            }
+            float temp = 0.1f * (1.0f - float(it) / float(iters));
+            for (uint32_t i = 0; i < n_; ++i) {
+                float dl = std::sqrt(disp[i].x * disp[i].x +
+                                     disp[i].y * disp[i].y);
+                if (dl < 1e-6f) continue;
+                float step = std::min(dl, temp) / dl;
+                pos_[i].x += disp[i].x * step;
+                pos_[i].y += disp[i].y * step;
+                pos_[i].x = std::clamp(pos_[i].x, 0.0f, 1.0f);
+                pos_[i].y = std::clamp(pos_[i].y, 0.0f, 1.0f);
+            }
+        }
+        break;
+    }
+    }
+    laidOut_ = true;
+}
+
+void NetworkPlot::prepare(render::Renderer& r) {
+    auto& ctx = r.backend().context();
+    if (!laidOut_) computeLayout();
+    if (!prepared_) {
+        edgesR_.init(ctx.device.handle(), r.backend().renderPass(),
+                     r.backend().sampleCount(), r.pipelineCache());
+        nodesR_.init(ctx.device.handle(), r.backend().renderPass(),
+                     r.backend().sampleCount(), r.descriptorPool(),
+                     r.pipelineCache());
+        prepared_ = true;
+    }
+    // Edge endpoint pairs (a,b) per edge.
+    std::vector<Point2D> segPts;
+    segPts.reserve(edges_.size() * 2);
+    for (auto [a, b] : edges_) {
+        if (a >= n_ || b >= n_) continue;
+        segPts.push_back(pos_[a]);
+        segPts.push_back(pos_[b]);
+    }
+    if (!segPts.empty())
+        edgesR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                       std::span{segPts}, opts_.edgeColor, opts_.edgeWidth);
+    if (!pos_.empty()) {
+        std::vector<Color> colors(pos_.size(), opts_.nodeColor);
+        std::vector<float> sizes(pos_.size(), opts_.nodeSize);
+        nodesR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                       std::span{pos_}, std::span{colors}, std::span{sizes});
+    }
+}
+
+void NetworkPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+                       const Axes& axes, Rect2D rect) {
+    if (!prepared_) return;
+    Transform2D t = axes.transform();
+    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
+                     vk::Extent2D{rect.width, rect.height}};
+    if (edgesR_.pointCount() >= 2)
+        edgesR_.draw(cmd, vrect, t, edgesR_.pointCount());
+    if (nodesR_.pointCount() > 0)
+        nodesR_.draw(cmd, vrect, t, nodesR_.pointCount());
+    // Node labels (mpl `with_labels=True`).
+    if (!opts_.labels.empty() && r.textReady()) {
+        for (uint32_t i = 0; i < n_ && i < opts_.labels.size(); ++i) {
+            if (opts_.labels[i].empty()) continue;
+            Point2D f = axes.dataToFraction(pos_[i]);
+            float px = rect.x + f.x * rect.width;
+            float py = rect.y + (1.0f - f.y) * rect.height;
+            r.textRenderer().draw(cmd, vrect, opts_.labels[i], px, py,
+                                  Color::black(), opts_.fontScale, 0.0f,
+                                  HAlign::Center);
+        }
+    }
+}
+
+void NetworkPlot::contributeToAutoscale(Viewport& v) const {
+    for (const auto& p : pos_) {
+        v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
+        v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
+    }
+}
+
 } // namespace volcano::plot

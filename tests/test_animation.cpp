@@ -247,3 +247,89 @@ TEST(AnimationRender, ToJsHtmlProducesPage) {
     EXPECT_NE(html.find("data:image/png;base64,"), std::string::npos);
     EXPECT_NE(html.find("<script>"), std::string::npos);
 }
+
+// ═══ Blitting (mpl blit=True) ═══════════════════════════════════════════════
+
+TEST(AnimationRender, BlitRestoresBackground) {
+    test::PlotTestHarness h(64, 64, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->setStyle(test::flatTestStyle());
+    fig.subplotsAdjust(0, 0, 1, 1, 0, 0);
+    fig.layout(Extent2D{64, 64});
+    ax->setViewport({{0, 1}, {0, 1}});
+
+    // Static artist: blue point at (0.5, 0.8).
+    Series2D stat;
+    stat.color = Color::blue();
+    stat.size = 14.0f;
+    stat.points = {{0.5f, 0.8f}};
+    ax->addPlot(std::make_unique<ScatterPlot>(stat));
+
+    // Animated artist: red point moving right each frame.
+    Series2D animS;
+    animS.color = Color::red();
+    animS.size = 14.0f;
+    animS.points = {{0.1f, 0.5f}};
+    ax->addPlot(std::make_unique<ScatterPlot>(animS));
+    auto* plotPtr = dynamic_cast<ScatterPlot*>(&*ax->plots().back());
+    ASSERT_NE(plotPtr, nullptr);
+    plotPtr->animated = true;
+
+    FuncAnimation anim(fig, [&](size_t i) {
+        plotPtr->series().points = {{0.1f + 0.2f * float(i), 0.5f}};
+    }, 3, {}, 50, /*blit=*/true);
+
+    // Capture the static background (without animated artists).
+    anim.drawFrame(0);
+    h.renderer().prepare(fig);
+    ASSERT_TRUE(h.renderer().blitCaptureBackground(fig));
+
+    // Frame 2: draw animated artists only, over the restored background.
+    anim.drawFrame(2);
+    h.renderer().prepare(fig);
+    h.renderer().blitDrawAnimated(fig);
+    auto px = h.backend().readbackRgba8();
+    auto img = test::Image::fromRgba8(px, 64, 64);
+
+    // Red point must be at its frame-2 position (x=0.5 → px 32, y=0.5 →
+    // row 32 after the Y flip), not at the frame-0/1 positions.
+    EXPECT_GT(img.countColorInRegion(test::Pixel::red(), 26, 26, 40, 40, 40), 5u)
+        << "animated point missing at frame-2 position";
+    EXPECT_EQ(img.countColorInRegion(test::Pixel::red(), 0, 26, 12, 40, 40), 0u)
+        << "blit left a trail at the frame-0 position";
+    EXPECT_EQ(img.countColorInRegion(test::Pixel::red(), 13, 26, 25, 40, 40), 0u)
+        << "blit left a trail at the frame-1 position";
+
+    // Static artist survived: blue point at (0.5,0.8) → px (32, 13).
+    EXPECT_GT(img.countColorInRegion(test::Pixel::blue(), 26, 6, 40, 20, 40), 5u)
+        << "static background not restored";
+}
+
+TEST(AnimationRender, BlitSaveAnimationGif) {
+    test::PlotTestHarness h(64, 64);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->setStyle(test::flatTestStyle());
+    ax->setViewport({{0, 1}, {0, 1}});
+
+    Series2D series;
+    series.color = Color::red();
+    series.size = 12.0f;
+    series.points = {{0.1f, 0.5f}};
+    auto* sp = ax->addPlot(std::make_unique<ScatterPlot>(series));
+    auto* plotPtr = dynamic_cast<ScatterPlot*>(sp);
+    plotPtr->animated = true;
+
+    FuncAnimation anim(fig, [&](size_t i) {
+        plotPtr->series().points = {{0.1f + 0.2f * float(i), 0.5f}};
+    }, 3, {}, 50, /*blit=*/true);
+
+    bool ok = h.renderer().saveAnimation(anim, "/tmp/test_blit_anim.gif", 10.0);
+    ASSERT_TRUE(ok);
+    std::ifstream f("/tmp/test_blit_anim.gif", std::ios::binary);
+    char magic[6] = {};
+    f.read(magic, 6);
+    EXPECT_EQ(std::string_view(magic, 6), "GIF89a");
+    std::filesystem::remove("/tmp/test_blit_anim.gif");
+}

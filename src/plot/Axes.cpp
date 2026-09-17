@@ -126,6 +126,23 @@ HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap) {
     return addOwned<HeatmapPlot>(*this, std::move(grid), cmap);
 }
 
+WordCloudPlot& Axes::wordcloud(
+        std::vector<std::pair<std::string, double>> words) {
+    auto p = std::make_unique<WordCloudPlot>();
+    p->words.reserve(words.size());
+    for (auto& [t, w] : words)
+        p->words.push_back({std::move(t), w});
+    auto* raw = p.get();
+    addPlot(std::move(p));
+    return *raw;
+}
+
+NetworkPlot& Axes::network(
+        uint32_t nodeCount,
+        std::vector<std::pair<uint32_t, uint32_t>> edges) {
+    return addOwned<NetworkPlot>(*this, nodeCount, std::move(edges));
+}
+
 void Axes::setXscale(std::string_view name) {
     if (name == "linear")      xScale_ = AxisScale::linear();
     else if (name == "log")    xScale_ = AxisScale::log();

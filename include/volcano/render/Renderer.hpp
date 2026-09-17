@@ -32,6 +32,15 @@ public:
     /// Render one frame of the figure.
     void renderFrame(plot::Figure& figure);
 
+    /// Blitting (mpl canvas.copy_from_bbox + restore_region + draw_artist):
+    /// render the frame *without* animated artists and snapshot the
+    /// result as the restorable background. Returns false when the
+    /// backend can't blit (MSAA, swapchain).
+    bool blitCaptureBackground(plot::Figure& figure);
+    /// Restore the captured background and draw only artists flagged
+    /// `animated` (mpl canvas.restore_region + draw_artist + blit).
+    void blitDrawAnimated(plot::Figure& figure);
+
     /// Drain backend input events and dispatch them into the figure's
     /// interaction system (canvas callbacks, widgets, navigation).
     /// Returns false when a quit event was received.
@@ -91,6 +100,10 @@ public:
     measureRichText(std::string_view text, float scale = 1.0f);
 
 private:
+    /// Which plot subset a frame draws (blit modes).
+    enum class DrawSubset { All, StaticOnly, AnimatedOnly };
+    void renderFrameSubset(plot::Figure& figure, DrawSubset subset);
+
     backend::IBackend& backend_;
     std::unique_ptr<core::PipelineCache> pipelineCache_;
     std::unique_ptr<core::DescriptorPool> descriptorPool_;

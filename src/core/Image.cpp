@@ -92,6 +92,10 @@ void Image::transitionLayout(vk::CommandBuffer cmd, vk::Image image,
         barrier.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite).setDstAccessMask(vk::AccessFlagBits::eTransferRead);
         srcStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
         dstStage = vk::PipelineStageFlagBits::eTransfer;
+    } else if (oldLayout == vk::ImageLayout::eShaderReadOnlyOptimal && newLayout == vk::ImageLayout::eTransferDstOptimal) {
+        barrier.setSrcAccessMask(vk::AccessFlagBits::eShaderRead).setDstAccessMask(vk::AccessFlagBits::eTransferWrite);
+        srcStage = vk::PipelineStageFlagBits::eFragmentShader;
+        dstStage = vk::PipelineStageFlagBits::eTransfer;
     } else {
         barrier.setSrcAccessMask(vk::AccessFlagBits::eNone).setDstAccessMask(vk::AccessFlagBits::eNone);
         srcStage = vk::PipelineStageFlagBits::eTopOfPipe;

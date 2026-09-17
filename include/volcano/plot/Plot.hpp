@@ -58,6 +58,10 @@ public:
     /// matplotlib `rasterized`: stored for vector backends (PDF/SVG) which
     /// may embed the layer as a bitmap. No effect on raster rendering.
     bool rasterized = false;
+    /// matplotlib `animated`: when blitting is active, animated artists
+    /// are excluded from the captured background and re-drawn each frame
+    /// over the restored snapshot.
+    bool animated = false;
     /// Hit-test (matplotlib `contains` / pick): true when the data-space
     /// point hits this layer. Default: never hit.
     virtual bool contains(const Axes&, Point2D) const { return false; }

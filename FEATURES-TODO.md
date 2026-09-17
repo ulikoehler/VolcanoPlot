@@ -211,10 +211,15 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       face colors, configurable face/edge rendering)
 
 ### 1.8 VolcanoPlot-specific (GPU-native)
-- [x] GPU-side function evaluation (FunctionPlot — CPU fallback, GPU compute TODO)
-- [x] GPU-side KDE (KDEPlot — CPU fallback, GPU compute TODO)
+- [x] GPU-side function evaluation (FunctionPlot — user GLSL bodies compiled
+      to a compute shader at runtime via EvalRenderer; output vec2 buffer is
+      bound directly to LineRenderer — results never leave the GPU; CPU
+      fallback when shaderc is unavailable or the body fails to compile)
+- [x] GPU-side KDE (KDEPlot — KdeEvalRenderer compute shader writes the
+      density grid; CPU fallback kept, Gaussian math corrected)
 - [x] GPU autoscale (parallel min/max reduce)
-- [x] Infinite zoom (FunctionPlot::reevaluate — framework in place)
+- [x] Infinite zoom (FunctionPlot re-evaluates on manual x-range changes;
+      autoscale-driven viewports don't trigger resampling — no feedback loop)
 - [x] f32 phase decomposition for deep-zoom chirp plots
       (`PhaseDecomposer` utility — splits phase into large f64-computed
       constant + small f32 delta, uses sin(a+b)=sin(a)cos(b)+cos(a)sin(b)
@@ -380,8 +385,12 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       vertex transform; glyphs rasterized at 16px reference and scaled on GPU)
 - [x] Font subsetting for large character sets (atlas holds a curated subset:
       ASCII + Greek + math symbols, not the full font)
-- [~] CJK / RTL text shaping (HarfBuzz integrated and shapes any script;
-      CJK glyphs not in atlas charset — needs a CJK font + charset test)
+- [x] CJK / RTL text shaping — HarfBuzz `hb_buffer_guess_segment_properties`
+      gives correct direction/script per run; a broad-coverage fallback face
+      is probed at init (coverage ranking over system fonts) and shares the
+      glyph atlas (single texture); lazily rasterized glyphs flag the atlas
+      dirty → re-upload + repaint once; UTF-8 run-splitting routes glyphs to
+      the covering face; atlas enlarged to 2048²
 
 ---
 
@@ -508,7 +517,11 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `FuncAnimation`
 - [x] `ArtistAnimation`
 - [x] `TimedAnimation` base
-- [~] Blitting support for efficient updates (`blit` flag stored; renderer re-renders full frames — true blit regions need a composite path)
+- [x] Blitting support for efficient updates — `IPlot::animated` marks
+      artists; `blitCaptureBackground()` renders static-only and snapshots
+      the framebuffer; `blitDrawAnimated()` restores the snapshot via a
+      loadOp=LOAD render pass and redraws only animated artists;
+      saveAnimation/toJsHtml use it when `anim.blit` is set
 - [x] Writers: `PillowWriter` (GIF89a built-in), `FFMpegWriter`, `ImageMagickWriter`, `ApngWriter` (built-in, zlib); HTML via `jsHtmlFromPngFrames`/`html5VideoFromMovie`
 - [x] `animation.to_jshtml` (`Renderer::toJsHtml`), `animation.to_html5_video` (`Renderer::toHtml5Video`, falls back to JS HTML without ffmpeg)
 
@@ -554,10 +567,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       map through `dataToFraction`'s projection stage)
 - [x] Treemaps — built-in `squarify` layout + `treemap(axes, sizes, ...)`
       helper (patch rects + centered labels)
-- [~] Word clouds (requires third-party `wordcloud` — no C++ equivalent;
-      would need a placement algorithm + font metrics)
-- [~] Network/graph drawing (requires third-party `networkx` — layout
-      algorithms out of scope; LineCollection+scatter suffice manually)
+- [x] Word clouds — `WordCloudPlot` / `ax.wordcloud(words)`: Archimedean-
+      spiral packing with pixel-space box collision via measureText,
+      weight-scaled fonts (linear/log), seeded-deterministic, optional
+      90° rotation ratio, colormap-ranked colors
+- [x] Network/graph drawing — `NetworkPlot` / `ax.network(n, edges)`:
+      Fruchterman–Reingold spring, circular, random, and given layouts;
+      edges via LineSegmentRenderer, nodes via PointRenderer, optional
+      per-node labels
 - [x] `Table` / `ax.table` (tabular data overlays) — `TablePlot` IPlot with
       cell text/colors, row/col labels, `loc` placement
 - [x] `matshow` / `spy` matrix visualizations (heatmap-backed, existing)

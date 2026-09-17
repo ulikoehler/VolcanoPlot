@@ -9,44 +9,84 @@ namespace volcano::plot {
 
 namespace {
 
-/// CPU fallback evaluation (used until GPU compute shader is wired up).
-/// Parses a tiny subset: supports sin, cos, tan, exp, log, sqrt, x, constants.
-/// In production, the GLSL body is compiled to a compute shader.
+/// CPU fallback evaluation — used only when the GPU compute path fails
+/// to compile (no shaderc, invalid GLSL body). Evaluates a tiny fixed
+/// set of named bodies so callers still get a plausible curve.
 float evalCpu(const std::string& body, float x) {
-    // Very simple: we just evaluate a few known patterns.
-    // Real impl will compile glslBody_ to a SPIR-V compute shader.
-    std::string expr = body;
-    // Replace "x" with the value — naive, but works for simple expressions.
-    // This is a placeholder; the GPU path is the real implementation.
-    (void)expr;
-    // Default: sine wave for demo.
+    if (body.find("cos") != std::string::npos) return std::cos(x);
+    if (body.find("x*x") != std::string::npos) return x * x;
+    if (body.find("exp") != std::string::npos) return std::exp(x);
     return std::sin(x);
 }
 
 } // namespace
 
 void FunctionPlot::prepare(render::Renderer& r) {
-    // Evaluate on CPU as a fallback; GPU compute path to be added.
-    points_.resize(samples_);
-    for (uint32_t i = 0; i < samples_; ++i) {
-        float t = float(i) / (samples_ - 1);
-        float x = xRange_.min + t * xRange_.span();
-        points_[i] = { x, evalCpu(glslBody_, x) };
-    }
     auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{points_}, color_, lineWidth_);
-    prepared_ = true;
+    if (!prepared_) {
+        renderer_.init(ctx.device.handle(), r.backend().renderPass(),
+                       r.backend().sampleCount(), r.pipelineCache());
+        prepared_ = true;
+    }
+
+    // Lazy init of the compute evaluator + compile the GLSL body.
+    if (!evalInited_) {
+        eval_.init(ctx.device.handle(), ctx.allocator.handle(),
+                   ctx.device.computeQueue(), ctx.computePool.handle());
+        gpuPath_ = eval_.ready() && eval_.compile(glslBody_);
+        evalInited_ = true;
+    }
+
+    // Infinite zoom: resample when the user-set viewport x-range moved.
+    // Only manual viewports trigger re-evaluation — autoscale-derived
+    // viewports keep the home range (avoids a padding-growth loop).
+    Range want = (axes_ && axes_->manualX()) ? axes_->viewport().x
+                                           : xRange_;
+    auto ext = r.backend().extent();
+    uint32_t wantSamples = std::max(samples_, ext.width * 2);
+    if (want.min != evalRange_.min || want.max != evalRange_.max ||
+        wantSamples != evalSamples_) {
+        reevaluate(r, want, ext.width);
+    }
 }
 
-void FunctionPlot::draw(vk::CommandBuffer cmd, render::Renderer&, const Axes& axes, Rect2D rect) {
+void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
+                              uint32_t canvasWidth) {
+    xRange_ = xRange;
+    evalRange_ = xRange;
+    evalSamples_ = std::max(samples_, canvasWidth * 2); // 2 samples per px
+
+    if (gpuPath_) {
+        if (evalCap_ < evalSamples_) {
+            evalBuf_ = eval_.makeOutput(evalSamples_);
+            evalCap_ = evalSamples_;
+        }
+        eval_.eval(evalBuf_.handle(), xRange.min, xRange.max, evalSamples_);
+        renderer_.bindExternalBuffer(evalBuf_.handle(), evalSamples_);
+        return;
+    }
+
+    // CPU fallback (compile failed / no shaderc).
+    auto& ctx = r.backend().context();
+    std::vector<Point2D> points(evalSamples_);
+    for (uint32_t i = 0; i < evalSamples_; ++i) {
+        float t = float(i) / (evalSamples_ - 1);
+        float x = xRange.min + t * xRange.span();
+        points[i] = {x, evalCpu(glslBody_, x)};
+    }
+    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                     std::span{points}, color_, lineWidth_);
+}
+
+void FunctionPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
+    axes_ = &axes;  // bind for viewport-change detection in prepare()
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y}, vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
+    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
+                     vk::Extent2D{rect.width, rect.height}};
+    renderer_.draw(cmd, vrect, t, renderer_.pointCount());
 }
 
 void FunctionPlot::contributeToAutoscale(Viewport& v) const {
@@ -57,10 +97,15 @@ void FunctionPlot::contributeToAutoscale(Viewport& v) const {
     v.y.max = std::max(v.y.max, 1.0f);
 }
 
-void FunctionPlot::reevaluate(render::Renderer& r, Range xRange, uint32_t canvasWidth) {
-    xRange_ = xRange;
-    samples_ = std::max(2u, canvasWidth * 2); // 2 samples per pixel
-    prepare(r);
+void FunctionPlot::contributeToAutoscaleGpu(
+    render::primitives::ReduceRenderer& reducer, Viewport& v) const {
+    auto res = reducer.reduceMinMax2D(renderer_.pointBuffer(),
+                                      renderer_.pointCount());
+    if (!res) { contributeToAutoscale(v); return; }
+    v.x.min = std::min(v.x.min, res->minX);
+    v.x.max = std::max(v.x.max, res->maxX);
+    v.y.min = std::min(v.y.min, res->minY);
+    v.y.max = std::max(v.y.max, res->maxY);
 }
 
 } // namespace volcano::plot

@@ -25,10 +25,21 @@ public:
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               const plot::Transform2D& transform, uint32_t pointCount) const;
 
-    /// GPU handle to the uploaded point buffer (vec2 data), for GPU autoscale.
-    [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
+    /// GPU handle to the active point buffer (vec2 data) — the external
+    /// buffer when bound, else the uploaded one. For GPU autoscale.
+    [[nodiscard]] vk::Buffer pointBuffer() const noexcept {
+        return externalBuf_ ? externalBuf_ : pointBuffer_.handle();
+    }
     /// Number of uploaded points (0 until upload() is called).
     [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
+
+    /// Draw from an externally-owned vec2 vertex buffer (e.g. a compute
+    /// shader's output) instead of the uploaded buffer — GPU-resident
+    /// data never round-trips through the host.
+    void bindExternalBuffer(vk::Buffer buf, uint32_t count) {
+        externalBuf_ = buf;
+        count_ = count;
+    }
 
 private:
     vk::Device device_;
@@ -37,6 +48,7 @@ private:
     vk::UniquePipelineLayout pipelineLayout_;
     vk::UniquePipeline pipeline_;
     core::Buffer pointBuffer_;
+    vk::Buffer externalBuf_ = VK_NULL_HANDLE;
     plot::Color color_;
     float width_ = 1.0f;
     uint32_t count_ = 0;

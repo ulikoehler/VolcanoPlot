@@ -205,3 +205,104 @@ TEST(Radar, PolarFillRendersInside) {
     // Corners outside the polygon are background.
     EXPECT_PIXEL_AT(img, 2, 2, White, 40);
 }
+
+// ═══ wordcloud ═════════════════════════════════════════════════════════════
+
+TEST(WordCloud, RendersWordsSizedByWeight) {
+    Fx fx;
+    auto& wc = fx.ax->wordcloud({{"alpha", 10.0}, {"beta", 5.0},
+                                 {"gamma", 3.0}, {"delta", 1.0}});
+    wc.maxFontScale = 2.5f;
+    auto img = fx.render();
+    // Any non-white pixels = words rendered.
+    size_t painted = img.countIf([](uint32_t, uint32_t, test::Pixel p) {
+        return int(p.r) + int(p.g) + int(p.b) < 720;
+    });
+    EXPECT_GT(painted, 100u);
+}
+
+TEST(WordCloud, EmptyWordsNoCrash) {
+    Fx fx;
+    fx.ax->wordcloud({});
+    EXPECT_NO_THROW(fx.render());
+}
+
+TEST(WordCloud, DeterministicLayout) {
+    // Two identical word clouds must produce identical frames.
+    Fx fx1, fx2;
+    fx1.ax->wordcloud({{"a", 5.0}, {"b", 3.0}, {"c", 1.0}});
+    fx2.ax->wordcloud({{"a", 5.0}, {"b", 3.0}, {"c", 1.0}});
+    auto i1 = fx1.render();
+    auto i2 = fx2.render();
+    ASSERT_EQ(i1.raw().size(), i2.raw().size());
+    EXPECT_TRUE(std::ranges::equal(i1.raw(), i2.raw()));
+}
+
+// ═══ network ═══════════════════════════════════════════════════════════════
+
+TEST(Network, CircularLayoutPositionsOnCircle) {
+    Fx fx;
+    NetworkPlot::Options opts;
+    opts.layout = NetworkPlot::Layout::Circular;
+    auto* net = static_cast<NetworkPlot*>(fx.ax->addPlot(
+        std::make_unique<NetworkPlot>(5u,
+            std::vector<std::pair<uint32_t,uint32_t>>{{0,1},{1,2},{2,3}},
+            opts)));
+    // Force layout: render triggers prepare()→computeLayout().
+    auto img = fx.render();
+    const auto& pos = net->positions();
+    ASSERT_EQ(pos.size(), 5u);
+    for (const auto& p : pos) {
+        float dx = p.x - 0.5f, dy = p.y - 0.5f;
+        EXPECT_NEAR(std::sqrt(dx*dx + dy*dy), 0.45f, 1e-4f);
+    }
+}
+
+TEST(Network, SpringLayoutSeparatesNodes) {
+    Fx fx;
+    // Two disconnected pairs — repulsion should spread all four nodes.
+    auto* net = static_cast<NetworkPlot*>(fx.ax->addPlot(
+        std::make_unique<NetworkPlot>(4u,
+            std::vector<std::pair<uint32_t,uint32_t>>{{0,1},{2,3}})));
+    auto img = fx.render();
+    const auto& pos = net->positions();
+    ASSERT_EQ(pos.size(), 4u);
+    // After spring layout, at least some pairs are far apart.
+    float maxD = 0;
+    for (auto& a : pos) for (auto& b : pos) {
+        float d = std::hypot(a.x - b.x, a.y - b.y);
+        maxD = std::max(maxD, d);
+    }
+    EXPECT_GT(maxD, 0.3f);
+}
+
+TEST(Network, RendersEdgesAndNodes) {
+    Fx fx;
+    NetworkPlot::Options opts;
+    opts.layout = NetworkPlot::Layout::Circular;
+    opts.nodeColor = Color::red();
+    opts.edgeColor = Color::blue();
+    opts.nodeSize = 12.0f;
+    fx.ax->addPlot(std::make_unique<NetworkPlot>(4u,
+        std::vector<std::pair<uint32_t,uint32_t>>{{0,1},{1,2},{2,3},{3,0}},
+        opts));
+    auto img = fx.render();
+    EXPECT_PIXEL_COUNT(img, Red, 30, 40);   // 4 node markers
+    EXPECT_PIXEL_COUNT(img, Blue, 30, 40);  // edge segments
+}
+
+TEST(Network, GivenLayoutUsesProvidedPositions) {
+    Fx fx;
+    NetworkPlot::Options opts;
+    opts.layout = NetworkPlot::Layout::Given;
+    opts.positions = {{0.2f, 0.2f}, {0.8f, 0.8f}};
+    opts.nodeColor = Color::red();
+    opts.nodeSize = 14.0f;
+    fx.ax->addPlot(std::make_unique<NetworkPlot>(2u,
+        std::vector<std::pair<uint32_t,uint32_t>>{{0,1}}, opts));
+    auto img = fx.render();
+    // Node at data (0.2,0.2) → pixel ≈ (26, 102) (Y-flip).
+    EXPECT_PIXEL_COUNT(img, Red, 30, 40);
+    EXPECT_GT(img.countColorInRegion(Red, 15, 92, 40, 115, 40), 5u);
+    EXPECT_GT(img.countColorInRegion(Red, 90, 15, 115, 40, 40), 5u);
+}

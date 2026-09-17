@@ -97,4 +97,9 @@ void Buffer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
     cmd.handle().copyBuffer(staging.handle(), buffer_, region);
 }
 
+void Buffer::invalidate() {
+    if (allocator_ && allocation_)
+        vmaInvalidateAllocation(allocator_, allocation_, 0, VK_WHOLE_SIZE);
+}
+
 } // namespace volcano::core

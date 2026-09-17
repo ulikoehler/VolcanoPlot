@@ -680,10 +680,33 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
 }
 
 void Renderer::renderFrame(plot::Figure& figure) {
+    renderFrameSubset(figure, DrawSubset::All);
+    // Lazily-rasterized glyphs (first CJK/fallback-face characters in a
+    // frame) grow the CPU atlas mid-pass — re-upload and repaint once.
+    if (textReady_ && textRenderer_.atlasDirty()) {
+        auto& ctx = backend_.context();
+        textRenderer_.syncAtlas(ctx.device.graphicsQueue(),
+                                ctx.graphicsPool.handle());
+        renderFrameSubset(figure, DrawSubset::All);
+    }
+}
+
+bool Renderer::blitCaptureBackground(plot::Figure& figure) {
+    renderFrameSubset(figure, DrawSubset::StaticOnly);
+    return backend_.blitCapture();
+}
+
+void Renderer::blitDrawAnimated(plot::Figure& figure) {
+    renderFrameSubset(figure, DrawSubset::AnimatedOnly);
+}
+
+void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     auto ext = backend_.extent();
     figure.layout(plot::Extent2D{ext.width, ext.height});
 
-    auto cmd = backend_.beginFrame();
+    auto cmd = subset == DrawSubset::AnimatedOnly
+                   ? backend_.beginFrameLoad()
+                   : backend_.beginFrame();
     textRenderer_.resetScratch();
     spineRenderer_.resetScratch();
     for (auto& p : figure.placements()) {
@@ -692,17 +715,21 @@ void Renderer::renderFrame(plot::Figure& figure) {
                          vk::Extent2D{rect.width, rect.height}};
 
         // Draw grid background for this axes (per-axis enable).
-        if (gridInited_ &&
+        if (subset != DrawSubset::AnimatedOnly && gridInited_ &&
             (p.axes->style().xAxis.grid || p.axes->style().yAxis.grid)) {
             gridRenderer_.draw(cmd, vrect, p.axes->transform(),
                                p.axes->style().xAxis,
                                p.axes->style().yAxis);
         }
 
-        // Draw all plot layers in zorder (matplotlib zorder compositing).
+        // Draw plot layers in zorder, filtered by the blit subset.
         for (auto* plot : p.axes->drawOrder()) {
+            if (subset == DrawSubset::StaticOnly && plot->animated) continue;
+            if (subset == DrawSubset::AnimatedOnly && !plot->animated) continue;
             const_cast<plot::IPlot*>(plot)->draw(cmd, *this, *p.axes, rect);
         }
+
+        if (subset == DrawSubset::AnimatedOnly) continue;
 
         // Draw axis spines and tick marks.
         drawSpines(cmd, *p.axes, rect);
@@ -725,7 +752,7 @@ void Renderer::renderFrame(plot::Figure& figure) {
     }
 
     // Interactive overlays (§11): widgets + nav zoom rubber-band.
-    if (spineInited_) {
+    if (subset != DrawSubset::AnimatedOnly && spineInited_) {
         vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
         Painter painter{cmd, *this, fullRect};
         for (auto& w : figure.widgets()) w->draw(painter);
@@ -1065,10 +1092,19 @@ bool Renderer::saveAnimation(plot::Animation& anim,
     auto ext = backend_.extent();
     if (!w->open(path, ext.width, ext.height, fps)) return false;
     size_t n = anim.frameCount();
+    // Blit path (mpl blit=True): snapshot the static background once,
+    // then per frame restore it and draw only `animated` artists.
+    bool useBlit = false;
+    if (anim.blit && n > 0) {
+        anim.drawFrame(0);
+        prepare(anim.figure());
+        useBlit = blitCaptureBackground(anim.figure());
+    }
     for (size_t i = 0; i < n; ++i) {
         anim.drawFrame(i);
         prepare(anim.figure());
-        renderFrame(anim.figure());
+        if (useBlit) blitDrawAnimated(anim.figure());
+        else         renderFrame(anim.figure());
         auto px = backend_.readbackRgba8();
         if (px.empty() || !w->writeFrame(px)) return false;
     }
@@ -1080,10 +1116,17 @@ std::string Renderer::toJsHtml(plot::Animation& anim, double fps) {
     if (!png) return {};
     std::vector<std::vector<uint8_t>> frames;
     size_t n = anim.frameCount();
+    bool useBlit = false;
+    if (anim.blit && n > 0) {
+        anim.drawFrame(0);
+        prepare(anim.figure());
+        useBlit = blitCaptureBackground(anim.figure());
+    }
     for (size_t i = 0; i < n; ++i) {
         anim.drawFrame(i);
         prepare(anim.figure());
-        renderFrame(anim.figure());
+        if (useBlit) blitDrawAnimated(anim.figure());
+        else         renderFrame(anim.figure());
         auto px = backend_.readbackRgba8();
         if (px.empty()) return {};
         auto ext = backend_.extent();

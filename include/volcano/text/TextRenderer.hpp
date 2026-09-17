@@ -72,6 +72,13 @@ public:
     /// Font line advance (ascent+descent+leading) in pixels at `scale`.
     float lineHeight(float scale = 1.0f);
 
+    /// True when draw() rasterized new glyphs into the CPU-side atlas
+    /// since the last GPU upload (e.g. first CJK/extended characters).
+    /// Call syncAtlas() outside a render pass, then re-render the frame.
+    [[nodiscard]] bool atlasDirty() const noexcept { return atlasDirty_; }
+    /// Re-upload the atlas texture to the GPU (outside any render pass).
+    void syncAtlas(vk::Queue queue, vk::CommandPool pool);
+
 private:
     vk::Device device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -88,11 +95,16 @@ private:
     std::unique_ptr<text_shaper_hb> shaper_;
     std::unique_ptr<text_renderer_ft> textRenderer_;
     font_face* fontFace_ = nullptr;
+    /// Broad-coverage fallback face (CJK/RTL/…); glyphs missing from
+    /// fontFace_ shape against this instead (shared atlas).
+    font_face* fallbackFace_ = nullptr;
 
-    // Atlas texture (uploaded lazily)
+    // Atlas texture (uploaded lazily, re-uploaded when it grows)
     core::Image atlasImage_;
     vk::UniqueImageView atlasView_;
     bool atlasUploaded_ = false;
+    bool atlasDirty_ = false;
+    size_t atlasGlyphCount_ = 0;
     int atlasWidth_ = 0;
     int atlasHeight_ = 0;
 
@@ -113,6 +125,11 @@ private:
 
     /// Find and load a system font.
     void loadFont();
+    /// Pre-render the ASCII + math-symbol charset into the CPU atlas.
+    void prepareAtlasGlyphs();
+    /// Upload the current atlas bitmap to the GPU. Called by
+    /// prepareAtlas (first upload) and syncAtlas (growth re-upload).
+    void uploadAtlas(vk::Queue queue, vk::CommandPool pool);
 };
 
 } // namespace volcano::text

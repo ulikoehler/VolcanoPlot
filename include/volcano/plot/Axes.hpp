@@ -257,6 +257,17 @@ public:
     class HeatmapPlot& imshow(Grid2D grid,
         const Colormap& cmap = colormaps::viridis());
 
+    // ── Specialized (§15) ──
+    /// Word cloud: `ax.wordcloud({{"word", weight}, …})` — words packed
+    /// on an Archimedean spiral, sized by weight.
+    class WordCloudPlot& wordcloud(
+        std::vector<std::pair<std::string, double>> words);
+    /// Network/graph drawing (`networkx.draw` equivalent):
+    /// `ax.network(nodeCount, {{a,b},…}, opts)`.
+    class NetworkPlot& network(
+        uint32_t nodeCount,
+        std::vector<std::pair<uint32_t, uint32_t>> edges);
+
     // ── Units / categorical & date axes (mpl matplotlib.units) ──
 
     /// mpl `ax.plot(x, y)` — unit-aware: plain floats pass through,

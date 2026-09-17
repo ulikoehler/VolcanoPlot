@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -16,6 +18,7 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include <hb.h>
 
 // glyb headers (must be included in dependency order — glyb headers
 // don't include their own dependencies)
@@ -135,6 +138,189 @@ std::string findSystemFontFile() {
     return {};
 }
 
+/// Codepoints probed when ranking fallback fonts: Latin, Greek,
+/// Cyrillic, Hebrew, Arabic, CJK ideograph, hiragana, hangul.
+constexpr uint32_t kCoverageProbes[] = {
+    0x0041, 0x03B2, 0x0416, 0x05D0, 0x0627, 0x4E2D, 0x3042, 0xD55C};
+
+/// Number of probe codepoints covered by the font at `path` (opened
+/// transiently — not registered with the font manager).
+int probeFontCoverage(FT_Library ftlib, const std::filesystem::path& path) {
+    FT_Face probe = nullptr;
+    if (FT_New_Face(ftlib, path.string().c_str(), 0, &probe)) return 0;
+    int score = 0;
+    for (uint32_t cp : kCoverageProbes)
+        if (FT_Get_Char_Index(probe, cp) != 0) ++score;
+    FT_Done_Face(probe);
+    return score;
+}
+
+/// Scan system font directories for the regular font with the broadest
+/// probe coverage. Returns {} when nothing beats `primaryPath`.
+std::string findFallbackFontFile(FT_Library ftlib,
+                                 const std::string& primaryPath) {
+    std::vector<std::filesystem::path> dirs = {
+        "/usr/share/fonts", "/usr/local/share/fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+    };
+    int bestScore = probeFontCoverage(ftlib, primaryPath);
+    std::string best;
+    for (const auto& d : dirs) {
+        if (!std::filesystem::exists(d)) continue;
+        for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
+            if (!e.is_regular_file()) continue;
+            auto ext = e.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".ttf" && ext != ".otf" && ext != ".ttc") continue;
+            auto path = e.path().string();
+            if (path == primaryPath) continue;
+            int score = probeFontCoverage(ftlib, e.path());
+            if (score > bestScore) { bestScore = score; best = path; }
+        }
+    }
+    return best;
+}
+
+/// Does `face` provide a glyph for `cp`?
+bool faceCovers(font_face* face, uint32_t cp) {
+    auto* ft = static_cast<font_face_ft*>(face);
+    return ft && ft->ftface && FT_Get_Char_Index(ft->ftface, cp) != 0;
+}
+
+/// Pick the face covering `cp`: primary → fallback → primary (.notdef).
+font_face* faceFor(font_face* primary, font_face* fallback, uint32_t cp) {
+    if (faceCovers(primary, cp)) return primary;
+    if (faceCovers(fallback, cp)) return fallback;
+    return primary;
+}
+
+/// font_manager_ft subclass that shares ONE atlas across all faces —
+/// fallback-face glyphs land in the same GPU texture (glyph entries are
+/// keyed by font_id). Also fixes upstream's uninitialized defaulAtlas.
+class FontManagerShared : public font_manager_ft {
+public:
+    static constexpr int kAtlasSize = 2048;  // headroom for CJK glyph sets
+
+    FontManagerShared() { defaulAtlas = nullptr; }
+
+    font_atlas* getCurrentAtlas(font_face* face) override {
+        if (!defaulAtlas) defaulAtlas = getNewAtlas(face);
+        return defaulAtlas;
+    }
+
+    font_atlas* getNewAtlas(font_face* face) override {
+        auto atlas = std::unique_ptr<font_atlas>(new font_atlas(0, 0, 0));
+        auto ai = faceAtlasMap.find(face);
+        if (ai == faceAtlasMap.end())
+            ai = faceAtlasMap.insert(faceAtlasMap.end(),
+                std::make_pair(face, std::vector<font_atlas*>()));
+        if (face && msdf_enabled && msdf_autoload && ai->second.empty()) {
+            atlas->load(this, face);
+            importAtlas(atlas.get());
+        }
+        if (!atlas->pixels)
+            atlas->reset(kAtlasSize, kAtlasSize,
+                         color_enabled ? font_atlas::COLOR_DEPTH :
+                         msdf_enabled  ? font_atlas::MSDF_DEPTH :
+                                         font_atlas::GRAY_DEPTH);
+        auto* atlasp = atlas.get();
+        if (face) ai->second.push_back(atlasp);
+        everyAtlas.push_back(std::move(atlas));
+        return atlasp;
+    }
+};
+
+/// text_shaper_hb subclass that guesses direction/script from content
+/// instead of hardcoding LTR/Latin — enables RTL (Arabic/Hebrew) and
+/// correct script-aware shaping. Adds no members: text_shaper_hb lacks
+/// a virtual dtor, so this must stay stateless.
+class ShaperGuess : public text_shaper_hb {
+public:
+    void shape(std::vector<glyph_shape>& shapes,
+               text_segment& segment) override {
+        auto* face = static_cast<font_face_ft*>(segment.face);
+        face->get_metrics(segment.font_size);
+        hb_font_t* hbfont = face->get_hbfont(segment.font_size);
+        hb_language_t hblang = hb_language_from_string(
+            segment.language.c_str(), (int)segment.language.size());
+        hb_buffer_t* buf = hb_buffer_create();
+        hb_buffer_set_language(buf, hblang);
+        hb_buffer_add_utf8(buf, segment.text.c_str(),
+                           (int)segment.text.size(), 0,
+                           (int)segment.text.size());
+        hb_buffer_guess_segment_properties(buf);
+        hb_shape(hbfont, buf, nullptr, 0);
+        unsigned n = 0;
+        auto* info = hb_buffer_get_glyph_infos(buf, &n);
+        auto* pos = hb_buffer_get_glyph_positions(buf, &n);
+        for (unsigned i = 0; i < n; ++i)
+            shapes.push_back({info[i].codepoint, info[i].cluster,
+                              pos[i].x_offset, pos[i].y_offset,
+                              pos[i].x_advance, pos[i].y_advance});
+        hb_buffer_destroy(buf);
+    }
+};
+
+/// A maximal byte-range of text sharing one font face.
+struct FontRun { size_t start; size_t len; font_face* face; };
+
+/// Split a UTF-8 line into runs by covering face. Neutral codepoints
+/// (space, ASCII punctuation) extend the current run rather than
+/// splitting it — keeps "abc 中" to two runs instead of three.
+std::vector<FontRun> splitFontRuns(std::string_view line,
+                                   font_face* primary,
+                                   font_face* fallback) {
+    std::vector<FontRun> runs;
+    size_t i = 0;
+    while (i < line.size()) {
+        auto uc = utf8_to_utf32_code(line.data() + i);
+        if (uc.len <= 0) break;
+        uint32_t cp = static_cast<uint32_t>(uc.code);
+        font_face* f = faceFor(primary, fallback, cp);
+        bool neutral = cp == ' ' ||
+            (cp < 0x80 && std::ispunct(static_cast<unsigned char>(cp)));
+        if (!runs.empty() && (neutral || f == runs.back().face)) {
+            runs.back().len += size_t(uc.len);
+        } else {
+            runs.push_back({i, size_t(uc.len), f});
+        }
+        i += size_t(uc.len);
+    }
+    return runs;
+}
+
+/// Advance (in pixels) of a single-face run shaped at `fontSize`.
+/// Positive even for RTL runs — direction only affects glyph order.
+float runAdvance(text_shaper* shaper, font_face* face,
+                 std::string_view text, int fontSize) {
+    std::vector<glyph_shape> shapes;
+    text_segment seg(std::string(text), "en", face, fontSize, 0, 0, 0);
+    shaper->shape(shapes, seg);
+    float adv = 0.0f;
+    for (const auto& s : shapes) adv += s.x_advance / 64.0f;
+    return std::abs(adv);
+}
+
+/// Shape `text` with `face` and render into `batch`. `penX` is the
+/// run's left edge in screen pixels — for RTL runs (negative advance)
+/// the glyph origin is placed at the run's right edge. Returns the
+/// run's advance (always positive).
+float shapeAndRenderRun(text_shaper* shaper, text_renderer_ft* renderer,
+                        draw_list& batch, font_face* face,
+                        std::string_view text, int fontSize,
+                        float penX, float y, uint32_t rgba) {
+    std::vector<glyph_shape> shapes;
+    text_segment seg(std::string(text), "en", face, fontSize,
+                     penX, y, rgba);
+    shaper->shape(shapes, seg);
+    float adv = 0.0f;
+    for (const auto& s : shapes) adv += s.x_advance / 64.0f;
+    if (adv < 0.0f) seg.x = penX - adv;  // RTL: origin at right edge
+    renderer->render(batch, shapes, seg);
+    return std::abs(adv);
+}
+
 } // namespace
 
 // The atlas always stores glyphs rasterized at this fixed reference size;
@@ -169,13 +355,10 @@ TextRenderer::measureText(std::string_view text, float scale) {
                                         ? nl : nl - start);
         ++lines;
         if (!line.empty()) {
-            std::vector<glyph_shape> shapes;
-            std::string lang = "en";
-            text_segment segment(std::string(line), lang, fontFace_,
-                                 kRefFontSize, 0, 0, 0xff000000);
-            shaper_->shape(shapes, segment);
             float width = 0.0f;
-            for (const auto& s : shapes) width += s.x_advance / 64.0f;
+            for (const auto& r : splitFontRuns(line, fontFace_, fallbackFace_))
+                width += runAdvance(shaper_.get(), r.face,
+                                    line.substr(r.start, r.len), kRefFontSize);
             maxWidth = std::max(maxWidth, width);
         }
         if (nl == std::string_view::npos) break;
@@ -199,8 +382,8 @@ void TextRenderer::init(vk::Device device, VmaAllocator allocator,
     allocator_ = allocator;
 
     // --- glyb font manager, shaper, renderer ---
-    fontManager_ = std::make_unique<font_manager_ft>();
-    shaper_ = std::make_unique<text_shaper_hb>();
+    fontManager_ = std::make_unique<FontManagerShared>();
+    shaper_ = std::make_unique<ShaperGuess>();
     textRenderer_ = std::make_unique<text_renderer_ft>(fontManager_.get());
     batch_ = new draw_list();
 
@@ -345,6 +528,19 @@ void TextRenderer::loadFont() {
     if (fontPath.empty()) return;
     fontManager_->scanFontPath(fontPath);
     fontFace_ = fontManager_->findFontByPath(fontPath);
+    if (!fontFace_) return;
+
+    // Broad-coverage fallback face for scripts the primary font lacks
+    // (CJK, Arabic, Hebrew, …). glyb shares one atlas across faces, so
+    // fallback glyphs land in the same GPU texture.
+    if (!std::getenv("VOLCANO_FONT")) {
+        std::string fbPath = findFallbackFontFile(fontManager_->ftlib,
+                                                  fontPath);
+        if (!fbPath.empty()) {
+            fontManager_->scanFontPath(fbPath);
+            fallbackFace_ = fontManager_->findFontByPath(fbPath);
+        }
+    }
 }
 
 void TextRenderer::resetScratch() {
@@ -377,6 +573,24 @@ void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
 
 void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     if (atlasUploaded_ || !fontFace_) return;
+    prepareAtlasGlyphs();
+    uploadAtlas(queue, pool);
+    atlasUploaded_ = true;
+    atlasGlyphCount_ = fontManager_->glyph_map.size();
+}
+
+void TextRenderer::syncAtlas(vk::Queue queue, vk::CommandPool pool) {
+    if (!atlasDirty_ || !atlasUploaded_) return;
+    uploadAtlas(queue, pool);
+    atlasDirty_ = false;
+    atlasGlyphCount_ = fontManager_->glyph_map.size();
+}
+
+/// Prerender the ASCII + math-symbol charset so common text is already
+/// in the atlas before the first frame. Extended-script glyphs (CJK,
+/// Arabic, …) are still rasterized lazily on first use — draw() marks
+/// the atlas dirty and the renderer re-uploads between frames.
+void TextRenderer::prepareAtlasGlyphs() {
 
     // Pre-render common characters to populate the atlas: ASCII plus the
     // Greek letters, math symbols, and combining accents emitted by the
@@ -400,30 +614,34 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     draw_list_clear(*batch);
     shaper_->shape(shapes, segment);
     textRenderer_->render(*batch, shapes, segment);
+}
 
-    // Get the atlas (now populated with glyphs).
+void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
+    // Get the atlas (populated with glyphs).
     auto* atlas = fontManager_->getCurrentAtlas(fontFace_);
     if (!atlas || !atlas->pixels) return;
 
     atlasWidth_ = (int)atlas->width;
     atlasHeight_ = (int)atlas->height;
 
-    // Create the Vulkan image (R8_UNORM for grayscale atlas).
-    core::ImageDesc idesc{};
-    idesc.format = vk::Format::eR8Unorm;
-    idesc.extent = vk::Extent2D{uint32_t(atlasWidth_), uint32_t(atlasHeight_)};
-    idesc.usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
-    idesc.tiling = vk::ImageTiling::eOptimal;
-    atlasImage_ = core::Image(allocator_, idesc);
+    if (!atlasUploaded_) {
+        // Create the Vulkan image (R8_UNORM for grayscale atlas).
+        core::ImageDesc idesc{};
+        idesc.format = vk::Format::eR8Unorm;
+        idesc.extent = vk::Extent2D{uint32_t(atlasWidth_), uint32_t(atlasHeight_)};
+        idesc.usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
+        idesc.tiling = vk::ImageTiling::eOptimal;
+        atlasImage_ = core::Image(allocator_, idesc);
 
-    // Create image view.
-    vk::ImageViewCreateInfo ivci{};
-    ivci.setImage(atlasImage_.handle())
-        .setViewType(vk::ImageViewType::e2D)
-        .setFormat(vk::Format::eR8Unorm)
-        .setSubresourceRange(vk::ImageSubresourceRange{
-            vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
-    atlasView_ = device_.createImageViewUnique(ivci);
+        // Create image view.
+        vk::ImageViewCreateInfo ivci{};
+        ivci.setImage(atlasImage_.handle())
+            .setViewType(vk::ImageViewType::e2D)
+            .setFormat(vk::Format::eR8Unorm)
+            .setSubresourceRange(vk::ImageSubresourceRange{
+                vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+        atlasView_ = device_.createImageViewUnique(ivci);
+    }
 
     // Create a staging buffer and copy atlas pixels.
     size_t pixelBytes = size_t(atlasWidth_) * size_t(atlasHeight_);
@@ -446,10 +664,11 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     cbbi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cmd.begin(cbbi);
 
-    // Transition image to transfer dst.
+    // Transition image to transfer dst (ShaderReadOnly on re-upload).
     core::Image::transitionLayout(cmd, atlasImage_.handle(),
         vk::Format::eR8Unorm,
-        vk::ImageLayout::eUndefined,
+        atlasUploaded_ ? vk::ImageLayout::eShaderReadOnlyOptimal
+                       : vk::ImageLayout::eUndefined,
         vk::ImageLayout::eTransferDstOptimal);
 
     // Copy buffer to image.
@@ -481,19 +700,19 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     // Free the command buffer.
     device_.freeCommandBuffers(pool, cmd);
 
-    // Update descriptor set.
-    vk::DescriptorImageInfo dii{};
-    dii.setSampler(sampler_.get())
-       .setImageView(atlasView_.get())
-       .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-    vk::WriteDescriptorSet wds{};
-    wds.setDstSet(descSet_)
-       .setDstBinding(0)
-       .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-       .setImageInfo(dii);
-    device_.updateDescriptorSets(wds, {});
-
-    atlasUploaded_ = true;
+    if (!atlasUploaded_) {
+        // Update descriptor set (image/view are stable across re-uploads).
+        vk::DescriptorImageInfo dii{};
+        dii.setSampler(sampler_.get())
+           .setImageView(atlasView_.get())
+           .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
+        vk::WriteDescriptorSet wds{};
+        wds.setDstSet(descSet_)
+           .setDstBinding(0)
+           .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+           .setImageInfo(dii);
+        device_.updateDescriptorSets(wds, {});
+    }
 }
 
 void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
@@ -526,29 +745,34 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         auto line = text.substr(start, nl == std::string_view::npos
                                         ? nl : nl - start);
         if (!line.empty()) {
+            auto runs = splitFontRuns(line, fontFace_, fallbackFace_);
             float lineX = x;
             if (lineAlign != plot::HAlign::Left) {
                 // Per-line alignment within the block width.
                 float lw = 0.0f;
-                std::vector<glyph_shape> ws;
-                std::string lang = "en";
-                text_segment wseg(std::string(line), lang, fontFace_,
-                                  font_size, 0, 0, rgba);
-                shaper_->shape(ws, wseg);
-                for (const auto& s : ws) lw += s.x_advance / 64.0f;
+                for (const auto& r : runs)
+                    lw += runAdvance(shaper_.get(), r.face,
+                                     line.substr(r.start, r.len), font_size);
                 lineX += lineAlign == plot::HAlign::Center
                              ? (blockW - lw) * 0.5f : (blockW - lw);
             }
-            std::vector<glyph_shape> shapes;
-            std::string lang = "en";
-            text_segment segment(std::string(line), lang, fontFace_,
-                                 font_size, lineX, lineY, rgba);
-            shaper_->shape(shapes, segment);
-            textRenderer_->render(*batch, shapes, segment);
+            float pen = lineX;
+            for (const auto& r : runs)
+                pen += shapeAndRenderRun(shaper_.get(), textRenderer_.get(),
+                                         *batch, r.face,
+                                         line.substr(r.start, r.len),
+                                         font_size, pen, lineY, rgba);
         }
         if (nl == std::string_view::npos) break;
         start = nl + 1;
         lineY += lineH;
+    }
+
+    // Lazily-rasterized glyphs (CJK, fallback-face runs, …) grow the CPU
+    // atlas — flag it so the renderer re-uploads before the next frame.
+    if (fontManager_->glyph_map.size() != atlasGlyphCount_) {
+        atlasGlyphCount_ = fontManager_->glyph_map.size();
+        if (atlasUploaded_) atlasDirty_ = true;
     }
 
     if (batch->vertices.empty() || batch->indices.empty()) return;

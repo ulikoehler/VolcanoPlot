@@ -28,18 +28,12 @@ float silvermanBandwidth(const std::vector<Point2D>& samples, int dim) {
 
 } // namespace
 
-void KDEPlot::evaluateKdeOnGpu(render::Renderer& /*r*/) {
-    // TODO: dispatch compute shader to evaluate KDE into grid_.
-    // For now, CPU fallback to produce a valid grid for rendering.
+void KDEPlot::evaluateKdeOnGpu(render::Renderer& r) {
     grid_.width = gridW_;
     grid_.height = gridH_;
-    grid_.values.assign(size_t(gridW_) * gridH_, 0.0f);
 
     float bwX = bandwidth_ > 0 ? bandwidth_ : silvermanBandwidth(samples_, 0);
     float bwY = bandwidth_ > 0 ? bandwidth_ : silvermanBandwidth(samples_, 1);
-    float inv2bwX2 = 1.0f / (2.0f * bwX * bwX);
-    float inv2bwY2 = 1.0f / (2.0f * bwY * bwY);
-    float norm = 1.0f / (2.0f * 3.14159265f * bwX * bwY * samples_.size());
 
     // Compute data range
     Range rx{1e30f, -1e30f}, ry{1e30f, -1e30f};
@@ -49,19 +43,49 @@ void KDEPlot::evaluateKdeOnGpu(render::Renderer& /*r*/) {
     }
     grid_.xRange = rx; grid_.yRange = ry;
 
-    for (uint32_t j = 0; j < gridH_; ++j) {
-        for (uint32_t i = 0; i < gridW_; ++i) {
-            float gx = rx.min + (i + 0.5f) / gridW_ * rx.span();
-            float gy = ry.min + (j + 0.5f) / gridH_ * ry.span();
-            float sum = 0;
-            for (const auto& s : samples_) {
-                float dx = (gx - s.x) * inv2bwX2;
-                float dy = (gy - s.y) * inv2bwY2;
-                sum += std::exp(-(dx + dy));
+    if (samples_.empty()) {
+        grid_.values.assign(size_t(gridW_) * gridH_, 0.0f);
+        return;
+    }
+
+    // GPU path: stream samples to a storage buffer and gather the
+    // density per cell in a compute shader.
+    auto& ctx = r.backend().context();
+    if (!kdeInited_) {
+        try {
+            kde_.init(ctx.device.handle(), ctx.allocator.handle(),
+                      ctx.device.computeQueue(), ctx.computePool.handle());
+        } catch (...) {
+            // No shaderc / pipeline failure — CPU fallback below.
+        }
+        kdeInited_ = true;
+    }
+    if (kde_.ready()) {
+        grid_.values = kde_.eval(samples_, gridW_, gridH_,
+                                 rx.min, rx.max, ry.min, ry.max, bwX, bwY);
+    }
+
+    // CPU fallback (identical math to the shader).
+    if (grid_.values.empty()) {
+        float inv2bwX2 = 1.0f / (2.0f * bwX * bwX);
+        float inv2bwY2 = 1.0f / (2.0f * bwY * bwY);
+        float norm = 1.0f / (2.0f * 3.14159265f * bwX * bwY * samples_.size());
+        grid_.values.assign(size_t(gridW_) * gridH_, 0.0f);
+        for (uint32_t j = 0; j < gridH_; ++j) {
+            for (uint32_t i = 0; i < gridW_; ++i) {
+                float gx = rx.min + (i + 0.5f) / gridW_ * rx.span();
+                float gy = ry.min + (j + 0.5f) / gridH_ * ry.span();
+                float sum = 0;
+                for (const auto& s : samples_) {
+                    float dx = gx - s.x;
+                    float dy = gy - s.y;
+                    sum += std::exp(-(dx * dx * inv2bwX2 + dy * dy * inv2bwY2));
+                }
+                grid_.values[j * gridW_ + i] = sum * norm;
             }
-            grid_.values[j * gridW_ + i] = sum * norm;
         }
     }
+
     // Compute value range
     grid_.valueRange = {1e30f, -1e30f};
     for (float v : grid_.values) {

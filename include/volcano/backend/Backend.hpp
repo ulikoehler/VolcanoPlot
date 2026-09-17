@@ -80,6 +80,17 @@ public:
     /// End the render pass, submit, and present (screen) / resolve (headless).
     virtual void endFrame() = 0;
 
+    /// Blitting (mpl canvas.copy_from_bbox / restore_region):
+    /// snapshot the current color attachment for later restore.
+    /// Returns false when unsupported (MSAA, swapchain, ...).
+    virtual bool blitCapture() { return false; }
+    /// True once blitCapture() has stored a background.
+    [[nodiscard]] virtual bool blitCaptured() const { return false; }
+    /// Begin a frame that loads the captured background instead of
+    /// clearing (loadOp=eLoad). Falls back to beginFrame() when blitting
+    /// isn't supported.
+    virtual vk::CommandBuffer beginFrameLoad() { return beginFrame(); }
+
     [[nodiscard]] virtual GpuContext& context() noexcept = 0;
     [[nodiscard]] virtual const GpuContext& context() const noexcept = 0;
     [[nodiscard]] virtual vk::Extent2D extent() const noexcept = 0;

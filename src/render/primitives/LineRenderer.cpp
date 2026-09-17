@@ -140,6 +140,7 @@ void LineRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool po
     color_ = color;
     width_ = width;
     count_ = static_cast<uint32_t>(points.size());
+    externalBuf_ = VK_NULL_HANDLE;
 }
 
 void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
@@ -188,7 +189,8 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     cmd.setViewport(0, vp);
     cmd.setScissor(0, rect);
 
-    std::array<vk::Buffer, 1> buf = { pointBuffer_.handle() };
+    std::array<vk::Buffer, 1> buf = { externalBuf_ ? externalBuf_
+                                                  : pointBuffer_.handle() };
     std::array<vk::DeviceSize, 1> off = {0};
     cmd.bindVertexBuffers(0, buf, off);
     cmd.draw(pointCount, 1, 0, 0);

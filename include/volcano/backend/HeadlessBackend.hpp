@@ -17,8 +17,12 @@ public:
 
     bool pollEvents() override { return true; }
     vk::CommandBuffer beginFrame() override;
+    vk::CommandBuffer beginFrameLoad() override;
     void endFrame() override;
     std::vector<uint8_t> readbackRgba8() override;
+
+    bool blitCapture() override;
+    [[nodiscard]] bool blitCaptured() const override { return blitCaptured_; }
 
     [[nodiscard]] GpuContext& context() noexcept override { return ctx_; }
     [[nodiscard]] const GpuContext& context() const noexcept override { return ctx_; }
@@ -32,6 +36,10 @@ private:
     void createRenderPass();
     void createFramebuffer();
     void createCommandBuffer();
+    /// Build a render pass; `colorLoad`/`colorInitial` configure the
+    /// color attachment (clear for fresh frames, load for blit frames).
+    vk::UniqueRenderPass makeRenderPass(vk::AttachmentLoadOp colorLoad,
+                                        vk::ImageLayout colorInitial);
 
     BackendDesc desc_;
     GpuContext ctx_;
@@ -52,6 +60,11 @@ private:
     vk::UniqueCommandBuffer commandBuffer_;
     vk::UniqueFence renderFence_;
     bool frameBegun_ = false;
+
+    /// Blit state: eLoad-variant render pass + snapshot image.
+    vk::UniqueRenderPass renderPassLoad_;
+    core::Image blitImage_;
+    bool blitCaptured_ = false;
 };
 
 } // namespace volcano::backend

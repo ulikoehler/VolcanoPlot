@@ -15,6 +15,8 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/primitives/SurfaceRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SpineRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/ReduceRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/EvalRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/KdeEvalRenderer.cpp
     ${VOLCANO_ROOT}/src/render/GridRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/Grid3DRenderer.cpp
     ${VOLCANO_ROOT}/src/render/TickLayout.cpp

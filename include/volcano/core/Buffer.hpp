@@ -52,6 +52,10 @@ public:
     /// Upload data from a CPU span. Requires staging if not host-visible.
     void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool, std::span<const std::byte> data);
 
+    /// Invalidate the CPU cache so `mappedData()` reflects GPU writes.
+    /// Needed before reading host-cached buffers written by the GPU.
+    void invalidate();
+
 private:
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
