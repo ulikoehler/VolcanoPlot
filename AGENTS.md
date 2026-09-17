@@ -35,6 +35,10 @@ cmake --build build -j4
 
 # Generate side-by-side matplotlib vs VolcanoPlot gallery
 ./scripts/generate_gallery.sh gallery
+
+# Generate per-microfeature comparison gallery (parallelized; see
+# docs/MICROFEATURES.md for the ordered verification checklist)
+./scripts/generate_microgallery.sh gallery_micro --jobs 8
 ```
 
 ## Dependencies (system)
