@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/Axes.hpp>
+#include <volcano/plot/Events.hpp>
 #include <volcano/plot/Rc.hpp>
 #include "PlotTestHarness.hpp"
 
@@ -367,4 +368,133 @@ TEST(LegendRc, SpacingAndFrameParams) {
     EXPECT_FALSE(rc::params().legend.fancyBox);
     EXPECT_TRUE(rc::params().legend.shadow);
     EXPECT_FLOAT_EQ(rc::params().legend.titleFont.size, 16.0f);
+}
+
+// ─── handler_map (mpl legend handler protocol) ──────────────────────────────
+
+TEST(LegendHandlerMap, HandlerOverridesDefaultEntry) {
+    LFig lf(256);
+    Series2D s;
+    s.label = "line";
+    s.color = Color::green();
+    s.points = {{-10.0f, -10.0f}, {-9.0f, -9.0f}};
+    lf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+
+    auto& lg = lf.axes->legend();
+    // mpl handler_map: LinePlot → two custom handles (red + blue).
+    lg.handlerMap[std::type_index(typeid(LinePlot))] =
+        [](const IPlot&) {
+            return std::vector<LegendHandle>{
+                {"h-red", Color::red(), LegendMarker::Square},
+                {"h-blue", Color::blue(), LegendMarker::Square}};
+        };
+    auto img = lf.render();
+
+    const auto box = lf.axes->legendBox();
+    ASSERT_GT(box.width, 0u) << "legend box should be tracked";
+    // Both handler colors should appear inside the legend box.
+    size_t red = 0, blue = 0;
+    for (uint32_t y = uint32_t(box.y); y < uint32_t(box.y + box.height); ++y)
+        for (uint32_t x = uint32_t(box.x); x < uint32_t(box.x + box.width); ++x) {
+            auto p = img.get(x, y);
+            if (p.approx(Pixel::red(), 60)) ++red;
+            if (p.approx(Pixel::blue(), 60)) ++blue;
+        }
+    EXPECT_GT(red, 10u) << "handler's red handle should render";
+    EXPECT_GT(blue, 10u) << "handler's blue handle should render";
+}
+
+TEST(LegendHandlerMap, UnhandledTypeFallsBackToLabel) {
+    LFig lf(256);
+    lf.addEntry("scatter", Color::green());
+    auto& lg = lf.axes->legend();
+    // Handler registered for a different type — scatter falls back.
+    lg.handlerMap[std::type_index(typeid(LinePlot))] =
+        [](const IPlot&) {
+            return std::vector<LegendHandle>{
+                {"x", Color::red(), LegendMarker::Square}};
+        };
+    auto img = lf.render();
+    const auto box = lf.axes->legendBox();
+    ASSERT_GT(box.width, 0u);
+    size_t green = 0;
+    for (uint32_t y = uint32_t(box.y); y < uint32_t(box.y + box.height); ++y)
+        for (uint32_t x = uint32_t(box.x); x < uint32_t(box.x + box.width); ++x)
+            if (img.get(x, y).approx(Pixel::green(), 60)) ++green;
+    EXPECT_GT(green, 10u) << "fallback entry should use the plot's color";
+}
+
+// ─── Draggable legend (mpl legend.draggable) ────────────────────────────────
+
+TEST(LegendDrag, DraggableMovesBox) {
+    LFig lf(256);
+    lf.addEntry("a", Color::green());
+    lf.axes->legend().draggable = true;
+    auto img0 = lf.render();
+    const auto box0 = lf.axes->legendBox();
+    ASSERT_GT(box0.width, 0u);
+
+    // Press inside the legend, drag +30/+20, release.
+    const float cx = box0.x + box0.width / 2.0f;
+    const float cy = box0.y + box0.height / 2.0f;
+    Event press{Event::Type::ButtonPress};
+    press.x = cx; press.y = cy; press.button = 1;
+    lf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = cx + 30.0f; move.y = cy + 20.0f; move.buttons = 1;
+    lf.figure.dispatch(move);
+    Event release{Event::Type::ButtonRelease};
+    release.x = move.x; release.y = move.y; release.button = 1;
+    lf.figure.dispatch(release);
+
+    const auto& lg = lf.axes->style().legend;
+    EXPECT_NEAR(lg.dragOffset.x, 30.0f, 0.01f);
+    EXPECT_NEAR(lg.dragOffset.y, 20.0f, 0.01f);
+
+    auto img1 = lf.render();
+    const auto box1 = lf.axes->legendBox();
+    EXPECT_NEAR(box1.x, box0.x + 30.0f, 1.0f) << "box should move with drag";
+    EXPECT_NEAR(box1.y, box0.y + 20.0f, 1.0f);
+}
+
+TEST(LegendDrag, NonDraggableIgnoresPress) {
+    LFig lf(256);
+    lf.addEntry("a", Color::green());
+    lf.axes->legend().draggable = false;
+    auto img = lf.render();
+    const auto box = lf.axes->legendBox();
+    ASSERT_GT(box.width, 0u);
+
+    Event press{Event::Type::ButtonPress};
+    press.x = box.x + box.width / 2.0f;
+    press.y = box.y + box.height / 2.0f;
+    press.button = 1;
+    lf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = press.x + 40.0f; move.y = press.y + 40.0f; move.buttons = 1;
+    lf.figure.dispatch(move);
+
+    const auto& lg = lf.axes->style().legend;
+    EXPECT_FLOAT_EQ(lg.dragOffset.x, 0.0f);
+    EXPECT_FLOAT_EQ(lg.dragOffset.y, 0.0f);
+}
+
+TEST(LegendDrag, PressOutsideLegendStartsNoDrag) {
+    LFig lf(256);
+    lf.addEntry("a", Color::green());
+    lf.axes->legend().draggable = true;
+    auto img = lf.render();
+    ASSERT_GT(lf.axes->legendBox().width, 0u);
+
+    // Press at the canvas corner — outside the legend box.
+    Event press{Event::Type::ButtonPress};
+    press.x = 2.0f; press.y = 254.0f; press.button = 1;
+    lf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = 60.0f; move.y = 200.0f; move.buttons = 1;
+    lf.figure.dispatch(move);
+
+    const auto& lg = lf.axes->style().legend;
+    EXPECT_FLOAT_EQ(lg.dragOffset.x, 0.0f);
+    EXPECT_FLOAT_EQ(lg.dragOffset.y, 0.0f);
 }

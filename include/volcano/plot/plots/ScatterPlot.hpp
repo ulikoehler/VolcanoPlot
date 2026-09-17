@@ -9,7 +9,12 @@ namespace volcano::plot {
 
 class ScatterPlot : public IPlot {
 public:
-    explicit ScatterPlot(Series2D series) : series_(std::move(series)) {}
+    explicit ScatterPlot(Series2D series) : series_(std::move(series)) {
+        // matplotlib scatter defaults to 'o' markers.
+        if (series_.marker == MarkerStyle::None && !series_.markerPath &&
+            series_.markerTex.empty())
+            series_.marker = MarkerStyle::Circle;
+    }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

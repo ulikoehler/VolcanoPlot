@@ -490,4 +490,31 @@ MathLayout layoutMathText(std::string_view text, float baseScale,
     return out;
 }
 
+std::string mathTextToUnicode(std::string_view text) {
+    std::string out;
+    bool inMath = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == '$') { inMath = !inMath; continue; }
+        if (inMath && ch == '\\') {
+            size_t j = i + 1;
+            while (j < text.size() &&
+                   std::isalpha(static_cast<unsigned char>(text[j])))
+                ++j;
+            auto name = text.substr(i + 1, j - i - 1);
+            if (auto it = symbolMap().find(name); it != symbolMap().end())
+                out += it->second;
+            else
+                out += name;          // unknown command → literal name
+            i = j - 1;
+            continue;
+        }
+        // Drop grouping braces and script operators (layout concerns).
+        if (inMath && (ch == '{' || ch == '}' || ch == '_' || ch == '^'))
+            continue;
+        out += ch;
+    }
+    return out;
+}
+
 } // namespace volcano::text

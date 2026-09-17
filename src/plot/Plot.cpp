@@ -473,12 +473,52 @@ void Figure::dispatch(Event e) {
             e.dataPos = e.inaxes->fractionToData(
                 e.inaxes->canvasToFraction({e.x, e.y}));
     }
-    // Canvas subscribers first (mpl order), then widgets (topmost first —
-    // later widgets draw on top), then the navigation controller.
+    // Canvas subscribers first (mpl order), then legend dragging, then
+    // widgets (topmost first — later widgets draw on top), then the
+    // navigation controller.
     canvas_.emit(e);
+    if (legendDragEvent(e)) return;
     for (auto it = widgets_.rbegin(); it != widgets_.rend(); ++it)
         if ((*it)->handleEvent(e)) return;
     if (nav_) nav_->handleEvent(e);
+}
+
+bool Figure::legendDragEvent(const Event& e) {
+    if (e.type == Event::Type::ButtonPress && e.button == 1) {
+        // Topmost axes first (later placements render on top).
+        auto tryAxes = [&](Axes* ax) -> bool {
+            return ax && ax->style().legend.visible &&
+                   ax->style().legend.draggable &&
+                   ax->legendContains(e.x, e.y);
+        };
+        for (auto it = placements_.rbegin(); it != placements_.rend(); ++it)
+            if (tryAxes(it->axes.get())) {
+                legendDragAxes_ = it->axes.get();
+                legendDragLast_ = {e.x, e.y};
+                return true;
+            }
+        for (auto it = subfigs_.rbegin(); it != subfigs_.rend(); ++it)
+            for (auto* ax : (*it).figure->allAxes())
+                if (tryAxes(ax)) {
+                    legendDragAxes_ = ax;
+                    legendDragLast_ = {e.x, e.y};
+                    return true;
+                }
+        return false;
+    }
+    if (!legendDragAxes_) return false;
+    if (e.type == Event::Type::ButtonRelease && e.button == 1) {
+        legendDragAxes_ = nullptr;
+        return true;
+    }
+    if (e.type == Event::Type::MotionNotify) {
+        auto& lg = legendDragAxes_->style().legend;
+        lg.dragOffset.x += e.x - legendDragLast_.x;
+        lg.dragOffset.y += e.y - legendDragLast_.y;
+        legendDragLast_ = {e.x, e.y};
+        return true;
+    }
+    return false;
 }
 
 TransformPtr Figure::transFigure() const {

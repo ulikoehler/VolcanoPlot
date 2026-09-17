@@ -13,6 +13,13 @@ namespace volcano::plot {
 struct Point2D { float x; float y; };
 struct Point3D { float x; float y; float z; };
 
+/// Legend marker shape for a plot layer.
+enum class LegendMarker {
+    Square,   ///< Filled square (bar, fill, histogram, ...)
+    Line,     ///< Horizontal line segment (line, step, stem, function, ...)
+    Circle,   ///< Filled circle (scatter, scatter3d, ...)
+};
+
 /// Horizontal alignment (shared by text, annotations, and font properties).
 enum class HAlign { Left, Center, Right };
 

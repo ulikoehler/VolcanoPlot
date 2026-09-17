@@ -54,6 +54,9 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 private:
+    /// Raster marker pass (series_.marker / markerPath / markerTex).
+    void drawMarkersAtPoints(vk::CommandBuffer cmd, render::Renderer& r,
+                             const Axes& axes, Rect2D rect);
     Series2D series_;
     render::primitives::LineRenderer renderer_;
     bool prepared_ = false;

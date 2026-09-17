@@ -259,6 +259,19 @@ public:
     /// Set the property cycler (matplotlib axes.prop_cycle). Initialized
     /// from style_.colorCycle (or tab10 when unset).
     void setPropCycle(Cycler c) { cycler_ = std::move(c); }
+
+    /// Legend box rect in figure pixels, tracked by the renderer each
+    /// frame for hit-testing (draggable legends). Empty width/height →
+    /// no legend currently drawn.
+    void setLegendBox(Rect2D r) const { legendBox_ = r; }
+    [[nodiscard]] Rect2D legendBox() const { return legendBox_; }
+    /// True if (x,y) in figure pixels lies inside the legend box.
+    [[nodiscard]] bool legendContains(float x, float y) const {
+        return legendBox_.width > 0 && x >= legendBox_.x &&
+               x <= legendBox_.x + float(legendBox_.width) &&
+               y >= legendBox_.y &&
+               y <= legendBox_.y + float(legendBox_.height);
+    }
     [[nodiscard]] Cycler& propCycle() noexcept { return cycler_; }
     [[nodiscard]] const Cycler& propCycle() const noexcept { return cycler_; }
     /// Reset the cycler position to the first entry.
@@ -356,6 +369,8 @@ private:
     std::vector<std::unique_ptr<IPlot>> plots_;
     std::vector<TextAnnotation> texts_;
     std::vector<Annotation> annotations_;
+    /// Legend box rect tracked by the renderer for hit-testing.
+    mutable Rect2D legendBox_{};
 };
 
 } // namespace volcano::plot

@@ -78,6 +78,18 @@ public:
     /// True when the spine renderer pipeline is ready.
     [[nodiscard]] bool spineReady() const noexcept { return spineInited_; }
 
+    /// Draw UTF-8 text with mathtext (`$…$`) support at a pixel position
+    /// (baseline origin). Used internally and by plot layers drawing
+    /// rich-text elements (TeX markers, contour labels).
+    void drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
+                      std::string_view text, float x, float y,
+                      plot::Color color, float scale = 1.0f,
+                      float rotation = 0.0f,
+                      plot::HAlign lineAlign = plot::HAlign::Left);
+    /// Measure rich text at `scale` (mathtext-aware).
+    [[nodiscard]] text::TextRenderer::TextMetrics
+    measureRichText(std::string_view text, float scale = 1.0f);
+
 private:
     backend::IBackend& backend_;
     std::unique_ptr<core::PipelineCache> pipelineCache_;
@@ -118,19 +130,6 @@ private:
                                      const std::filesystem::path& path,
                                      const encode::SaveOptions& options,
                                      encode::ImageFormat fmt);
-
-    /// Draw a text string that may contain $...$ math segments, multi-line
-    /// text, rotation and per-line alignment. (x, y) is the baseline-left
-    /// origin of the block in pixel coordinates.
-    void drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
-                      std::string_view text, float x, float y,
-                      plot::Color color, float scale, float rotation = 0.0f,
-                      plot::HAlign lineAlign = plot::HAlign::Left);
-
-    /// Measure a rich text string (math-aware). Returns
-    /// {width, height, ascent} in pixels.
-    text::TextRenderer::TextMetrics measureRichText(std::string_view text,
-                                                    float scale);
 };
 
 } // namespace volcano::render

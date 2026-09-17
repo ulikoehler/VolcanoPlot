@@ -489,17 +489,24 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     if (!spineInited_ || !textReady_) return;
     const auto& style = axes.style();
     const auto& lg = style.legend;
-    if (!lg.visible) return;
+    if (!lg.visible) { axes.setLegendBox({}); return; }
 
-    // Collect legend entries (label + color + marker) from all plot layers.
+    // Collect legend entries (label + color + marker) from all plot
+    // layers; a handler_map entry overrides the plot's own handle.
     struct LegendEntry { std::string label; plot::Color color; plot::LegendMarker marker; };
     std::vector<LegendEntry> entries;
     for (auto& plot : axes.plots()) {
+        if (auto it = lg.handlerMap.find(std::type_index(typeid(*plot)));
+            it != lg.handlerMap.end()) {
+            for (auto& h : it->second(*plot))
+                entries.push_back({std::move(h.label), h.color, h.marker});
+            continue;
+        }
         auto lbl = plot->label();
         if (lbl.empty()) continue;
         entries.push_back({std::move(lbl), plot->legendColor(), plot->legendMarker()});
     }
-    if (entries.empty()) return;
+    if (entries.empty()) { axes.setLegendBox({}); return; }
 
     auto ext = backend_.extent();
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
@@ -590,9 +597,15 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         else if (la.by < 0.5f) py -= m;
     }
 
+    // Drag offset (mpl draggable legend): pixel displacement applied
+    // to the resolved anchor point.
+    px += lg.dragOffset.x;
+    py += lg.dragOffset.y;
+
     const float boxX = px - la.bx * boxW;
     const float boxY = py - (1.0f - la.by) * boxH;
     const plot::Rect2D boxRect{boxX, boxY, boxW, boxH};
+    axes.setLegendBox(boxRect);
 
     // Drop shadow behind the box.
     if (lg.shadow) {

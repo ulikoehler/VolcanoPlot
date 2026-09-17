@@ -49,11 +49,17 @@ sketchPolyline(std::span<const Point2D> points, float scale,
 /// "up" marker like '^' has its apex at -y). Used by vector export and
 /// picking; scale by the marker size and translate to position.
 struct MarkerGeom {
-    std::vector<Point2D> outline;               ///< closed fill polygon
+    std::vector<std::vector<Point2D>> outlines; ///< closed fill polygons
     std::vector<std::vector<Point2D>> strokes;  ///< open stroke polylines
     bool filled = true;   ///< false → stroke-only marker ('+', 'x', '|', ...)
 };
 [[nodiscard]] MarkerGeom markerGeom(MarkerStyle style, int numsides = 5,
                                     float angle = 0.0f);
+
+class Path;
+/// Marker geometry from a custom Path (matplotlib marker=Path). The
+/// path's vertex bounds are normalized into the unit box; closed
+/// subpaths become fill outlines, open subpaths become strokes.
+[[nodiscard]] MarkerGeom markerGeom(const Path& path, int curveSteps = 16);
 
 } // namespace volcano::plot

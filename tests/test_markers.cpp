@@ -6,10 +6,13 @@
 #include <volcano/plot/Stroke.hpp>
 #include <volcano/plot/Axes.hpp>
 #include <volcano/plot/Plot.hpp>
+#include <volcano/text/MathText.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 using namespace volcano;
@@ -445,6 +448,138 @@ TEST(LineStyleRegression, WideLineIsThick) {
     EXPECT_TRUE(dark(img.get(64, 69)));
     EXPECT_FALSE(dark(img.get(64, 55)));
     EXPECT_FALSE(dark(img.get(64, 73)));
+}
+
+// ── Custom Path / TeX markers ───────────────────────────────────────────────
+
+TEST(PathMarker, CustomPathRendersFilledShape) {
+    CraftedFigure cf(64);
+    // A triangle path (mpl marker=Path): vertices in arbitrary units —
+    // the marker is normalized into the size box.
+    Path p;
+    p.moveTo({0.0f, -2.0f});
+    p.lineTo({2.0f, 2.0f});
+    p.lineTo({-2.0f, 2.0f});
+    p.close();
+    Series2D s;
+    s.color = Color::black();
+    s.markerPath = p;
+    s.size = 24.0f;
+    s.points.push_back({0.5f, 0.5f});
+    cf.axes->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+    auto dark = [](Pixel px) { return px.r + px.g + px.b < 200; };
+    EXPECT_TRUE(dark(img.get(32, 32)));    // center
+    EXPECT_TRUE(dark(img.get(32, 24)));    // apex (path -y → screen up)
+    EXPECT_FALSE(dark(img.get(10, 32)));   // outside the marker
+}
+
+TEST(PathMarker, PathNormalizesToUnitBox) {
+    Path p;
+    p.moveTo({0.0f, 0.0f});
+    p.lineTo({4.0f, 0.0f});
+    p.lineTo({4.0f, 4.0f});
+    p.lineTo({0.0f, 4.0f});
+    p.close();
+    auto g = markerGeom(p);
+    ASSERT_EQ(g.outlines.size(), 1u);
+    ASSERT_EQ(g.outlines[0].size(), 4u);
+    // Bounds should land in [-0.5, 0.5] centered on origin.
+    float loX = 1e9f, hiX = -1e9f, loY = 1e9f, hiY = -1e9f;
+    for (auto q : g.outlines[0]) {
+        loX = std::min(loX, q.x); hiX = std::max(hiX, q.x);
+        loY = std::min(loY, q.y); hiY = std::max(hiY, q.y);
+    }
+    EXPECT_NEAR(loX, -0.5f, 1e-3f);
+    EXPECT_NEAR(hiX, 0.5f, 1e-3f);
+    EXPECT_NEAR(loY, -0.5f, 1e-3f);
+    EXPECT_NEAR(hiY, 0.5f, 1e-3f);
+    EXPECT_TRUE(g.filled);
+}
+
+TEST(PathMarker, OpenSubpathsBecomeStrokes) {
+    Path p;
+    p.moveTo({-1.0f, 0.0f});
+    p.lineTo({1.0f, 0.0f});   // open subpath → stroke
+    auto g = markerGeom(p);
+    EXPECT_TRUE(g.outlines.empty());
+    ASSERT_EQ(g.strokes.size(), 1u);
+    EXPECT_FALSE(g.filled);
+}
+
+TEST(TexMarker, MathTextToUnicode) {
+    EXPECT_EQ(text::mathTextToUnicode("$\\alpha$"), "α");
+    EXPECT_EQ(text::mathTextToUnicode("$\\times$"), "×");
+    EXPECT_EQ(text::mathTextToUnicode("plain"), "plain");
+    EXPECT_EQ(text::mathTextToUnicode("$x_{i}$"), "xi");
+}
+
+TEST(TexMarker, RendersGlyphAtPoint) {
+    CraftedFigure cf(64);
+    Series2D s;
+    s.color = Color::black();
+    s.markerTex = "$\\alpha$";
+    s.size = 28.0f;
+    s.points.push_back({0.5f, 0.5f});
+    cf.axes->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+    auto dark = [](Pixel px) { return px.r + px.g + px.b < 200; };
+    int darkCount = 0;
+    for (uint32_t y = 16; y < 48; ++y)
+        for (uint32_t x = 16; x < 48; ++x)
+            if (dark(img.get(x, y))) ++darkCount;
+    EXPECT_GT(darkCount, 10) << "TeX marker should rasterize a glyph";
+}
+
+TEST(TexMarker, VectorEmitUsesUnicodeGlyph) {
+    PlotTestHarness harness(128, 128);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    Series2D s;
+    s.markerTex = "$\\beta$";
+    s.points = {{0.5f, 0.5f}};
+    ax->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+    auto path = std::filesystem::temp_directory_path() / "volcano_tex.svg";
+    ASSERT_TRUE(harness.renderer().savefig(fig, path));
+    std::ifstream in(path);
+    std::string doc{std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>{}};
+    EXPECT_NE(doc.find("β"), std::string::npos)
+        << "TeX marker should emit the unicode glyph, not raw $\\beta$";
+    std::filesystem::remove(path);
+}
+
+TEST(LineMarkers, MarkersRenderOnLineVertices) {
+    CraftedFigure cf(128);
+    Series2D s;
+    s.color = Color::black();
+    s.lineStyle = LineStyle::None;   // markers only (mpl ls='None')
+    s.marker = MarkerStyle::Square;
+    s.size = 20.0f;
+    s.points = {{0.5f, 0.5f}};
+    cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+    auto dark = [](Pixel px) { return px.r + px.g + px.b < 200; };
+    EXPECT_TRUE(dark(img.get(64, 64)));
+    EXPECT_TRUE(dark(img.get(58, 64)));
+}
+
+TEST(LineMarkers, DefaultLineHasNoMarkers) {
+    CraftedFigure cf(128);
+    Series2D s;
+    s.color = Color::black();
+    s.points = {{0.0f, 0.5f}, {1.0f, 0.5f}};
+    cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+    auto dark = [](Pixel px) { return px.r + px.g + px.b < 200; };
+    // Marker defaults to None — no blobs at the endpoints.
+    EXPECT_FALSE(dark(img.get(0, 55))) << "no marker cap at line start";
+    EXPECT_FALSE(dark(img.get(0, 73)));
+    EXPECT_TRUE(dark(img.get(64, 64)));
 }
 
 TEST(LineStyleRegression, LineStyleNoneRendersNothing) {

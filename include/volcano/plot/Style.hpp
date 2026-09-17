@@ -6,9 +6,12 @@
 #include "volcano/plot/Normalize.hpp"
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeindex>
+#include <unordered_map>
 #include <vector>
 
 namespace volcano::plot {
@@ -89,6 +92,16 @@ struct AxisStyle {
     Color labelColor = Color::black();
 };
 
+class IPlot;
+
+/// One legend entry (label + handle appearance). Legend handlers
+/// (LegendStyle::handlerMap) produce these for their plot type.
+struct LegendHandle {
+    std::string label;
+    Color color = Color::black();
+    LegendMarker marker = LegendMarker::Square;
+};
+
 /// Legend configuration.
 struct LegendStyle {
     bool visible = false;
@@ -127,8 +140,22 @@ struct LegendStyle {
     float borderPad = 0.4f;
     float columnSpacing = 2.0f;
     float borderAxesPad = 0.5f;
-    /// Whether the legend may be dragged (interaction wiring in §11).
+    /// Whether the legend may be dragged (mpl legend.draggable()).
+    /// While dragged, `dragOffset` accumulates the pixel displacement
+    /// applied to the loc/anchor position.
     bool draggable = false;
+    /// Pixel-space drag displacement applied to the resolved legend
+    /// anchor. Updated by the interaction layer while dragging; users
+    /// may set it to reposition the legend programmatically.
+    Point2D dragOffset{0.0f, 0.0f};
+    /// mpl `handler_map`: per-plot-type handlers producing legend
+    /// handles. Keyed on `typeid(plot)`; a handler receives the IPlot
+    /// and returns one or more handles (a plot may expand to several
+    /// entries, e.g. errorbar → line + caps). Plots with no handler and
+    /// no label are skipped.
+    std::unordered_map<std::type_index,
+        std::function<std::vector<LegendHandle>(const IPlot&)>>
+        handlerMap;
 };
 
 /// Colorbar configuration.

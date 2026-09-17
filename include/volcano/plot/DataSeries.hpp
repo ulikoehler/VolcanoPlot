@@ -7,6 +7,9 @@
 #include <span>
 #include <string>
 #include <variant>
+#include <volcano/plot/Path.hpp>
+
+#include <optional>
 #include <vector>
 
 namespace volcano::plot {
@@ -17,10 +20,16 @@ struct Series2D {
     std::string label;
     Color color = Color::blue();
     float size = 6.0f;          // marker size in pixels
-    MarkerStyle marker = MarkerStyle::Circle;
+    MarkerStyle marker = MarkerStyle::None;  // mpl plot() default: none
     MarkerFill markerFill = MarkerFill::Full;
     int markerNumsides = 5;     ///< for Polygon/StarN/AsteriskN/CircledN
     float markerAngle = 0.0f;   ///< rotation in radians
+    /// Custom marker path (matplotlib marker=Path instance): vertex
+    /// bounds are normalized to the marker-size box. Overrides `marker`.
+    std::optional<Path> markerPath;
+    /// TeX/mathtext marker (matplotlib marker='$…$'): the laid-out
+    /// glyph string is drawn centered at each point. Overrides `marker`.
+    std::string markerTex;
     LineStyle lineStyle = LineStyle::Solid;
     /// Custom dash tuple (on, off, ...) in pixels. Empty → derived from
     /// lineStyle via dashPattern().

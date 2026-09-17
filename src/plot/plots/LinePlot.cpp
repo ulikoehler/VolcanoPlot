@@ -6,6 +6,8 @@
 #include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include "volcano/plot/Stroke.hpp"
+#include "volcano/text/MathText.hpp"
+#include "../MarkerDraw.hpp"
 #include "../VectorEmitHelpers.hpp"
 #include <algorithm>
 namespace volcano::plot {
@@ -20,8 +22,13 @@ void LinePlot::prepare(render::Renderer& r) {
 }
 void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
-    if (!prepared_ || series_.points.size() < 2 ||
-        series_.lineStyle == LineStyle::None) return;
+    if (!prepared_ || series_.points.empty()) return;
+    if (series_.points.size() < 2 ||
+        series_.lineStyle == LineStyle::None) {
+        // Marker-only (linestyle 'None') still draws markers.
+        drawMarkersAtPoints(cmd, r, axes, rect);
+        return;
+    }
 
     // Expand the point sequence for step draw styles, then map data → pixels.
     auto pts = applyDrawStyle(series_.points, series_.drawStyle);
@@ -60,6 +67,37 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
     auto mesh = strokePolyline(px, sp);
     spine.drawTriangles(cmd, clip, res, mesh.verts, series_.color);
+
+    // Markers at each vertex (matplotlib plot marker=...).
+    drawMarkersAtPoints(cmd, r, axes, rect);
+}
+
+void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
+                                   render::Renderer& r,
+                                   const Axes& axes, Rect2D rect) {
+    if (series_.size <= 0) return;
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    std::vector<Point2D> px;
+    px.reserve(series_.points.size());
+    for (const auto& p : series_.points) {
+        auto f = axes.dataToFraction(p);
+        px.push_back({rect.x + f.x * float(rect.width),
+                      rect.y + (1.0f - f.y) * float(rect.height)});
+    }
+    if (series_.markerPath) {
+        drawMarkersPx(r, cmd, clip, px, markerGeom(*series_.markerPath),
+                      series_.size, series_.color,
+                      std::max(1.0f, series_.size * 0.1f));
+    } else if (!series_.markerTex.empty()) {
+        drawTexMarkersPx(r, cmd, clip, px, series_.markerTex,
+                         series_.color, series_.size);
+    } else if (series_.marker != MarkerStyle::None) {
+        auto g = markerGeom(series_.marker, series_.markerNumsides,
+                            series_.markerAngle);
+        drawMarkersPx(r, cmd, clip, px, g, series_.size, series_.color,
+                      std::max(1.0f, series_.size * 0.1f));
+    }
 }
 void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                           Rect2D rect) {
@@ -95,7 +133,24 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         c.polyline(px, pen);
     }
     // Markers at each point.
-    if (series_.marker != MarkerStyle::None && series_.size > 0) {
+    if (series_.size <= 0) return;
+    if (!series_.markerTex.empty()) {
+        auto uni = text::mathTextToUnicode(series_.markerTex);
+        const float halfW = series_.size * 0.3f * float(uni.size());
+        for (const auto& dp : series_.points) {
+            auto p = toPx(dp);
+            c.text({p.x - halfW, p.y + series_.size * 0.35f},
+                   uni, series_.size, series_.color);
+        }
+        return;
+    }
+    if (series_.markerPath) {
+        emitMarkerAt(c, toPx, series_.points,
+                     markerGeom(*series_.markerPath), series_.size,
+                     series_.color, std::max(1.0f, series_.size * 0.1f));
+        return;
+    }
+    if (series_.marker != MarkerStyle::None) {
         auto g = markerGeom(series_.marker, series_.markerNumsides,
                             series_.markerAngle);
         emitMarkerAt(c, toPx, series_.points, g, series_.size,

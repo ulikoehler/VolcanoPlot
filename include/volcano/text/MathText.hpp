@@ -28,6 +28,12 @@ namespace volcano::text {
 /// True if `s` contains a `$...$` math segment.
 [[nodiscard]] bool containsMath(std::string_view s) noexcept;
 
+/// Flatten a (possibly math-containing) string to plain Unicode: `$…$`
+/// delimiters and grouping braces are stripped and `\command` symbols
+/// are replaced by their Unicode equivalents. Used where math layout
+/// isn't available (vector text backends, TeX markers).
+[[nodiscard]] std::string mathTextToUnicode(std::string_view text);
+
 /// A positioned run of UTF-8 text within a laid-out block.
 /// Coordinates are pixels relative to the block origin (0, baseline).
 struct MathRun {

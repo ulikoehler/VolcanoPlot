@@ -36,11 +36,12 @@ void emitMarkerAt(render::VectorCanvas& c, const Map& toPx,
                 out.push_back({c0.x + q.x * size, c0.y + q.y * size});
             return out;
         };
-        if (g.filled && g.outline.size() >= 3) {
-            if (color.a > 0.0f) {
-                c.polygon(scaled(g.outline), color);
+        for (const auto& out : g.outlines) {
+            if (out.size() < 3) continue;
+            if (g.filled && color.a > 0.0f) {
+                c.polygon(scaled(out), color);
             } else {
-                auto ring = scaled(g.outline);
+                auto ring = scaled(out);
                 ring.push_back(ring.front());
                 c.polyline(ring, pen);
             }
@@ -48,11 +49,6 @@ void emitMarkerAt(render::VectorCanvas& c, const Map& toPx,
         for (const auto& st : g.strokes) {
             auto line = scaled(st);
             if (line.size() >= 2) c.polyline(line, pen);
-        }
-        if (!g.filled && g.strokes.empty() && g.outline.size() >= 3) {
-            auto ring = scaled(g.outline);
-            ring.push_back(ring.front());
-            c.polyline(ring, pen);
         }
     }
 }

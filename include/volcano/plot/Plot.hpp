@@ -23,13 +23,6 @@ namespace volcano::plot {
 class Navigation;
 class Widget;
 
-/// Legend marker shape for a plot layer.
-enum class LegendMarker {
-    Square,   ///< Filled square (bar, fill, histogram, ...)
-    Line,     ///< Horizontal line segment (line, step, stem, function, ...)
-    Circle,   ///< Filled circle (scatter, scatter3d, ...)
-};
-
 /// Interface implemented by all plot types (scatter, line, bar, pie, ...).
 class IPlot {
 public:
@@ -228,6 +221,13 @@ private:
     EventCanvas canvas_;
     std::unique_ptr<Navigation> nav_;
     std::vector<std::unique_ptr<Widget>> widgets_;
+
+    /// Legend drag state (mpl legend.draggable()): the axes whose legend
+    /// is being dragged and the pointer position at the last event.
+    Axes* legendDragAxes_ = nullptr;
+    Point2D legendDragLast_{};
+    /// Legend drag handling; returns true when the event was consumed.
+    bool legendDragEvent(const Event& e);
 
     /// Compute effective grid margins for tight/constrained layout.
     void computeTightMargins(Extent2D extent);

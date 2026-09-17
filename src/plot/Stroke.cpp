@@ -1,7 +1,9 @@
 // volcano/plot/Stroke.cpp — CPU polyline stroker
 #include <volcano/plot/Stroke.hpp>
+#include "volcano/plot/Path.hpp"
 
 #include <cmath>
+#include <limits>
 #include <initializer_list>
 
 namespace volcano::plot {
@@ -281,21 +283,22 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
     };
     switch (style) {
     case MarkerStyle::None: break;
-    case MarkerStyle::Point:  g.outline = ngon(20, 0.35f); break;
-    case MarkerStyle::Circle: g.outline = ngon(20); break;
-    case MarkerStyle::Square: g.outline = ngon(4, 0.5f, -kPi / 4.0f); break;
-    case MarkerStyle::Diamond: g.outline = ngon(4, 0.6f); break;
+    case MarkerStyle::Point:  g.outlines = {ngon(20, 0.35f)}; break;
+    case MarkerStyle::Circle: g.outlines = {ngon(20)}; break;
+    case MarkerStyle::Square: g.outlines = {ngon(4, 0.5f, -kPi / 4.0f)}; break;
+    case MarkerStyle::Diamond: g.outlines = {ngon(4, 0.6f)}; break;
     case MarkerStyle::ThinDiamond: {
         float c = std::cos(angle), s = std::sin(angle);
         Point2D pts[4] = {{0,-0.7f},{0.4f,0},{0,0.7f},{-0.4f,0}};
+        g.outlines.resize(1);
         for (auto p : pts)
-            g.outline.push_back({p.x*c - p.y*s, p.x*s + p.y*c});
+            g.outlines.back().push_back({p.x*c - p.y*s, p.x*s + p.y*c});
         break;
     }
-    case MarkerStyle::Triangle: g.outline = ngon(3); break;
-    case MarkerStyle::TriDown: g.outline = ngon(3, 0.5f, kPi/2.0f); break;
-    case MarkerStyle::TriLeft: g.outline = ngon(3, 0.5f, kPi); break;
-    case MarkerStyle::TriRight: g.outline = ngon(3, 0.5f, 0.0f); break;
+    case MarkerStyle::Triangle: g.outlines = {ngon(3)}; break;
+    case MarkerStyle::TriDown: g.outlines = {ngon(3, 0.5f, kPi/2.0f)}; break;
+    case MarkerStyle::TriLeft: g.outlines = {ngon(3, 0.5f, kPi)}; break;
+    case MarkerStyle::TriRight: g.outlines = {ngon(3, 0.5f, 0.0f)}; break;
     case MarkerStyle::Tri1:   // Y tripod: 3 spokes (stroke)
         g.strokes = {{{0,0},{0,-0.5f}},
                      {{0,0},{0.433f,0.25f}},
@@ -326,7 +329,7 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
         Point2D pts[12] = {
             {-a,-0.5f},{a,-0.5f},{a,-a},{0.5f,-a},{0.5f,a},{a,a},
             {a,0.5f},{-a,0.5f},{-a,a},{-0.5f,a},{-0.5f,-a},{-a,-a}};
-        g.outline.assign(pts, pts + 12); break;
+        g.outlines = {{pts, pts + 12}}; break;
     }
     case MarkerStyle::XFilled: {
         const float a = 0.1667f;
@@ -334,22 +337,24 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
             {-a,-0.5f},{a,-0.5f},{a,-a},{0.5f,-a},{0.5f,a},{a,a},
             {a,0.5f},{-a,0.5f},{-a,a},{-0.5f,a},{-0.5f,-a},{-a,-a}};
         float c = std::cos(kPi/4.0f), s = std::sin(kPi/4.0f);
+        g.outlines.resize(1);
         for (auto p : pts)
-            g.outline.push_back({(p.x*c - p.y*s)*1.1f, (p.x*s + p.y*c)*1.1f});
+            g.outlines.back().push_back({(p.x*c - p.y*s)*1.1f, (p.x*s + p.y*c)*1.1f});
         break;
     }
     case MarkerStyle::Star: {  // 5-point star
+        g.outlines.resize(1);
         for (int i = 0; i < 10; ++i) {
             float r = (i % 2 == 0) ? 0.5f : 0.21f;
             float a = -kPi / 2.0f + i * kPi / 5.0f;
-            g.outline.push_back({r * std::cos(a), r * std::sin(a)});
+            g.outlines.back().push_back({r * std::cos(a), r * std::sin(a)});
         }
         break;
     }
-    case MarkerStyle::Pentagon: g.outline = ngon(5); break;
-    case MarkerStyle::Hexagon1: g.outline = ngon(6); break;
-    case MarkerStyle::Hexagon2: g.outline = ngon(6, 0.5f, 0.0f); break;
-    case MarkerStyle::Octagon: g.outline = ngon(8, 0.5f, -kPi/8.0f); break;
+    case MarkerStyle::Pentagon: g.outlines = {ngon(5)}; break;
+    case MarkerStyle::Hexagon1: g.outlines = {ngon(6)}; break;
+    case MarkerStyle::Hexagon2: g.outlines = {ngon(6, 0.5f, 0.0f)}; break;
+    case MarkerStyle::Octagon: g.outlines = {ngon(8, 0.5f, -kPi/8.0f)}; break;
     case MarkerStyle::VLine:
         g.strokes = {{{0,-0.5f},{0,0.5f}}}; g.filled = false; break;
     case MarkerStyle::HLine:
@@ -386,12 +391,13 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
     case MarkerStyle::CaretDownBase:
         g.strokes = {{{-0.35f,-0.35f},{-0.4f,-0.3f},{0.4f,-0.3f}}};
         g.filled = false; break;
-    case MarkerStyle::Polygon: g.outline = ngon(numsides); break;
+    case MarkerStyle::Polygon: g.outlines = {ngon(numsides)}; break;
     case MarkerStyle::StarN: {
+        g.outlines.resize(1);
         for (int i = 0; i < numsides * 2; ++i) {
             float r = (i % 2 == 0) ? 0.5f : 0.21f;
             float a = -kPi / 2.0f + i * kPi / numsides;
-            g.outline.push_back({r * std::cos(a), r * std::sin(a)});
+            g.outlines.back().push_back({r * std::cos(a), r * std::sin(a)});
         }
         break;
     }
@@ -403,7 +409,7 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
         }
         g.filled = false; break;
     }
-    case MarkerStyle::CircledN: g.outline = ngon(numsides); break;
+    case MarkerStyle::CircledN: g.outlines = {ngon(numsides)}; break;
     }
     // Apply rotation to strokes as well.
     if (angle != 0.0f && !g.filled) {
@@ -412,6 +418,41 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
             for (auto& p : st)
                 p = {p.x * c - p.y * s, p.x * s + p.y * c};
     }
+    return g;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// markerGeom(Path) — custom path markers normalized to the unit box
+// ═══════════════════════════════════════════════════════════════════════════
+
+MarkerGeom markerGeom(const Path& path, int curveSteps) {
+    MarkerGeom g;
+    auto subs = path.toPolylines(curveSteps);
+    if (subs.empty()) return g;
+
+    // Bounds over all flattened vertices → normalize into [-0.5, 0.5].
+    float loX = std::numeric_limits<float>::max();
+    float hiX = std::numeric_limits<float>::lowest();
+    float loY = loX, hiY = hiX;
+    for (const auto& sp : subs)
+        for (auto p : sp.points) {
+            loX = std::min(loX, p.x); hiX = std::max(hiX, p.x);
+            loY = std::min(loY, p.y); hiY = std::max(hiY, p.y);
+        }
+    float cx = (loX + hiX) * 0.5f, cy = (loY + hiY) * 0.5f;
+    float sx = hiX - loX, sy = hiY - loY;
+    float sc = std::max(sx, sy);
+    if (sc <= 0.0f) sc = 1.0f;   // degenerate: keep as-is, centered
+
+    for (auto& sp : subs) {
+        std::vector<Point2D> pts;
+        pts.reserve(sp.points.size());
+        for (auto p : sp.points)
+            pts.push_back({(p.x - cx) / sc, (p.y - cy) / sc});
+        if (sp.closed) g.outlines.push_back(std::move(pts));
+        else           g.strokes.push_back(std::move(pts));
+    }
+    g.filled = !g.outlines.empty();
     return g;
 }
 
