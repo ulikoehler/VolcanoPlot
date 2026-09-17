@@ -75,6 +75,7 @@ public:
     std::string label_;
 
     void prepare(render::Renderer&) override {} // CPU tessellation per frame
+    [[nodiscard]] bool canEmitVector() const override { return true; }
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override {
         return !faceColors.empty() && faceColors[0].a > 0 ? faceColors[0]
@@ -104,6 +105,12 @@ protected:
                              std::span<const float> dash,
                              const std::string& hatch, float hatchSpacing,
                              float sketchScale = 0.0f);
+    /// Vector-export counterpart of drawSubpaths: fill + edge + hatch.
+    static void emitSubpaths(render::VectorCanvas& c,
+                             const std::vector<Path::Subpath>& subs,
+                             Color face, Color edge, float lw,
+                             std::span<const float> dash,
+                             const std::string& hatch, float hatchSpacing);
 };
 
 /// PatchCollection — a list of styled patches.
@@ -116,6 +123,8 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     /// Picking: hit when the data point is inside a patch.
     bool contains(const Axes&, Point2D pt) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// PathCollection — one path instanced at `offsets`, scaled per-item.
@@ -135,6 +144,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// LineCollection — independent line segments/curves with per-line style.
@@ -146,6 +157,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// PolyCollection — filled polygons with per-poly face/edge colors.
@@ -159,6 +172,8 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     /// Picking: hit when the data point is inside a polygon.
     bool contains(const Axes&, Point2D pt) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// QuadMesh — a (rows×cols) grid of colored quads defined by a
@@ -176,6 +191,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// TriMeshCollection — filled triangles on a shared vertex list
@@ -190,6 +207,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// CircleCollection — circles of per-item radius at `offsets` (mpl).

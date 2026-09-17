@@ -1,6 +1,9 @@
 // volcano/plot/plots/ErrorbarPlot.cpp
 #include "volcano/plot/plots/ErrorbarPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "volcano/plot/Stroke.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -219,6 +222,40 @@ void ErrorbarPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
     // Draw markers on top.
     if (cfg_.drawMarker && !x_.empty())
         pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(x_.size()));
+}
+
+void ErrorbarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                              Rect2D rect) {
+    if (errorSegments_.empty() && hasErrors_ == false)
+        buildErrorSegments();
+    auto toPx = pxMapper(axes, rect);
+    // Error bars + caps (line-segment soup, pairs of points).
+    render::VectorCanvas::Pen ep;
+    ep.color = cfg_.errorbarColor;
+    ep.width = cfg_.errorbarWidth;
+    for (size_t i = 0; i + 1 < errorSegments_.size(); i += 2) {
+        Point2D seg[2] = {toPx(errorSegments_[i]),
+                          toPx(errorSegments_[i + 1])};
+        c.polyline(seg, ep);
+    }
+    // Connecting line.
+    if (cfg_.drawLine && x_.size() >= 2) {
+        std::vector<Point2D> px;
+        px.reserve(x_.size());
+        for (size_t i = 0; i < x_.size(); ++i)
+            px.push_back(toPx({x_[i], y_[i]}));
+        render::VectorCanvas::Pen lp;
+        lp.color = cfg_.color;
+        lp.width = cfg_.lineWidth;
+        c.polyline(px, lp);
+    }
+    // Markers.
+    if (cfg_.drawMarker && !x_.empty()) {
+        std::vector<Point2D> pts(x_.size());
+        for (size_t i = 0; i < x_.size(); ++i) pts[i] = {x_[i], y_[i]};
+        auto g = markerGeom(MarkerStyle::Circle);
+        emitMarkerAt(c, toPx, pts, g, cfg_.markerSize, cfg_.markerColor);
+    }
 }
 
 void ErrorbarPlot::contributeToAutoscale(Viewport& v) const {

@@ -1,6 +1,7 @@
 // volcano/plot/plots/PiePlot.cpp
 #include "volcano/plot/plots/PiePlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <cmath>
 #include <format>
@@ -85,6 +86,67 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
                   px - pctW * 0.5f, py - fontSize * 0.5f, pctColor, 1.0f);
 
         angle += sweep;
+    }
+}
+
+void PiePlot::emitVector(render::VectorCanvas& c, const Axes&, Rect2D rect) {
+    float cx = float(rect.x) + float(rect.width) * 0.5f;
+    float cy = float(rect.y) + float(rect.height) * 0.5f;
+    float radius = std::min(float(rect.width), float(rect.height)) * 0.5f
+                   * 0.9f;
+    constexpr float PI = 3.14159265358979323846f;
+    float total = 0;
+    for (auto v : data_.values) total += v;
+    if (total <= 0) return;
+
+    constexpr int kSeg = 32;
+    float angle = 0.0f;
+    for (size_t i = 0; i < data_.values.size(); ++i) {
+        float sweep = 2.0f * PI * data_.values[i] / total;
+        Color col = i < data_.colors.size() ? data_.colors[i]
+                                            : Color::fromRgba8(31, 119, 180);
+        float r1 = 1.0f + data_.explode * float(i);
+        float rr = radius * r1;
+        // Annular-sector polygon: outer arc then inner arc reversed.
+        std::vector<Point2D> wedge;
+        wedge.push_back({cx, cy});
+        if (data_.innerRadius > 0.0f) wedge.clear();
+        for (int s = 0; s <= kSeg; ++s) {
+            float a = angle + sweep * float(s) / kSeg;
+            wedge.push_back({cx + rr * std::cos(a),
+                             cy - rr * std::sin(a)});  // Y flipped
+        }
+        if (data_.innerRadius > 0.0f) {
+            float ri = radius * data_.innerRadius;
+            for (int s = kSeg; s >= 0; --s) {
+                float a = angle + sweep * float(s) / kSeg;
+                wedge.push_back({cx + ri * std::cos(a),
+                                 cy - ri * std::sin(a)});
+            }
+        }
+        render::VectorCanvas::Pen edge;
+        edge.color = Color::white();
+        edge.width = 3.0f;
+        c.polygon(wedge, col, &edge);
+        angle += sweep;
+    }
+    // Labels (outside) + percentages (inside).
+    if (!data_.labels.empty()) {
+        angle = 0.0f;
+        for (size_t i = 0;
+             i < data_.values.size() && i < data_.labels.size(); ++i) {
+            float sweep = 2.0f * PI * data_.values[i] / total;
+            float mid = angle + sweep * 0.5f;
+            float lx = cx + radius * 1.15f * std::cos(mid);
+            float ly = cy - radius * 1.15f * std::sin(mid);
+            c.text({lx, ly}, data_.labels[i], 14.0f, Color::black());
+            float px = cx + radius * 0.65f * std::cos(mid);
+            float py = cy - radius * 0.65f * std::sin(mid);
+            c.text({px, py}, std::format("{:.0f}%",
+                                         data_.values[i] / total * 100.0f),
+                   14.0f, Color::black());
+            angle += sweep;
+        }
     }
 }
 } // namespace volcano::plot

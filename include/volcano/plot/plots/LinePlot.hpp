@@ -49,6 +49,10 @@ public:
     }
 
     Series2D& series() noexcept { return series_; }
+    [[nodiscard]] const Series2D& series() const noexcept { return series_; }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 private:
     Series2D series_;
     render::primitives::LineRenderer renderer_;

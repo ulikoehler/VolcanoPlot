@@ -1,6 +1,8 @@
 // volcano/plot/plots/StepPlot.cpp — step and stairs plot implementation
 #include "volcano/plot/plots/StepPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -78,6 +80,20 @@ void StepPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
+}
+
+void StepPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                          Rect2D rect) {
+    if (stepPoints_.empty()) buildStepPoints();
+    if (stepPoints_.size() < 2) return;
+    auto toPx = pxMapper(axes, rect);
+    std::vector<Point2D> px;
+    px.reserve(stepPoints_.size());
+    for (auto p : stepPoints_) px.push_back(toPx(p));
+    render::VectorCanvas::Pen pen;
+    pen.color = color_;
+    pen.width = lineWidth_;
+    c.polyline(px, pen);
 }
 
 void StepPlot::contributeToAutoscale(Viewport& v) const {
@@ -176,6 +192,40 @@ void StairsPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
         fillRenderer_.draw(cmd, vrect, t);
     if (!stepPoints_.empty())
         lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
+}
+
+void StairsPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                            Rect2D rect) {
+    if (stepPoints_.empty() && !values_.empty()) {
+        // Rebuild the staircase outline without a GPU prepare.
+        size_t n = values_.size();
+        stepPoints_.push_back({edges_[0], values_[0]});
+        for (size_t i = 1; i < n; ++i) {
+            stepPoints_.push_back({edges_[i], values_[i - 1]});
+            stepPoints_.push_back({edges_[i], values_[i]});
+        }
+        stepPoints_.push_back({edges_[n], values_[n - 1]});
+    }
+    auto toPx = pxMapper(axes, rect);
+    if (fill_) {
+        size_t n = values_.size();
+        for (size_t i = 0; i < n; ++i) {
+            Point2D q[4] = {toPx({edges_[i], 0.0f}),
+                            toPx({edges_[i + 1], 0.0f}),
+                            toPx({edges_[i + 1], values_[i]}),
+                            toPx({edges_[i], values_[i]})};
+            c.polygon(q, fillColor_);
+        }
+    }
+    if (stepPoints_.size() >= 2) {
+        std::vector<Point2D> px;
+        px.reserve(stepPoints_.size());
+        for (auto p : stepPoints_) px.push_back(toPx(p));
+        render::VectorCanvas::Pen pen;
+        pen.color = color_;
+        pen.width = lineWidth_;
+        c.polyline(px, pen);
+    }
 }
 
 void StairsPlot::contributeToAutoscale(Viewport& v) const {

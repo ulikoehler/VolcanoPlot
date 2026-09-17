@@ -33,6 +33,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<float> x_, y_;
@@ -67,6 +70,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<float> values_, edges_;

@@ -59,7 +59,10 @@ public:
     /// matplotlib figure.savefig: prepare, render (with transparent
     /// clear if requested), read back, and encode to `path` — format
     /// inferred from the extension (png/webp/bmp/raw/jpg/tiff/pdf/svg/
-    /// svgz/eps/ps) or options.format. Headless backends only.
+    /// svgz/eps/ps/pgf) or options.format. Headless backends only.
+    /// Vector formats (pdf/svg/eps/ps/pgf) go through the vector
+    /// backend: layers with canEmitVector() write native geometry,
+    /// others are rasterized and embedded (matplotlib rasterized).
     [[nodiscard]] bool savefig(plot::Figure& figure,
                                const std::filesystem::path& path,
                                const encode::SaveOptions& options = {});
@@ -109,6 +112,12 @@ private:
     /// Draw text annotations and arrow annotations for one axes.
     void drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                          plot::Rect2D rect);
+
+    /// Vector-backend savefig (pdf/svg/eps/pgf). See savefig.
+    [[nodiscard]] bool savefigVector(plot::Figure& figure,
+                                     const std::filesystem::path& path,
+                                     const encode::SaveOptions& options,
+                                     encode::ImageFormat fmt);
 
     /// Draw a text string that may contain $...$ math segments, multi-line
     /// text, rotation and per-line alignment. (x, y) is the baseline-left

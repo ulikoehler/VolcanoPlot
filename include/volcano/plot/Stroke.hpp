@@ -45,4 +45,15 @@ dashSplit(std::span<const Point2D> points, std::span<const float> dashes,
 sketchPolyline(std::span<const Point2D> points, float scale,
                float length = 128.0f, uint64_t seed = 0);
 
+/// Marker outline geometry in unit space ([-0.5, 0.5], Y-down, so an
+/// "up" marker like '^' has its apex at -y). Used by vector export and
+/// picking; scale by the marker size and translate to position.
+struct MarkerGeom {
+    std::vector<Point2D> outline;               ///< closed fill polygon
+    std::vector<std::vector<Point2D>> strokes;  ///< open stroke polylines
+    bool filled = true;   ///< false → stroke-only marker ('+', 'x', '|', ...)
+};
+[[nodiscard]] MarkerGeom markerGeom(MarkerStyle style, int numsides = 5,
+                                    float angle = 0.0f);
+
 } // namespace volcano::plot

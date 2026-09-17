@@ -2,6 +2,8 @@
 #include "volcano/plot/Axes.hpp"
 #include "volcano/plot/Collections.hpp"
 #include "volcano/plot/Specialized.hpp"
+#include "volcano/plot/plots/ReferenceLines.hpp"
+#include "volcano/plot/plots/HeatmapPlot.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Rc.hpp"
 #include "volcano/plot/Ticks.hpp"
@@ -79,6 +81,46 @@ TablePlot& Axes::table(std::vector<std::vector<std::string>> cellText,
     auto* raw = t.get();
     addPlot(std::move(t));
     return *raw;
+}
+
+namespace {
+template <class T, class... Args>
+T& addOwned(Axes& ax, Args&&... args) {
+    auto p = std::make_unique<T>(std::forward<Args>(args)...);
+    auto* raw = p.get();
+    ax.addPlot(std::move(p));
+    return *raw;
+}
+} // namespace
+
+AxhLine& Axes::axhline(float y, Color color, float width) {
+    return addOwned<AxhLine>(*this, y, color, width);
+}
+AxvLine& Axes::axvline(float x, Color color, float width) {
+    return addOwned<AxvLine>(*this, x, color, width);
+}
+AxhSpan& Axes::axhspan(float y1, float y2, Color color) {
+    return addOwned<AxhSpan>(*this, y1, y2, color);
+}
+AxvSpan& Axes::axvspan(float x1, float x2, Color color) {
+    return addOwned<AxvSpan>(*this, x1, x2, color);
+}
+Hlines& Axes::hlines(std::vector<float> y, float xMin, float xMax,
+                     Color color, float width) {
+    return addOwned<Hlines>(*this, std::move(y), xMin, xMax, color, width);
+}
+Vlines& Axes::vlines(std::vector<float> x, float yMin, float yMax,
+                     Color color, float width) {
+    return addOwned<Vlines>(*this, std::move(x), yMin, yMax, color, width);
+}
+EventPlot& Axes::eventplot(std::vector<std::vector<float>> positions) {
+    return addOwned<EventPlot>(*this, std::move(positions));
+}
+EventPlot& Axes::eventplot(std::vector<float> positions) {
+    return addOwned<EventPlot>(*this, std::move(positions));
+}
+HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap) {
+    return addOwned<HeatmapPlot>(*this, std::move(grid), cmap);
 }
 
 void Axes::setXscale(std::string_view name) {

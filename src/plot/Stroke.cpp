@@ -2,6 +2,7 @@
 #include <volcano/plot/Stroke.hpp>
 
 #include <cmath>
+#include <initializer_list>
 
 namespace volcano::plot {
 
@@ -258,6 +259,160 @@ std::vector<Point2D> sketchPolyline(std::span<const Point2D> points,
         prev = b;
     }
     return out;
+}
+
+
+MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
+    MarkerGeom g;
+    auto ngon = [&](int n, float r = 0.5f, float phase = -kPi / 2.0f) {
+        std::vector<Point2D> out;
+        out.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            float a = phase + angle + i * (2.0f * kPi / n);
+            out.push_back({r * std::cos(a), r * std::sin(a)});
+        }
+        return out;
+    };
+    auto cross = [&](std::initializer_list<Point2D> a,
+                     std::initializer_list<Point2D> b) {
+        g.strokes.push_back(std::vector<Point2D>(a));
+        g.strokes.push_back(std::vector<Point2D>(b));
+        g.filled = false;
+    };
+    switch (style) {
+    case MarkerStyle::None: break;
+    case MarkerStyle::Point:  g.outline = ngon(20, 0.35f); break;
+    case MarkerStyle::Circle: g.outline = ngon(20); break;
+    case MarkerStyle::Square: g.outline = ngon(4, 0.5f, -kPi / 4.0f); break;
+    case MarkerStyle::Diamond: g.outline = ngon(4, 0.6f); break;
+    case MarkerStyle::ThinDiamond: {
+        float c = std::cos(angle), s = std::sin(angle);
+        Point2D pts[4] = {{0,-0.7f},{0.4f,0},{0,0.7f},{-0.4f,0}};
+        for (auto p : pts)
+            g.outline.push_back({p.x*c - p.y*s, p.x*s + p.y*c});
+        break;
+    }
+    case MarkerStyle::Triangle: g.outline = ngon(3); break;
+    case MarkerStyle::TriDown: g.outline = ngon(3, 0.5f, kPi/2.0f); break;
+    case MarkerStyle::TriLeft: g.outline = ngon(3, 0.5f, kPi); break;
+    case MarkerStyle::TriRight: g.outline = ngon(3, 0.5f, 0.0f); break;
+    case MarkerStyle::Tri1:   // Y tripod: 3 spokes (stroke)
+        g.strokes = {{{0,0},{0,-0.5f}},
+                     {{0,0},{0.433f,0.25f}},
+                     {{0,0},{-0.433f,0.25f}}};
+        g.filled = false; break;
+    case MarkerStyle::Tri2:
+        g.strokes = {{{0,0},{0,0.5f}},
+                     {{0,0},{0.433f,-0.25f}},
+                     {{0,0},{-0.433f,-0.25f}}};
+        g.filled = false; break;
+    case MarkerStyle::Tri3:
+        g.strokes = {{{0,0},{-0.5f,0}},
+                     {{0,0},{0.25f,-0.433f}},
+                     {{0,0},{0.25f,0.433f}}};
+        g.filled = false; break;
+    case MarkerStyle::Tri4:
+        g.strokes = {{{0,0},{0.5f,0}},
+                     {{0,0},{-0.25f,-0.433f}},
+                     {{0,0},{-0.25f,0.433f}}};
+        g.filled = false; break;
+    case MarkerStyle::Plus:
+        cross({{-0.5f,0},{0.5f,0}}, {{0,-0.5f},{0,0.5f}}); break;
+    case MarkerStyle::X:
+        cross({{-0.35f,-0.35f},{0.35f,0.35f}},
+              {{-0.35f,0.35f},{0.35f,-0.35f}}); break;
+    case MarkerStyle::PlusFilled: {  // thick plus as a 12-gon
+        const float a = 0.1667f;  // half arm thickness
+        Point2D pts[12] = {
+            {-a,-0.5f},{a,-0.5f},{a,-a},{0.5f,-a},{0.5f,a},{a,a},
+            {a,0.5f},{-a,0.5f},{-a,a},{-0.5f,a},{-0.5f,-a},{-a,-a}};
+        g.outline.assign(pts, pts + 12); break;
+    }
+    case MarkerStyle::XFilled: {
+        const float a = 0.1667f;
+        Point2D pts[12] = {
+            {-a,-0.5f},{a,-0.5f},{a,-a},{0.5f,-a},{0.5f,a},{a,a},
+            {a,0.5f},{-a,0.5f},{-a,a},{-0.5f,a},{-0.5f,-a},{-a,-a}};
+        float c = std::cos(kPi/4.0f), s = std::sin(kPi/4.0f);
+        for (auto p : pts)
+            g.outline.push_back({(p.x*c - p.y*s)*1.1f, (p.x*s + p.y*c)*1.1f});
+        break;
+    }
+    case MarkerStyle::Star: {  // 5-point star
+        for (int i = 0; i < 10; ++i) {
+            float r = (i % 2 == 0) ? 0.5f : 0.21f;
+            float a = -kPi / 2.0f + i * kPi / 5.0f;
+            g.outline.push_back({r * std::cos(a), r * std::sin(a)});
+        }
+        break;
+    }
+    case MarkerStyle::Pentagon: g.outline = ngon(5); break;
+    case MarkerStyle::Hexagon1: g.outline = ngon(6); break;
+    case MarkerStyle::Hexagon2: g.outline = ngon(6, 0.5f, 0.0f); break;
+    case MarkerStyle::Octagon: g.outline = ngon(8, 0.5f, -kPi/8.0f); break;
+    case MarkerStyle::VLine:
+        g.strokes = {{{0,-0.5f},{0,0.5f}}}; g.filled = false; break;
+    case MarkerStyle::HLine:
+        g.strokes = {{{-0.5f,0},{0.5f,0}}}; g.filled = false; break;
+    case MarkerStyle::TickLeft:
+        g.strokes = {{{0,0},{-0.5f,0}}}; g.filled = false; break;
+    case MarkerStyle::TickRight:
+        g.strokes = {{{0,0},{0.5f,0}}}; g.filled = false; break;
+    case MarkerStyle::TickUp:
+        g.strokes = {{{0,0},{0,-0.5f}}}; g.filled = false; break;
+    case MarkerStyle::TickDown:
+        g.strokes = {{{0,0},{0,0.5f}}}; g.filled = false; break;
+    case MarkerStyle::CaretLeft:
+        g.strokes = {{{-0.3f,0},{0.3f,-0.4f},{0.3f,0.4f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretRight:
+        g.strokes = {{{0.3f,0},{-0.3f,-0.4f},{-0.3f,0.4f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretUp:
+        g.strokes = {{{0,-0.3f},{-0.4f,0.3f},{0.4f,0.3f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretDown:
+        g.strokes = {{{0,0.3f},{-0.4f,-0.3f},{0.4f,-0.3f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretLeftBase:
+        g.strokes = {{{-0.35f,0.3f},{0.35f,-0.4f},{0.35f,0.4f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretRightBase:
+        g.strokes = {{{0.35f,0.3f},{-0.35f,-0.4f},{-0.35f,0.4f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretUpBase:
+        g.strokes = {{{-0.35f,-0.3f},{-0.4f,0.35f},{0.4f,0.35f}}};
+        g.filled = false; break;
+    case MarkerStyle::CaretDownBase:
+        g.strokes = {{{-0.35f,-0.35f},{-0.4f,-0.3f},{0.4f,-0.3f}}};
+        g.filled = false; break;
+    case MarkerStyle::Polygon: g.outline = ngon(numsides); break;
+    case MarkerStyle::StarN: {
+        for (int i = 0; i < numsides * 2; ++i) {
+            float r = (i % 2 == 0) ? 0.5f : 0.21f;
+            float a = -kPi / 2.0f + i * kPi / numsides;
+            g.outline.push_back({r * std::cos(a), r * std::sin(a)});
+        }
+        break;
+    }
+    case MarkerStyle::AsteriskN: {
+        for (int i = 0; i < numsides; ++i) {
+            float a = -kPi / 2.0f + i * 2.0f * kPi / numsides;
+            g.strokes.push_back({{0,0},
+                {0.5f * std::cos(a), 0.5f * std::sin(a)}});
+        }
+        g.filled = false; break;
+    }
+    case MarkerStyle::CircledN: g.outline = ngon(numsides); break;
+    }
+    // Apply rotation to strokes as well.
+    if (angle != 0.0f && !g.filled) {
+        float c = std::cos(angle), s = std::sin(angle);
+        for (auto& st : g.strokes)
+            for (auto& p : st)
+                p = {p.x * c - p.y * s, p.x * s + p.y * c};
+    }
+    return g;
 }
 
 } // namespace volcano::plot

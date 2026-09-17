@@ -1,6 +1,9 @@
 // volcano/plot/plots/StemPlot.cpp — stem plot implementation
 #include "volcano/plot/plots/StemPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "volcano/plot/Stroke.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -101,6 +104,46 @@ void StemPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
 
     if (config_.markers && !markerPoints_.empty())
         markerRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));
+}
+
+namespace {
+
+MarkerStyle stemMarker(const std::string& s) {
+    if (s == "square") return MarkerStyle::Square;
+    if (s == "diamond") return MarkerStyle::Diamond;
+    if (s == "plus") return MarkerStyle::Plus;
+    if (s == "x") return MarkerStyle::X;
+    if (s == "star") return MarkerStyle::Star;
+    if (s == "triangle") return MarkerStyle::Triangle;
+    return MarkerStyle::Circle;
+}
+
+} // namespace
+
+void StemPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                          Rect2D rect) {
+    if (stemSegments_.empty() && !x_.empty()) buildGeometry();
+    auto toPx = pxMapper(axes, rect);
+    render::VectorCanvas::Pen pen;
+    pen.color = config_.lineColor;
+    pen.width = config_.lineWidth;
+    for (size_t i = 0; i + 1 < stemSegments_.size(); i += 2) {
+        Point2D seg[2] = {toPx(stemSegments_[i]), toPx(stemSegments_[i + 1])};
+        c.polyline(seg, pen);
+    }
+    if (config_.showBaseline && baselineSegments_.size() >= 2) {
+        render::VectorCanvas::Pen bp;
+        bp.color = config_.baselineColor;
+        bp.width = config_.baselineWidth;
+        Point2D seg[2] = {toPx(baselineSegments_[0]),
+                          toPx(baselineSegments_[1])};
+        c.polyline(seg, bp);
+    }
+    if (config_.markers && !markerPoints_.empty()) {
+        auto g = markerGeom(stemMarker(config_.markerStyle));
+        emitMarkerAt(c, toPx, markerPoints_, g, config_.markerSize,
+                     config_.markerColor);
+    }
 }
 
 void StemPlot::contributeToAutoscale(Viewport& v) const {

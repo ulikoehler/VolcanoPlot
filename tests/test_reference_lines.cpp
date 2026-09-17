@@ -4,6 +4,7 @@
 
 #include <volcano/plot/plots/ReferenceLines.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
+#include <volcano/plot/plots/HeatmapPlot.hpp>
 
 #include <gtest/gtest.h>
 
@@ -351,4 +352,166 @@ TEST(RefLineRegression, AxhSpanAlphaBlended) {
     Pixel p = img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy));
     EXPECT_GT(p.r, 150) << "Blended gray should be light";
     EXPECT_LT(p.r, 220) << "Blended gray should not be white";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Axes convenience APIs — ax.axhline/axvline/axhspan/axvspan/hlines/vlines
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(RefAxesApi, AxhlineAxvlineConvenience) {
+    RefFigure cf(256);
+    Series2D s;
+    s.color = Color::white();
+    s.points = {{0, 0}, {10, 10}};
+    cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    cf.axes->axhline(5.0f, Color::fromRgba8(255, 0, 0, 255), 2.0f);
+    cf.axes->axvline(5.0f, Color::fromRgba8(0, 0, 255, 255), 2.0f);
+    auto img = cf.render();
+    EXPECT_GT(countPixels(img, isRed), 200u) << "axhline should draw";
+    EXPECT_GT(countPixels(img, isBlue), 200u) << "axvline should draw";
+}
+
+TEST(RefAxesApi, AxhspanAxvspanConvenience) {
+    RefFigure cf(256);
+    Series2D s;
+    s.color = Color::white();
+    s.points = {{0, 0}, {10, 10}};
+    cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    cf.axes->axhspan(6.0f, 8.0f, Color::fromRgba8(200, 200, 200, 255));
+    cf.axes->axvspan(1.0f, 3.0f, Color::fromRgba8(100, 100, 255, 255));
+    auto img = cf.render();
+    EXPECT_GT(countPixels(img, isGray), 500u) << "axhspan should fill";
+    EXPECT_GT(countPixels(img, isBlue), 500u) << "axvspan should fill";
+}
+
+TEST(RefAxesApi, HlinesVlinesConvenience) {
+    RefFigure cf(256);
+    Series2D s;
+    s.color = Color::white();
+    s.points = {{0, 0}, {10, 10}};
+    cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    cf.axes->hlines({2.0f, 8.0f}, 0.0f, 10.0f,
+                    Color::fromRgba8(255, 0, 0, 255), 2.0f);
+    cf.axes->vlines({2.0f, 8.0f}, 0.0f, 10.0f,
+                    Color::fromRgba8(0, 0, 255, 255), 2.0f);
+    auto img = cf.render();
+    EXPECT_GT(countPixels(img, isRed), 200u);
+    EXPECT_GT(countPixels(img, isBlue), 200u);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EventPlot — matplotlib eventplot
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(EventPlotRegression, RendersRowsOfTicks) {
+    RefFigure cf(256);
+    // Two rows: events at x = {2,5,8} on row 0 and x = {3,7} on row 1.
+    // Set explicit colors/offsets after addPlot (prop cycler runs at add).
+    auto& ep = cf.axes->eventplot(
+        std::vector<std::vector<float>>{{2, 5, 8}, {3, 7}});
+    ep.colors = {Color::fromRgba8(255, 0, 0, 255),
+                 Color::fromRgba8(0, 0, 255, 255)};
+    ep.linelengths = {0.8f, 0.8f};
+    auto img = cf.render();
+
+    const auto& vp = cf.axes->viewport();
+    // Row 0 ticks at y=0 (red), row 1 ticks at y=1 (blue).
+    auto check = [&](float dx, float dy, bool (*pred)(const Pixel&)) {
+        auto [px, py] = dataToPixel(vp, cf.axes->rect, dx, dy);
+        for (int ddy = -1; ddy <= 1; ++ddy)
+            for (int ddx = -1; ddx <= 1; ++ddx) {
+                uint32_t x = uint32_t(px) + ddx, y = uint32_t(py) + ddy;
+                if (x < img.width() && y < img.height() &&
+                    pred(img.get(x, y))) return true;
+            }
+        return false;
+    };
+    EXPECT_TRUE(check(5.0f, 0.0f, isRed)) << "Row-0 tick at x=5 should be red";
+    EXPECT_TRUE(check(3.0f, 1.0f, isBlue)) << "Row-1 tick at x=3 should be blue";
+    EXPECT_GT(countPixels(img, isRed), 50u);
+    EXPECT_GT(countPixels(img, isBlue), 30u);
+}
+
+TEST(EventPlotRegression, VerticalOrientation) {
+    RefFigure cf(256);
+    auto& ep = cf.axes->eventplot(std::vector<float>{2.0f, 5.0f, 8.0f});
+    ep.orientation = "vertical";
+    ep.colors = {Color::fromRgba8(255, 0, 0, 255)};
+    ep.linelengths = {0.8f};
+    auto img = cf.render();
+    // Vertical: events on y, ticks horizontal at x offsets 0.
+    const auto& vp = cf.axes->viewport();
+    EXPECT_GT(countPixels(img, isRed), 30u);
+}
+
+TEST(EventPlotRegression, ContributesToAutoscale) {
+    RefFigure cf(256);
+    cf.axes->eventplot(std::vector<std::vector<float>>{{1, 9}, {3, 6}});
+    auto img = cf.render();
+    const auto& vp = cf.axes->viewport();
+    EXPECT_LE(vp.x.min, 1.0f) << "x range should include events";
+    EXPECT_GE(vp.x.max, 9.0f);
+    EXPECT_LE(vp.y.min, -0.5f) << "y range should include row offsets ± half";
+    EXPECT_GE(vp.y.max, 1.5f);
+}
+
+TEST(EventPlotRegression, SingleVectorOverload) {
+    RefFigure cf(256);
+    cf.axes->eventplot(std::vector<float>{1.0f, 4.0f, 9.0f});
+    auto img = cf.render();
+    const auto& vp = cf.axes->viewport();
+    EXPECT_GE(vp.x.max, 9.0f);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// imshow — alias over HeatmapPlot
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(ImshowApi, RendersGridAsImage) {
+    RefFigure cf(256);
+    // 2×2 grid: top-left hot, rest cold → viridis corner colors.
+    Grid2D g;
+    g.width = g.height = 2;
+    g.values = {0.0f, 0.0f, 0.0f, 1.0f};
+    g.xRange = {0, 2};
+    g.yRange = {0, 2};
+    g.valueRange = {0, 1};
+    cf.axes->imshow(g);
+    auto img = cf.render();
+
+    // Value 1 (viridis top ≈ yellow) should appear in one quadrant.
+    size_t yellow = countPixels(img, [](const Pixel& p) {
+        return p.r > 180 && p.g > 180 && p.b < 120;
+    });
+    EXPECT_GT(yellow, 1000u) << "Hot cell should render as viridis yellow";
+}
+
+TEST(ImshowApi, ReturnsHeatmapForStyling) {
+    RefFigure cf(128);
+    Grid2D g;
+    g.width = g.height = 2;
+    g.values = {0.f, 1.f, 1.f, 0.f};
+    g.xRange = {0, 2};
+    g.yRange = {0, 2};
+    g.valueRange = {0, 1};
+    auto& hm = cf.axes->imshow(g);
+    // Returns the HeatmapPlot — mpl callers can style it.
+    EXPECT_TRUE(static_cast<IPlot*>(&hm) != nullptr);
+    auto img = cf.render();
+    EXPECT_GT(img.width(), 0u);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vector emit for the reference layers
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(RefAxesApi, SpansAndEventplotCanEmitVector) {
+    AxhSpan hs(1.0f, 2.0f);
+    AxvSpan vs(1.0f, 2.0f);
+    EventPlot ep(std::vector<float>{1.0f});
+    AxhLine hl(0.5f);
+    EXPECT_TRUE(hs.canEmitVector());
+    EXPECT_TRUE(vs.canEmitVector());
+    EXPECT_TRUE(ep.canEmitVector());
+    EXPECT_TRUE(hl.canEmitVector());
 }

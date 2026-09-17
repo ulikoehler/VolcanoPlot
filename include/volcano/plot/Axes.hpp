@@ -9,6 +9,7 @@
 #include "volcano/plot/Annotation.hpp"
 #include "volcano/plot/Scale.hpp"
 #include "volcano/plot/Projection.hpp"
+#include "volcano/plot/Colormap.hpp"
 
 #include <functional>
 #include <memory>
@@ -228,6 +229,32 @@ public:
     /// Returns the created TablePlot for styling.
     class TablePlot& table(std::vector<std::vector<std::string>> cellText,
                            std::string loc = "bottom");
+
+    // ── Reference lines / spans (mpl ax.axhline etc.) ──
+    /// mpl `ax.axhline(y)`: horizontal line across the axes.
+    class AxhLine& axhline(float y, Color color = Color::black(),
+                           float width = 1.0f);
+    /// mpl `ax.axvline(x)`: vertical line across the axes.
+    class AxvLine& axvline(float x, Color color = Color::black(),
+                           float width = 1.0f);
+    /// mpl `ax.axhspan(ymin, ymax)`: shaded horizontal band.
+    class AxhSpan& axhspan(float y1, float y2,
+        Color color = Color::fromRgba8(200, 200, 200, 128));
+    /// mpl `ax.axvspan(xmin, xmax)`: shaded vertical band.
+    class AxvSpan& axvspan(float x1, float x2,
+        Color color = Color::fromRgba8(200, 200, 200, 128));
+    /// mpl `ax.hlines(y, xmin, xmax)`: horizontal segments per y.
+    class Hlines& hlines(std::vector<float> y, float xMin, float xMax,
+                         Color color = Color::black(), float width = 1.0f);
+    /// mpl `ax.vlines(x, ymin, ymax)`: vertical segments per x.
+    class Vlines& vlines(std::vector<float> x, float yMin, float yMax,
+                         Color color = Color::black(), float width = 1.0f);
+    /// mpl `ax.eventplot(positions)`: rows of identical event markers.
+    class EventPlot& eventplot(std::vector<std::vector<float>> positions);
+    class EventPlot& eventplot(std::vector<float> positions);
+    /// mpl `ax.imshow(grid)`: 2D image/heatmap display.
+    class HeatmapPlot& imshow(Grid2D grid,
+        const Colormap& cmap = colormaps::viridis());
 
     /// Set the property cycler (matplotlib axes.prop_cycle). Initialized
     /// from style_.colorCycle (or tab10 when unset).

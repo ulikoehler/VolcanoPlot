@@ -2,6 +2,7 @@
 #include "volcano/plot/Collections.hpp"
 #include "volcano/plot/Axes.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
 #include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 
@@ -453,6 +454,162 @@ AsteriskPolygonCollection::AsteriskPolygonCollection(
     : PathCollection(Path::unitAsterisk(n), std::move(offs)) {
     sizes = radiiToSizes(radii);
     strokeOnly = true;
+}
+
+// ═══ Vector emit (§17: PDF/SVG/EPS/PGF export) ═════════════════════════════
+
+void Collection::emitSubpaths(render::VectorCanvas& c,
+                              const std::vector<Path::Subpath>& subs,
+                              Color face, Color edge, float lw,
+                              std::span<const float> dash,
+                              const std::string& hatchStr,
+                              float hatchSpacing) {
+    if (face.a > 0.0f) {
+        for (const auto& sp : subs)
+            if (sp.closed && sp.points.size() >= 3)
+                c.polygon(sp.points, face);
+        if (!hatchStr.empty()) {
+            render::VectorCanvas::Pen pen;
+            pen.color = edge.a > 0 ? edge : Color::black();
+            pen.width = std::max(0.6f, hatchSpacing * 0.1f);
+            for (const auto& sp : subs) {
+                if (!sp.closed || sp.points.size() < 3) continue;
+                auto tris = hatchTriangles(sp.points, hatchStr, hatchSpacing);
+                // hatchTriangles returns a triangle soup; emit as quads→
+                // polygons per triangle.
+                for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                    Point2D t[3] = {tris[i], tris[i+1], tris[i+2]};
+                    c.polygon(t, pen.color);
+                }
+            }
+        }
+    }
+    if (edge.a > 0.0f && lw > 0.0f) {
+        render::VectorCanvas::Pen pen;
+        pen.color = edge; pen.width = lw;
+        pen.dashes.assign(dash.begin(), dash.end());
+        for (const auto& sp : subs) {
+            if (sp.points.size() < 2) continue;
+            std::vector<Point2D> pts = sp.points;
+            if (sp.closed) pts.push_back(pts.front());
+            c.polyline(pts, pen);
+        }
+    }
+}
+
+void PatchCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                 Rect2D rect) {
+    for (const auto& p : patches) {
+        Path path = p.style.transform ? p.path.transformed(*p.style.transform)
+                                      : p.path;
+        auto subs = path.toPolylines();
+        for (auto& sp : subs)
+            for (auto& pt : sp.points) pt = toPx(axes, rect, pt);
+        std::vector<float> dash = p.style.dashes;
+        if (dash.empty())
+            dash = dashPattern(p.style.lineStyle, p.style.lineWidth);
+        emitSubpaths(c, subs, p.style.face, p.style.edge, p.style.lineWidth,
+                     dash, p.style.hatch, p.style.hatchSpacing);
+    }
+}
+
+void PathCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                Rect2D rect) {
+    if (offsets.empty()) return;
+    auto proto = path.toPolylines();
+    Color defFace = faceColors.empty() ? Color{0.121f, 0.466f, 0.705f, 1}
+                                       : Color{};
+    Color defEdge = edgeColors.empty() ? Color{0, 0, 0, 0} : Color{};
+    float ppu = float(rect.width) /
+                std::max(1e-9f, axes.viewport().x.span());
+    float ppv = float(rect.height) /
+                std::max(1e-9f, axes.viewport().y.span());
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        Point2D size = at(sizes, i, Point2D{1, 1});
+        Point2D center = offsetPx(axes, rect, offsetTransform.get(),
+                                  offsets[i], {});
+        auto subs = proto;
+        for (auto& sp : subs)
+            for (auto& pt : sp.points) {
+                Point2D scaled{pt.x * size.x, pt.y * size.y};
+                if (i < transforms.size() && transforms[i])
+                    scaled = transforms[i]->apply(scaled);
+                pt = {center.x + scaled.x * ppu, center.y - scaled.y * ppv};
+            }
+        float lw = at(lineWidths, i, 1.0f);
+        std::vector<float> dash =
+            dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        Color face = at(faceColors, i, defFace);
+        if (strokeOnly) face.a = 0.0f;
+        emitSubpaths(c, subs, face, at(edgeColors, i, defEdge), lw, dash,
+                     hatch, hatchSpacing);
+    }
+}
+
+void LineCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                Rect2D rect) {
+    Color def{0.121f, 0.466f, 0.705f, 1};
+    for (size_t i = 0; i < segments.size(); ++i) {
+        std::vector<Point2D> px;
+        px.reserve(segments[i].size());
+        for (auto p : segments[i]) px.push_back(toPx(axes, rect, p));
+        if (px.size() < 2) continue;
+        float lw = at(lineWidths, i, 1.5f);
+        render::VectorCanvas::Pen pen;
+        pen.color = at(edgeColors, i, def);
+        pen.width = lw;
+        pen.dashes = dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        if (pen.color.a > 0) c.polyline(px, pen);
+    }
+}
+
+void PolyCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                Rect2D rect) {
+    Color defFace{0.121f, 0.466f, 0.705f, 1};
+    Color defEdge{0, 0, 0, 0};
+    for (size_t i = 0; i < polys.size(); ++i) {
+        Path::Subpath sp;
+        sp.closed = true;
+        sp.points.reserve(polys[i].size());
+        for (auto p : polys[i]) sp.points.push_back(toPx(axes, rect, p));
+        float lw = at(lineWidths, i, 1.0f);
+        std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
+                                                 : dashes;
+        emitSubpaths(c, {sp}, at(faceColors, i, defFace),
+                     at(edgeColors, i, defEdge), lw, dash, hatch,
+                     hatchSpacing);
+    }
+}
+
+void QuadMesh::emitVector(render::VectorCanvas& c, const Axes& axes,
+                          Rect2D rect) {
+    if (rows == 0 || cols == 0 ||
+        corners.size() < size_t(rows + 1) * (cols + 1))
+        return;
+    Color def{0.121f, 0.466f, 0.705f, 1};
+    for (uint32_t row = 0; row < rows; ++row)
+        for (uint32_t col = 0; col < cols; ++col) {
+            size_t i = size_t(row) * cols + col;
+            Point2D q[4] = {
+                toPx(axes, rect, corners[size_t(row) * (cols + 1) + col]),
+                toPx(axes, rect, corners[size_t(row) * (cols + 1) + col + 1]),
+                toPx(axes, rect,
+                     corners[size_t(row + 1) * (cols + 1) + col + 1]),
+                toPx(axes, rect, corners[size_t(row + 1) * (cols + 1) + col])};
+            c.polygon(q, at(cellColors, i, def));
+        }
+}
+
+void TriMeshCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                   Rect2D rect) {
+    Color def{0.121f, 0.466f, 0.705f, 1};
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        auto t = triangles[i];
+        Point2D tri[3] = {toPx(axes, rect, vertices[t[0]]),
+                          toPx(axes, rect, vertices[t[1]]),
+                          toPx(axes, rect, vertices[t[2]])};
+        c.polygon(tri, at(faceColors, i, def));
+    }
 }
 
 // ═══ Picking (§16) ════════════════════════════════════════════════════════

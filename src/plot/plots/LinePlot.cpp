@@ -1,10 +1,12 @@
 // volcano/plot/plots/LinePlot.cpp
 #include "volcano/plot/plots/LinePlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include "volcano/plot/Stroke.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include <algorithm>
 namespace volcano::plot {
 void LinePlot::prepare(render::Renderer& r) {
@@ -58,6 +60,47 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
     auto mesh = strokePolyline(px, sp);
     spine.drawTriangles(cmd, clip, res, mesh.verts, series_.color);
+}
+void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                          Rect2D rect) {
+    if (series_.points.empty()) return;
+    auto toPx = [&](Point2D p) {
+        auto f = axes.dataToFraction(p);
+        return Point2D{rect.x + f.x * float(rect.width),
+                       rect.y + (1.0f - f.y) * float(rect.height)};
+    };
+    // Line.
+    if (series_.lineStyle != LineStyle::None && series_.points.size() >= 2) {
+        auto pts = applyDrawStyle(series_.points, series_.drawStyle);
+        std::vector<Point2D> px;
+        px.reserve(pts.size());
+        for (const auto& p : pts) px.push_back(toPx(p));
+        if (axes.style().sketchScale > 0.0f)
+            px = sketchPolyline(px, axes.style().sketchScale * 2.0f);
+        render::VectorCanvas::Pen pen;
+        pen.color = series_.color;
+        pen.width = series_.lineWidth;
+        pen.dashes = series_.dashes.empty()
+            ? dashPattern(series_.lineStyle, series_.lineWidth)
+            : series_.dashes;
+        pen.dashOffset = series_.dashOffset;
+        pen.join = series_.joinStyle;
+        pen.cap = series_.capStyle;
+        // gapcolor underlay.
+        if (series_.gapColor.a > 0.0f && !pen.dashes.empty()) {
+            auto solid = pen; solid.color = series_.gapColor;
+            solid.dashes.clear();
+            c.polyline(px, solid);
+        }
+        c.polyline(px, pen);
+    }
+    // Markers at each point.
+    if (series_.marker != MarkerStyle::None && series_.size > 0) {
+        auto g = markerGeom(series_.marker, series_.markerNumsides,
+                            series_.markerAngle);
+        emitMarkerAt(c, toPx, series_.points, g, series_.size,
+                     series_.color, 1.0f);
+    }
 }
 void LinePlot::contributeToAutoscale(Viewport& v) const {
     for (const auto& p : series_.points) {

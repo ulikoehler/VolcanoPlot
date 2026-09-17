@@ -1,6 +1,8 @@
 // volcano/plot/plots/ReferenceLines.cpp
 #include "volcano/plot/plots/ReferenceLines.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 
@@ -218,6 +220,173 @@ void Hlines::contributeToAutoscale(Viewport& v) const {
     for (float y : yPositions_) {
         v.y.min = std::min(v.y.min, y);
         v.y.max = std::max(v.y.max, y);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vector emit for the reference lines/spans
+// ═══════════════════════════════════════════════════════════════════════════
+
+void AxhLine::emitVector(render::VectorCanvas& c, const Axes& axes,
+                         Rect2D rect) {
+    float py = rect.y +
+        (1.0f - axes.dataToFraction({0.0f, y_}).y) * float(rect.height);
+    render::VectorCanvas::Pen pen;
+    pen.color = color_; pen.width = width_;
+    Point2D seg[2] = {{float(rect.x), py}, {float(rect.x + rect.width), py}};
+    c.polyline(seg, pen);
+}
+
+void AxvLine::emitVector(render::VectorCanvas& c, const Axes& axes,
+                         Rect2D rect) {
+    float px = rect.x +
+        axes.dataToFraction({x_, 0.0f}).x * float(rect.width);
+    render::VectorCanvas::Pen pen;
+    pen.color = color_; pen.width = width_;
+    Point2D seg[2] = {{px, float(rect.y)}, {px, float(rect.y + rect.height)}};
+    c.polyline(seg, pen);
+}
+
+void AxhSpan::emitVector(render::VectorCanvas& c, const Axes& axes,
+                         Rect2D rect) {
+    float pa = rect.y +
+        (1.0f - axes.dataToFraction({0.0f, std::min(y1_, y2_)}).y) *
+            float(rect.height);
+    float pb = rect.y +
+        (1.0f - axes.dataToFraction({0.0f, std::max(y1_, y2_)}).y) *
+            float(rect.height);
+    Point2D q[4] = {{float(rect.x), pb}, {float(rect.x + rect.width), pb},
+                    {float(rect.x + rect.width), pa}, {float(rect.x), pa}};
+    c.polygon(q, color_);
+}
+
+void AxvSpan::emitVector(render::VectorCanvas& c, const Axes& axes,
+                         Rect2D rect) {
+    float pa = rect.x +
+        axes.dataToFraction({std::min(x1_, x2_), 0.0f}).x *
+            float(rect.width);
+    float pb = rect.x +
+        axes.dataToFraction({std::max(x1_, x2_), 0.0f}).x *
+            float(rect.width);
+    Point2D q[4] = {{pa, float(rect.y)}, {pb, float(rect.y)},
+                    {pb, float(rect.y + rect.height)},
+                    {pa, float(rect.y + rect.height)}};
+    c.polygon(q, color_);
+}
+
+void Vlines::emitVector(render::VectorCanvas& c, const Axes& axes,
+                        Rect2D rect) {
+    auto toPx = pxMapper(axes, rect);
+    render::VectorCanvas::Pen pen;
+    pen.color = color_; pen.width = width_;
+    for (float x : xPositions_) {
+        Point2D seg[2] = {toPx({x, yMin_}), toPx({x, yMax_})};
+        c.polyline(seg, pen);
+    }
+}
+
+void Hlines::emitVector(render::VectorCanvas& c, const Axes& axes,
+                        Rect2D rect) {
+    auto toPx = pxMapper(axes, rect);
+    render::VectorCanvas::Pen pen;
+    pen.color = color_; pen.width = width_;
+    for (float y : yPositions_) {
+        Point2D seg[2] = {toPx({xMin_, y}), toPx({xMax_, y})};
+        c.polyline(seg, pen);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EventPlot
+// ═══════════════════════════════════════════════════════════════════════════
+
+void EventPlot::buildRows() {
+    rowSegs_.assign(positions_.size(), {});
+    rowColors_.assign(positions_.size(), color);
+    rowWidths_.assign(positions_.size(), lineWidth);
+    bool vert = orientation == "vertical";
+    for (size_t i = 0; i < positions_.size(); ++i) {
+        float off = i < lineoffsets.size() ? lineoffsets[i] : float(i);
+        float half = (i < linelengths.size() ? linelengths[i] : 1.0f) * 0.5f;
+        if (i < colors.size()) rowColors_[i] = colors[i];
+        if (i < linewidths.size()) rowWidths_[i] = linewidths[i];
+        auto& segs = rowSegs_[i];
+        for (float p : positions_[i]) {
+            if (vert) {
+                segs.push_back({off - half, p});
+                segs.push_back({off + half, p});
+            } else {
+                segs.push_back({p, off - half});
+                segs.push_back({p, off + half});
+            }
+        }
+    }
+}
+
+void EventPlot::prepare(render::Renderer& r) {
+    buildRows();
+    auto& ctx = r.backend().context();
+    renderers_.clear();
+    for (size_t i = 0; i < rowSegs_.size(); ++i) {
+        if (rowSegs_[i].empty()) continue;
+        auto sr = std::make_unique<render::primitives::LineSegmentRenderer>();
+        sr->init(ctx.device.handle(), r.backend().renderPass(),
+                 r.backend().sampleCount(), r.pipelineCache());
+        sr->upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                   ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                   std::span{rowSegs_[i]}, rowColors_[i], rowWidths_[i]);
+        renderers_.push_back(std::move(sr));
+    }
+    prepared_ = true;
+}
+
+void EventPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+                     const Axes& axes, Rect2D rect) {
+    if (!prepared_) return;
+    Transform2D t = axes.transform();
+    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
+                     vk::Extent2D{rect.width, rect.height}};
+    size_t row = 0;
+    for (auto& sr : renderers_) {
+        while (row < rowSegs_.size() && rowSegs_[row].empty()) ++row;
+        if (row >= rowSegs_.size()) break;
+        sr->draw(cmd, vrect, t, uint32_t(rowSegs_[row++].size()));
+    }
+}
+
+void EventPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                           Rect2D rect) {
+    if (rowSegs_.empty()) buildRows();
+    auto toPx = pxMapper(axes, rect);
+    for (size_t i = 0; i < rowSegs_.size(); ++i) {
+        render::VectorCanvas::Pen pen;
+        pen.color = rowColors_[i];
+        pen.width = rowWidths_[i];
+        for (size_t k = 0; k + 1 < rowSegs_[i].size(); k += 2) {
+            Point2D seg[2] = {toPx(rowSegs_[i][k]), toPx(rowSegs_[i][k + 1])};
+            c.polyline(seg, pen);
+        }
+    }
+}
+
+void EventPlot::contributeToAutoscale(Viewport& v) const {
+    bool vert = orientation == "vertical";
+    for (size_t i = 0; i < positions_.size(); ++i) {
+        float off = i < lineoffsets.size() ? lineoffsets[i] : float(i);
+        float half = (i < linelengths.size() ? linelengths[i] : 1.0f) * 0.5f;
+        for (float p : positions_[i]) {
+            if (vert) {
+                v.x.min = std::min(v.x.min, off - half);
+                v.x.max = std::max(v.x.max, off + half);
+                v.y.min = std::min(v.y.min, p);
+                v.y.max = std::max(v.y.max, p);
+            } else {
+                v.x.min = std::min(v.x.min, p);
+                v.x.max = std::max(v.x.max, p);
+                v.y.min = std::min(v.y.min, off - half);
+                v.y.max = std::max(v.y.max, off + half);
+            }
+        }
     }
 }
 

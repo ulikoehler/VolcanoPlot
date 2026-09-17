@@ -11,6 +11,9 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override { (void)v; }
     LegendMarker legendMarker() const override { return LegendMarker::Square; }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 private:
     PieData data_;
     render::primitives::PieRenderer renderer_;

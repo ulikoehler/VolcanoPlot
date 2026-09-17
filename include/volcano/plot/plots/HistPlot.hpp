@@ -90,6 +90,9 @@ public:
     [[nodiscard]] const std::vector<float>& binHeights() const { return heights_.front(); }
     /// Per-dataset bin heights (valid after prepare()).
     [[nodiscard]] const std::vector<std::vector<float>>& binHeightsAll() const { return heights_; }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<std::vector<float>> datasets_;

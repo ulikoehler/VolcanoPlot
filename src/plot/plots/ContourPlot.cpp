@@ -1,6 +1,8 @@
 // volcano/plot/plots/ContourPlot.cpp — contour and contourf implementation
 #include "volcano/plot/plots/ContourPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/text/TextRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 
@@ -307,6 +309,57 @@ void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
     }
 }
 
+void ContourPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                             Rect2D rect) {
+    if (segments_.empty()) { computeLevels(); marchingSquares(); }
+    if (segments_.empty()) return;
+    auto toPx = pxMapper(axes, rect);
+    render::VectorCanvas::Pen pen;
+    pen.color = config_.lineColor;
+    pen.width = config_.lineWidth;
+    for (size_t i = 0; i + 1 < segments_.size(); i += 2) {
+        if (config_.cmap && !config_.levels.empty()) {
+            float t = (segLevels_[i / 2] - config_.levels.front()) /
+                      std::max(1e-9f, config_.levels.back() -
+                                      config_.levels.front());
+            pen.color = config_.cmap->sample(std::clamp(t, 0.0f, 1.0f));
+        }
+        Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};
+        c.polyline(seg, pen);
+    }
+    // clabel text at each level's representative midpoint.
+    if (config_.clabel) {
+        std::map<float, std::vector<Point2D>> byLevel;
+        for (size_t i = 0; i + 1 < segments_.size(); i += 2)
+            byLevel[segLevels_[i / 2]].push_back(
+                {(segments_[i].x + segments_[i + 1].x) * 0.5f,
+                 (segments_[i].y + segments_[i + 1].y) * 0.5f});
+        Color tcol = config_.clabelColor.a > 0 ? config_.clabelColor
+                                               : config_.lineColor;
+        for (const auto& [level, mids] : byLevel) {
+            if (!config_.clabelLevels.empty() &&
+                std::find(config_.clabelLevels.begin(),
+                          config_.clabelLevels.end(), level) ==
+                    config_.clabelLevels.end())
+                continue;
+            if (mids.empty()) continue;
+            Point2D ctr{0, 0};
+            for (auto& m : mids) { ctr.x += m.x; ctr.y += m.y; }
+            ctr.x /= float(mids.size()); ctr.y /= float(mids.size());
+            const Point2D* best = &mids[0];
+            float bestD = 1e30f;
+            for (const auto& m : mids) {
+                float d = (m.x - ctr.x) * (m.x - ctr.x) +
+                          (m.y - ctr.y) * (m.y - ctr.y);
+                if (d < bestD) { bestD = d; best = &m; }
+            }
+            auto p = toPx(*best);
+            c.text(p, std::format("{:g}", level),
+                   16.0f * config_.clabelFontScale, tcol);
+        }
+    }
+}
+
 void ContourPlot::contributeToAutoscale(Viewport& v) const {
     v.x.min = std::min(v.x.min, grid_.xRange.min);
     v.x.max = std::max(v.x.max, grid_.xRange.max);
@@ -428,6 +481,18 @@ void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t);
+}
+
+void ContourfPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                              Rect2D rect) {
+    if (positions_.empty()) { computeLevels(); marchingSquaresFilled(); }
+    if (positions_.empty()) return;
+    auto toPx = pxMapper(axes, rect);
+    for (size_t i = 0; i + 2 < positions_.size(); i += 3) {
+        Point2D tri[3] = {toPx(positions_[i]), toPx(positions_[i + 1]),
+                          toPx(positions_[i + 2])};
+        c.polygon(tri, colors_[i]);
+    }
 }
 
 void ContourfPlot::contributeToAutoscale(Viewport& v) const {

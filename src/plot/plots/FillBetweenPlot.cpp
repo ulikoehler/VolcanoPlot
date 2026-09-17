@@ -1,6 +1,8 @@
 // volcano/plot/plots/FillBetweenPlot.cpp
 #include "volcano/plot/plots/FillBetweenPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -84,6 +86,19 @@ void FillBetweenPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
     renderer_.draw(cmd, vrect, t);
+}
+
+void FillBetweenPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                                 Rect2D rect) {
+    if (x_.empty()) return;
+    auto toPx = pxMapper(axes, rect);
+    std::vector<Point2D> poly;
+    poly.reserve(x_.size() * 2);
+    for (size_t i = 0; i < x_.size(); ++i)
+        poly.push_back(toPx({x_[i], y1_[i]}));
+    for (size_t i = x_.size(); i-- > 0;)
+        poly.push_back(toPx({x_[i], y2_[i]}));
+    if (poly.size() >= 3) c.polygon(poly, color_);
 }
 
 void FillBetweenPlot::contributeToAutoscale(Viewport& v) const {

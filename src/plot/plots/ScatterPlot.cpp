@@ -1,8 +1,10 @@
 // volcano/plot/plots/ScatterPlot.cpp
 #include "volcano/plot/plots/ScatterPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include "../VectorEmitHelpers.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -37,6 +39,15 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& /*r*/,
                    static_cast<uint32_t>(series_.points.size()), mp);
 }
 
+void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                             Rect2D rect) {
+    auto g = markerGeom(series_.marker, series_.markerNumsides,
+                        series_.markerAngle);
+    bool fill = series_.markerFill != MarkerFill::None;
+    emitMarkerAt(c, pxMapper(axes, rect), series_.points, g,
+                 series_.size, fill ? series_.color : Color::transparent(),
+                 std::max(1.0f, series_.size * 0.1f));
+}
 void ScatterPlot::contributeToAutoscale(Viewport& v) const {
     for (const auto& p : series_.points) {
         v.x.min = std::min(v.x.min, p.x);

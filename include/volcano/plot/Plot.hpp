@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace volcano::render { class Renderer; }
+namespace volcano::render { class Renderer; class VectorCanvas; }
 
 namespace volcano::render::primitives { class ReduceRenderer; }
 
@@ -68,6 +68,15 @@ public:
     /// Hit-test (matplotlib `contains` / pick): true when the data-space
     /// point hits this layer. Default: never hit.
     virtual bool contains(const Axes&, Point2D) const { return false; }
+    /// Whether this layer can emit native vector primitives
+    /// (see emitVector). Used by the exporter to group raster fallback
+    /// runs; `rasterized=true` forces fallback even when true.
+    [[nodiscard]] virtual bool canEmitVector() const { return false; }
+    /// Emit native vector primitives (PDF/SVG/EPS/PGF export) in figure
+    /// pixel space, clipped to `rect` (the axes rect). Only called when
+    /// canEmitVector() is true and `rasterized` is false. Non-const like
+    /// draw(): geometry may be built lazily.
+    virtual void emitVector(render::VectorCanvas&, const Axes&, Rect2D) {}
 };
 
 /// A Figure holds one or more Axes arranged in a grid.

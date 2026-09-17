@@ -37,6 +37,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     float y_;
@@ -65,6 +68,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     float x_;
@@ -92,6 +98,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     float y1_, y2_;
@@ -119,6 +128,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     float x1_, x2_;
@@ -148,6 +160,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<float> xPositions_;
@@ -180,6 +195,9 @@ public:
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<float> yPositions_;
@@ -190,6 +208,74 @@ private:
     render::primitives::LineSegmentRenderer renderer_;
     uint32_t vertexCount_ = 0;
     bool prepared_ = false;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EventPlot — rows of event markers as line segments (matplotlib eventplot)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// EventPlot — identical events at discrete positions, drawn as line
+/// segments. Equivalent to matplotlib's `eventplot(positions, ...)`.
+///
+/// `positions` is a list of rows; each row is a list of event coordinates
+/// along the primary axis. Row `i` is drawn at line offset `lineoffsets[i]`
+/// (default 0,1,2,...) along the secondary axis with segment half-length
+/// `linelengths[i] / 2` (default 1). `orientation` "horizontal" (default)
+/// draws horizontal ticks (events on x); "vertical" draws vertical ticks.
+class EventPlot : public IPlot {
+public:
+    explicit EventPlot(std::vector<std::vector<float>> positions)
+        : positions_(std::move(positions)) {}
+    /// Single row of events.
+    explicit EventPlot(std::vector<float> positions)
+        : positions_{std::move(positions)} {}
+
+    /// Per-row offset along the secondary axis (default: 0,1,2,...).
+    std::vector<float> lineoffsets;
+    /// Per-row full segment length (default 1).
+    std::vector<float> linelengths;
+    /// Per-row line width in px (default `lineWidth`).
+    std::vector<float> linewidths;
+    /// Per-row colors (default `color`, cycling mpl-style when empty).
+    std::vector<Color> colors;
+    /// "horizontal" (events on x, ticks horizontal offsets on y) or
+    /// "vertical".
+    std::string orientation = "horizontal";
+    /// Fallback color/width when per-row lists are empty.
+    Color color = Color::fromRgba8(31, 119, 180, 255);
+    float lineWidth = 1.5f;
+
+    void prepare(render::Renderer& r) override;
+    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+              const Axes& axes, Rect2D rect) override;
+    void contributeToAutoscale(Viewport& v) const override;
+    [[nodiscard]] std::string label() const override { return label_; }
+    [[nodiscard]] Color legendColor() const override { return color; }
+    [[nodiscard]] LegendMarker legendMarker() const override {
+        return LegendMarker::Line;
+    }
+    void setLabel(std::string l) { label_ = std::move(l); }
+    bool applyCycleProps(const CycleProps& p) override {
+        if (p.color) color = *p.color;
+        if (p.lineWidth) lineWidth = *p.lineWidth;
+        return p.color || p.lineWidth;
+    }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
+
+private:
+    std::vector<std::vector<float>> positions_;
+    std::string label_;
+    // Segments per row (pair endpoints, data coords), row colors/widths.
+    std::vector<std::vector<Point2D>> rowSegs_;
+    std::vector<Color> rowColors_;
+    std::vector<float> rowWidths_;
+    std::vector<std::unique_ptr<render::primitives::LineSegmentRenderer>>
+        renderers_;
+    bool prepared_ = false;
+
+    void buildRows();
 };
 
 } // namespace volcano::plot

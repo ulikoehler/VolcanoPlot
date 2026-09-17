@@ -25,6 +25,9 @@ public:
         }
         return false;
     }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 private:
     BarData data_;
     render::primitives::BarRenderer renderer_;

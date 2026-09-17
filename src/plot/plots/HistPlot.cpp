@@ -1,6 +1,8 @@
 // volcano/plot/plots/HistPlot.cpp
 #include "volcano/plot/plots/HistPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -312,6 +314,41 @@ void HistPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
             stepRenderers_[i]->draw(cmd, vrect, t, stepCounts_[i]);
     } else {
         renderer_.draw(cmd, vrect, t);
+    }
+}
+
+void HistPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                          Rect2D rect) {
+    if (binEdges_.empty()) computeBins();
+    auto toPx = pxMapper(axes, rect);
+    auto setColor = [&](size_t d) {
+        return d < cfg_.colors.size() ? cfg_.colors[d] : cfg_.color;
+    };
+    if (cfg_.histtype == HistType::Step) {
+        if (stepSegs_.empty()) buildStepSegments();
+        for (size_t d = 0; d < stepSegs_.size(); ++d) {
+            Color col = setColor(d);
+            col.a = 1.0f;
+            render::VectorCanvas::Pen pen;
+            pen.color = col;
+            pen.width = cfg_.stepLineWidth;
+            for (size_t i = 0; i + 1 < stepSegs_[d].size(); i += 2) {
+                Point2D seg[2] = {toPx(stepSegs_[d][i]),
+                                  toPx(stepSegs_[d][i + 1])};
+                c.polyline(seg, pen);
+            }
+        }
+        return;
+    }
+    std::vector<Point2D> positions;
+    std::vector<Color> colors;
+    buildBarVertices(positions, colors);
+    // Every 6 verts = one bar quad: {bl,br,ul},{br,ur,ul} → polygon
+    // corners 0,1,4,2.
+    for (size_t i = 0; i + 5 < positions.size(); i += 6) {
+        Point2D q[4] = {toPx(positions[i]), toPx(positions[i + 1]),
+                        toPx(positions[i + 4]), toPx(positions[i + 2])};
+        c.polygon(q, colors[i]);
     }
 }
 

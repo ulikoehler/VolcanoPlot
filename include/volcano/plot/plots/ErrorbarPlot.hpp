@@ -61,6 +61,9 @@ public:
     [[nodiscard]] std::string label() const override { return cfg_.label; }
     [[nodiscard]] Color legendColor() const override { return cfg_.color; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Circle; }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     std::vector<float> x_, y_;

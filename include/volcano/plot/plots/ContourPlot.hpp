@@ -50,6 +50,9 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return config_.lineColor; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     Grid2D grid_;
@@ -82,6 +85,9 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override;
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 
 private:
     Grid2D grid_;
