@@ -18,6 +18,8 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/Projection.cpp
     ${VOLCANO_ROOT}/src/plot/Cycler.cpp
     ${VOLCANO_ROOT}/src/plot/Ticks.cpp
+    ${VOLCANO_ROOT}/src/plot/Units.cpp
+    ${VOLCANO_ROOT}/src/plot/Dates.cpp
     ${VOLCANO_ROOT}/src/plot/LineMarker.cpp
     ${VOLCANO_ROOT}/src/plot/Stroke.cpp
     ${VOLCANO_ROOT}/src/plot/Events.cpp

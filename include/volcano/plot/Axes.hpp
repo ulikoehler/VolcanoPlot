@@ -10,6 +10,7 @@
 #include "volcano/plot/Scale.hpp"
 #include "volcano/plot/Projection.hpp"
 #include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Units.hpp"
 
 #include <functional>
 #include <memory>
@@ -256,6 +257,59 @@ public:
     class HeatmapPlot& imshow(Grid2D grid,
         const Colormap& cmap = colormaps::viridis());
 
+    // ── Units / categorical & date axes (mpl matplotlib.units) ──
+
+    /// mpl `ax.plot(x, y)` — unit-aware: plain floats pass through,
+    /// std::chrono dates convert to day numbers, std::string becomes
+    /// categorical positions. The converter's axisInfo is applied to
+    /// the axis (locator/formatter defaults).
+    class LinePlot& plot(const std::vector<float>& x,
+                         const std::vector<float>& y);
+    template <class TX, class TY>
+    class LinePlot& plot(const std::vector<TX>& xs,
+                         const std::vector<TY>& ys) {
+        registerBuiltinConverters();
+        auto fx = convertSeq(xs, this, 'x');
+        auto fy = convertSeq(ys, this, 'y');
+        if constexpr (!std::is_convertible_v<TX, float>) {
+            if (auto* c = UnitsRegistry::instance().find<TX>())
+                applyAxisInfo(*c, 'x');
+        }
+        if constexpr (!std::is_convertible_v<TY, float>) {
+            if (auto* c = UnitsRegistry::instance().find<TY>())
+                applyAxisInfo(*c, 'y');
+        }
+        return plot(fx, fy);
+    }
+    /// Y-only mpl `ax.plot(y)` form.
+    class LinePlot& plot(const std::vector<float>& y) {
+        std::vector<float> x(y.size());
+        for (size_t i = 0; i < y.size(); ++i) x[i] = float(i);
+        return plot(x, y);
+    }
+
+    /// mpl `ax.xaxis_date()`: treat x values as days since 1970-01-01
+    /// UTC — installs an AutoDateLocator + AutoDateFormatter.
+    void xaxis_date();
+    /// mpl `ax.yaxis_date()`.
+    void yaxis_date();
+
+    /// mpl categorical axis: set the category labels; ticks sit at
+    /// positions 0..n-1 labelled with the strings.
+    void setXCategories(std::vector<std::string> labels);
+    void setYCategories(std::vector<std::string> labels);
+    [[nodiscard]] const std::vector<std::string>& xCategories() const {
+        return xCategories_;
+    }
+    [[nodiscard]] const std::vector<std::string>& yCategories() const {
+        return yCategories_;
+    }
+    /// Lookup-or-append a category (mpl unit_data semantics): returns
+    /// its index, extending the axis category list on first sight and
+    /// refreshing the FixedLocator/FixedFormatter.
+    int xCategoryIndex(std::string_view label);
+    int yCategoryIndex(std::string_view label);
+
     /// Set the property cycler (matplotlib axes.prop_cycle). Initialized
     /// from style_.colorCycle (or tab10 when unset).
     void setPropCycle(Cycler c) { cycler_ = std::move(c); }
@@ -351,6 +405,10 @@ public:
 private:
     /// Apply 5% padding and degenerate-range fixup to a raw min/max viewport.
     static void finalizeAutoscale(Viewport& v);
+    /// Install a converter's axisInfo defaults on 'x' or 'y'.
+    void applyAxisInfo(const UnitConverter& conv, char axis);
+    /// Reinstall FixedLocator/FixedFormatter for the category list.
+    void installCategoryTicks(char axis);
 
     Viewport viewport_{0,1,0,1};
     bool manualX_ = false, manualY_ = false;
@@ -369,6 +427,8 @@ private:
     std::vector<std::unique_ptr<IPlot>> plots_;
     std::vector<TextAnnotation> texts_;
     std::vector<Annotation> annotations_;
+    /// Category labels per axis (mpl Axis.units unit_data).
+    std::vector<std::string> xCategories_, yCategories_;
     /// Legend box rect tracked by the renderer for hit-testing.
     mutable Rect2D legendBox_{};
 };

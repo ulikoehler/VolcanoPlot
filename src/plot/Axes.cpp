@@ -1,9 +1,11 @@
 // volcano/plot/Axes.cpp
 #include "volcano/plot/Axes.hpp"
 #include "volcano/plot/Collections.hpp"
+#include "volcano/plot/Dates.hpp"
 #include "volcano/plot/Specialized.hpp"
 #include "volcano/plot/plots/ReferenceLines.hpp"
 #include "volcano/plot/plots/HeatmapPlot.hpp"
+#include "volcano/plot/plots/LinePlot.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Rc.hpp"
 #include "volcano/plot/Ticks.hpp"
@@ -12,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 namespace volcano::plot {
 
@@ -338,6 +341,84 @@ void Axes::grid(bool on, std::string_view which, std::string_view axis) {
     };
     if (axis == "x" || axis == "both") apply(style_.xAxis);
     if (axis == "y" || axis == "both") apply(style_.yAxis);
+}
+
+// ── Units / categorical & date axes ─────────────────────────────────────────
+
+LinePlot& Axes::plot(const std::vector<float>& x,
+                     const std::vector<float>& y) {
+    Series2D s;
+    const size_t n = std::min(x.size(), y.size());
+    s.points.reserve(n);
+    for (size_t i = 0; i < n; ++i) s.points.push_back({x[i], y[i]});
+    auto p = std::make_unique<LinePlot>(std::move(s));
+    auto& ref = *p;
+    addPlot(std::move(p));
+    return ref;
+}
+
+void Axes::applyAxisInfo(const UnitConverter& conv, char axis) {
+    auto info = conv.axisInfo(axis == 'y' ? "y" : "x", this);
+    auto& st = axis == 'y' ? style_.yAxis : style_.xAxis;
+    if (info.locator) st.ticks.locator = info.locator;
+    if (info.formatter) st.ticks.formatter = info.formatter;
+    if (info.minorLocator) st.ticks.minorLocator = info.minorLocator;
+    if (info.minorFormatter)
+        st.ticks.minorFormatter = info.minorFormatter;
+    if (!info.label.empty()) st.label = info.label;
+}
+
+void Axes::xaxis_date() {
+    registerBuiltinConverters();
+    dates::DateConverter conv;
+    applyAxisInfo(conv, 'x');
+}
+
+void Axes::yaxis_date() {
+    registerBuiltinConverters();
+    dates::DateConverter conv;
+    applyAxisInfo(conv, 'y');
+}
+
+void Axes::installCategoryTicks(char axis) {
+    const auto& cats = axis == 'y' ? yCategories_ : xCategories_;
+    std::vector<float> locs(cats.size());
+    std::iota(locs.begin(), locs.end(), 0.0f);
+    auto loc = std::make_shared<FixedLocator>(std::move(locs));
+    auto fmt = std::make_shared<FixedFormatter>(cats);
+    if (axis == 'y') {
+        style_.yAxis.ticks.locator = std::move(loc);
+        style_.yAxis.ticks.formatter = std::move(fmt);
+    } else {
+        style_.xAxis.ticks.locator = std::move(loc);
+        style_.xAxis.ticks.formatter = std::move(fmt);
+    }
+}
+
+void Axes::setXCategories(std::vector<std::string> labels) {
+    xCategories_ = std::move(labels);
+    installCategoryTicks('x');
+}
+
+void Axes::setYCategories(std::vector<std::string> labels) {
+    yCategories_ = std::move(labels);
+    installCategoryTicks('y');
+}
+
+int Axes::xCategoryIndex(std::string_view label) {
+    for (size_t i = 0; i < xCategories_.size(); ++i)
+        if (xCategories_[i] == label) return int(i);
+    xCategories_.emplace_back(label);
+    installCategoryTicks('x');
+    return int(xCategories_.size()) - 1;
+}
+
+int Axes::yCategoryIndex(std::string_view label) {
+    for (size_t i = 0; i < yCategories_.size(); ++i)
+        if (yCategories_[i] == label) return int(i);
+    yCategories_.emplace_back(label);
+    installCategoryTicks('y');
+    return int(yCategories_.size()) - 1;
 }
 
 } // namespace volcano::plot

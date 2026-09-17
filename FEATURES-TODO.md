@@ -579,6 +579,24 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `violinplot` with custom positions, widths, bodies
 - [x] `errorbar` continuous vs per-point error styles
 
+## 17. Units & Date/Categorical Axes
+
+- [x] Units registry (`UnitsRegistry::instance()`, `UnitConverter`,
+      `AxisInfo` — mpl `matplotlib.units`)
+- [x] `dates::dateToNum`/`numToDate` (days since 1970-01-01 UTC),
+      `civilFromNum`, `strfnum`
+- [x] Date locators: `YearLocator`, `MonthLocator`, `WeekdayLocator`,
+      `DayLocator`, `HourLocator`, `MinuteLocator`, `SecondLocator`,
+      `MicrosecondLocator`, `AutoDateLocator`
+- [x] Date formatters: `DateFormatter` (strftime), `AutoDateFormatter`,
+      `ConciseDateFormatter` (offset text carries larger context)
+- [x] `dates::DateConverter` (chrono sys_days/sys_seconds/...) and
+      `dates::StrCategoryConverter` (order-of-appearance categories)
+- [x] `Axes::plot(x, y)` unit-aware convenience (floats, chrono dates,
+      string categories on either axis)
+- [x] `ax.xaxis_date()`/`yaxis_date()`, `setXCategories`/`setYCategories`,
+      `xCategoryIndex`/`yCategoryIndex` (mpl unit_data semantics)
+
 ---
 
 ## Priority Tiers
