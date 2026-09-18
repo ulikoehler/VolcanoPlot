@@ -16,9 +16,23 @@ namespace volcano::plot {
 
 /// A series of 2D points (scatter, line, etc.).
 struct Series2D {
+    /// Sentinel for "take the color from the axes prop_cycle"
+    /// (matplotlib plot()/scatter() default). Fully transparent.
+    static constexpr Color autoColor() { return Color::transparent(); }
+
     std::vector<Point2D> points;
     std::string label;
-    Color color = Color::blue();
+    /// The draw color. `autoColor()` (transparent) means the axes prop
+    /// cycle assigns it at addPlot() time; `resolvedColor()` falls back
+    /// to cycle color 0 when no cycle ever resolved it.
+    Color color = autoColor();
+
+    /// The color to draw with: `color` unless still `autoColor()`.
+    [[nodiscard]] Color resolvedColor() const {
+        return color.a > 0 ? color : ColorCycle::at(0);
+    }
+    /// True while the color is the auto/cycle sentinel.
+    [[nodiscard]] bool hasAutoColor() const { return color.a == 0; }
     float size = 6.0f;          // marker size in pixels
     MarkerStyle marker = MarkerStyle::None;  // mpl plot() default: none
     MarkerFill markerFill = MarkerFill::Full;
@@ -45,7 +59,9 @@ struct Series2D {
     /// this series (color/lineStyle/lineWidth/marker when the cycle
     /// provides them) and advances the cycle. Set before addPlot;
     /// fields may still be overridden after addPlot via series().
-    bool usePropCycle = false;
+    /// matplotlib parity: plot()/scatter() consume the prop_cycle by
+    /// default, so this is on unless the caller opts out.
+    bool usePropCycle = true;
 };
 
 /// A series of 3D points (3D scatter, surface).

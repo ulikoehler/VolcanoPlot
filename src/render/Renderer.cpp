@@ -7,6 +7,7 @@
 #include <volcano/plot/Colormap.hpp>
 #include <volcano/plot/Annotation.hpp>
 #include <volcano/plot/Interaction.hpp>
+#include <volcano/plot/Stroke.hpp>
 #include <volcano/plot/Ticks.hpp>
 #include <volcano/plot/Widgets.hpp>
 #include <volcano/text/MathText.hpp>
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <format>
 #include <string>
 
@@ -116,15 +118,6 @@ Renderer::~Renderer() = default;
 
 void Renderer::prepare(plot::Figure& figure) {
     auto& ctx = backend_.context();
-    // Init grid renderer once.
-    if (!gridInited_) {
-        gridRenderer_.init(ctx.device.handle(), backend_.renderPass(),
-                           backend_.sampleCount(), *pipelineCache_,
-                           ctx.allocator.handle(),
-                           ctx.device.graphicsQueue(),
-                           ctx.graphicsPool.handle());
-        gridInited_ = true;
-    }
     // Init text renderer once.
     if (!textInited_) {
         textRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
@@ -484,6 +477,83 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                       true, axes.yTicksRight());
 }
 
+/// Draw tick-aligned grid lines for one axes. xAxis.grid draws vertical
+/// lines at x tick positions, yAxis.grid draws horizontal lines at y
+/// ticks. gridWhich selects "major"/"minor"/"both"; minor lines use the
+/// minorGrid* styling. Grid line style "-"/"--"/":"/"-." maps to the
+/// usual dash patterns. Lines are clipped to the axes rect.
+void Renderer::drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                        plot::Rect2D rect) {
+    if (!spineInited_) return;
+    const auto& style = axes.style();
+    const auto& vp = axes.viewport();
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+
+    const float x0 = float(rect.x), y0 = float(rect.y);
+    const float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
+
+    auto drawSet = [&](bool yAxis, std::span<const float> fracs,
+                       plot::Color color, float widthPt,
+                       const std::string& lineStyle) {
+        if (fracs.empty()) return;
+        const float w = std::max(widthPt * kPtToPx, 1.0f);
+        plot::StrokeParams sp;
+        sp.width = w;
+        if (auto ls = plot::lineStyleFromString(lineStyle);
+            ls && *ls != plot::LineStyle::Solid)
+            sp.dashes = plot::dashPattern(*ls, w);
+        // Stroke every grid line into one mesh: a single drawTriangles
+        // call keeps scratch-buffer pressure low even with fine dashes.
+        std::vector<plot::Point2D> tris;
+        for (float f : fracs) {
+            if (f < 0.0f || f > 1.0f) continue;
+            plot::Point2D pts[2];
+            if (yAxis) {
+                float py = y0 + (1.0f - f) * float(rect.height);
+                pts[0] = {x0, py};
+                pts[1] = {x1, py};
+            } else {
+                float px = x0 + f * float(rect.width);
+                pts[0] = {px, y0};
+                pts[1] = {px, y1};
+            }
+            auto mesh = plot::strokePolyline(pts, sp);
+            tris.insert(tris.end(), mesh.verts.begin(), mesh.verts.end());
+        }
+        if (!tris.empty())
+            spineRenderer_.drawTriangles(cmd, clip, backend_.extent(),
+                                         tris, color);
+    };
+
+    auto drawAxis = [&](const plot::AxisStyle& as,
+                        const plot::AxisScale& scale,
+                        float lo, float hi, bool yAxis) {
+        if (!as.grid) return;
+        const auto& tc = as.ticks;
+        auto majors = axisTicks(tc, scale, lo, hi);
+        auto toFrac = [&](std::span<const float> ticks) {
+            std::vector<float> fr;
+            fr.reserve(ticks.size());
+            for (float t : ticks)
+                fr.push_back(yAxis ? axes.dataToFraction({0.0f, t}).y
+                                   : axes.dataToFraction({t, 0.0f}).x);
+            return fr;
+        };
+        if (as.gridWhich != "minor")
+            drawSet(yAxis, toFrac(majors), as.gridColor, as.gridLineWidth,
+                    as.gridLineStyle);
+        if (as.gridWhich == "minor" || as.gridWhich == "both") {
+            auto minors = axisMinorTicks(tc, scale, lo, hi, majors);
+            drawSet(yAxis, toFrac(minors), as.minorGridColor,
+                    as.minorGridLineWidth, as.minorGridLineStyle);
+        }
+    };
+
+    drawAxis(style.xAxis, axes.xscale(), vp.x.min, vp.x.max, false);
+    drawAxis(style.yAxis, axes.yscale(), vp.y.min, vp.y.max, true);
+}
+
 void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                           plot::Rect2D rect) {
     if (!spineInited_ || !textReady_) return;
@@ -571,7 +641,33 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
         return {1, 1, 1, 1}; // "best"/"upper right"/"0"/"1"/unknown
     };
-    const auto la = parseLoc(lg.location);
+    LocAnchor la = parseLoc(lg.location);
+    if (lg.location == "best" || lg.location == "0") {
+        // matplotlib loc='best': evaluate the inside-corner candidates
+        // and pick the one where the legend box overlaps the least data.
+        // Candidate order matches mpl's search order.
+        const LocAnchor cands[4] = {
+            {1, 1, 1, 1},  // upper right
+            {0, 1, 0, 1},  // upper left
+            {0, 0, 0, 0},  // lower left
+            {1, 0, 1, 0},  // lower right
+        };
+        const float fw = boxW / std::max(float(rect.width), 1.0f);
+        const float fh = boxH / std::max(float(rect.height), 1.0f);
+        float bestScore = std::numeric_limits<float>::infinity();
+        for (const auto& c : cands) {
+            float fx0 = c.fx > 0.5f ? 1.0f - fw : 0.0f;
+            float fy0 = c.fy > 0.5f ? 1.0f - fh : 0.0f;
+            auto d0 = axes.fractionToData({fx0, fy0});
+            auto d1 = axes.fractionToData({fx0 + fw, fy0 + fh});
+            plot::Range xr{std::min(d0.x, d1.x), std::max(d0.x, d1.x)};
+            plot::Range yr{std::min(d0.y, d1.y), std::max(d0.y, d1.y)};
+            float score = 0.0f;
+            for (const auto& plot : axes.plots())
+                score += plot->occupancy(xr, yr);
+            if (score < bestScore) { bestScore = score; la = c; }
+        }
+    }
 
     // Anchor pixel position: bbox_to_anchor (anchorSpace coords) when set,
     // else the loc's axes fraction.
@@ -714,13 +810,20 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                          vk::Extent2D{rect.width, rect.height}};
 
-        // Draw grid background for this axes (per-axis enable).
-        if (subset != DrawSubset::AnimatedOnly && gridInited_ &&
-            (p.axes->style().xAxis.grid || p.axes->style().yAxis.grid)) {
-            gridRenderer_.draw(cmd, vrect, p.axes->transform(),
-                               p.axes->style().xAxis,
-                               p.axes->style().yAxis);
-        }
+        const bool gridOn = p.axes->style().xAxis.grid ||
+                            p.axes->style().yAxis.grid;
+
+        // Axes facecolor patch (matplotlib axes.facecolor).
+        if (subset != DrawSubset::AnimatedOnly && spineInited_ &&
+            p.axes->style().faceColor.a > 0.0f)
+            spineRenderer_.drawFilledRect(cmd, vrect, rect,
+                                          p.axes->style().faceColor);
+
+        // Draw tick-aligned grid lines (per-axis enable). axisBelow
+        // selects whether the grid sits under or over the plot artists.
+        if (subset != DrawSubset::AnimatedOnly && gridOn &&
+            p.axes->style().axisBelow)
+            drawGrid(cmd, *p.axes, rect);
 
         // Draw plot layers in zorder, filtered by the blit subset.
         for (auto* plot : p.axes->drawOrder()) {
@@ -728,6 +831,10 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
             if (subset == DrawSubset::AnimatedOnly && !plot->animated) continue;
             const_cast<plot::IPlot*>(plot)->draw(cmd, *this, *p.axes, rect);
         }
+
+        if (subset != DrawSubset::AnimatedOnly && gridOn &&
+            !p.axes->style().axisBelow)
+            drawGrid(cmd, *p.axes, rect);
 
         if (subset == DrawSubset::AnimatedOnly) continue;
 

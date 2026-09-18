@@ -18,7 +18,7 @@ void ScatterPlot::prepare(render::Renderer& r) {
     renderer_.init(ctx.device.handle(), r.backend().renderPass(),
                    r.backend().sampleCount(), r.descriptorPool(), r.pipelineCache());
 
-    std::vector<Color> colors(series_.points.size(), series_.color);
+    std::vector<Color> colors(series_.points.size(), series_.resolvedColor());
     std::vector<float> sizes(series_.points.size(), series_.size);
     renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                      ctx.graphicsPool.handle(), ctx.allocator.handle(),
@@ -43,10 +43,10 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         if (series_.markerPath)
             drawMarkersPx(r, cmd, vrect, px,
                           markerGeom(*series_.markerPath), series_.size,
-                          series_.color, std::max(1.0f, series_.size * 0.1f));
+                          series_.resolvedColor(), std::max(1.0f, series_.size * 0.1f));
         else
             drawTexMarkersPx(r, cmd, vrect, px, series_.markerTex,
-                             series_.color, series_.size);
+                             series_.resolvedColor(), series_.size);
         return;
     }
 
@@ -72,7 +72,7 @@ void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         for (const auto& dp : series_.points) {
             auto p = toPx(dp);
             c.text({p.x - halfW, p.y + series_.size * 0.35f},
-                   uni, series_.size, series_.color);
+                   uni, series_.size, series_.resolvedColor());
         }
         return;
     }
@@ -82,7 +82,7 @@ void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                      series_.markerAngle);
     bool fill = series_.markerFill != MarkerFill::None;
     emitMarkerAt(c, toPx, series_.points, g,
-                 series_.size, fill ? series_.color : Color::transparent(),
+                 series_.size, fill ? series_.resolvedColor() : Color::transparent(),
                  std::max(1.0f, series_.size * 0.1f));
 }
 void ScatterPlot::contributeToAutoscale(Viewport& v) const {

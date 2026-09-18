@@ -19,7 +19,9 @@ public:
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
                                   Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return series_.label; }
-    [[nodiscard]] Color legendColor() const override { return series_.color; }
+    [[nodiscard]] Color legendColor() const override {
+        return series_.resolvedColor();
+    }
 
     Series2D& series() noexcept { return series_; }
 

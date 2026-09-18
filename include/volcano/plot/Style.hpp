@@ -232,9 +232,10 @@ struct FigureStyle {
     /// Text color (matplotlib text.color).
     Color textColor = Color::black();
 
-    /// Whether grid/ticks are below plot elements (axes.axisbelow).
-    /// "line" = default (grid below, ticks above), true = grid+ticks below, false = above.
-    bool axisBelow = false;
+    /// Whether the grid draws below the plot artists (axes.axisbelow).
+    /// true = below (matplotlib's default 'line' behavior), false =
+    /// grid drawn over the artists.
+    bool axisBelow = true;
 
     /// Color cycle for automatic plot coloring (axes.prop_cycle).
     /// Mirrors the 'color' key of a parsed cycler expression.

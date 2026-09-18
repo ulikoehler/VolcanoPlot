@@ -4,7 +4,6 @@
 #include <volcano/backend/Backend.hpp>
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
-#include <volcano/render/GridRenderer.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
@@ -107,11 +106,9 @@ private:
     backend::IBackend& backend_;
     std::unique_ptr<core::PipelineCache> pipelineCache_;
     std::unique_ptr<core::DescriptorPool> descriptorPool_;
-    GridRenderer gridRenderer_;
     primitives::SpineRenderer spineRenderer_;
     primitives::ReduceRenderer reduceRenderer_;
     text::TextRenderer textRenderer_;
-    bool gridInited_ = false;
     bool textInited_ = false;
     bool spineInited_ = false;
     bool reduceInited_ = false;
@@ -125,6 +122,12 @@ private:
     /// Draw axis spines (border lines) and tick marks for one axes.
     void drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                     plot::Rect2D rect);
+
+    /// Draw tick-aligned grid lines for one axes (xAxis.grid → vertical
+    /// lines at x ticks, yAxis.grid → horizontal lines at y ticks;
+    /// gridWhich selects major/minor/both).
+    void drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                  plot::Rect2D rect);
 
     /// Draw a legend for the axes (if enabled in style).
     void drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,

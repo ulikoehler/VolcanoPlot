@@ -23,6 +23,7 @@ using namespace volcano::plot;
 TEST(GridSpec, UniformCellsSplitRegionEvenly) {
     GridSpec g(2, 2);
     g.left = 0.0f; g.right = 1.0f; g.bottom = 0.0f; g.top = 1.0f;
+    g.wspace = 0.0f; g.hspace = 0.0f;
     Rect2D fig{0, 0, 400, 400};
     auto tl = g.cellRect(g.region(fig), g.at(0, 0));
     auto br = g.cellRect(g.region(fig), g.at(1, 1));
@@ -35,6 +36,7 @@ TEST(GridSpec, UniformCellsSplitRegionEvenly) {
 TEST(GridSpec, SpansCoverMultipleCells) {
     GridSpec g(2, 3);
     g.left = 0.0f; g.right = 1.0f; g.bottom = 0.0f; g.top = 1.0f;
+    g.wspace = 0.0f; g.hspace = 0.0f;
     Rect2D fig{0, 0, 600, 400};
     // Span all 3 columns of row 1.
     auto r = g.cellRect(g.region(fig), g.at(1, 0, 1, 3));
@@ -47,6 +49,7 @@ TEST(GridSpec, SpansCoverMultipleCells) {
 TEST(GridSpec, WidthRatiosChangeCellSizes) {
     GridSpec g(1, 2);
     g.left = 0.0f; g.right = 1.0f; g.bottom = 0.0f; g.top = 1.0f;
+    g.wspace = 0.0f;
     g.widthRatios = {3.0f, 1.0f};
     Rect2D fig{0, 0, 400, 100};
     auto left = g.cellRect(g.region(fig), g.at(0, 0));
@@ -71,8 +74,10 @@ TEST(GridSpec, MarginsInsetTheRegion) {
 TEST(GridSpec, NestedGridResolvesInsideParentCell) {
     GridSpec g(1, 2);
     g.left = 0.0f; g.right = 1.0f; g.bottom = 0.0f; g.top = 1.0f;
+    g.wspace = 0.0f;
     auto sub = g.at(0, 1).nested(1, 2);
     sub->left = 0.0f; sub->right = 1.0f; sub->bottom = 0.0f; sub->top = 1.0f;
+    sub->wspace = 0.0f;
     Rect2D fig{0, 0, 800, 400};
     // Parent cell = right half (x 400..800). Nested cell 0 = x 400..600.
     auto r = sub->cellRect(sub->resolveRegion(fig), sub->at(0, 0));

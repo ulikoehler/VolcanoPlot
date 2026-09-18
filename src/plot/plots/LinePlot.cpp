@@ -17,7 +17,7 @@ void LinePlot::prepare(render::Renderer& r) {
                    r.backend().sampleCount(), r.pipelineCache());
     renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                      ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{series_.points}, series_.color, series_.lineWidth);
+                     std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
     prepared_ = true;
 }
 void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
@@ -66,7 +66,7 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     }
 
     auto mesh = strokePolyline(px, sp);
-    spine.drawTriangles(cmd, clip, res, mesh.verts, series_.color);
+    spine.drawTriangles(cmd, clip, res, mesh.verts, series_.resolvedColor());
 
     // Markers at each vertex (matplotlib plot marker=...).
     drawMarkersAtPoints(cmd, r, axes, rect);
@@ -87,15 +87,15 @@ void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
     }
     if (series_.markerPath) {
         drawMarkersPx(r, cmd, clip, px, markerGeom(*series_.markerPath),
-                      series_.size, series_.color,
+                      series_.size, series_.resolvedColor(),
                       std::max(1.0f, series_.size * 0.1f));
     } else if (!series_.markerTex.empty()) {
         drawTexMarkersPx(r, cmd, clip, px, series_.markerTex,
-                         series_.color, series_.size);
+                         series_.resolvedColor(), series_.size);
     } else if (series_.marker != MarkerStyle::None) {
         auto g = markerGeom(series_.marker, series_.markerNumsides,
                             series_.markerAngle);
-        drawMarkersPx(r, cmd, clip, px, g, series_.size, series_.color,
+        drawMarkersPx(r, cmd, clip, px, g, series_.size, series_.resolvedColor(),
                       std::max(1.0f, series_.size * 0.1f));
     }
 }
@@ -116,7 +116,7 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         if (axes.style().sketchScale > 0.0f)
             px = sketchPolyline(px, axes.style().sketchScale * 2.0f);
         render::VectorCanvas::Pen pen;
-        pen.color = series_.color;
+        pen.color = series_.resolvedColor();
         pen.width = series_.lineWidth;
         pen.dashes = series_.dashes.empty()
             ? dashPattern(series_.lineStyle, series_.lineWidth)
@@ -140,21 +140,21 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         for (const auto& dp : series_.points) {
             auto p = toPx(dp);
             c.text({p.x - halfW, p.y + series_.size * 0.35f},
-                   uni, series_.size, series_.color);
+                   uni, series_.size, series_.resolvedColor());
         }
         return;
     }
     if (series_.markerPath) {
         emitMarkerAt(c, toPx, series_.points,
                      markerGeom(*series_.markerPath), series_.size,
-                     series_.color, std::max(1.0f, series_.size * 0.1f));
+                     series_.resolvedColor(), std::max(1.0f, series_.size * 0.1f));
         return;
     }
     if (series_.marker != MarkerStyle::None) {
         auto g = markerGeom(series_.marker, series_.markerNumsides,
                             series_.markerAngle);
         emitMarkerAt(c, toPx, series_.points, g, series_.size,
-                     series_.color, 1.0f);
+                     series_.resolvedColor(), 1.0f);
     }
 }
 void LinePlot::contributeToAutoscale(Viewport& v) const {

@@ -89,7 +89,9 @@ time with a warning). Also optional: `libfreetype-dev` and
 
 - **GPU-side function evaluation** — functions evaluated in compute shaders
 - **MSAA anti-aliasing** — hardware multisampling for lines/points
-- **fwidth-based dynamic grid** — grid lines via screen-space derivatives
+- **Tick-aligned grid** — grid lines stroked at real tick positions
+  (`Renderer::drawGrid`); the earlier fwidth-procedural grid was replaced
+  because it could not align with the tick locator
 - **GPU autoscale** — parallel min/max reduce for viewport computation
 - **Infinite zoom** — sample count proportional to canvas width, not viewport
 - **f32 phase decomposition** — split phase into large constant + small delta
@@ -280,6 +282,16 @@ The regression test system has found and verified fixes for:
 - **HeatmapRenderer quad upload** — `std::span{kQuad, 6}` uploaded 6 floats
   (3 vertices) instead of 12 floats (6 vertices), so only one triangle of
   the fullscreen quad rendered.
+- **SpineRenderer scratch mid-frame realloc** — `ensureScratch` replaced
+  `scratchVB_` when it filled, so all draw commands recorded earlier in
+  the frame referenced a freed buffer (geometry silently vanished — e.g.
+  dashed grid lines). Fixed by retiring old buffers to `retiredScratch_`
+  until the next `resetScratch()`. Any renderer growing a scratch vertex
+  buffer mid-frame must keep the old buffer alive.
+- **Procedural shader grid** — `GridRenderer` computed its own `10^n`
+  step in a fragment shader, producing stair-step lines misaligned with
+  the ticks. Replaced by `Renderer::drawGrid`, which strokes line meshes
+  at the real `axisTicks`/`axisMinorTicks` positions via `strokePolyline`.
 
 ## See Also
 

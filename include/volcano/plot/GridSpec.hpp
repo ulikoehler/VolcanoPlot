@@ -42,7 +42,8 @@ public:
     // left/right/bottom/top bound the grid area; wspace/hspace are gaps
     // between cells expressed as a fraction of the mean cell size.
     float left = 0.08f, right = 0.92f, bottom = 0.08f, top = 0.92f;
-    float wspace = 0.0f, hspace = 0.0f;
+    // matplotlib defaults: wspace/hspace ≈ 0.2 of the mean cell size.
+    float wspace = 0.2f, hspace = 0.2f;
     /// Per-column/row relative sizes. Empty = uniform.
     std::vector<float> widthRatios, heightRatios;
 

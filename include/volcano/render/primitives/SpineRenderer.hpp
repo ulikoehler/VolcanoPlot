@@ -31,8 +31,12 @@ public:
     void drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
                         plot::Rect2D rect, plot::Color color);
 
-    /// Reset the scratch vertex buffer offset. Call at the start of each frame.
-    void resetScratch() { scratchOffset_ = 0; }
+    /// Reset the scratch vertex buffer offset. Call at the start of each
+    /// frame. Also releases scratch buffers retired by mid-frame growth.
+    void resetScratch() {
+        scratchOffset_ = 0;
+        retiredScratch_.clear();
+    }
 
     /// Draw tick marks along an axis.
     /// yAxis=false: x-axis ticks at the bottom edge (down); true: y-axis
@@ -77,6 +81,9 @@ private:
 
     /// Scratch vertex buffer (host-visible, ring-buffered).
     core::Buffer scratchVB_;
+    /// Scratch buffers retired by ensureScratch growth this frame; kept
+    /// alive because recorded draw commands still reference them.
+    std::vector<core::Buffer> retiredScratch_;
     size_t scratchCapacity_ = 0;
     size_t scratchOffset_ = 0;
 

@@ -184,9 +184,25 @@ TEST(AxesPropCycle, OptInSeriesGetsCycleColor) {
 
 TEST(AxesPropCycle, NonOptInSeriesKeepsColor) {
     Axes axes;
-    Series2D s; // usePropCycle = false
+    Series2D s;
+    s.usePropCycle = false;
+    s.color = Color::blue();  // explicit color kept even with cycle on
     auto* p = static_cast<LinePlot*>(axes.addPlot(std::make_unique<LinePlot>(s)));
     EXPECT_FLOAT_EQ(p->series().color.b, Color::blue().b);
+}
+
+TEST(AxesPropCycle, ExplicitColorNotOverriddenByCycle) {
+    Axes axes;
+    Series2D s;
+    s.color = Color::red();   // explicit: cycle must not overwrite it
+    auto* p = static_cast<LinePlot*>(axes.addPlot(std::make_unique<LinePlot>(s)));
+    EXPECT_FLOAT_EQ(p->series().color.r, Color::red().r);
+    EXPECT_FLOAT_EQ(p->series().color.g, Color::red().g);
+    // And the cycle must not have advanced — the next default series
+    // still gets C0.
+    Series2D s2;
+    auto* p2 = static_cast<LinePlot*>(axes.addPlot(std::make_unique<LinePlot>(s2)));
+    EXPECT_FLOAT_EQ(p2->series().color.r, ColorCycle::at(0).r);
 }
 
 TEST(AxesPropCycle, NonConsumingPlotsDontAdvanceCycle) {

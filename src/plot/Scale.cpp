@@ -1,5 +1,6 @@
 // volcano/plot/Scale.cpp
 #include "volcano/plot/Scale.hpp"
+#include "volcano/plot/Ticks.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -69,23 +70,10 @@ float AxisScale::inverse(float v) const {
 
 namespace {
 
-/// Linear nice-number tick locator (1/2/5 × 10^k steps).
-float niceStep(float rawStep) {
-    if (rawStep <= 0.0f || !std::isfinite(rawStep)) return 1.0f;
-    float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    float norm = rawStep / mag;
-    if (norm < 1.5f) return mag;
-    if (norm < 3.0f) return 2.0f * mag;
-    if (norm < 7.0f) return 5.0f * mag;
-    return 10.0f * mag;
-}
-
+/// Linear tick locator — matplotlib MaxNLocator semantics (nice steps
+/// [1,2,2.5,5,10]×10^k, at most ~nbins+1 ticks).
 std::vector<float> linearTicks(float vmin, float vmax, int nbins) {
-    std::vector<float> out;
-    float step = niceStep((vmax - vmin) / std::max(nbins - 1, 1));
-    for (float t = std::ceil(vmin / step) * step; t <= vmax + step * 1e-6f; t += step)
-        out.push_back(t);
-    return out;
+    return MaxNLocator{nbins}.tickValues(vmin, vmax);
 }
 
 } // namespace

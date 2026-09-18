@@ -14,17 +14,36 @@ public:
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
                                   Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return series_.label; }
-    [[nodiscard]] Color legendColor() const override { return series_.color; }
+    [[nodiscard]] Color legendColor() const override {
+        return series_.resolvedColor();
+    }
 
     bool applyCycleProps(const CycleProps& p) override {
         if (!series_.usePropCycle) return false;
-        if (p.color) series_.color = *p.color;
+        // Only an "auto" color consumes the cycle (matplotlib: an
+        // explicit color= does not advance the prop cycle).
+        bool consumed = false;
+        if (series_.hasAutoColor()) {
+            if (p.color) series_.color = *p.color;
+            consumed = true;
+        }
         if (p.lineStyle) series_.lineStyle = *p.lineStyle;
         if (p.lineWidth) series_.lineWidth = *p.lineWidth;
         if (p.marker) series_.marker = *p.marker;
-        return true;
+        return consumed;
     }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+
+    /// Fraction of series points inside the data-space box (loc="best").
+    [[nodiscard]] float occupancy(Range xr, Range yr) const override {
+        if (series_.points.empty()) return 0.0f;
+        size_t n = 0;
+        for (const auto& p : series_.points)
+            if (p.x >= xr.min && p.x <= xr.max &&
+                p.y >= yr.min && p.y <= yr.max)
+                ++n;
+        return float(n) / float(series_.points.size());
+    }
 
     /// Picking: hit when the data point is within half the line width
     /// (+2px) of a segment in pixel space.

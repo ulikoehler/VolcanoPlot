@@ -156,7 +156,11 @@ void SpineRenderer::init(vk::Device device, VmaAllocator allocator,
 void SpineRenderer::ensureScratch(size_t byteCount) {
     if (scratchOffset_ + byteCount <= scratchCapacity_) return;
     size_t needed = scratchOffset_ + byteCount;
-    size_t newSize = std::max<size_t>(16384, needed * 2);
+    size_t newSize = std::max<size_t>(1u << 20, needed * 2);
+    // The old buffer is still referenced by draw commands recorded this
+    // frame — keep it alive until resetScratch() at the next frame.
+    if (scratchVB_.handle() != VK_NULL_HANDLE)
+        retiredScratch_.push_back(std::move(scratchVB_));
     core::BufferDesc bdesc{};
     bdesc.size = newSize;
     bdesc.usage = core::BufferUsage::Vertex;

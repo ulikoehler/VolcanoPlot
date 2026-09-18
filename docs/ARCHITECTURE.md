@@ -64,8 +64,11 @@ Abstract interface for image encoding:
 2. **MSAA anti-aliasing** — hardware multisampling for lines/points. Sample
    count probed at init, fallback to highest supported.
 
-3. **fwidth-based dynamic grid** — grid lines via screen-space derivatives
-   in fragment shader. Lines never quantize under zoom.
+3. **Tick-aligned grid** — grid lines are CPU-stroked at the real tick
+   positions (`Renderer::drawGrid` + `strokePolyline`), honoring
+   major/minor selection, per-axis gating, dash styles, and axisbelow
+   ordering. (The earlier fwidth-procedural shader grid could not align
+   with the tick locator and was removed.)
 
 4. **GPU autoscale** — parallel min/max reduce computes viewport from data,
    read back to CPU asynchronously.

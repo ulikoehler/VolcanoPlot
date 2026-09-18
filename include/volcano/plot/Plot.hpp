@@ -51,6 +51,13 @@ public:
     /// cycle position only advances for consuming plots. Called by
     /// Axes::addPlot before the plot is stored.
     virtual bool applyCycleProps(const CycleProps&) { return false; }
+    /// How much of this artist's data lies inside the data-space box
+    /// `xr`×`yr`, as a fraction 0..1. Used to score candidate corners
+    /// for legend loc="best" (matplotlib picks the least-overlapping
+    /// placement). Default 0 = no occupancy information.
+    [[nodiscard]] virtual float occupancy(Range, Range) const {
+        return 0.0f;
+    }
 
     /// matplotlib `zorder`: plots are drawn in ascending zorder
     /// (stable — equal zorder keeps insertion order).
