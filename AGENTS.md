@@ -321,6 +321,6 @@ The regression test system has found and verified fixes for:
 
 ## See Also
 
-- `FEATURES-TODO.md` — matplotlib feature parity tracking
-- `TODO.md` — next major features roadmap
+- `FEATURES-TODO.md` — matplotlib feature parity tracking + next major
+  features roadmap (§18)
 - `docs/` — design documents

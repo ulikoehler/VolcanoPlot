@@ -352,6 +352,12 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `text`, `annotate` (Axes::text(), Axes::annotate() with arrows)
 - [x] `tick_params`, `set_xticklabels`, `set_yticklabels` (auto tick labels: [x])
 - [x] `Annotation` with `arrowprops` (simple arrow shaft + arrowhead)
+- [x] `arrowstyle` grammar (`ArrowStyleSpec` + `parseArrowStyle`):
+      `-`, `<-`, `->`, `<->`, `-|>`, `<|-`, `<|-|>`, `-[`, `<-[`, `]-[`,
+      `|-|`, `simple`, `fancy`, `wedge` + params (head_length/head_width/
+      tail_width/widthA/widthB/lengthA/lengthB/shrink_factor/
+      mutation_scale); geometry per mpl `patches.py` (pad_projected
+      overshoot, stroked brackets, tapered wedge); raster + vector paths
 - [x] Coordinate systems: `data`, `axes`, `figure`, `display`, `offset points`
 - [x] Text alignment: left/center/right, top/center/bottom/baseline
 - [x] Text background box (bbox face/edge color, padding)
@@ -404,9 +410,10 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] TICK/CARET variants (`0`–`11`)
 - [~] TeX glyph markers (`'$...$'`) — MathText exists, but per-marker
       text draw calls aren't wired
-- [~] Custom `Path` markers — pending Path infrastructure (§14);
-      `(numsides, style, angle)` polygons done via Polygon/StarN/
-      AsteriskN/CircledN + `markerNumsides`/`markerAngle`
+- [x] Custom `Path` markers — `Series2D::markerPath` (any `Path` flattened
+      via `markerGeom`, wired into ScatterPlot/LinePlot; feature
+      `063_marker_path`); `(numsides, style, angle)` polygons via
+      Polygon/StarN/AsteriskN/CircledN + `markerNumsides`/`markerAngle`
 - [x] Fill styles: `full`, `left`, `right`, `bottom`, `top`, `none`
       (MarkerFill, SDF half-fill/outline in PointRenderer)
 
@@ -455,7 +462,8 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `frameon`, `framealpha`, `facecolor`, `edgecolor`, `shadow`, `fancybox` (fields in LegendStyle)
 - [x] `labelcolor`
 - [x] `handlelength`, `handletextpad`, `borderpad`, `columnspacing` (+`borderaxespad`, rcParams)
-- [~] `draggable` — flag field exists; mouse interaction pending §11 event system
+- [ ] `draggable` — flag field exists; §11 event system + picking are
+      done, but pick+drag wiring for legends/annotations is still missing
 - [~] `handler_map` / legend handlers — `IPlot::legendMarker()` provides per-plot handle shapes; no arbitrary handler factory
 
 ---
@@ -553,6 +561,11 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `CircleCollection`
 - [x] `RegularPolyCollection`, `AsteriskPolygonCollection`
 - [x] `Patch` primitives: `Circle`, `Ellipse`, `Rectangle`, `Polygon`, `Wedge`, `FancyBboxPatch`, `FancyArrowPatch` (in `patch::` namespace)
+- [ ] `boxstyle` variants on `FancyBboxPatch` (`round`, `roundtooth`,
+      `sawtooth`, `square` + `pad`/`rounding_size` params — only a
+      rounded-rect with `pad` exists)
+- [ ] `set_clip_path` for artists (arbitrary `Path` clip, not just the
+      axes rect — needed for mpl's clip-path gallery examples)
 - [x] Hatch patterns (`/ \ | - + x`, repeats increase density; `o`/`.`/`*` not supported)
 - [x] `offsets` and `offset_transform` for instanced rendering (offsetTransform on Collection)
 
@@ -650,3 +663,87 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - Interactive widgets
 - All colormaps
 - All plot types
+
+---
+
+## 18. Roadmap — Next Major Features (priority order)
+
+The microfeature-parity sweep is complete (see `docs/MICROFEATURES.md`).
+Items below are roughly ordered by user-visible value vs. implementation
+cost. Features that were once listed here and are now done (Path
+infrastructure, contour/contourf, widgets, GridSpec/subfigures, polar,
+tri_*) are checked off in the sections above.
+
+### P0 — Correctness & robustness
+- [ ] **Remaining parity deltas** — residual microfeature diffs: legend
+      box sizing/spacing vs mpl in dense cases, colorbar `fraction`/
+      `aspect` semantics (mpl `aspect=20` drives strip width; `fraction`
+      drives axes shrink — `ColorbarStyle` only has pixel `width`),
+      minor tick-label suppression on crowded axes, `labelpad`/
+      `tick pad` fine tuning, bezier-accurate `simple`/`fancy`/`wedge`
+      arrow bodies (currently straight-edged polygon approximations).
+- [ ] **Vector/raster parity pass** — sweep the vector (SVG/PDF) path
+      for fixes that landed raster-only: secondary axis labels, table
+      placement outside axes, legend shadow, faux-bold titles, colorbar
+      extend triangles, tick-label rotation anchoring.
+- [ ] **`draggable` legends/annotations** — pick+drag wiring (event
+      system + picking exist; see §8).
+- [ ] **Deterministic vector regression tests** — pixel tests cover the
+      raster path; add golden-geometry tests for `emitVector` output.
+
+### P1 — High-value features
+- [ ] **`set_clip_path` for artists** — arbitrary `Path` clipping
+      (infrastructure exists; needs API + scissor/path-clip render
+      plumbing; see §14).
+- [ ] **`boxstyle` variants** — `FancyBboxPatch` `roundtooth`/`sawtooth`
+      + `pad`/`rounding_size` (only a padded rounded rect exists; §14).
+- [ ] **MathText coverage** — expand the subset: `\sum`/`\int` large
+      operators, `\left(\right` auto-sized delimiters, nested scripts
+      (fractions/radicals/accents already done; §5).
+- [ ] **`contour`/`clabel` inline label gaps** — labels exist; the
+      contour line isn't broken under them.
+- [ ] **`pcolormesh shading="gouraud"`** and `imshow interpolation=`
+      variants (`"bilinear"`, `"bicubic"`, `"antialiased"` — `"nearest"`
+      done) in the heatmap shader.
+- [ ] **Log-scale data clipping** — non-positive points in log mode
+      should be dropped at data-conversion time (currently clamps).
+
+### P2 — Performance & GPU leverage
+- [ ] **GPU-side marker/path tessellation** — marker quads currently
+      use SDF; large `PathCollection`s should triangulate on GPU or use
+      instanced glyph atlases.
+- [ ] **MSDF text atlas** — replace the grayscale bitmap atlas with
+      multi-channel SDF for crisp text at any DPI (glyb has an MSDF
+      renderer stub already).
+- [ ] **Multi-frame animation GPU encode** — APNG/GIF encoders are CPU;
+      wire the compute-shader encoder into the animation path.
+- [ ] **Partial redraw / damage tracking** — screen backend re-renders
+      everything; cache the framebuffer and blit overlays.
+- [ ] **GPU `pcolormesh`/`contour`** — move CPU tessellation to compute
+      for million-cell meshes.
+
+### P3 — Broader matplotlib surface
+- [ ] **`AxesImage` transforms** — `imshow` `extent` + `transform=`
+      non-affine support (polar projection of images).
+- [ ] **`mpl_toolkits.axes_grid1` extras** — `AnchoredSizeBar`,
+      `anchored_artists`, zoom-effect inset (`inset_axes`/
+      `make_axes_locatable` done).
+- [ ] **3D polish** — `plot_surface` colormap shading (light source),
+      `view_init` interactive rotation on screen backend, 3D tick
+      labels on pane edges, `scatter` size/depth cueing.
+- [ ] **`quiver`/`streamplot` params** — quiver `scale`, `width`,
+      `headwidth`; streamplot `arrowsize`/`broken_streamlines`.
+
+### P4 — Ecosystem & ergonomics
+- [ ] **pybind11 bindings (`volcanoplot` Python module)** — the single
+      biggest adoption driver; keep the API mirroring `matplotlib.pyplot`.
+- [ ] **`xarray`/`pandas` plotting hooks** — `__array__` + `plot`
+      dispatch, index/date handling via existing unit converters.
+- [ ] **Nix/Homebrew packaging + CI matrix** — prebuilt binaries,
+      Vulkan ICD (lavapipe) in CI for headless tests.
+- [ ] **Documentation site** — API reference (Doxygen/mkdocs), gallery
+      browser from `gallery_micro`, migration guide from matplotlib.
+- [ ] **Serialization round-trip** — save/load a `Figure` to JSON for
+      reproducible test fixtures and headless replays.
+- [ ] **Accessibility** — colorblind-safe default cycle option,
+      alt-text metadata in vector output.
