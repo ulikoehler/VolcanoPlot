@@ -45,3 +45,17 @@ shaders/**/*.spv
 # OS
 .DS_Store
 Thumbs.db
+
+# In-source CMake configure artifacts (configure was run at repo root)
+Makefile
+_deps/
+*.a
+/tests/volcano_tests
+/tests/cmake_test_discovery_*.json
+/tests/*_include.cmake
+/tests/*_tests.cmake
+/examples/example_*
+/src/cli/volcano_headless
+/src/cli/volcano_screen
+Testing/
+DartConfiguration.tcl
