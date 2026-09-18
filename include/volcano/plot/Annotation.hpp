@@ -10,8 +10,11 @@
 //   ax.annotate(3.0, 4.0, 5.0, 7.0, "maximum", CoordSystem::Data);
 #pragma once
 
+#include "volcano/plot/Path.hpp"
 #include "volcano/plot/Types.hpp"
 
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,56 @@ struct ConnectionStyle {
 /// "arc3,rad=-0.2", "angle,angleA=0,angleB=90,rad=10", "bar,fraction=0.3".
 /// Unrecognized strings fall back to Arc3 with rad=0 (straight line).
 ConnectionStyle parseConnectionStyle(std::string_view s);
+
+/// matplotlib `arrowstyle` specification (FancyArrowPatch). Two kinds:
+///   - end-marked curves: "-", "<-", "->", "<->", "-[", "<-[", "]-[",
+///     "-|>", "<|-", "<|-|>", "|-|" — stroke/fill marks at the path ends
+///   - named full-body arrows: "simple", "fancy", "wedge" — a single
+///     filled polygon swept along the connection path
+/// Head/body dimensions are in units of `mutationSize`, matching
+/// matplotlib's mutation_scale scaling: mutationSize is in *points*
+/// (mpl default = annotation fontsize = 10pt) and is converted to
+/// pixels by × dpi/72 before geometry generation.
+struct ArrowStyleSpec {
+    /// Mark at a path end. A=path start (text end), B=path end (data end).
+    enum class End { None, Open, Filled, Bracket, Bar };
+    /// Named full-body arrow style (overrides ends when set).
+    enum class Body { None, Simple, Fancy, Wedge };
+
+    End headA = End::None;
+    End headB = End::None;
+    Body body = Body::None;
+
+    float headLength = 0.4f;   ///< × mutationSize
+    float headWidth = 0.2f;    ///< × mutationSize
+    float tailWidth = 0.2f;    ///< × mutationSize (named bodies)
+    float widthA = 1.0f;       ///< bracket/bar width at A × mutationSize
+    float widthB = 1.0f;       ///< bracket/bar width at B × mutationSize
+    float lengthA = 0.2f;      ///< shaft shrink at A × mutationSize
+    float lengthB = 0.2f;      ///< shaft shrink at B × mutationSize
+    float shrinkFactor = 0.5f; ///< wedge: position of max width
+    float mutationSize = 10.0f;///< points (mpl mutation_scale = fontsize)
+};
+
+/// Parse a matplotlib arrowstyle string, e.g. "->", "-|>",
+/// "<|-|>, head_length=0.6", "wedge, tail_width=0.5".
+/// Unknown names fall back to "->" (mpl default is "simple", but "->"
+/// matches the existing VolcanoPlot annotation default).
+ArrowStyleSpec parseArrowStyle(std::string_view s);
+
+/// Geometry produced by transmuting an arrowstyle onto a sampled
+/// connection path (pixel space). Strokes are drawn as line strips,
+/// fills as triangle-soup polygons (via earClip).
+struct ArrowGeometry {
+    std::vector<std::vector<Point2D>> strokes;
+    std::vector<std::vector<Point2D>> fills;
+};
+
+/// Transmute `spec` onto the sampled connection `path` (pixel space,
+/// at least 2 points). `lineWidth` feeds bracket/bar thickness.
+ArrowGeometry buildArrowGeometry(std::span<const Point2D> path,
+                                 const ArrowStyleSpec& spec,
+                                 float lineWidth = 1.0f);
 
 /// Sample the connection path between A (text end) and B (data end),
 /// in pixel space. Returns a polyline including both endpoints.
@@ -120,6 +173,10 @@ struct Annotation {
 
     /// Arrow style (None = no arrow, just text).
     ArrowStyle arrowStyle = ArrowStyle::Simple;
+    /// Optional mpl arrowstyle spec (e.g. `parseArrowStyle("-|>")`).
+    /// When set, takes precedence over `arrowStyle`/`arrowHeadSize`/
+    /// `arrowHeadAngle`.
+    std::optional<ArrowStyleSpec> arrowSpec;
     /// Arrow color.
     Color arrowColor = Color::black();
     /// Arrow line width in pixels.

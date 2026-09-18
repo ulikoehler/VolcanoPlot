@@ -408,3 +408,238 @@ TEST(AnnotationRegression, TextColorIsRespected) {
     }
     EXPECT_GT(redCount, 5u) << "Text color should be respected";
 }
+
+// ═══ arrowstyle: parser (micro) ═══════════════════════════════════════════
+
+TEST(ArrowStyleParse, SimpleNames) {
+    using E = ArrowStyleSpec::End;
+    EXPECT_EQ(parseArrowStyle("-").headA, E::None);
+    EXPECT_EQ(parseArrowStyle("-").headB, E::None);
+    EXPECT_EQ(parseArrowStyle("->").headB, E::Open);
+    EXPECT_EQ(parseArrowStyle("<-").headA, E::Open);
+    EXPECT_EQ(parseArrowStyle("<->").headA, E::Open);
+    EXPECT_EQ(parseArrowStyle("<->").headB, E::Open);
+    EXPECT_EQ(parseArrowStyle("-|>").headB, E::Filled);
+    EXPECT_EQ(parseArrowStyle("<|-").headA, E::Filled);
+    EXPECT_EQ(parseArrowStyle("<|-|>").headA, E::Filled);
+    EXPECT_EQ(parseArrowStyle("<|-|>").headB, E::Filled);
+    EXPECT_EQ(parseArrowStyle("-[").headB, E::Bracket);
+    EXPECT_EQ(parseArrowStyle("]-[").headA, E::Bracket);
+    EXPECT_EQ(parseArrowStyle("]-[").headB, E::Bracket);
+    EXPECT_EQ(parseArrowStyle("|-|").headA, E::Bar);
+    EXPECT_EQ(parseArrowStyle("|-|").headB, E::Bar);
+}
+
+TEST(ArrowStyleParse, NamedBodies) {
+    using B = ArrowStyleSpec::Body;
+    auto s = parseArrowStyle("simple");
+    EXPECT_EQ(s.body, B::Simple);
+    EXPECT_FLOAT_EQ(s.headLength, 0.5f);
+    EXPECT_FLOAT_EQ(s.headWidth, 0.5f);
+    EXPECT_FLOAT_EQ(s.tailWidth, 0.2f);
+    auto f = parseArrowStyle("fancy");
+    EXPECT_EQ(f.body, B::Fancy);
+    EXPECT_FLOAT_EQ(f.tailWidth, 0.4f);
+    auto w = parseArrowStyle("wedge");
+    EXPECT_EQ(w.body, B::Wedge);
+    EXPECT_FLOAT_EQ(w.tailWidth, 0.3f);
+}
+
+TEST(ArrowStyleParse, ParamOverrides) {
+    auto s = parseArrowStyle("-|>, head_length=0.8, head_width=0.6");
+    EXPECT_FLOAT_EQ(s.headLength, 0.8f);
+    EXPECT_FLOAT_EQ(s.headWidth, 0.6f);
+    auto w = parseArrowStyle("wedge, tail_width=0.9, shrink_factor=0.25");
+    EXPECT_FLOAT_EQ(w.tailWidth, 0.9f);
+    EXPECT_FLOAT_EQ(w.shrinkFactor, 0.25f);
+}
+
+TEST(ArrowStyleParse, UnknownFallsBackToArrow) {
+    auto s = parseArrowStyle("bogus");
+    EXPECT_EQ(s.headB, ArrowStyleSpec::End::Open);
+}
+
+// ═══ arrowstyle: geometry (micro) ═════════════════════════════════════════
+
+namespace {
+
+std::vector<Point2D> straightPath() {
+    return {{0.0f, 0.0f}, {50.0f, 0.0f}, {100.0f, 0.0f}};
+}
+
+} // namespace
+
+TEST(ArrowGeom, FilledHeadTriangle) {
+    // "-|>" with ms=10: hl=4, hw(half-width)=2 → tip (100,0), base (96,±2).
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("-|>"), 1.0f);
+    ASSERT_EQ(g.fills.size(), 1u);
+    ASSERT_EQ(g.fills[0].size(), 3u);
+    // apex overshoots the tip by pad = 0.5·lw/sin(θ) ≈ 1.118 (mpl)
+    EXPECT_NEAR(g.fills[0][0].x, 101.118f, 1e-2f); // apex
+    EXPECT_NEAR(g.fills[0][1].x, 96.0f, 1e-4f);    // base corners
+    EXPECT_NEAR(std::abs(g.fills[0][1].y), 2.0f, 1e-4f);
+    EXPECT_NEAR(g.fills[0][2].y, -g.fills[0][1].y, 1e-4f);
+}
+
+TEST(ArrowGeom, OpenHeadIsTwoStrokes) {
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("->"), 1.0f);
+    // shaft + 2 head strokes
+    EXPECT_EQ(g.strokes.size(), 3u);
+    EXPECT_TRUE(g.fills.empty());
+    // Both head strokes end at the overshot apex (~101.118).
+    for (size_t i = 1; i < g.strokes.size(); ++i) {
+        EXPECT_NEAR(g.strokes[i].back().x, 101.118f, 1e-2f);
+    }
+}
+
+TEST(ArrowGeom, DoubleHeadedHasTwoFills) {
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("<|-|>"), 1.0f);
+    EXPECT_EQ(g.fills.size(), 2u);
+    // One head at x≈0 (A end), one at x≈100 (B end).
+    float minX = 1e9f, maxX = -1e9f;
+    for (auto& f : g.fills) {
+        minX = std::min(minX, f[0].x);
+        maxX = std::max(maxX, f[0].x);
+    }
+    EXPECT_NEAR(minX, -1.118f, 1e-2f);
+    EXPECT_NEAR(maxX, 101.118f, 1e-2f);
+}
+
+TEST(ArrowGeom, BracketIsStrokeAcrossTip) {
+    // mpl _get_bracket: a stroked "[" — crossbar ±widthB·ms at the tip
+    // plus stubs lengthB·ms back along the path.
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("-["), 1.0f);
+    EXPECT_TRUE(g.fills.empty());
+    ASSERT_EQ(g.strokes.size(), 2u);  // shaft + bracket
+    const auto& br = g.strokes[1];
+    ASSERT_EQ(br.size(), 4u);
+    // Crossbar ends at ±widthB·ms = ±10, stubs lengthB·ms = 2 back.
+    EXPECT_NEAR(br[1].y, 10.0f, 1e-4f);
+    EXPECT_NEAR(br[2].y, -10.0f, 1e-4f);
+    EXPECT_NEAR(br[0].x, 100.0f - 2.0f, 1e-4f);
+    EXPECT_NEAR(br[3].x, 100.0f - 2.0f, 1e-4f);
+    EXPECT_NEAR(br[1].x, 100.0f, 1e-4f);
+}
+
+TEST(ArrowGeom, SimpleBodyIsSinglePolygon) {
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("simple"), 1.0f);
+    ASSERT_EQ(g.fills.size(), 1u);
+    EXPECT_EQ(g.fills[0].size(), 5u);
+    EXPECT_TRUE(g.strokes.empty());
+    // Tip vertex is the path end.
+    EXPECT_NEAR(g.fills[0][2].x, 100.0f, 1e-4f);
+}
+
+TEST(ArrowGeom, WedgeIsTaperedPolygon) {
+    // mpl Wedge: half-width tail_width·ms/2 at A, ×shrink_factor mid, 0 at B.
+    auto g = buildArrowGeometry(straightPath(),
+                                parseArrowStyle("wedge"), 1.0f);
+    ASSERT_EQ(g.fills.size(), 1u);
+    ASSERT_EQ(g.fills[0].size(), 5u);
+    EXPECT_NEAR(g.fills[0][2].x, 100.0f, 1e-4f);        // apex at B
+    EXPECT_NEAR(std::abs(g.fills[0][0].y), 1.5f, 1e-4f); // tw·ms/2 = 1.5
+    EXPECT_NEAR(std::abs(g.fills[0][1].y), 0.75f, 1e-4f);// ×shrink 0.5
+    EXPECT_NEAR(g.fills[0][1].x, 50.0f, 1e-4f);        // mid vertex
+}
+
+TEST(ArrowGeom, MutationScaleScalesHead) {
+    auto spec = parseArrowStyle("-|>");
+    spec.mutationSize = 20.0f;  // hl = 0.4*20 = 8, +pad ≈ 1.118
+    auto g = buildArrowGeometry(straightPath(), spec, 1.0f);
+    ASSERT_EQ(g.fills.size(), 1u);
+    EXPECT_NEAR(g.fills[0][0].x - g.fills[0][1].x, 9.118f, 1e-2f);
+}
+
+TEST(ArrowGeom, NoEndsDrawsOnlyShaft) {
+    auto g = buildArrowGeometry(straightPath(), parseArrowStyle("-"), 1.0f);
+    EXPECT_EQ(g.strokes.size(), 1u);
+    EXPECT_TRUE(g.fills.empty());
+}
+
+// ═══ arrowstyle: rendering (macro) ════════════════════════════════════════
+
+TEST(ArrowSpecRegression, FilledHeadRenders) {
+    // "-|>" should produce a filled triangle at the annotate target.
+    AnnFigure cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.5f, 0.5f, 0.8f, 0.8f, "");
+    a->arrowSpec = parseArrowStyle("-|>");
+    a->arrowSpec->mutationSize = 24.0f;
+    a->arrowWidth = 2.0f;
+    a->arrowColor = Color::black();
+    a->shrinkA = 0.0f; a->shrinkB = 0.0f;
+    auto img = cf.render();
+    // Filled head near the target pixel (128, 128): expect dark pixels
+    // in a small neighborhood (the open '->' head is only 2 thin lines;
+    // a filled triangle covers more area).
+    size_t near = 0;
+    for (uint32_t y = 116; y <= 140; ++y)
+        for (uint32_t x = 116; x <= 140; ++x)
+            if (isBlackish(img.get(x, y))) ++near;
+    EXPECT_GT(near, 30u) << "Filled arrow head should cover pixels near tip";
+}
+
+TEST(ArrowSpecRegression, DoubleHeadedRendersBothEnds) {
+    AnnFigure cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.5f, 0.5f, 0.8f, 0.8f, "");
+    a->arrowSpec = parseArrowStyle("<|-|>");
+    a->arrowSpec->mutationSize = 20.0f;
+    a->arrowWidth = 2.0f;
+    a->shrinkA = 0.0f; a->shrinkB = 0.0f;
+    auto img = cf.render();
+    // A-end head near text position (0.8,0.8) → pixel (205,51).
+    size_t nearA = 0;
+    for (uint32_t y = 45; y <= 60; ++y)
+        for (uint32_t x = 195; x <= 215; ++x)
+            if (isBlackish(img.get(x, y))) ++nearA;
+    EXPECT_GT(nearA, 5u) << "Head should also render at the A end";
+}
+
+TEST(ArrowSpecRegression, BracketEndRenders) {
+    AnnFigure cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.5f, 0.5f, 0.8f, 0.8f, "");
+    a->arrowSpec = parseArrowStyle("-[");
+    a->arrowSpec->mutationSize = 20.0f;
+    a->arrowWidth = 2.0f;
+    a->shrinkA = 0.0f; a->shrinkB = 0.0f;
+    auto img = cf.render();
+    // Bracket bar at the tip (128,128) → a cluster of dark pixels.
+    size_t near = 0;
+    for (uint32_t y = 122; y <= 134; ++y)
+        for (uint32_t x = 122; x <= 134; ++x)
+            if (isBlackish(img.get(x, y))) ++near;
+    EXPECT_GT(near, 10u) << "Bracket should render a bar at the tip";
+}
+
+TEST(ArrowSpecRegression, WedgeBodyRenders) {
+    AnnFigure cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.5f, 0.5f, 0.8f, 0.8f, "");
+    a->arrowSpec = parseArrowStyle("wedge");
+    a->arrowSpec->mutationSize = 30.0f;
+    a->shrinkA = 0.0f; a->shrinkB = 0.0f;
+    auto img = cf.render();
+    // The wedge fills a triangular region between text and target —
+    // dark pixels should appear OFF the shaft line too.
+    size_t total = countPixels(img, isBlackish);
+    EXPECT_GT(total, 200u) << "Wedge should fill a visible triangular area";
+}
+
+TEST(ArrowSpecRegression, SpecNoneStillWorks) {
+    // arrowSpec unset → existing enum path unchanged.
+    AnnFigure cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.5f, 0.5f, 0.8f, 0.8f, "");
+    a->arrowStyle = ArrowStyle::Simple;
+    a->arrowWidth = 2.0f;
+    a->shrinkA = 0.0f; a->shrinkB = 0.0f;
+    auto img = cf.render();
+    EXPECT_GT(countPixels(img, isBlackish), 10u);
+}

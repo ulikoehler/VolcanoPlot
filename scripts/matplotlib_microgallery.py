@@ -848,6 +848,37 @@ def f115_table_bottom(fig, out):
              loc="bottom")
 
 
+
+
+def f116_arrowstyle_filled(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    ax.annotate("-|>", xy=(2, 2), xytext=(4, 5),
+                arrowprops=dict(arrowstyle="-|>"))
+    ax.annotate("-[", xy=(7, 3), xytext=(5, 7),
+                arrowprops=dict(arrowstyle="-["))
+    ax.annotate("|-|", xy=(2, 8), xytext=(5, 6),
+                arrowprops=dict(arrowstyle="|-|"))
+
+
+def f117_arrowstyle_double(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    ax.annotate("<|-|>", xy=(3, 3), xytext=(7, 3),
+                arrowprops=dict(arrowstyle="<|-|>"))
+    ax.annotate("<->", xy=(3, 7), xytext=(7, 7),
+                arrowprops=dict(arrowstyle="<->"))
+
+
+def f118_arrowstyle_fancy(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    ax.annotate("fancy", xy=(3, 3), xytext=(6, 5),
+                arrowprops=dict(arrowstyle="fancy"))
+    ax.annotate("wedge", xy=(7, 8), xytext=(4, 6),
+                arrowprops=dict(arrowstyle="wedge"))
+
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # Feature name → generator. Names/numbers match microgallery.cpp exactly.

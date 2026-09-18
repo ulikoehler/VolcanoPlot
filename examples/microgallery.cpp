@@ -945,6 +945,35 @@ void f105_unicode_text(Figure& fig) {
     ax->text(5, 5, "Größe α ≈ π");
 }
 
+void f116_arrowstyle_filled(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    auto* a1 = ax->annotate(2, 2, 4, 5, "-|>");
+    a1->arrowSpec = parseArrowStyle("-|>");
+    auto* a2 = ax->annotate(7, 3, 5, 7, "-[");
+    a2->arrowSpec = parseArrowStyle("-[");
+    auto* a3 = ax->annotate(2, 8, 5, 6, "|-|");
+    a3->arrowSpec = parseArrowStyle("|-|");
+}
+
+void f117_arrowstyle_double(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    auto* a1 = ax->annotate(3, 3, 7, 3, "<|-|>");
+    a1->arrowSpec = parseArrowStyle("<|-|>");
+    auto* a2 = ax->annotate(3, 7, 7, 7, "<->");
+    a2->arrowSpec = parseArrowStyle("<->");
+}
+
+void f118_arrowstyle_fancy(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    auto* a1 = ax->annotate(3, 3, 6, 5, "fancy");
+    a1->arrowSpec = parseArrowStyle("fancy");
+    auto* a2 = ax->annotate(7, 8, 4, 6, "wedge");
+    a2->arrowSpec = parseArrowStyle("wedge");
+}
+
 // ═══ Tier 11 — multi-axes layout ════════════════════════════════════════
 
 void f106_subplots_2x2(Figure& fig) {
@@ -1183,6 +1212,9 @@ const Feature kFeatures[] = {
     {"113_step_post",          f113_step_post},
     {"114_eventplot_rows",     f114_eventplot_rows},
     {"115_table_bottom",       f115_table_bottom},
+    {"116_arrowstyle_filled",  f116_arrowstyle_filled},
+    {"117_arrowstyle_double",  f117_arrowstyle_double},
+    {"118_arrowstyle_fancy",   f118_arrowstyle_fancy},
 };
 
 } // namespace

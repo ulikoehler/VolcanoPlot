@@ -219,10 +219,18 @@ interpreting any data-carrying tier.
 | 114 | `eventplot_rows` | multi-row event markers |
 | 115 | `table_bottom` | cell table below axes |
 
+## Tier 13 — Arrow styles (116–118)
+
+| # | Name | Checks |
+|---|------|--------|
+| 116 | `arrowstyle_filled` | `-|>` filled head, `-[`/`|-|` bracket ends |
+| 117 | `arrowstyle_double` | `<|-|>` filled heads both ends, `<->` open |
+| 118 | `arrowstyle_fancy` | `fancy`/`wedge` filled body arrows |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.sh`
 2. Scan `comparison/` top-down (filename order = check order).
 3. At the **first** mismatch: fix that feature, regenerate with
    `--filter <name>`, then rescan — higher-tier failures often evaporate.
-4. Only compare complex gallery plots once all 115 pass inspection.
+4. Only compare complex gallery plots once all 118 pass inspection.

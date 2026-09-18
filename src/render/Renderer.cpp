@@ -1147,7 +1147,26 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
             // Sample the connection path (arc3/angle/arc/bar).
             auto path = plot::connectionPath(textPos, dataPos, a.connection,
                                              a.shrinkA, a.shrinkB);
-            if (path.size() >= 2) {
+            if (path.size() >= 2 && a.arrowSpec) {
+                // mpl arrowstyle spec → strokes + filled marks.
+                // mutationSize is in points; mpl scales by dpi/72.
+                auto spec = *a.arrowSpec;
+                spec.mutationSize *= dpi / 72.0f;
+                auto geo = plot::buildArrowGeometry(path, spec,
+                                                    a.arrowWidth);
+                vk::Extent2D res{backend_.extent().width,
+                                 backend_.extent().height};
+                for (auto& s : geo.strokes)
+                    spineRenderer_.drawLineStrip(cmd, clipRect,
+                        backend_.extent(), std::span{s},
+                        a.arrowColor, a.arrowWidth);
+                for (auto& f : geo.fills) {
+                    auto tris = plot::earClip(f);
+                    if (!tris.empty())
+                        spineRenderer_.drawTriangles(cmd, clipRect, res,
+                            std::span{tris}, a.arrowColor);
+                }
+            } else if (path.size() >= 2) {
                 spineRenderer_.drawLineStrip(cmd, clipRect, backend_.extent(),
                     std::span{path}, a.arrowColor, a.arrowWidth);
 

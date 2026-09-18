@@ -484,7 +484,16 @@ void VectorRenderer::emitAnnotations(const plot::Axes& axes, Rect2D rect,
                 auto path = plot::connectionPath(textPos, dataPos,
                                                  a.connection,
                                                  a.shrinkA, a.shrinkB);
-                if (path.size() >= 2) {
+                if (path.size() >= 2 && a.arrowSpec) {
+                    auto spec = *a.arrowSpec;
+                    spec.mutationSize *= dpi / 72.0f;
+                    auto geo = plot::buildArrowGeometry(
+                        path, spec, a.arrowWidth);
+                    Pen p = penOf(a.arrowColor, a.arrowWidth);
+                    for (auto& s : geo.strokes) c.polyline(s, p);
+                    for (auto& f : geo.fills)
+                        c.polygon(f, a.arrowColor);
+                } else if (path.size() >= 2) {
                     Pen p = penOf(a.arrowColor, a.arrowWidth);
                     c.polyline(path, p);
                     size_t n = path.size();
