@@ -33,15 +33,17 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                       ? float(rect.height) * heightFrac / float(rows)
                       : std::min(float(rect.height) / float(rows), 28.0f);
     float tableH = cellH * float(rows);
-    // Y-down pixels: "bottom" → table at bottom of axes rect.
-    float y0 = (loc == "top") ? float(rect.y)
-                              : float(rect.y) + float(rect.height) - tableH;
+    // mpl loc='bottom' attaches the table's top edge to the bottom spine,
+    // extending below the axes; 'top' extends above. Y-down pixels.
+    float y0 = (loc == "top") ? float(rect.y) - tableH
+                              : float(rect.y) + float(rect.height);
     float x0 = float(rect.x);
 
     auto& spine = r.spineRenderer();
     auto& text = r.textRenderer();
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    // The table may extend outside the axes rect — clip to the canvas.
+    auto ext = r.backend().extent();
+    vk::Rect2D clip{vk::Offset2D{0, 0}, ext};
 
     auto cellRect = [&](size_t row, size_t col) {
         return plot::Rect2D{int32_t(x0 + float(col) * cellW),
@@ -52,9 +54,10 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     auto drawCell = [&](size_t row, size_t col, const std::string& str,
                         Color bg) {
         auto cr = cellRect(row, col);
-        if (bg.a > 0) spine.drawFilledRect(cmd, clip, cr, bg);
+        if (bg.a > 0)
+            spine.drawFilledRect(cmd, clip, r.backend().extent(), cr, bg);
         // Cell border.
-        spine.drawRect(cmd, clip, cr, edgeColor, 1.0f);
+        spine.drawRect(cmd, clip, r.backend().extent(), cr, edgeColor, 1.0f);
         // Centered text.
         auto m = text.measureText(str, cellFontScale);
         float tx = float(cr.x) + (cellW - m.width) * 0.5f;

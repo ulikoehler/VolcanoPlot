@@ -96,25 +96,37 @@ TEST(Treemap, AddsPatchesAndLabels) {
 
 TEST(TablePlot, RendersCellsAndText) {
     Fx fx;
+    // mpl loc='bottom' hangs the table off the bottom spine — give the
+    // figure a bottom margin so the cells land on canvas.
+    fx.fig.subplotsAdjust(0, 0.45f, 1, 1, 0, 0);
     auto& tbl = fx.ax->table({{"1", "2"}, {"3", "4"}});
     tbl.cellColors = {{Color::red(), Color::red()},
                       {Color::red(), Color::red()}};
     tbl.edgeColor = Color::blue();
     auto img = fx.render();
-    // Table sits along the bottom edge — red cells + blue borders.
+    // Red cells + blue borders below the axes bottom edge.
+    uint32_t y0 = uint32_t(fx.ax->rect.y) + fx.ax->rect.height;
     EXPECT_PIXEL_COUNT(img, Red, 1000, 40);
     EXPECT_PIXEL_COUNT(img, Blue, 50, 40);
+    EXPECT_GT(img.countIf([y0](uint32_t, uint32_t y, auto p) {
+                  return y >= y0 && y < y0 + 20 &&
+                         p.r > 200 && p.g < 60 && p.b < 60;
+              }),
+              200u);
 }
 
 TEST(TablePlot, TopLoc) {
     Fx fx;
+    // loc='top' hangs the table off the top spine — leave a top margin.
+    fx.fig.subplotsAdjust(0, 0, 1, 0.5f, 0, 0);
     auto& tbl = fx.ax->table({{"x"}}, "top");
     tbl.cellColors = {{Color::red()}};
     tbl.edgeColor.a = 0;
     tbl.textColor = Color{0, 0, 0, 0}; // hide glyph
     auto img = fx.render();
-    EXPECT_PIXEL_AT(img, 64, 4, Red, 60);          // near top
-    EXPECT_PIXEL_AT(img, 64, 100, White, 60);      // bottom untouched
+    // Axes top at ~(1-0.5)*128=64 → cell spans y≈36..64.
+    EXPECT_PIXEL_AT(img, 64, 50, Red, 60);         // near top
+    EXPECT_PIXEL_AT(img, 64, 120, White, 60);      // bottom untouched
 }
 
 // ═══ Sankey ═══════════════════════════════════════════════════════════════

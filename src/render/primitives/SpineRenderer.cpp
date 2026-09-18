@@ -170,7 +170,8 @@ void SpineRenderer::ensureScratch(size_t byteCount) {
     scratchOffset_ = 0;
 }
 
-void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D clip,
+                                  vk::Extent2D resolution,
                                   std::span<const plot::Point2D> points,
                                   plot::Color color, float width) {
     if (!inited_ || points.empty()) return;
@@ -190,17 +191,17 @@ void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
 
     struct PC { float w, h, lw; } pc{
-        float(scissor.extent.width), float(scissor.extent.height), width};
+        float(resolution.width), float(resolution.height), width};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
     vk::DeviceSize offsets[] = { scratchOffset_ };
     cmd.bindVertexBuffers(0, scratchVB_.handle(), offsets);
 
-    vk::Viewport viewport{0, 0, float(scissor.extent.width),
-                          float(scissor.extent.height), 0, 1};
+    vk::Viewport viewport{0, 0, float(resolution.width),
+                          float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, scissor);
+    cmd.setScissor(0, clip);
     cmd.setLineWidth(width);
 
     cmd.draw(static_cast<uint32_t>(points.size()), 1, 0, 0);
@@ -208,7 +209,8 @@ void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void SpineRenderer::drawRect(vk::CommandBuffer cmd, vk::Rect2D clip,
+                             vk::Extent2D resolution,
                              plot::Rect2D rect, plot::Color color,
                              float lineWidth) {
     if (!inited_) return;
@@ -220,10 +222,11 @@ void SpineRenderer::drawRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
         {float(rect.x), float(rect.y + rect.height)},
         {float(rect.x), float(rect.y)},
     };
-    drawLineStrip(cmd, scissor, pts, color, lineWidth);
+    drawLineStrip(cmd, clip, resolution, pts, color, lineWidth);
 }
 
-void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D clip,
+                                   vk::Extent2D resolution,
                                    plot::Rect2D rect, plot::Color color) {
     if (!inited_) return;
     // 6 vertices for two triangles forming a rectangle.
@@ -246,17 +249,17 @@ void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
     struct PC { float w, h, lw; } pc{
-        float(scissor.extent.width), float(scissor.extent.height), 1.0f};
+        float(resolution.width), float(resolution.height), 1.0f};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
     vk::DeviceSize offsets[] = { scratchOffset_ };
     cmd.bindVertexBuffers(0, scratchVB_.handle(), offsets);
 
-    vk::Viewport viewport{0, 0, float(scissor.extent.width),
-                          float(scissor.extent.height), 0, 1};
+    vk::Viewport viewport{0, 0, float(resolution.width),
+                          float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, scissor);
+    cmd.setScissor(0, clip);
 
     cmd.draw(6, 1, 0, 0);
 
@@ -302,7 +305,8 @@ void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D clip,
+                              vk::Extent2D resolution,
                               plot::Rect2D rect, std::span<const float> positions,
                               plot::Color color, float tickLength,
                               bool yAxis, float dataMin, float dataMax,
@@ -343,7 +347,7 @@ void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
 
     for (size_t i = 0; i < points.size(); i += 2) {
         std::span<const plot::Point2D> seg(&points[i], 2);
-        drawLineStrip(cmd, scissor, seg, color, tickWidth);
+        drawLineStrip(cmd, clip, resolution, seg, color, tickWidth);
     }
 }
 

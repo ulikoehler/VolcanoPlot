@@ -162,7 +162,9 @@ void VectorRenderer::emitGrid(const plot::Axes& axes, Rect2D rect,
                             float lo, float hi, bool vert) {
         if (!as.grid) return;
         const auto& tc = as.ticks;
-        auto majors = axisTicks(tc, scale, lo, hi);
+        float axisLen = vert ? float(rect.width) : float(rect.height);
+        auto majors = axisTicks(tc, scale, lo, hi, axisLen,
+                                style.fontSize, style.dpi, !vert);
         bool wantMajor = as.gridWhich != "minor";
         bool wantMinor = as.gridWhich != "major";
         auto emitSet = [&](std::span<const float> ticks, Color col,
@@ -266,7 +268,9 @@ void VectorRenderer::emitSpinesTicks(const plot::Axes& axes, Rect2D rect,
                 }
             }
         };
-        auto majors = axisTicks(tc, scale, lo, hi);
+        float axisLen = yAxis ? float(rect.height) : float(rect.width);
+        auto majors = axisTicks(tc, scale, lo, hi, axisLen,
+                                style.fontSize, style.dpi, yAxis);
         emitSet(majors, tc.majorSize, tc.majorWidth);
         auto minors = axisMinorTicks(tc, scale, lo, hi, majors);
         emitSet(minors, tc.minorSize, tc.minorWidth);
@@ -325,10 +329,14 @@ void VectorRenderer::emitLabels(const plot::Axes& axes, Rect2D rect,
     // X tick labels.
     if (style.xAxis.visible) {
         const auto& tc = style.xAxis.ticks;
-        auto xTicks = axisTicks(tc, axes.xscale(), vp.x.min, vp.x.max);
+        auto xTicks = axisTicks(tc, axes.xscale(), vp.x.min, vp.x.max,
+                                float(rect.width), style.fontSize,
+                                style.dpi, false);
         plot::ScalarFormatter defaultFmt;
         plot::FormatStrFormatter strFmt("");
-        auto* fmt = axisFormatter(tc, xTicks, style, defaultFmt, strFmt);
+        plot::LogFormatterMathtext logFmt;
+        auto* fmt = axisFormatter(tc, xTicks, style, axes.xscale(),
+                                  defaultFmt, strFmt, logFmt);
         bool top = axes.xTicksTop();
         float edge = top ? y0 : y1;
         float d = top ? -1.0f : 1.0f;
@@ -375,10 +383,14 @@ void VectorRenderer::emitLabels(const plot::Axes& axes, Rect2D rect,
     // Y tick labels.
     if (style.yAxis.visible) {
         const auto& tc = style.yAxis.ticks;
-        auto yTicks = axisTicks(tc, axes.yscale(), vp.y.min, vp.y.max);
+        auto yTicks = axisTicks(tc, axes.yscale(), vp.y.min, vp.y.max,
+                                float(rect.height), style.fontSize,
+                                style.dpi, true);
         plot::ScalarFormatter defaultFmt;
         plot::FormatStrFormatter strFmt("");
-        auto* fmt = axisFormatter(tc, yTicks, style, defaultFmt, strFmt);
+        plot::LogFormatterMathtext logFmt;
+        auto* fmt = axisFormatter(tc, yTicks, style, axes.yscale(),
+                                  defaultFmt, strFmt, logFmt);
         bool right = axes.yTicksRight();
         float edge = right ? x1 : x0;
         float d = right ? 1.0f : -1.0f;

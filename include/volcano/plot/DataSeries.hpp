@@ -83,6 +83,9 @@ struct Grid2D {
     /// Optional value range; if invalid (min > max), computed from data.
     Range valueRange{std::numeric_limits<float>::max(),
                      std::numeric_limits<float>::lowest()};
+    /// Grid row origin: "upper" places row 0 at the top of the axes
+    /// (matplotlib imshow default), "lower" places it at the bottom.
+    std::string origin = "upper";
 };
 
 /// A function to be evaluated on the GPU.

@@ -86,7 +86,8 @@ void NavCubePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         });
         for (int ei : order) {
             Point2D pts[] = { px[edges[ei][0]], px[edges[ei][1]] };
-            spine.drawLineStrip(cmd, fullRect, pts, cfg.dimColor, 1.0f);
+            spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+                                pts, cfg.dimColor, 1.0f);
         }
     }
 
@@ -119,7 +120,8 @@ void NavCubePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         const auto& ax = axes[ord[i]];
         Point2D tip = toPixel(ax.dir);
         Point2D pts[] = { origin, tip };
-        spine.drawLineStrip(cmd, fullRect, pts, ax.color, cfg.axisWidth);
+        spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+                            pts, ax.color, cfg.axisWidth);
 
         // Label at the tip, offset slightly outward.
         if (cfg.showLabels && ax.label) {

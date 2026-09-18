@@ -42,7 +42,8 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
         float ex = cx + radius * std::cos(angle);
         float ey = cy - radius * std::sin(angle);  // Y flipped
         plot::Point2D edgePts[2] = {{cx, cy}, {ex, ey}};
-        spine.drawLineStrip(cmd, fullRect, edgePts, Color::white(), 3.0f);
+        spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+                            edgePts, Color::white(), 3.0f);
         angle += sweep;
     }
 

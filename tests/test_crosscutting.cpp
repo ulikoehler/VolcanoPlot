@@ -60,7 +60,8 @@ TEST(ZOrder, HigherDrawsOnTop) {
     auto* b2 = static_cast<BarPlot*>(fx.ax->addPlot(std::make_unique<BarPlot>(bd2)));
     b2->zorder = 10.0f;
     auto img = fx.render();
-    EXPECT_PIXEL_AT(img, 64, 40, Red, 40);
+    // Bar 0 centered at index 0 → occupies x∈[0, 0.4] of the [0,1] viewport.
+    EXPECT_PIXEL_AT(img, 32, 40, Red, 40);
     EXPECT_PIXEL_COUNT(img, Blue, 0, 40);
 }
 
@@ -72,7 +73,7 @@ TEST(ZOrder, LowerDrawsUnder) {
     fx.ax->addPlot(std::make_unique<BarPlot>(bd2));
     b1->zorder = 10.0f;  // b1 (blue) drawn last despite earlier insertion
     auto img = fx.render();
-    EXPECT_PIXEL_AT(img, 64, 40, Blue, 40);
+    EXPECT_PIXEL_AT(img, 32, 40, Blue, 40);
 }
 
 TEST(ZOrder, RasterizedFlagStored) {
@@ -109,8 +110,10 @@ TEST(Picking, BarHit) {
     Fx fx;
     BarData bd; bd.heights = {0.5f};
     fx.ax->addPlot(std::make_unique<BarPlot>(bd));
-    EXPECT_EQ(fx.ax->pick({0.5f, 0.3f}).size(), 1u);
-    EXPECT_TRUE(fx.ax->pick({0.5f, 0.8f}).empty());
+    // Bar 0 is centered at index 0 → spans [-0.4, 0.4] (mpl semantics).
+    EXPECT_EQ(fx.ax->pick({0.2f, 0.3f}).size(), 1u);
+    EXPECT_TRUE(fx.ax->pick({0.5f, 0.3f}).empty());
+    EXPECT_TRUE(fx.ax->pick({0.2f, 0.8f}).empty());
 }
 
 TEST(Picking, PatchHit) {
@@ -186,20 +189,24 @@ TEST(ColorbarExtend, MinMaxTrianglesDraw) {
     ax2->style().colorbar.width = 16.0f;
     ax2->style().colorbar.labelColor = Color{0, 0, 0, 0};
     auto img = h2.render(fig2);
-    // Colored strip pixels right of x=128.
-    auto nonWhite = img.countIf([](uint32_t x, uint32_t, test::Pixel p) {
-        return x >= 132 && x < 150 &&
+    // The colorbar reserves space, shrinking the axes; the strip lands
+    // just right of the (now smaller) axes rect.
+    uint32_t stripX = ax2->rect.x + ax2->rect.width +
+                      uint32_t(ax2->style().colorbar.padding);
+    uint32_t stripC = stripX + 8;
+    auto nonWhite = img.countIf([stripX](uint32_t x, uint32_t, test::Pixel p) {
+        return x >= stripX + 4 && x < stripX + 22 &&
                (p.r < 240 || p.g < 240 || p.b < 240);
     });
     EXPECT_GT(nonWhite, 200u);
     // Extend triangles: colored pixels at the strip's center column above/
     // below the body (triangle apexes).
-    auto topTri = img.countIf([](uint32_t x, uint32_t y, test::Pixel p) {
-        return x >= 136 && x <= 144 && y <= 6 &&
+    auto topTri = img.countIf([stripC](uint32_t x, uint32_t y, test::Pixel p) {
+        return x >= stripC - 4 && x <= stripC + 4 && y <= 6 &&
                (p.r < 240 || p.g < 240 || p.b < 240);
     });
-    auto botTri = img.countIf([](uint32_t x, uint32_t y, test::Pixel p) {
-        return x >= 136 && x <= 144 && y >= 122 &&
+    auto botTri = img.countIf([stripC](uint32_t x, uint32_t y, test::Pixel p) {
+        return x >= stripC - 4 && x <= stripC + 4 && y >= 122 &&
                (p.r < 240 || p.g < 240 || p.b < 240);
     });
     EXPECT_GT(topTri, 2u);
@@ -218,8 +225,10 @@ TEST(ColorbarExtend, NormMapsColors) {
     ax2->style().colorbar.colormap = "viridis";
     ax2->style().colorbar.norm = std::make_shared<LogNorm>(1.0f, 100.0f);
     auto img = h2.render(fig2);
-    auto nonWhite = img.countIf([](uint32_t x, uint32_t, test::Pixel p) {
-        return x >= 132 && x < 150 &&
+    uint32_t stripX = ax2->rect.x + ax2->rect.width +
+                      uint32_t(ax2->style().colorbar.padding);
+    auto nonWhite = img.countIf([stripX](uint32_t x, uint32_t, test::Pixel p) {
+        return x >= stripX + 4 && x < stripX + 22 &&
                (p.r < 240 || p.g < 240 || p.b < 240);
     });
     EXPECT_GT(nonWhite, 100u);

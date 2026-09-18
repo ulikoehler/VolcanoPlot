@@ -43,7 +43,10 @@ void main() {
     vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     // UV into grid texture: flip Y for Vulkan texture origin.
-    v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+    // u_proj.w > 0.5 → origin='lower' (row 0 at the bottom).
+    v_uv = vec2(a_pos.x * 0.5 + 0.5,
+                pc.u_proj.w > 0.5 ? a_pos.y * 0.5 + 0.5
+                                  : 0.5 - a_pos.y * 0.5);
 }
 )";
 
@@ -166,6 +169,12 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
        .setAddressModeV(vk::SamplerAddressMode::eClampToEdge)
        .setAddressModeW(vk::SamplerAddressMode::eClampToEdge);
     sampler_ = device.createSamplerUnique(sci);
+
+    // Nearest sampler for the data grid (matplotlib imshow/pcolormesh
+    // draw discrete cells, not interpolated values).
+    sci.setMagFilter(vk::Filter::eNearest).setMinFilter(vk::Filter::eNearest)
+       .setMipmapMode(vk::SamplerMipmapMode::eNearest);
+    samplerNearest_ = device.createSamplerUnique(sci);
 
     // Allocate descriptor set
     descSet_ = descPool.allocate(descLayout_.get());
@@ -294,7 +303,7 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
 
     // Update descriptor set
     vk::DescriptorImageInfo gridInfo{};
-    gridInfo.setSampler(sampler_.get())
+    gridInfo.setSampler(samplerNearest_.get())
             .setImageView(gridView_.get())
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
     vk::DescriptorImageInfo cmapInfo{};
@@ -315,6 +324,7 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
     valueMax_ = grid.valueRange.max;
     gridXRange_ = grid.xRange;
     gridYRange_ = grid.yRange;
+    originLower_ = grid.origin == "lower";
 }
 
 void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
@@ -346,6 +356,7 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
     pc.thetaOff = transform.projection.thetaOffset;
     pc.thetaDir = transform.projection.thetaDir;
+    pc.prPad = originLower_ ? 1.0f : 0.0f;
     pc.valueMin = valueMin_;
     pc.valueMax = valueMax_;
 

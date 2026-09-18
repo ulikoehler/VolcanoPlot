@@ -23,9 +23,17 @@ std::string formatTick(float v, float step);
 float autoTickStep(float vmin, float vmax, int nbins);
 
 /// Major tick positions honoring TickConfig locator/positions overrides.
+/// When `axisLengthPx` > 0 the effective nbins is capped by how many
+/// labels fit along the axis (matplotlib AutoLocator's get_tick_space:
+/// axis length in points / (label point size × factor), factor 3 for
+/// x and 2 for y). `fontPt`/`dpi` convert pixels to points.
 std::vector<float> axisTicks(const plot::TickConfig& tc,
                              const plot::AxisScale& scale,
-                             float lo, float hi);
+                             float lo, float hi,
+                             float axisLengthPx = 0.0f,
+                             float fontPt = 10.0f,
+                             float dpi = 100.0f,
+                             bool yAxis = false);
 /// Whether minor tick marks are drawn for this axis.
 bool minorEnabled(const plot::TickConfig& tc, const plot::AxisScale& s);
 /// Minor tick positions: explicit minorLocator, log-family subs, or
@@ -34,13 +42,16 @@ std::vector<float> axisMinorTicks(const plot::TickConfig& tc,
                                   const plot::AxisScale& scale,
                                   float lo, float hi,
                                   std::span<const float> majors);
-/// Formatter for an axis: explicit formatter, legacy format string, or
-/// default ScalarFormatter (setLocs gives offset/scientific detection).
+/// Formatter for an axis: explicit formatter, legacy format string,
+/// log-scale sci-notation, or default ScalarFormatter (setLocs gives
+/// offset/scientific detection).
 plot::Formatter* axisFormatter(const plot::TickConfig& tc,
                                std::span<const float> ticks,
                                const plot::FigureStyle& style,
+                               const plot::AxisScale& scale,
                                plot::ScalarFormatter& defaultFmt,
-                               plot::FormatStrFormatter& strFmt);
+                               plot::FormatStrFormatter& strFmt,
+                               plot::LogFormatterMathtext& logFmt);
 /// Label for tick `t` at index `i`, honoring fixed labels first.
 std::string tickLabel(const plot::TickConfig& tc, const plot::Formatter& f,
                       float t, int i);

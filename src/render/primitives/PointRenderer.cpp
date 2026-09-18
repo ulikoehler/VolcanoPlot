@@ -85,22 +85,21 @@ float sdPoly(vec2 p, float r, int n, float rot) {
     return length(p) * sign(p.x);
 }
 
-// iq's n-star SDF (m controls dent depth).
-float sdStar(vec2 p, float r, int n, float m, float rot) {
+// iq's exact 5-point star SDF. rf = inner/outer radius ratio
+// (~0.382 = golden ratio for a classic star).
+float sdStar5(vec2 p, float r, float rf, float rot) {
     float c = cos(rot), s = sin(rot);
     p = mat2(c, s, -s, c) * p;
-    float an = PI / float(n);
-    float en = PI / m;
-    vec2 acs = vec2(cos(an), sin(an));
-    vec2 ecs = vec2(cos(en), sin(en));
-    float bn = mod(atan(p.x, p.y), 2.0 * an) - an;
-    p = length(p) * vec2(cos(bn), abs(sin(bn)));
-    p -= r * acs;
-    p.y += clamp(-p.y, 0.0, r * acs.y);
-    p = abs(p);
-    p -= ecs;
-    p += vec2(p.y, -p.x) * clamp(-p.x * ecs.y - p.y * ecs.x, 0.0, r);
-    return length(p) * sign(p.x);
+    vec2 k1 = vec2(0.809016994375, -0.587785252292);
+    vec2 k2 = vec2(-k1.x, k1.y);
+    p.x = abs(p.x);
+    p -= 2.0 * max(dot(k1, p), 0.0) * k1;
+    p -= 2.0 * max(dot(k2, p), 0.0) * k2;
+    p.x = abs(p.x);
+    p.y -= r;
+    vec2 ba = rf * vec2(-k1.y, k1.x) - vec2(0.0, 1.0);
+    float h = clamp(dot(p, ba) / dot(ba, ba), 0.0, r);
+    return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
 }
 
 float sdBox(vec2 p, vec2 b) {
@@ -139,8 +138,8 @@ float markerDist(vec2 c, int code, int nside, float rot) {
     case 0:  return length(c) - 0.30;                    // '.' point
     case 1:  return length(c) - 1.00;                    // 'o' circle
     case 2:  return sdBox(c, vec2(0.75));                // 's' square
-    case 3:  return sdPoly(c, 0.9, 4, PI / 4.0);         // 'D' diamond
-    case 4:  return sdPoly(vec2(c.x, c.y * 0.6), 0.9, 4, PI / 4.0); // 'd'
+    case 3:  return sdPoly(c, 0.9, 4, 0.0);              // 'D' diamond
+    case 4:  return sdPoly(vec2(c.x, c.y * 0.6), 0.9, 4, 0.0); // 'd'
     case 5:  return sdPoly(c, 0.95, 3, PI);              // '^'
     case 6:  return sdPoly(c, 0.95, 3, 0.0);             // 'v'
     case 7:  return sdPoly(c, 0.95, 3, PI / 2.0);        // '<'
@@ -155,7 +154,7 @@ float markerDist(vec2 c, int code, int nside, float rot) {
                         sdSeg(c, vec2(-0.5, 0.5), vec2(0.5, -0.5))) - 0.08; // 'x'
     case 15: return sdCross(c, 0.0);                     // 'P'
     case 16: return sdCross(c, PI / 4.0);                // 'X'
-    case 17: return sdStar(c, 0.95, 5, 3.0, PI);         // '*'
+    case 17: return sdStar5(c, 0.95, 0.382, PI);         // '*'
     case 18: return sdPoly(c, 0.9, 5, PI);               // 'p'
     case 19: return sdPoly(c, 0.9, 6, 0.0);              // 'h'
     case 20: return sdPoly(c, 0.9, 6, PI / 6.0);         // 'H'
@@ -179,8 +178,12 @@ float markerDist(vec2 c, int code, int nside, float rot) {
     case 35: return min(sdCaret(c, PI),
                         sdSeg(c, vec2(0.0, -0.8), vec2(0.0, -0.3))) - 0.08;
     case 36: return sdPoly(c, 0.9, max(nside, 3), rot);       // (n,0)
-    case 37: return sdStar(c, 0.95, max(nside, 3),
-                           float(max(nside, 3)) * 0.5 + 0.5, rot);    // (n,1)
+    case 37: {  // (n,1) star-like polygon
+        if (nside <= 5) return sdStar5(c, 0.95, 0.382, rot + PI);
+        // n>5: approximate with a regular 2n-gon (SDF n-star is
+        // unreliable for large n).
+        return sdPoly(c, 0.95, max(nside, 3), rot + PI);
+    }
     case 38: return sdSpokes(c, max(nside, 3), 0.85, rot, 0.0) - 0.06; // (n,2)
     case 39: return length(c) - 0.85;                    // (n,3) ≈ circle
     default: return 1.0;                                 // none / unknown

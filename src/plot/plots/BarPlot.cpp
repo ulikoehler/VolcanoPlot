@@ -27,10 +27,10 @@ void BarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         float h = data_.heights[i];
         Point2D a, b;
         if (data_.horizontal) {
-            float y0 = float(i) + (1.0f - data_.width) * 0.5f;
+            float y0 = float(i) - data_.width * 0.5f;
             a = toPx({0.0f, y0 + bw}); b = toPx({h, y0});
         } else {
-            float x0 = float(i) + (1.0f - data_.width) * 0.5f;
+            float x0 = float(i) - data_.width * 0.5f;
             a = toPx({x0, 0.0f}); b = toPx({x0 + bw, h});
         }
         Color col = i < data_.colors.size() ? data_.colors[i]
@@ -40,7 +40,10 @@ void BarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     }
 }
 void BarPlot::contributeToAutoscale(Viewport& v) const {
-    v.x.min = std::min(v.x.min, 0.0f); v.x.max = std::max(v.x.max, float(data_.heights.size()));
+    v.x.min = std::min(v.x.min, -data_.width * 0.5f);
+    v.x.max = std::max(v.x.max,
+                       float(data_.heights.size()) - 1.0f +
+                           data_.width * 0.5f);
     v.y.min = std::min(v.y.min, 0.0f);
     for (float h : data_.heights) v.y.max = std::max(v.y.max, h);
 }

@@ -35,13 +35,13 @@ inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
                 spine.drawTriangles(cmd, clip, res, earClip(ring), color);
             } else {
                 ring.push_back(ring.front());
-                spine.drawLineStrip(cmd, clip, ring, color, strokeW);
+                spine.drawLineStrip(cmd, clip, res, ring, color, strokeW);
             }
         }
         for (const auto& st : g.strokes) {
             auto line = scaled(st);
             if (line.size() >= 2)
-                spine.drawLineStrip(cmd, clip, line, color, strokeW);
+                spine.drawLineStrip(cmd, clip, res, line, color, strokeW);
         }
     }
 }

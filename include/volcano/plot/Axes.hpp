@@ -149,6 +149,11 @@ public:
     // --- Tick / spine placement ---
     void setXTicksTop(bool top) { xTicksTop_ = top; }
     void setYTicksRight(bool right) { yTicksRight_ = right; }
+    /// matplotlib tick_params(top=True, right=True): tick marks on the
+    /// far side in addition to the near side; labels stay on the near
+    /// side (unlike setXTicksTop/setYTicksRight which move both).
+    void setXTickMarksTop(bool on) { xTickMarksTop_ = on; }
+    void setYTickMarksRight(bool on) { yTickMarksRight_ = on; }
 
     /// Per-side spine visibility (matplotlib ax.spines[...].set_visible).
     struct SpineSet { bool left = true, right = true, bottom = true, top = true; };
@@ -157,6 +162,8 @@ public:
     [[nodiscard]] const SpineSet& spines() const noexcept { return spines_; }
     [[nodiscard]] bool xTicksTop() const noexcept { return xTicksTop_; }
     [[nodiscard]] bool yTicksRight() const noexcept { return yTicksRight_; }
+    [[nodiscard]] bool xTickMarksTop() const noexcept { return xTickMarksTop_; }
+    [[nodiscard]] bool yTickMarksRight() const noexcept { return yTickMarksRight_; }
 
     // --- Tick locators / formatters (matplotlib axis.set_*_locator etc.) ---
     void setXLocator(std::shared_ptr<Locator> l) {
@@ -431,6 +438,7 @@ private:
     std::vector<Axes*> shareXWith_, shareYWith_;
     std::optional<SecondaryAxis> secondaryX_, secondaryY_;
     bool xTicksTop_ = false, yTicksRight_ = false;
+    bool xTickMarksTop_ = false, yTickMarksRight_ = false;
     SpineSet spines_{};
     Figure* figure_ = nullptr;
     FigureStyle style_;

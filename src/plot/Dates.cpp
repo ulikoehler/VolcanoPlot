@@ -216,7 +216,7 @@ std::string AutoDateFormatter::format(float v, int) const {
     if (scaleDays_ < 1.0f && std::abs(dayFrac) < 1e-6f)
         return strfnum(v, "%Y-%m-%d");
     if (scaleDays_ >= 365.0f) return strfnum(v, "%Y");
-    if (scaleDays_ >= 28.0f)  return strfnum(v, "%b %Y");
+    if (scaleDays_ >= 28.0f)  return strfnum(v, "%Y-%m");
     if (scaleDays_ >= 1.0f)   return strfnum(v, "%Y-%m-%d");
     if (scaleDays_ >= 1.0f / 1440.0f) return strfnum(v, "%H:%M");
     return strfnum(v, "%H:%M:%S");

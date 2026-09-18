@@ -121,8 +121,8 @@ TEST(StepRegression, StepAutoscaleMatchesData) {
 }
 
 TEST(StepRegression, StepPreHasHorizontalSegment) {
-    // With where='pre', at x=5 the y value should be 1 (from previous point)
-    // before jumping to 3. Check that there's a blue pixel at (x=5, y=1).
+    // mpl 'pre': interval (x[i-1], x[i]] has value y[i], so on (0, 5] the
+    // value is 3 — the horizontal segment at y=3 runs up to x=5.
     StepFigure cf(256);
     cf.axes->addPlot(std::make_unique<StepPlot>(
         std::vector<float>{0, 5, 10},
@@ -131,8 +131,8 @@ TEST(StepRegression, StepPreHasHorizontalSegment) {
     auto img = cf.render();
 
     auto vp = expectedViewport(0, 10, 1, 3);
-    // At x=5 (just before the step), y should be 1.
-    auto [px, py] = dataToPixel(vp, cf.axes->rect, 4.5f, 1.0f);
+    // At x=4.5 the 'pre' value is y[1]=3.
+    auto [px, py] = dataToPixel(vp, cf.axes->rect, 4.5f, 3.0f);
     bool found = false;
     for (int dy = -2; dy <= 2; ++dy)
         for (int dx = -2; dx <= 2; ++dx) {
@@ -140,7 +140,7 @@ TEST(StepRegression, StepPreHasHorizontalSegment) {
             if (x < img.width() && y < img.height())
                 if (isBlue(img.get(x, y))) found = true;
         }
-    EXPECT_TRUE(found) << "Pre step should have y=1 at x=4.5";
+    EXPECT_TRUE(found) << "Pre step should have y=3 at x=4.5";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

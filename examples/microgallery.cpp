@@ -210,8 +210,10 @@ void f016_ticks_wide(Figure& fig) {
 void f017_ticks_top_right(Figure& fig) {
     auto* ax = mfAxes(fig);
     ax->setXlim(0, 10); ax->setYlim(0, 10);
-    ax->setXTicksTop(true);
-    ax->setYTicksRight(true);
+    // mpl tick_params(top=True, right=True): marks on all four sides,
+    // labels stay bottom/left.
+    ax->setXTickMarksTop(true);
+    ax->setYTickMarksRight(true);
 }
 
 void f018_ticklabels_default(Figure& fig) {
@@ -246,7 +248,7 @@ void f022_ticklabels_rotation(Figure& fig) {
     ax->style().xAxis.ticks.positions = std::vector<float>{0, 1, 2, 3, 4};
     ax->style().xAxis.ticks.labels =
         std::vector<std::string>{"alpha", "beta", "gamma", "delta", "eps"};
-    ax->style().xAxis.tickFont.rotation = 0.7854f;  // 45°
+    ax->style().xAxis.tickFont.rotation = -0.7854f;  // mpl rotation=45
 }
 
 void f023_ticklabels_hidden(Figure& fig) {
@@ -838,6 +840,7 @@ Grid2D smallGrid() {
     for (uint32_t j = 0; j < 6; ++j)
         for (uint32_t i = 0; i < 8; ++i)
             g.values[j * 8 + i] = float(i + j);
+    g.origin = "lower";  // mpl imshow(origin="lower")
     return g;
 }
 
@@ -857,7 +860,8 @@ void f094_colorbar_extend(Figure& fig) {
 
 void f095_colorbar_colormap(Figure& fig) {
     auto* ax = mfAxes(fig);
-    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid()));
+    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid(),
+                                            colormaps::plasma()));
     auto& cb = ax->style().colorbar;
     cb.visible = true;
     cb.colormap = "plasma";

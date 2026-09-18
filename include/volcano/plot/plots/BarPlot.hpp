@@ -15,9 +15,9 @@ public:
     bool contains(const Axes&, Point2D pt) const override {
         float n = static_cast<float>(data_.heights.size());
         if (n <= 0) return false;
-        float bw = data_.width / n;
+        float bw = data_.width;
         for (size_t i = 0; i < data_.heights.size(); ++i) {
-            float x0 = float(i) * bw + (1.0f - data_.width) * 0.5f;
+            float x0 = float(i) - bw * 0.5f;
             float h = data_.heights[i];
             bool inY = h >= 0 ? (pt.y >= 0 && pt.y <= h)
                               : (pt.y >= h && pt.y <= 0);

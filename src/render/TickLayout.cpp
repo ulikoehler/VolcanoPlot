@@ -94,10 +94,23 @@ float autoTickStep(float vmin, float vmax, int nbins) {
 /// Major tick positions honoring TickConfig locator/positions overrides.
 std::vector<float> axisTicks(const plot::TickConfig& tc,
                              const plot::AxisScale& scale,
-                             float lo, float hi) {
+                             float lo, float hi,
+                             float axisLengthPx,
+                             float fontPt, float dpi, bool yAxis) {
     if (tc.locator) return tc.locator->tickValues(lo, hi);
-    if (tc.positions && !tc.positions->empty()) return *tc.positions;
-    return plot::scaleTicks(scale, lo, hi, tc.nbins);
+    // An explicitly-set positions list is honored even when empty
+    // (matplotlib ax.set_xticks([]) hides the ticks entirely).
+    if (tc.positions) return *tc.positions;
+    int nb = tc.nbins;
+    if (axisLengthPx > 0.0f) {
+        // mpl Axis.get_tick_space: estimated labels that fit along the
+        // axis. X assumes ≤3:1 text aspect, Y uses 2× line spacing.
+        float lengthPt = axisLengthPx * 72.0f / std::max(dpi, 1.0f);
+        float labelPt = std::max(fontPt, 1.0f) * (yAxis ? 2.0f : 3.0f);
+        int space = int(std::floor(lengthPt / labelPt));
+        nb = std::min(nb, std::max(space, 2));
+    }
+    return plot::scaleTicks(scale, lo, hi, nb);
 }
 
 /// Log-family scales get automatic minor ticks (matplotlib behavior).
@@ -133,13 +146,19 @@ std::vector<float> axisMinorTicks(const plot::TickConfig& tc,
 plot::Formatter* axisFormatter(const plot::TickConfig& tc,
                                std::span<const float> ticks,
                                const plot::FigureStyle& style,
+                               const plot::AxisScale& scale,
                                plot::ScalarFormatter& defaultFmt,
-                               plot::FormatStrFormatter& strFmt) {
+                               plot::FormatStrFormatter& strFmt,
+                               plot::LogFormatterMathtext& logFmt) {
     plot::Formatter* f = tc.formatter.get();
     if (!f && tc.format != "%g") {
         strFmt = plot::FormatStrFormatter(tc.format);
         f = &strFmt;
     }
+    // mpl log axes default to LogFormatterSciNotation ($m×10^{k}$).
+    if (!f && (scale.kind == plot::ScaleKind::Log ||
+               scale.kind == plot::ScaleKind::FunctionLog))
+        f = &logFmt;
     if (!f) {
         defaultFmt = plot::ScalarFormatter{};
         defaultFmt.scilimits = style.formatterLimits;

@@ -30,10 +30,12 @@ private:
     vk::UniqueImageView gridView_;
     vk::UniqueImageView cmapView_;
     vk::UniqueSampler sampler_;
+    vk::UniqueSampler samplerNearest_;
     vk::DescriptorSet descSet_;
     core::Buffer quadBuffer_;
     float valueMin_ = 0, valueMax_ = 1;
     plot::Range gridXRange_{0,1}, gridYRange_{0,1};
+    bool originLower_ = false;
     bool inited_ = false;
 };
 } // namespace volcano::render::primitives

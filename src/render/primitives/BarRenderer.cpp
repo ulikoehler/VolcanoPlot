@@ -141,7 +141,7 @@ void BarRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
     // matplotlib semantics: each bar is `width` units wide, centered on
     // its category index i.
     for (size_t i = 0; i < data.heights.size(); ++i) {
-        float x0 = float(i) + (1.0f - data.width) * 0.5f;
+        float x0 = float(i) - data.width * 0.5f;
         float bw = data.width;
         float x1 = x0 + bw;
         float h = data.heights[i];

@@ -242,12 +242,13 @@ void Figure::computeTightMargins(Extent2D extent) {
         // Top: axes title.
         if (!st.title.text.empty())
             needTop = std::max(needTop, (fontPx + 10.0f) / extent.height);
-        // Right: colorbar.
+        // Right: colorbar (strip + gap + tick labels, ~75px for labels).
         if (st.colorbar.visible)
             needRight = std::max(needRight,
-                (st.colorbar.width + st.colorbar.padding + 50.0f) / extent.width);
-        // Right-side y ticks (twinx) need symmetric margin.
-        if (p.axes->yTicksRight() && st.yAxis.visible)
+                (st.colorbar.width + st.colorbar.padding + 72.0f) / extent.width);
+        // Right-side y ticks (twinx) or a secondary axis need margin.
+        if ((p.axes->yTicksRight() || p.axes->secondaryY()) &&
+            st.yAxis.visible)
             needRight = std::max(needRight,
                 (4.0f + 4.0f + 40.0f) / extent.width);
         if (p.axes->xTicksTop() && st.xAxis.visible)
@@ -362,6 +363,16 @@ void Figure::layoutInRect(Rect2D rect) {
             break;
         default:
             break; // handled in second pass
+        }
+        // matplotlib shrinks the axes to make room for the colorbar
+        // (strip + padding + tick labels live in the reclaimed space).
+        const auto& cbs = p.axes->style().colorbar;
+        if (cbs.visible &&
+            (p.mode == PlacementMode::Grid ||
+             p.mode == PlacementMode::FigureFraction)) {
+            uint32_t reserve = static_cast<uint32_t>(
+                cbs.padding + cbs.width + 40.0f);
+            if (reserve < p.axes->rect.width) p.axes->rect.width -= reserve;
         }
     }
 

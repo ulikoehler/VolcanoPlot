@@ -217,9 +217,10 @@ TEST(MicroGrid, MajorGridStraightAndAligned) {
     MfFigure tf(256);
     tf.axes->grid(true);
     auto img = tf.render();
-    // Interior major ticks at fractions .2/.4/.6/.8 → vertical grid
-    // lines spanning the full axes height at those columns.
-    for (float f : {0.2f, 0.4f, 0.6f, 0.8f}) {
+    // Interior x major ticks at fractions .25/.5/.75 (AutoLocator on a
+    // ~200px axis gives step 2.5 → ticks 0,2.5,5,7.5,10) → vertical
+    // grid lines spanning the full axes height at those columns.
+    for (float f : {0.25f, 0.5f, 0.75f}) {
         int32_t cx = tf.rect.x + int32_t(f * float(tf.rect.width));
         // A 1-2px line may land anywhere in a few-px window depending on
         // subpixel alignment; require one column with >50% coverage.
@@ -295,9 +296,9 @@ TEST(MicroGrid, DashedGridHasGaps) {
     tf.axes->style().xAxis.gridLineStyle = "--";
     tf.axes->style().yAxis.gridLineStyle = "--";
     auto img = tf.render();
-    // The vertical grid line at tick fraction .4 is dashed → gray
+    // The vertical grid line at tick fraction .5 is dashed → gray
     // pixels present but covering much less of the column than solid.
-    int32_t cx = tf.rect.x + int32_t(0.4f * float(tf.rect.width));
+    int32_t cx = tf.rect.x + int32_t(0.5f * float(tf.rect.width));
     size_t gray = countIn(img,
         {cx - 1, tf.rect.y + 2, 3, tf.rect.height - 4}, isGridGray);
     float cov = float(gray) / float(3 * (tf.rect.height - 4));
@@ -317,10 +318,10 @@ TEST(MicroGrid, AxisBelowPutsGridUnderArtists) {
     s.lineWidth = 4.0f;
     below.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
     auto imgBelow = below.render();
-    // Region around the crossing of the red line (y=5) and the x=4
-    // vertical grid line.
+    // Region around the crossing of the red line (y=5) and the x=5
+    // vertical grid line (fraction .5).
     auto cross = [](const MfFigure& f) {
-        return Rect2D{f.rect.x + int32_t(0.4f * float(f.rect.width)) - 2,
+        return Rect2D{f.rect.x + int32_t(0.5f * float(f.rect.width)) - 2,
                       f.rect.y + int32_t(0.5f * float(f.rect.height)) - 2,
                       5, 5};
     };

@@ -12,19 +12,18 @@ namespace volcano::plot {
 
 namespace {
 
-/// Nice-number step (1, 2, 2.5, 5, 10 × 10^k) giving ≤ nbins+1 ticks.
+/// Nice-number step (1, 2, 2.5, 5, 10 × 10^k): smallest step ≥ range/nbins.
 float niceStep(float vmin, float vmax, int nbins) {
     if (vmin >= vmax) return 1.0f;
+    // matplotlib MaxNLocator: smallest nice step >= range/nbins.
     float rawStep = (vmax - vmin) / std::max(nbins, 1);
     float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
     const float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
-    float step = 10.0f * mag;
     for (float s : niceSteps) {
         float cand = s * mag;
-        int n = int(std::floor(vmax / cand) - std::ceil(vmin / cand)) + 1;
-        if (n <= nbins + 1) { step = cand; break; }
+        if (cand >= rawStep * (1.0f - 1e-6f)) return cand;
     }
-    return step;
+    return 10.0f * mag;
 }
 
 /// Ticks at multiples of step covering [vmin, vmax].
@@ -178,12 +177,13 @@ std::vector<float> AutoMinorLocator::between(std::span<const float> majors,
     float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
     for (size_t i = 0; i + 1 < majors.size(); ++i) {
         float step = majors[i + 1] - majors[i];
-        // Auto ndivs: 5 subdivisions; 4 when step/5 isn't a round number.
-        int nd = ndivs_ > 0 ? ndivs_ : 5;
+        // matplotlib AutoMinorLocator: 5 subdivisions when the major
+        // step's mantissa divides 5 (1, 2.5, 5 × 10^k), else 4.
+        int nd = ndivs_ > 0 ? ndivs_ : 4;
         if (ndivs_ == 0) {
-            float sub = step / 5.0f;
-            // Prefer 4 subdivisions for steps like 0.4, 2.5 → .1, .5 ok for 5.
-            if (std::abs(sub * 10.0f - std::round(sub * 10.0f)) > 1e-4f) nd = 4;
+            float exp10 = std::floor(std::log10(step));
+            float mant = step / std::pow(10.0f, exp10);
+            if (std::abs(std::fmod(5.0f, mant)) < 1e-4f) nd = 5;
         }
         for (int k = 1; k < nd; ++k) {
             float t = majors[i] + step * k / nd;

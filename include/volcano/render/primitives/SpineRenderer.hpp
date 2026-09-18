@@ -24,11 +24,15 @@ public:
               core::DescriptorPool& descPool);
 
     /// Draw a rectangle border around the given pixel rect.
-    void drawRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    /// `clip` is the scissor rect; `resolution` is the framebuffer extent
+    /// used for the pixel→NDC transform (canvas pixels, not clip-relative).
+    void drawRect(vk::CommandBuffer cmd, vk::Rect2D clip,
+                  vk::Extent2D resolution,
                   plot::Rect2D rect, plot::Color color, float lineWidth);
 
     /// Draw a filled rectangle (two triangles).
-    void drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    void drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D clip,
+                        vk::Extent2D resolution,
                         plot::Rect2D rect, plot::Color color);
 
     /// Reset the scratch vertex buffer offset. Call at the start of each
@@ -46,7 +50,8 @@ public:
     /// farSide: x ticks at the top edge / y ticks at the right edge
     /// (matplotlib xaxis.top / yaxis.right).
     /// tickWidth: line width in pixels.
-    void drawTicks(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    void drawTicks(vk::CommandBuffer cmd, vk::Rect2D clip,
+                   vk::Extent2D resolution,
                    plot::Rect2D rect, std::span<const float> positions,
                    plot::Color color, float tickLength,
                    bool yAxis, float dataMin, float dataMax,
@@ -56,7 +61,8 @@ public:
     /// Draw a line strip from the given pixel-space points.
     /// Used by reference line plots (AxhLine, AxvLine) that need to draw
     /// lines spanning the axes in pixel coordinates.
-    void drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    void drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D clip,
+                       vk::Extent2D resolution,
                        std::span<const plot::Point2D> points,
                        plot::Color color, float width);
 

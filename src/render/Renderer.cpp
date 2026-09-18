@@ -30,14 +30,17 @@ public:
         : cmd_(cmd), r_(r), scissor_(scissor) {}
 
     void fillRect(plot::Rect2D rect, plot::Color c) override {
-        r_.spineRenderer().drawFilledRect(cmd_, scissor_, rect, c);
+        r_.spineRenderer().drawFilledRect(cmd_, scissor_,
+                                          r_.backend().extent(), rect, c);
     }
     void outlineRect(plot::Rect2D rect, plot::Color c, float w) override {
-        r_.spineRenderer().drawRect(cmd_, scissor_, rect, c, w);
+        r_.spineRenderer().drawRect(cmd_, scissor_,
+                                    r_.backend().extent(), rect, c, w);
     }
     void line(std::span<const plot::Point2D> pts, plot::Color c,
               float w) override {
-        r_.spineRenderer().drawLineStrip(cmd_, scissor_, pts, c, w);
+        r_.spineRenderer().drawLineStrip(cmd_, scissor_,
+                                         r_.backend().extent(), pts, c, w);
     }
     void text(std::string_view s, float x, float y, plot::Color c,
               float scale) override {
@@ -201,8 +204,8 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
         auto p0 = rot(rl.x0, rl.y0);
         auto p1 = rot(rl.x1, rl.y0);
         plot::Point2D pts[2] = {p0, p1};
-        spineRenderer_.drawLineStrip(cmd, scissor, std::span{pts, 2},
-                                     color, rl.thickness);
+        spineRenderer_.drawLineStrip(cmd, scissor, backend_.extent(),
+                                     std::span{pts, 2}, color, rl.thickness);
     }
 }
 
@@ -216,8 +219,9 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
         style.title.text.empty()) {
         return;
     }
-    float fontSize = 16.0f;
-    float scale = 1.0f;
+    // Text scale: style.fontSize is in points at style.dpi; the atlas
+    // renders 16px at scale 1.
+    float scale = style.fontSize * style.dpi / (72.0f * 16.0f);
     auto labelColor = style.xAxis.color;
 
     // Use the full framebuffer as the scissor rect so text outside the
@@ -228,44 +232,6 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     // Tick mark geometry constants (shared with drawSpines).
     constexpr float kTickLength = 4.0f;
     constexpr float kTickSpacing = 4.0f;  // gap between tick mark and label
-
-    // --- X axis label ---
-    if (style.xAxis.visible && !style.xAxis.label.empty()) {
-        auto m = measureRichText(style.xAxis.label, scale);
-        // Center horizontally at axes center, below the tick labels.
-        // Top border at tickBottom + kTickSpacing + labelHeight + labelGap.
-        constexpr float kXLabelGap = 8.0f;
-        float cx = rect.x + rect.width / 2.0f - m.width / 2.0f;
-        float cy = float(rect.y + rect.height) + kTickLength + kTickSpacing +
-                   16.0f + kXLabelGap + m.ascent;  // 16px approx label height
-        drawRichText(cmd, fullRect,
-            style.xAxis.label, cx, cy, labelColor, scale,
-            style.xAxis.labelFont.rotation, plot::HAlign::Center);
-    }
-
-    // --- Y axis label ---
-    if (style.yAxis.visible && !style.yAxis.label.empty()) {
-        // Rotate -90° (clockwise in screen space, Y-down) so the label
-        // reads bottom-to-top. The rotation origin is the text baseline (x, y).
-        // After rotation:
-        //   - text width becomes vertical extent (upward from origin)
-        //   - ascent becomes leftward extent, descent becomes rightward
-        // We want: vertical center at axes middle, positioned left of tick labels.
-        auto m = measureRichText(style.yAxis.label, scale);
-        // Y position: y - width/2 = axes vertical center
-        float oy = rect.y + rect.height / 2.0f + m.width / 2.0f;
-        // X position: center of rotated text at (rect.x - tickLen - spacing - maxLabelW - labelGap)
-        // Center after rotation = x + (descent - ascent)/2 = x + (m.height - m.ascent - m.ascent)/2
-        //                      = x + m.height/2 - m.ascent
-        // So x = centerPos - m.height/2 + m.ascent
-        constexpr float kYLabelGap = 8.0f;
-        float centerPos = float(rect.x) - kTickLength - kTickSpacing - 40.0f - kYLabelGap;
-        float ox = centerPos - m.height / 2.0f + m.ascent;
-        constexpr float kRotMinus90 = -1.5707963267948966f; // -π/2
-        drawRichText(cmd, fullRect,
-            style.yAxis.label, ox, oy, labelColor, scale,
-            kRotMinus90 + style.yAxis.labelFont.rotation, plot::HAlign::Center);
-    }
 
     // --- Title ---
     if (!style.title.text.empty()) {
@@ -279,6 +245,12 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
         drawRichText(cmd, fullRect,
             style.title.text, cx, cy, style.title.color, scale,
             style.title.font.rotation, plot::HAlign::Center);
+        // Faux bold: second pass offset ~0.6px (no bold face in the atlas).
+        if (style.title.weight == "bold" ||
+            style.title.font.weight == "bold")
+            drawRichText(cmd, fullRect,
+                style.title.text, cx + 0.6f, cy, style.title.color, scale,
+                style.title.font.rotation, plot::HAlign::Center);
     }
 
     // --- Tick labels ---
@@ -294,16 +266,20 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     const auto& vp = axes.viewport();
     if (style.xAxis.visible) {
         const auto& tc = style.xAxis.ticks;
-        auto xTicks = axisTicks(tc, axes.xscale(), vp.x.min, vp.x.max);
+        auto xTicks = axisTicks(tc, axes.xscale(), vp.x.min, vp.x.max,
+                                float(rect.width), style.fontSize,
+                                style.dpi, false);
         plot::ScalarFormatter defaultFmt;
         plot::FormatStrFormatter strFmt("");
-        plot::Formatter* fmt = axisFormatter(tc, xTicks, style,
-                                             defaultFmt, strFmt);
+        plot::LogFormatterMathtext logFmt;
+        plot::Formatter* fmt = axisFormatter(tc, xTicks, style, axes.xscale(),
+                                             defaultFmt, strFmt, logFmt);
         bool top = axes.xTicksTop();
         float edge = top ? float(rect.y) : float(rect.y + rect.height);
         float d = top ? -1.0f : 1.0f;
         float outLen = tc.majorSize * kPtToPx * (1.0f - tickInFrac(tc));
         float tickEnd = edge + d * outLen;
+        float tickLabelH = 0.0f;
         int i = 0;
         for (float tick : xTicks) {
             float px = rect.x + axes.dataToFraction({tick, 0.0f}).x * rect.width;
@@ -311,13 +287,25 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
             auto label = tickLabel(tc, *fmt, tick, i++);
             if (label.empty()) continue;
             auto m = measureRichText(label, scale);
-            // Horizontal center at px; label sits outside the tick mark.
-            float x = px - m.width * 0.5f;
+            float rot = style.xAxis.tickFont.rotation;
+            tickLabelH = std::max(tickLabelH,
+                m.ascent + m.width * std::abs(std::sin(rot)));
             // bottom: text top at tickEnd + spacing (y - ascent = top)
             // top: text bottom at tickEnd - spacing (y+descent = bottom)
-            float y = top ? tickEnd - kTickSpacing - m.height + m.ascent
-                          : tickEnd + kTickSpacing + m.ascent;
-            drawRichText(cmd, fullRect, label, x, y, labelColor, scale);
+            float baseY = top ? tickEnd - kTickSpacing - m.height + m.ascent
+                              : tickEnd + kTickSpacing + m.ascent;
+            float x, y = baseY;
+            if (rot != 0.0f) {
+                // Rotated: anchor the baseline's right end at the tick
+                // (matplotlib's ha='right' for rotated xticklabels).
+                float cosR = std::cos(rot), sinR = std::sin(rot);
+                x = px - m.width * cosR;
+                y = baseY - m.width * sinR;
+            } else {
+                // Horizontal center at px; label sits outside the tick mark.
+                x = px - m.width * 0.5f;
+            }
+            drawRichText(cmd, fullRect, label, x, y, labelColor, scale, rot);
         }
         // Offset/scientific text at the axis end (matplotlib "+1e4").
         auto off = fmt->offsetText();
@@ -346,20 +334,38 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                 drawRichText(cmd, fullRect, label, x, y, labelColor, mScale);
             }
         }
+
+        // --- X axis label --- centered below the tick labels (or above
+        // when ticks are on top), using the measured tick-label depth.
+        if (!style.xAxis.label.empty()) {
+            auto m = measureRichText(style.xAxis.label, scale);
+            constexpr float kXLabelGap = 4.0f;
+            float cx = rect.x + rect.width / 2.0f - m.width / 2.0f;
+            float cy = edge + d * (outLen + kTickSpacing + tickLabelH +
+                                   kXLabelGap) + m.ascent -
+                       (top ? m.height : 0.0f);
+            drawRichText(cmd, fullRect,
+                style.xAxis.label, cx, cy, style.xAxis.labelColor, scale,
+                style.xAxis.labelFont.rotation, plot::HAlign::Center);
+        }
     }
 
     if (style.yAxis.visible) {
         const auto& tc = style.yAxis.ticks;
-        auto yTicks = axisTicks(tc, axes.yscale(), vp.y.min, vp.y.max);
+        auto yTicks = axisTicks(tc, axes.yscale(), vp.y.min, vp.y.max,
+                                float(rect.height), style.fontSize,
+                                style.dpi, true);
         plot::ScalarFormatter defaultFmt;
         plot::FormatStrFormatter strFmt("");
-        plot::Formatter* fmt = axisFormatter(tc, yTicks, style,
-                                             defaultFmt, strFmt);
+        plot::LogFormatterMathtext logFmt;
+        plot::Formatter* fmt = axisFormatter(tc, yTicks, style, axes.yscale(),
+                                             defaultFmt, strFmt, logFmt);
         bool right = axes.yTicksRight();
         float edge = right ? float(rect.x + rect.width) : float(rect.x);
         float d = right ? 1.0f : -1.0f;
         float outLen = tc.majorSize * kPtToPx * (1.0f - tickInFrac(tc));
         float tickEnd = edge + d * outLen;
+        float tickLabelW = 0.0f;
         int i = 0;
         for (float tick : yTicks) {
             float py = rect.y + rect.height -
@@ -368,11 +374,26 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
             auto label = tickLabel(tc, *fmt, tick, i++);
             if (label.empty()) continue;
             auto m = measureRichText(label, scale);
+            float rot = style.yAxis.tickFont.rotation;
+            tickLabelW = std::max(tickLabelW,
+                m.width * std::abs(std::cos(rot)) +
+                m.height * std::abs(std::sin(rot)));
             // Label sits outside the tick mark, vertically centered at py.
-            float x = right ? tickEnd + kTickSpacing
-                            : tickEnd - kTickSpacing - m.width;
-            float y = py + m.ascent - m.height * 0.5f;
-            drawRichText(cmd, fullRect, label, x, y, labelColor, scale);
+            float baseY = py + m.ascent - m.height * 0.5f;
+            float x, y = baseY;
+            if (rot != 0.0f) {
+                // Rotated: anchor the baseline's edge at the tick mark,
+                // keeping the same vertical center (mpl va='center').
+                float cosR = std::cos(rot), sinR = std::sin(rot);
+                float edge = right ? tickEnd + kTickSpacing
+                                   : tickEnd - kTickSpacing;
+                x = right ? edge : edge - m.width * cosR;
+                y = right ? baseY : baseY - m.width * sinR;
+            } else {
+                x = right ? tickEnd + kTickSpacing
+                          : tickEnd - kTickSpacing - m.width;
+            }
+            drawRichText(cmd, fullRect, label, x, y, labelColor, scale, rot);
         }
         // Offset text above the top of the y axis.
         auto off = fmt->offsetText();
@@ -400,6 +421,56 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                 drawRichText(cmd, fullRect, label, x, y, labelColor, mScale);
             }
         }
+
+        // --- Y axis label --- Rotate -90° (clockwise in screen space,
+        // Y-down) so the label reads bottom-to-top. The rotation origin is
+        // the text baseline (x, y). After rotation:
+        //   - text width becomes vertical extent (upward from origin)
+        //   - ascent becomes leftward extent, descent becomes rightward
+        // We want: vertical center at axes middle, positioned outside the
+        // tick labels using their measured width.
+        if (!style.yAxis.label.empty()) {
+            auto m = measureRichText(style.yAxis.label, scale);
+            // Y position: y - width/2 = axes vertical center
+            float oy = rect.y + rect.height / 2.0f + m.width / 2.0f;
+            // Center of rotated text = x + m.height/2 - m.ascent, so
+            // x = centerPos - m.height/2 + m.ascent.
+            constexpr float kYLabelGap = 6.0f;
+            float centerPos = edge + d * (outLen + kTickSpacing +
+                                          tickLabelW + kYLabelGap +
+                                          m.height * 0.5f);
+            float ox = centerPos - m.height / 2.0f + m.ascent;
+            constexpr float kRotMinus90 = -1.5707963267948966f; // -π/2
+            drawRichText(cmd, fullRect,
+                style.yAxis.label, ox, oy, style.yAxis.labelColor, scale,
+                kRotMinus90 + style.yAxis.labelFont.rotation,
+                plot::HAlign::Center);
+        }
+
+        // --- Secondary y axis (matplotlib secondary_yaxis): right-side
+        // tick labels in transformed units positioned via the inverse map.
+        if (auto sec = axes.secondaryY()) {
+            float slo = sec->forward(vp.y.min), shi = sec->forward(vp.y.max);
+            auto sTicks = axisTicks(tc, plot::AxisScale{}, slo, shi,
+                                    float(rect.height), style.fontSize,
+                                    style.dpi, true);
+            plot::ScalarFormatter sFmt;
+            sFmt.setLocs(sTicks);
+            float rEdge = float(rect.x + rect.width);
+            for (float st : sTicks) {
+                float v = sec->inverse(st);
+                float py = rect.y + rect.height -
+                           axes.dataToFraction({0.0f, v}).y * rect.height;
+                if (py < rect.y || py > rect.y + rect.height) continue;
+                auto label = sFmt.format(st, 0);
+                if (label.empty()) continue;
+                auto m = measureRichText(label, scale);
+                drawRichText(cmd, fullRect, label,
+                             rEdge + outLen + kTickSpacing,
+                             py + m.ascent - m.height * 0.5f,
+                             labelColor, scale);
+            }
+        }
     }
 }
 
@@ -422,7 +493,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
     const auto& sp = axes.spines();
     auto quad = [&](float qx0, float qy0, float qx1, float qy1) {
-        spineRenderer_.drawFilledRect(cmd, fullRect,
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
             plot::Rect2D{qx0, qy0, qx1 - qx0, qy1 - qy0}, spineColor);
     };
     if (sp.bottom) quad(x0, y1 - t, x1, y1);
@@ -447,27 +518,41 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                              float lo, float hi, bool yAxis, bool farSide) {
         const auto& tc = as.ticks;
         float inF = tickInFrac(tc);
-        auto majors = axisTicks(tc, scale, lo, hi);
+        float axisLen = yAxis ? float(rect.height) : float(rect.width);
+        auto majors = axisTicks(tc, scale, lo, hi, axisLen,
+                                style.fontSize, style.dpi, yAxis);
         auto majorFrac = toFrac(majors, yAxis);
-        spineRenderer_.drawTicks(cmd, fullRect, rect, majorFrac,
+        spineRenderer_.drawTicks(cmd, fullRect, ext, rect, majorFrac,
                                  as.color, tc.majorSize * kPtToPx,
                                  yAxis, 0.0f, 1.0f, inF, farSide,
                                  std::max(tc.majorWidth * kPtToPx, 1.5f));
         auto minors = axisMinorTicks(tc, scale, lo, hi, majors);
         if (!minors.empty()) {
             auto minorFrac = toFrac(minors, yAxis);
-            spineRenderer_.drawTicks(cmd, fullRect, rect, minorFrac,
+            spineRenderer_.drawTicks(cmd, fullRect, ext, rect, minorFrac,
                                      as.color, tc.minorSize * kPtToPx,
                                      yAxis, 0.0f, 1.0f, inF, farSide,
                                      std::max(tc.minorWidth * kPtToPx, 1.0f));
         }
     };
-    if (style.xAxis.visible)
-        drawAxisTicks(style.xAxis, axes.xscale(), vp.x.min, vp.x.max,
-                      false, axes.xTicksTop());
-    if (style.yAxis.visible)
-        drawAxisTicks(style.yAxis, axes.yscale(), vp.y.min, vp.y.max,
-                      true, axes.yTicksRight());
+    if (style.xAxis.visible) {
+        // Marks on the top: either moved (xTicksTop) or in addition to
+        // the bottom (xTickMarksTop, mpl tick_params(top=True)).
+        if (axes.xTicksTop() || axes.xTickMarksTop())
+            drawAxisTicks(style.xAxis, axes.xscale(), vp.x.min, vp.x.max,
+                          false, true);
+        if (!axes.xTicksTop() || axes.xTickMarksTop())
+            drawAxisTicks(style.xAxis, axes.xscale(), vp.x.min, vp.x.max,
+                          false, false);
+    }
+    if (style.yAxis.visible) {
+        if (axes.yTicksRight() || axes.yTickMarksRight())
+            drawAxisTicks(style.yAxis, axes.yscale(), vp.y.min, vp.y.max,
+                          true, true);
+        if (!axes.yTicksRight() || axes.yTickMarksRight())
+            drawAxisTicks(style.yAxis, axes.yscale(), vp.y.min, vp.y.max,
+                          true, false);
+    }
 }
 
 /// Draw tick-aligned grid lines for one axes. xAxis.grid draws vertical
@@ -524,7 +609,9 @@ void Renderer::drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
                         float lo, float hi, bool yAxis) {
         if (!as.grid) return;
         const auto& tc = as.ticks;
-        auto majors = axisTicks(tc, scale, lo, hi);
+        float axisLen = yAxis ? float(rect.height) : float(rect.width);
+        auto majors = axisTicks(tc, scale, lo, hi, axisLen,
+                                style.fontSize, style.dpi, yAxis);
         auto toFrac = [&](std::span<const float> ticks) {
             std::vector<float> fr;
             fr.reserve(ticks.size());
@@ -574,11 +661,13 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     auto ext = backend_.extent();
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
 
-    // Font scale: 12pt maps to the 16px reference size (matplotlib's
-    // "medium" legend fontsize ≈ font.size ≈ 10-12pt).
-    const float scale = lg.font.size / 12.0f;
+    // Font scale: same points→pixels mapping as the rest of the text
+    // pipeline (16px atlas reference at 72dpi).
+    const float scale = lg.font.size * style.dpi / (72.0f * 16.0f);
     const float fontPx = 16.0f * scale;
-    const float rowHeight = textRenderer_.lineHeight(scale);
+    // mpl: each row is fontPx tall, separated by labelspacing × fontPx.
+    const float rowHeight = fontPx;
+    const float rowPitch = fontPx * (1.0f + lg.labelSpacing);
     const float pad = lg.borderPad * fontPx + (lg.fancyBox ? 2.0f : 0.0f);
     const float handleW = lg.handleLength * fontPx;
     const float textGap = lg.handleTextPad * fontPx;
@@ -609,7 +698,7 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
 
     // Title row.
     float titleW = 0.0f, titleH = 0.0f;
-    const float titleScale = lg.titleFont.size / 12.0f;
+    const float titleScale = lg.titleFont.size * style.dpi / (72.0f * 16.0f);
     if (!lg.title.empty()) {
         auto m = measureRichText(lg.title, titleScale);
         titleW = m.width;
@@ -617,7 +706,8 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     }
 
     const float boxW = pad * 2 + std::max(contentW, titleW);
-    const float boxH = pad * 2 + titleH + rows * rowHeight;
+    const float boxH = pad * 2 + titleH + rows * rowHeight +
+                       (rows - 1) * lg.labelSpacing * fontPx;
 
     // Resolve loc → the axes-space anchor (fx,fy) and the box-fraction
     // point (bx,by) placed there. (0,0)=bottom-left, (1,1)=top-right.
@@ -699,7 +789,7 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     // Drop shadow behind the box.
     if (lg.shadow) {
         const float so = fontPx * 0.25f;
-        spineRenderer_.drawFilledRect(cmd, fullRect,
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
             {boxX + so, boxY + so, boxW, boxH},
             plot::Color::fromRgba8(0, 0, 0, 100));
     }
@@ -708,8 +798,8 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         // Semi-transparent background.
         auto bg = lg.faceColor;
         bg.a *= lg.frameAlpha;
-        spineRenderer_.drawFilledRect(cmd, fullRect, boxRect, bg);
-        spineRenderer_.drawRect(cmd, fullRect, boxRect, lg.edgeColor, 1.0f);
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext, boxRect, bg);
+        spineRenderer_.drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
     }
 
     // Title (centered across the box).
@@ -729,14 +819,14 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         const int c = i / rows, r = i % rows;
         float colX = boxX + pad;
         for (int j = 0; j < c; ++j) colX += colW[j] + colGap;
-        const float y = contentTop + r * rowHeight;
+        const float y = contentTop + r * rowPitch;
         const float markerSize = fontPx;
         const float midY = y + rowHeight / 2.0f;
         const auto& e = entries[i];
 
         if (e.marker == plot::LegendMarker::Line) {
             plot::Point2D pts[] = {{colX, midY}, {colX + handleW, midY}};
-            spineRenderer_.drawLineStrip(cmd, fullRect, pts, e.color, 2.0f);
+            spineRenderer_.drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
         } else if (e.marker == plot::LegendMarker::Circle) {
             // Filled disc (octagon fan) centered in the handle area.
             const float cx = colX + handleW / 2.0f, radius = markerSize / 2.0f;
@@ -754,7 +844,7 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         } else {
             // Filled square centered in the handle area.
             const float sx = colX + (handleW - markerSize) / 2.0f;
-            spineRenderer_.drawFilledRect(cmd, fullRect,
+            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
                 {int32_t(sx), int32_t(midY - markerSize / 2.0f),
                  uint32_t(markerSize), uint32_t(markerSize)},
                 e.color);
@@ -798,6 +888,15 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                    : backend_.beginFrame();
     textRenderer_.resetScratch();
     spineRenderer_.resetScratch();
+
+    // Figure patch (figure.facecolor) fills the canvas under everything.
+    const auto& figFc = figure.style().faceColor;
+    if (subset != DrawSubset::AnimatedOnly && spineInited_ && figFc.a > 0.0f) {
+        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        plot::Rect2D canvas{0, 0, ext.width, ext.height};
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext, canvas, figFc);
+    }
+
     for (auto& p : figure.placements()) {
         plot::Rect2D rect = p.axes->rect;
         vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
@@ -809,7 +908,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         // Axes facecolor patch (matplotlib axes.facecolor).
         if (subset != DrawSubset::AnimatedOnly && spineInited_ &&
             p.axes->style().faceColor.a > 0.0f)
-            spineRenderer_.drawFilledRect(cmd, vrect, rect,
+            spineRenderer_.drawFilledRect(cmd, vrect, ext, rect,
                                           p.axes->style().faceColor);
 
         // Draw tick-aligned grid lines (per-axis enable). axisBelow
@@ -851,6 +950,19 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         drawColorbar(cmd, *p.axes, rect);
     }
 
+    // Figure suptitle at top center (mirrors VectorRenderer).
+    const auto& ft = figure.style().title;
+    if (subset != DrawSubset::AnimatedOnly && textInited_ && textReady_ &&
+        !ft.text.empty()) {
+        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        float scale = ft.font.size / 12.0f;
+        auto m = measureRichText(ft.text, scale);
+        drawRichText(cmd, fullRect, ft.text,
+                     ext.width * 0.5f - m.width * 0.5f,
+                     m.ascent + 2.0f, ft.color, scale,
+                     ft.font.rotation, plot::HAlign::Center);
+    }
+
     // Interactive overlays (§11): widgets + nav zoom rubber-band.
     if (subset != DrawSubset::AnimatedOnly && spineInited_) {
         vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
@@ -860,7 +972,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
             auto [a, b] = figure.nav().zoomRect();
             plot::Rect2D zr{std::min(a.x, b.x), std::min(a.y, b.y),
                             std::abs(b.x - a.x), std::abs(b.y - a.y)};
-            spineRenderer_.drawRect(cmd, fullRect, zr,
+            spineRenderer_.drawRect(cmd, fullRect, ext, zr,
                                     plot::Color{0.0f, 0.0f, 0.0f, 0.8f}, 1.0f);
         }
     }
@@ -918,7 +1030,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         float t = 1.0f - float(i) / float(segments - 1);
         auto color = sampleAt(t);
         float y = bodyY0 + i * segH;
-        spineRenderer_.drawFilledRect(cmd, fullRect,
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
             {int32_t(stripX), int32_t(y), uint32_t(stripW), uint32_t(segH) + 1},
             color);
     }
@@ -943,7 +1055,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     }
 
     // Draw border around the strip body (plus extend outlines).
-    spineRenderer_.drawRect(cmd, fullRect,
+    spineRenderer_.drawRect(cmd, fullRect, ext,
         {int32_t(stripX), int32_t(bodyY0), uint32_t(stripW), uint32_t(bodyH)},
         style.colorbar.edgeColor, 1.0f);
 
@@ -960,7 +1072,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             {stripX + stripW, y},
             {stripX + stripW + 4.0f, y},
         };
-        spineRenderer_.drawLineStrip(cmd, fullRect, tickPts,
+        spineRenderer_.drawLineStrip(cmd, fullRect, ext, tickPts,
                                      style.colorbar.edgeColor, 1.0f);
         // Draw label.
         std::string label = formatTick(tick, cbStep);
@@ -1002,9 +1114,11 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                 static_cast<int32_t>(aligned.y - m.ascent - pad),
                 static_cast<uint32_t>(m.width + 2 * pad),
                 static_cast<uint32_t>(m.height + 2 * pad)};
-            spineRenderer_.drawFilledRect(cmd, clipRect, bbox, t.bboxFaceColor);
+            spineRenderer_.drawFilledRect(cmd, clipRect, backend_.extent(),
+                                          bbox, t.bboxFaceColor);
             if (t.bboxEdgeColor.a > 0.0f) {
-                spineRenderer_.drawRect(cmd, clipRect, bbox, t.bboxEdgeColor, 1.0f);
+                spineRenderer_.drawRect(cmd, clipRect, backend_.extent(),
+                                        bbox, t.bboxEdgeColor, 1.0f);
             }
         }
 
@@ -1034,7 +1148,7 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
             auto path = plot::connectionPath(textPos, dataPos, a.connection,
                                              a.shrinkA, a.shrinkB);
             if (path.size() >= 2) {
-                spineRenderer_.drawLineStrip(cmd, clipRect,
+                spineRenderer_.drawLineStrip(cmd, clipRect, backend_.extent(),
                     std::span{path}, a.arrowColor, a.arrowWidth);
 
                 // Arrowhead along the final segment's tangent.
@@ -1062,8 +1176,10 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                         {endX - rightX * headLen, endY - rightY * headLen}
                     };
                     spineRenderer_.drawLineStrip(cmd, clipRect,
+                        backend_.extent(),
                         std::span{head1, 2}, a.arrowColor, a.arrowWidth);
                     spineRenderer_.drawLineStrip(cmd, clipRect,
+                        backend_.extent(),
                         std::span{head2, 2}, a.arrowColor, a.arrowWidth);
                 }
             }
@@ -1084,9 +1200,12 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                     static_cast<int32_t>(aligned.y - m.ascent - pad),
                     static_cast<uint32_t>(m.width + 2 * pad),
                     static_cast<uint32_t>(m.height + 2 * pad)};
-                spineRenderer_.drawFilledRect(cmd, clipRect, bbox, a.bboxFaceColor);
+                spineRenderer_.drawFilledRect(cmd, clipRect,
+                                              backend_.extent(),
+                                              bbox, a.bboxFaceColor);
                 if (a.bboxEdgeColor.a > 0.0f) {
-                    spineRenderer_.drawRect(cmd, clipRect, bbox, a.bboxEdgeColor, 1.0f);
+                    spineRenderer_.drawRect(cmd, clipRect, backend_.extent(),
+                                            bbox, a.bboxEdgeColor, 1.0f);
                 }
             }
 
@@ -1115,16 +1234,21 @@ bool Renderer::savefig(plot::Figure& figure,
     }
 
     // Transparent output → clear with alpha 0 (matplotlib
-    /// savefig(transparent=True)).
-    if (options.transparent)
+    /// savefig(transparent=True)) and hide the figure patch.
+    auto savedFc = figure.style().faceColor;
+    if (options.transparent) {
         backend_.setClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        figure.style().faceColor.a = 0.0f;
+    }
 
     prepare(figure);
     renderFrame(figure);
 
     // Restore the opaque clear for subsequent frames.
-    if (options.transparent)
+    if (options.transparent) {
         backend_.setClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        figure.style().faceColor = savedFc;
+    }
 
     auto pixels = backend_.readbackRgba8();
     if (pixels.empty()) return false;

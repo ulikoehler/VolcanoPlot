@@ -309,7 +309,18 @@ The regression test system has found and verified fixes for:
   the ticks. Replaced by `Renderer::drawGrid`, which strokes line meshes
   at the real `axisTicks`/`axisMinorTicks` positions via `strokePolyline`.
 
+## Matplotlib Parity Rules
+
+- **Always consult the matplotlib source code** when determining
+  constants, defaults, formulas, or algorithmic behavior (locator steps,
+  minor-tick subdivisions, hatch spacing, legend metrics, colorbar
+  aspect, etc.). Do not guess — the real values live in
+  `lib/matplotlib/` (e.g. `ticker.py`, `legend.py`, `colorbar.py`,
+  `axis.py`, `hatch.py`). pip-installed mpl or a GitHub checkout both
+  work.
+
 ## See Also
 
 - `FEATURES-TODO.md` — matplotlib feature parity tracking
+- `TODO.md` — next major features roadmap
 - `docs/` — design documents

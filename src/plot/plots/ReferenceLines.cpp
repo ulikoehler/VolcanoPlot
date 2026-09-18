@@ -33,7 +33,7 @@ void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
     // Clip to the axes patch (matplotlib clips these lines to the axes).
     vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
                     vk::Extent2D{rect.width, rect.height}};
-    r.spineRenderer().drawLineStrip(cmd, clip,
+    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
 
@@ -63,7 +63,7 @@ void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
     };
     vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
                     vk::Extent2D{rect.width, rect.height}};
-    r.spineRenderer().drawLineStrip(cmd, clip,
+    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
 

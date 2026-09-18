@@ -23,7 +23,7 @@ struct PatchStyle {
     float dashOffset = 0.0f;
     /// mpl hatch string: '/', '\\', '|', '-', '+', 'x' (repeats = denser).
     std::string hatch;
-    float hatchSpacing = 6.0f;      ///< base spacing in pixels
+    float hatchSpacing = 24.0f;     ///< base spacing in px (mpl '/' ≈ 24)
     /// Optional extra transform applied to the path before data mapping.
     TransformPtr transform;
 };
@@ -69,7 +69,7 @@ public:
     LineStyle lineStyle = LineStyle::Solid;
     std::vector<float> dashes;
     std::string hatch;
-    float hatchSpacing = 6.0f;
+    float hatchSpacing = 24.0f;
     std::vector<Point2D> offsets;       ///< instancing offsets
     TransformPtr offsetTransform;       ///< mpl offset_transform
     std::string label_;

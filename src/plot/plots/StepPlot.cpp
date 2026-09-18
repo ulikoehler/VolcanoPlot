@@ -32,19 +32,21 @@ void StepPlot::buildStepPoints() {
     }
     switch (where_) {
     case StepWhere::Pre:
-        // Horizontal then vertical: at each x[i], y is y[i-1] then jumps to y[i].
-        stepPoints_.push_back({x_[0], y_[0]});
-        for (size_t i = 1; i < n; ++i) {
-            stepPoints_.push_back({x_[i], y_[i - 1]});  // horizontal to x[i]
-            stepPoints_.push_back({x_[i], y_[i]});       // vertical to y[i]
-        }
-        break;
-    case StepWhere::Post:
-        // Vertical then horizontal: at each x[i], y jumps to y[i] then goes horizontal.
+        // mpl 'pre': interval (x[i-1], x[i]] has value y[i] — vertical jump
+        // at x[i-1], then horizontal at y[i].
         stepPoints_.push_back({x_[0], y_[0]});
         for (size_t i = 1; i < n; ++i) {
             stepPoints_.push_back({x_[i - 1], y_[i]});  // vertical to y[i]
             stepPoints_.push_back({x_[i], y_[i]});       // horizontal to x[i]
+        }
+        break;
+    case StepWhere::Post:
+        // mpl 'post': interval [x[i], x[i+1]) has value y[i] — horizontal at
+        // y[i-1] to x[i], then vertical jump.
+        stepPoints_.push_back({x_[0], y_[0]});
+        for (size_t i = 1; i < n; ++i) {
+            stepPoints_.push_back({x_[i], y_[i - 1]});  // horizontal to x[i]
+            stepPoints_.push_back({x_[i], y_[i]});       // vertical to y[i]
         }
         break;
     case StepWhere::Mid:

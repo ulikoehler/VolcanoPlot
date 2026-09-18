@@ -83,8 +83,9 @@ struct AxisStyle {
     /// Grid line style: "-", "--", ":", "-."
     std::string gridLineStyle = "-";
     /// Minor-grid styling (used when gridWhich is "minor"/"both").
-    Color minorGridColor = Color::fromRgba8(215, 215, 215);
-    float minorGridLineWidth = 0.5f;
+    /// mpl draws minor grid lines with the same grid.* style as majors.
+    Color minorGridColor = Color::fromRgba8(176, 176, 176);
+    float minorGridLineWidth = 0.8f;
     std::string minorGridLineStyle = "-";
     /// Log scale.
     bool logScale = false;
@@ -119,8 +120,9 @@ struct LegendStyle {
     int nrows = 0;
     /// Legend title row (matplotlib legend title / title_fontproperties).
     std::string title;
-    FontProperties titleFont;
-    FontProperties font;
+    FontProperties titleFont{.size = 10.0f};
+    /// mpl legend.fontsize defaults to 'medium' (rcParams font.size).
+    FontProperties font{.size = 10.0f};
     /// Label color override; nullopt → inherit style text color.
     std::optional<Color> labelColor;
     Color faceColor = Color::fromRgba8(255, 255, 255, 200);
@@ -138,6 +140,9 @@ struct LegendStyle {
     float handleLength = 2.0f;
     float handleTextPad = 0.8f;
     float borderPad = 0.4f;
+    /// Vertical space between legend rows, in font-size units
+    /// (matplotlib legend.labelspacing).
+    float labelSpacing = 0.5f;
     float columnSpacing = 2.0f;
     float borderAxesPad = 0.5f;
     /// Whether the legend may be dragged (mpl legend.draggable()).
@@ -163,8 +168,8 @@ struct ColorbarStyle {
     bool visible = false;
     std::string colormap = "viridis";
     Color edgeColor = Color::black();
-    float width = 20.0f;       // pixel width of the color strip
-    float padding = 10.0f;     // padding from the axes rect
+    float width = 10.0f;       // pixel width of the color strip
+    float padding = 16.0f;     // padding from the axes rect
     FontProperties labelFont;
     Color labelColor = Color::black();
     /// matplotlib `extend`: "neither" (default), "min", "max", or "both" —
