@@ -561,11 +561,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `CircleCollection`
 - [x] `RegularPolyCollection`, `AsteriskPolygonCollection`
 - [x] `Patch` primitives: `Circle`, `Ellipse`, `Rectangle`, `Polygon`, `Wedge`, `FancyBboxPatch`, `FancyArrowPatch` (in `patch::` namespace)
-- [ ] `boxstyle` variants on `FancyBboxPatch` (`round`, `roundtooth`,
-      `sawtooth`, `square` + `pad`/`rounding_size` params — only a
-      rounded-rect with `pad` exists)
-- [ ] `set_clip_path` for artists (arbitrary `Path` clip, not just the
-      axes rect — needed for mpl's clip-path gallery examples)
+- [x] `boxstyle` variants on `FancyBboxPatch` — full mpl `BoxStyle`
+      grammar (`square`/`circle`/`ellipse`/`round`/`round4`/`sawtooth`/
+      `roundtooth`/`larrow`/`rarrow`/`darrow` + `pad`/`rounding_size`/
+      `tooth_size`/`mutation_scale`) via `parseBoxStyle`/`boxStylePath`;
+      `Annotation::boxStyle` for `bbox=dict(boxstyle=...)`
+- [x] `set_clip_path` for artists — `Collection::clipPath` and
+      `Annotation::clipPath` (data-coord `Path`, CPU polygon clipping of
+      fills/hatches/edges/lines, raster + vector)
 - [x] Hatch patterns (`/ \ | - + x`, repeats increase density; `o`/`.`/`*` not supported)
 - [x] `offsets` and `offset_transform` for instanced rendering (offsetTransform on Collection)
 
@@ -680,8 +683,7 @@ tri_*) are checked off in the sections above.
       `aspect` semantics (mpl `aspect=20` drives strip width; `fraction`
       drives axes shrink — `ColorbarStyle` only has pixel `width`),
       minor tick-label suppression on crowded axes, `labelpad`/
-      `tick pad` fine tuning, bezier-accurate `simple`/`fancy`/`wedge`
-      arrow bodies (currently straight-edged polygon approximations).
+      `tick pad` fine tuning.
 - [ ] **Vector/raster parity pass** — sweep the vector (SVG/PDF) path
       for fixes that landed raster-only: secondary axis labels, table
       placement outside axes, legend shadow, faux-bold titles, colorbar
@@ -692,11 +694,12 @@ tri_*) are checked off in the sections above.
       raster path; add golden-geometry tests for `emitVector` output.
 
 ### P1 — High-value features
-- [ ] **`set_clip_path` for artists** — arbitrary `Path` clipping
-      (infrastructure exists; needs API + scissor/path-clip render
-      plumbing; see §14).
-- [ ] **`boxstyle` variants** — `FancyBboxPatch` `roundtooth`/`sawtooth`
-      + `pad`/`rounding_size` (only a padded rounded rect exists; §14).
+- [x] **`set_clip_path` for artists** — done (CPU polygon clipping on
+      `Collection`/`Annotation`, raster + vector; §14).
+- [x] **`boxstyle` variants** — done (full mpl `BoxStyle` grammar; §14).
+- [x] **Bezier-accurate arrow bodies** — `simple`/`fancy`/`wedge` now
+      use mpl's `make_wedged_bezier2`/`get_parallels`/circle-split
+      construction (quad-Bézier outlines flattened at draw time).
 - [ ] **MathText coverage** — expand the subset: `\sum`/`\int` large
       operators, `\left(\right` auto-sized delimiters, nested scripts
       (fractions/radicals/accents already done; §5).

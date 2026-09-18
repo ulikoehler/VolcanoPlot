@@ -974,6 +974,57 @@ void f118_arrowstyle_fancy(Figure& fig) {
     a2->arrowSpec = parseArrowStyle("wedge");
 }
 
+
+void f119_clip_path(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    // Line clipped to a circle + filled rect clipped to the same circle.
+    auto lc = std::make_unique<LineCollection>(
+        std::vector<std::vector<Point2D>>{
+            {{0, 5}, {10, 5}}, {{0, 6.2f}, {10, 6.2f}}});
+    lc->edgeColors = {Color::blue(), Color::red()};
+    lc->lineWidths = {3.0f, 3.0f};
+    lc->clipPath = Path::ellipse({5, 5}, 3.0f, 3.0f);
+    ax->addPlot(std::move(lc));
+    auto p = patch::Rectangle(3, 1, 4, 3);
+    p.style.face = Color::fromRgba8(180, 220, 180);
+    p.style.edge.a = 0;
+    auto pc = std::make_unique<PatchCollection>(std::vector<Patch>{p});
+    pc->clipPath = Path::ellipse({5, 5}, 3.0f, 3.0f);
+    ax->addPlot(std::move(pc));
+}
+
+void f120_boxstyle(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    auto spec1 = *parseBoxStyle("sawtooth,pad=0.4");
+    auto p1 = patch::FancyBboxPatch(0.8f, 5.5f, 3.4f, 3.4f, spec1);
+    p1.style.face = Color::fromRgba8(200, 200, 255);
+    ax->addPatch(p1);
+    auto spec2 = *parseBoxStyle("roundtooth,pad=0.4");
+    auto p2 = patch::FancyBboxPatch(5.2f, 5.5f, 3.4f, 3.4f, spec2);
+    p2.style.face = Color::fromRgba8(200, 255, 200);
+    ax->addPatch(p2);
+    auto spec3 = *parseBoxStyle("round,pad=0.3,rounding_size=0.6");
+    auto p3 = patch::FancyBboxPatch(3.2f, 1.0f, 3.6f, 3.0f, spec3);
+    p3.style.face = Color::fromRgba8(255, 220, 200);
+    ax->addPatch(p3);
+}
+
+void f121_arrow_bezier(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 10); ax->setYlim(0, 10);
+    auto* a1 = ax->annotate(2, 2, 5, 6, "");
+    a1->arrowSpec = parseArrowStyle("simple");
+    a1->connection = parseConnectionStyle("arc3,rad=0.3");
+    auto* a2 = ax->annotate(8, 2, 5, 6, "");
+    a2->arrowSpec = parseArrowStyle("fancy");
+    a2->connection = parseConnectionStyle("arc3,rad=-0.3");
+    auto* a3 = ax->annotate(2, 9, 8, 8, "");
+    a3->arrowSpec = parseArrowStyle("wedge,tail_width=0.5");
+    a3->connection = parseConnectionStyle("arc3,rad=0.2");
+}
+
 // ═══ Tier 11 — multi-axes layout ════════════════════════════════════════
 
 void f106_subplots_2x2(Figure& fig) {
@@ -1215,6 +1266,9 @@ const Feature kFeatures[] = {
     {"116_arrowstyle_filled",  f116_arrowstyle_filled},
     {"117_arrowstyle_double",  f117_arrowstyle_double},
     {"118_arrowstyle_fancy",   f118_arrowstyle_fancy},
+    {"119_clip_path",          f119_clip_path},
+    {"120_boxstyle",           f120_boxstyle},
+    {"121_arrow_bezier",       f121_arrow_bezier},
 };
 
 } // namespace

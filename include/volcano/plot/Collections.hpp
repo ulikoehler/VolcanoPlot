@@ -6,6 +6,7 @@
 #include "volcano/plot/Stroke.hpp"
 #include "volcano/plot/Transform.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,10 @@ namespace patch {
 /// Rounded-box patch: (x, y, w, h) with corner rounding `pad` (data units).
 [[nodiscard]] Patch FancyBboxPatch(float x, float y, float w, float h,
                                    float pad = 0.1f);
+/// mpl `FancyBboxPatch` with a full `boxstyle` spec (pad etc. ×
+/// `spec.mutationSize`, in data units).
+[[nodiscard]] Patch FancyBboxPatch(float x, float y, float w, float h,
+                                   const BoxStyleSpec& spec);
 /// Simple arrow patch: shaft from `a` to `b` with a triangular head.
 [[nodiscard]] Patch FancyArrowPatch(Point2D a, Point2D b,
                                     float headWidth = 0.05f,
@@ -72,6 +77,10 @@ public:
     float hatchSpacing = 24.0f;
     std::vector<Point2D> offsets;       ///< instancing offsets
     TransformPtr offsetTransform;       ///< mpl offset_transform
+    /// mpl set_clip_path: optional clip path in data coords. Fill, edge,
+    /// hatch and line geometry is clipped to its outline (single outer
+    /// ring; flattened) at draw time.
+    std::optional<Path> clipPath;
     std::string label_;
 
     void prepare(render::Renderer&) override {} // CPU tessellation per frame
@@ -97,6 +106,7 @@ protected:
                             Point2D itemOriginPx);
     /// Fill+edge+hatch one pixel-space polygon soup into the draw lists.
     /// `sketchScale` > 0 applies xkcd-style wobble to stroked edges.
+    /// `clipRing` (pixel space) additionally clips all emitted geometry.
     static void drawSubpaths(vk::CommandBuffer cmd,
                              render::Renderer& r,
                              vk::Rect2D clip, vk::Extent2D res,
@@ -104,13 +114,19 @@ protected:
                              Color face, Color edge, float lw,
                              std::span<const float> dash,
                              const std::string& hatch, float hatchSpacing,
-                             float sketchScale = 0.0f);
+                             float sketchScale = 0.0f,
+                             std::span<const Point2D> clipRing = {});
     /// Vector-export counterpart of drawSubpaths: fill + edge + hatch.
     static void emitSubpaths(render::VectorCanvas& c,
                              const std::vector<Path::Subpath>& subs,
                              Color face, Color edge, float lw,
                              std::span<const float> dash,
-                             const std::string& hatch, float hatchSpacing);
+                             const std::string& hatch, float hatchSpacing,
+                             std::span<const Point2D> clipRing = {});
+
+    /// Resolve `clipPath` to a pixel-space ring (first/largest subpath),
+    /// or empty when unset.
+    std::vector<Point2D> clipRingPx(const Axes& axes, Rect2D rect) const;
 };
 
 /// PatchCollection — a list of styled patches.

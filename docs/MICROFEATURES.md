@@ -227,10 +227,18 @@ interpreting any data-carrying tier.
 | 117 | `arrowstyle_double` | `<|-|>` filled heads both ends, `<->` open |
 | 118 | `arrowstyle_fancy` | `fancy`/`wedge` filled body arrows |
 
+## Tier 14 — Paths (119–121)
+
+| # | Name | Checks |
+|---|------|--------|
+| 119 | `clip_path` | line + patch `clipPath` to a circle |
+| 120 | `boxstyle` | `sawtooth`/`roundtooth`/`round` FancyBboxPatch |
+| 121 | `arrow_bezier` | `simple`/`fancy`/`wedge` on arc3 connections |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.sh`
 2. Scan `comparison/` top-down (filename order = check order).
 3. At the **first** mismatch: fix that feature, regenerate with
    `--filter <name>`, then rescan — higher-tier failures often evaporate.
-4. Only compare complex gallery plots once all 118 pass inspection.
+4. Only compare complex gallery plots once all 121 pass inspection.

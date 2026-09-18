@@ -141,6 +141,9 @@ struct TextAnnotation {
     float bboxPadding = 4.0f;
     /// Background box corner radius in pixels (0 = square corners).
     float bboxCornerRadius = 0.0f;
+    /// mpl bbox=dict(boxstyle=...) — when set, the bbox outline uses this
+    /// boxstyle path instead of a plain rectangle.
+    std::optional<BoxStyleSpec> boxStyle;
 
     /// Whether to clip the text to the axes rect (matplotlib clip_on).
     /// Default false (matplotlib default); set true to clip data-space text.
@@ -198,11 +201,17 @@ struct Annotation {
     Color bboxFaceColor = Color::transparent();
     Color bboxEdgeColor = Color::transparent();
     float bboxPadding = 4.0f;
+    /// mpl bbox=dict(boxstyle=...) — outline path for the bbox.
+    std::optional<BoxStyleSpec> boxStyle;
 
     /// Shrink the arrow on both ends by this many pixels
     /// (so it doesn't overlap the text or the data point marker).
     float shrinkA = 2.0f;  ///< shrink at the text end
     float shrinkB = 2.0f;  ///< shrink at the data point end
+
+    /// mpl set_clip_path: optional clip path in data coords; the arrow
+    /// geometry is clipped to its outline at draw time.
+    std::optional<Path> clipPath;
 };
 
 class Axes;

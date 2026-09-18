@@ -341,4 +341,94 @@ clipSegmentToPolygon(Point2D a, Point2D b, std::span<const Point2D> poly) {
     return out;
 }
 
+// ─── polyline / triangle clipping ─────────────────────────────────────────
+
+std::vector<std::vector<Point2D>>
+clipPolylineToPolygon(std::span<const Point2D> points,
+                      std::span<const Point2D> poly) {
+    std::vector<std::vector<Point2D>> out;
+    if (points.size() < 2 || poly.size() < 3) return out;
+    std::vector<Point2D> cur;
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
+        for (auto [s, e] : clipSegmentToPolygon(points[i], points[i + 1],
+                                                poly)) {
+            if (!cur.empty() &&
+                (std::abs(cur.back().x - s.x) > 1e-4f ||
+                 std::abs(cur.back().y - s.y) > 1e-4f)) {
+                if (cur.size() > 1) out.push_back(std::move(cur));
+                cur.clear();
+            }
+            if (cur.empty()) cur.push_back(s);
+            cur.push_back(e);
+        }
+    }
+    if (cur.size() > 1) out.push_back(std::move(cur));
+    return out;
+}
+
+std::vector<Point2D>
+clipRingToRing(std::span<const Point2D> subject,
+               std::span<const Point2D> clipRing) {
+    if (clipRing.size() < 3) return {};
+    std::vector<Point2D> out(subject.begin(), subject.end());
+    // Signed area → inside is left of each edge for CCW (y-up math);
+    // normalize so `inside` means cross(edge, toPoint) has sign `w`.
+    float area = 0;
+    for (size_t i = 0, j = clipRing.size() - 1; i < clipRing.size(); j = i++)
+        area += clipRing[j].x * clipRing[i].y -
+                clipRing[i].x * clipRing[j].y;
+    float w = area >= 0 ? 1.0f : -1.0f;
+    size_t n = clipRing.size();
+    for (size_t i = 0, j = n - 1; i < n; j = i++) {
+        Point2D e0 = clipRing[j], e1 = clipRing[i];
+        float ex = e1.x - e0.x, ey = e1.y - e0.y;
+        auto inside = [&](Point2D p) {
+            return w * (ex * (p.y - e0.y) - ey * (p.x - e0.x)) >= -1e-9f;
+        };
+        auto intersect = [&](Point2D a, Point2D b) {
+            float d = (b.x - a.x) * ey - (b.y - a.y) * ex;
+            float t = std::abs(d) < 1e-12f ? 0.0f
+                      : ((e0.x - a.x) * ey - (e0.y - a.y) * ex) / d;
+            return Point2D{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
+        };
+        std::vector<Point2D> next;
+        for (size_t k = 0, m = out.size(), l = m - 1; k < m; l = k++) {
+            Point2D a = out[l], b = out[k];
+            bool inA = inside(a), inB = inside(b);
+            if (inB) {
+                if (!inA) next.push_back(intersect(a, b));
+                next.push_back(b);
+            } else if (inA) {
+                next.push_back(intersect(a, b));
+            }
+        }
+        out = std::move(next);
+        if (out.empty()) break;
+    }
+    return out;
+}
+
+std::vector<Point2D>
+clipTrianglesToPolygon(std::span<const Point2D> triVerts,
+                       std::span<const Point2D> clipRing) {
+    std::vector<Point2D> out;
+    if (triVerts.size() < 3 || clipRing.size() < 3) return out;
+    auto clipTris = earClip(clipRing);
+    for (size_t t = 0; t + 2 < triVerts.size(); t += 3) {
+        Point2D tri[3] = {triVerts[t], triVerts[t + 1], triVerts[t + 2]};
+        for (size_t c = 0; c + 2 < clipTris.size(); c += 3) {
+            Point2D ct[3] = {clipTris[c], clipTris[c + 1], clipTris[c + 2]};
+            auto clipped = clipRingToRing(std::span<const Point2D>{tri, 3},
+                                          std::span<const Point2D>{ct, 3});
+            // Fan-triangulate the clipped polygon.
+            for (size_t k = 2; k < clipped.size(); ++k) {
+                out.push_back(clipped[0]);
+                out.push_back(clipped[k - 1]);
+                out.push_back(clipped[k]);
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace volcano::plot

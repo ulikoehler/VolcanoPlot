@@ -879,6 +879,45 @@ def f118_arrowstyle_fancy(fig, out):
                 arrowprops=dict(arrowstyle="wedge"))
 
 
+
+def f119_clip_path(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    clip = mpatches.Circle((5, 5), 3.0, transform=ax.transData)
+    for y, c in ((5, "blue"), (6.2, "red")):
+        ln, = ax.plot([0, 10], [y, y], color=c, lw=3)
+        ln.set_clip_path(clip)
+    r = mpatches.Rectangle((3, 1), 4, 3, facecolor="#b4dcb4",
+                           edgecolor="none")
+    ax.add_patch(r)
+    r.set_clip_path(clip)
+
+def f120_boxstyle(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    ax.add_patch(mpatches.FancyBboxPatch((0.8, 5.5), 3.4, 3.4,
+                 boxstyle="sawtooth,pad=0.4", facecolor="#c8c8ff",
+                 mutation_scale=1.0))
+    ax.add_patch(mpatches.FancyBboxPatch((5.2, 5.5), 3.4, 3.4,
+                 boxstyle="roundtooth,pad=0.4", facecolor="#c8ffc8",
+                 mutation_scale=1.0))
+    ax.add_patch(mpatches.FancyBboxPatch((3.2, 1.0), 3.6, 3.0,
+                 boxstyle="round,pad=0.3,rounding_size=0.6",
+                 facecolor="#ffdcc8", mutation_scale=1.0))
+
+def f121_arrow_bezier(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+    ax.annotate("", xy=(2, 2), xytext=(5, 6),
+                arrowprops=dict(arrowstyle="simple",
+                                connectionstyle="arc3,rad=0.3"))
+    ax.annotate("", xy=(8, 2), xytext=(5, 6),
+                arrowprops=dict(arrowstyle="fancy",
+                                connectionstyle="arc3,rad=-0.3"))
+    ax.annotate("", xy=(2, 9), xytext=(8, 8),
+                arrowprops=dict(arrowstyle="wedge,tail_width=0.5",
+                                connectionstyle="arc3,rad=0.2"))
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # Feature name → generator. Names/numbers match microgallery.cpp exactly.

@@ -526,25 +526,53 @@ TEST(ArrowGeom, BracketIsStrokeAcrossTip) {
 }
 
 TEST(ArrowGeom, SimpleBodyIsSinglePolygon) {
+    // mpl Simple transmute: one closed bezier outline — parallel tail,
+    // wedged head, tip at the path end.
     auto g = buildArrowGeometry(straightPath(),
                                 parseArrowStyle("simple"), 1.0f);
     ASSERT_EQ(g.fills.size(), 1u);
-    EXPECT_EQ(g.fills[0].size(), 5u);
     EXPECT_TRUE(g.strokes.empty());
-    // Tip vertex is the path end.
-    EXPECT_NEAR(g.fills[0][2].x, 100.0f, 1e-4f);
+    auto& o = g.fills[0];
+    ASSERT_GT(o.size(), 10u);   // flattened curves, not 5 corners
+    EXPECT_NEAR(o.front().x, o.back().x, 1e-3f);  // closed
+    EXPECT_NEAR(o.front().y, o.back().y, 1e-3f);
+    // Tip at B(100,0); head base at hl = 0.5*ms = 5 back; head half-width
+    // hw·ms/2 = 2.5; tail half-width tw·ms/2 = 1.0.
+    float maxX = 0, minY = 1e9f, maxY = -1e9f;
+    for (auto p : o) {
+        maxX = std::max(maxX, p.x);
+        minY = std::min(minY, p.y); maxY = std::max(maxY, p.y);
+    }
+    EXPECT_NEAR(maxX, 100.0f, 0.5f);
+    EXPECT_NEAR(maxY - minY, 5.0f, 0.5f);   // head half-width 2.5 each side
+    // Tail start half-width ≈ 1.0: find verts near x≈0.
+    float tailHalf = 0;
+    for (auto p : o) if (p.x < 2.0f) tailHalf = std::max(tailHalf, std::abs(p.y));
+    EXPECT_NEAR(tailHalf, 1.0f, 0.2f);
 }
 
 TEST(ArrowGeom, WedgeIsTaperedPolygon) {
-    // mpl Wedge: half-width tail_width·ms/2 at A, ×shrink_factor mid, 0 at B.
+    // mpl Wedge: half-width tail_width·ms/2 = 1.5 at A, ×shrink_factor
+    // (0.5) at the middle, 0 at B — a smooth tapered outline.
     auto g = buildArrowGeometry(straightPath(),
                                 parseArrowStyle("wedge"), 1.0f);
     ASSERT_EQ(g.fills.size(), 1u);
-    ASSERT_EQ(g.fills[0].size(), 5u);
-    EXPECT_NEAR(g.fills[0][2].x, 100.0f, 1e-4f);        // apex at B
-    EXPECT_NEAR(std::abs(g.fills[0][0].y), 1.5f, 1e-4f); // tw·ms/2 = 1.5
-    EXPECT_NEAR(std::abs(g.fills[0][1].y), 0.75f, 1e-4f);// ×shrink 0.5
-    EXPECT_NEAR(g.fills[0][1].x, 50.0f, 1e-4f);        // mid vertex
+    auto& o = g.fills[0];
+    ASSERT_GT(o.size(), 10u);
+    EXPECT_NEAR(o.front().x, o.back().x, 1e-3f);
+    EXPECT_NEAR(o.front().y, o.back().y, 1e-3f);
+    // Half-width as a function of x along the straight path.
+    auto halfAt = [&](float x) {
+        float h = 0;
+        for (auto p : o)
+            if (std::abs(p.x - x) < 3.0f) h = std::max(h, std::abs(p.y));
+        return h;
+    };
+    EXPECT_NEAR(halfAt(0.0f), 1.5f, 0.2f);    // tw·ms/2
+    EXPECT_NEAR(halfAt(50.0f), 0.75f, 0.2f);  // ×shrink at mid
+    float tip = 0;
+    for (auto p : o) tip = std::max(tip, p.x);
+    EXPECT_NEAR(tip, 100.0f, 0.5f);           // apex at B
 }
 
 TEST(ArrowGeom, MutationScaleScalesHead) {

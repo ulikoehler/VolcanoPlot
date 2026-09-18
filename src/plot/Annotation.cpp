@@ -3,6 +3,8 @@
 #include "volcano/plot/Axes.hpp"
 
 #include <algorithm>
+#include <array>
+#include <tuple>
 #include <charconv>
 #include <cmath>
 
@@ -210,6 +212,219 @@ std::vector<Point2D> trimPathEnd(std::span<const Point2D> path, float dist) {
     return out;
 }
 
+
+// ─── mpl bezier.py ports (quadratic Bézier helpers) ───────────────────────
+
+using QuadBez = std::array<Point2D, 3>;
+
+Point2D quadAt(const QuadBez& b, float t) {
+    float u = 1.0f - t;
+    return {u*u*b[0].x + 2*u*t*b[1].x + t*t*b[2].x,
+            u*u*b[0].y + 2*u*t*b[1].y + t*t*b[2].y};
+}
+
+// mpl get_cos_sin
+std::pair<float,float> getCosSin(float x0, float y0, float x1, float y1) {
+    float d = std::hypot(x1 - x0, y1 - y0);
+    if (d == 0.0f) return {0.0f, 0.0f};
+    return {(x1 - x0) / d, (y1 - y0) / d};
+}
+
+// mpl get_normal_points → {left, right}
+std::pair<Point2D,Point2D> getNormalPoints(float cx, float cy,
+                                         float cosT, float sinT,
+                                         float length) {
+    if (length == 0.0f) return {{cx, cy}, {cx, cy}};
+    return {{cx + length * sinT, cy - length * cosT},
+            {cx - length * sinT, cy + length * cosT}};
+}
+
+// mpl find_control_points: quad bezier through c1 (t=0), mm (t=0.5), c2 (t=1)
+QuadBez findControlPoints(Point2D c1, Point2D mm, Point2D c2) {
+    return {c1, {0.5f * (4*mm.x - (c1.x + c2.x)),
+                 0.5f * (4*mm.y - (c1.y + c2.y))}, c2};
+}
+
+// mpl make_wedged_bezier2 → {left, right} quad beziers.
+std::pair<QuadBez,QuadBez> makeWedgedBezier2(const QuadBez& b, float width,
+                                           float w1 = 1.0f, float wm = 0.5f,
+                                           float w2 = 0.0f) {
+    auto [c1, cm, c3] = std::tie(b[0], b[1], b[2]);
+    auto [ct1, st1] = getCosSin(c1.x, c1.y, cm.x, cm.y);
+    auto [ct2, st2] = getCosSin(cm.x, cm.y, c3.x, c3.y);
+    auto [c1l, c1r] = getNormalPoints(c1.x, c1.y, ct1, st1, width * w1);
+    auto [c3l, c3r] = getNormalPoints(c3.x, c3.y, ct2, st2, width * w2);
+    Point2D c12{(c1.x + cm.x) * .5f, (c1.y + cm.y) * .5f};
+    Point2D c23{(cm.x + c3.x) * .5f, (cm.y + c3.y) * .5f};
+    Point2D c123{(c12.x + c23.x) * .5f, (c12.y + c23.y) * .5f};
+    auto [ct123, st123] = getCosSin(c12.x, c12.y, c23.x, c23.y);
+    auto [c123l, c123r] = getNormalPoints(c123.x, c123.y, ct123, st123,
+                                          width * wm);
+    return {findControlPoints(c1l, c123l, c3l),
+            findControlPoints(c1r, c123r, c3r)};
+}
+
+// mpl get_parallels → {left, right} quad beziers.
+std::pair<QuadBez,QuadBez> getParallels(const QuadBez& b, float width) {
+    auto [c1, cm, c2] = std::tie(b[0], b[1], b[2]);
+    float ct1, st1, ct2, st2;
+    // check_if_parallel on (c1-cm) and (cm-c2)
+    float t1 = std::atan2(c1.x - cm.x, c1.y - cm.y);
+    float t2 = std::atan2(cm.x - c2.x, cm.y - c2.y);
+    float dt = std::abs(t1 - t2);
+    bool antiParallel = std::abs(dt - float(M_PI)) < 1e-5f;
+    if (antiParallel) {
+        std::tie(ct1, st1) = getCosSin(c1.x, c1.y, c2.x, c2.y);
+        ct2 = ct1; st2 = st1;
+    } else {
+        std::tie(ct1, st1) = getCosSin(c1.x, c1.y, cm.x, cm.y);
+        std::tie(ct2, st2) = getCosSin(cm.x, cm.y, c2.x, c2.y);
+    }
+    auto [c1l, c1r] = getNormalPoints(c1.x, c1.y, ct1, st1, width);
+    auto [c2l, c2r] = getNormalPoints(c2.x, c2.y, ct2, st2, width);
+    // mpl get_intersection; falls back to midpoint on near-parallel lines.
+    auto intersect = [](float cx1, float cy1, float c1t, float s1t,
+                        float cx2, float cy2, float c2t, float s2t,
+                        Point2D fb) {
+        float a = s1t, b_ = -c1t, c = s2t, d = -c2t;
+        float ad_bc = a * d - b_ * c;
+        if (std::abs(ad_bc) < 1e-12f) return fb;
+        float r1 = s1t * cx1 - c1t * cy1;
+        float r2 = s2t * cx2 - c2t * cy2;
+        return Point2D{(d * r1 - b_ * r2) / ad_bc,
+                       (-c * r1 + a * r2) / ad_bc};
+    };
+    Point2D cml = intersect(c1l.x, c1l.y, ct1, st1, c2l.x, c2l.y, ct2, st2,
+                            {0.5f*(c1l.x + c2l.x), 0.5f*(c1l.y + c2l.y)});
+    Point2D cmr = intersect(c1r.x, c1r.y, ct1, st1, c2r.x, c2r.y, ct2, st2,
+                            {0.5f*(c1r.x + c2r.x), 0.5f*(c1r.y + c2r.y)});
+    return {{c1l, cml, c2l}, {c1r, cmr, c2r}};
+}
+
+// mpl split_de_casteljau for a quad bezier.
+std::pair<QuadBez,QuadBez> splitQuad(const QuadBez& b, float t) {
+    Point2D a{b[0].x + (b[1].x - b[0].x) * t, b[0].y + (b[1].y - b[0].y) * t};
+    Point2D c{b[1].x + (b[2].x - b[1].x) * t, b[1].y + (b[2].y - b[1].y) * t};
+    Point2D m{a.x + (c.x - a.x) * t, a.y + (c.y - a.y) * t};
+    return {{b[0], a, m}, {m, c, b[2]}};
+}
+
+// mpl split_bezier_intersecting_with_closedpath for a circle.
+// Returns {left, right}; nullopt when both ends are on the same side.
+std::optional<std::pair<QuadBez,QuadBez>>
+splitQuadAtCircle(const QuadBez& b, Point2D cc, float r) {
+    float r2 = r * r;
+    auto inside = [&](Point2D p) {
+        float dx = p.x - cc.x, dy = p.y - cc.y;
+        return dx*dx + dy*dy < r2;
+    };
+    float t0 = 0.0f, t1 = 1.0f;
+    Point2D start = quadAt(b, t0), end = quadAt(b, t1);
+    bool sIn = inside(start), eIn = inside(end);
+    if (sIn == eIn && (start.x != end.x || start.y != end.y))
+        return std::nullopt;
+    const float tol = 0.01f;
+    while (std::hypot(start.x - end.x, start.y - end.y) >= tol) {
+        float tm = 0.5f * (t0 + t1);
+        Point2D mid = quadAt(b, tm);
+        if (sIn != inside(mid)) {
+            t1 = tm;
+            if (end.x == mid.x && end.y == mid.y) break;
+            end = mid;
+        } else {
+            t0 = tm;
+            if (start.x == mid.x && start.y == mid.y) break;
+            start = mid; sIn = inside(mid);
+        }
+    }
+    return splitQuad(b, 0.5f * (t0 + t1));
+}
+
+// mpl _point_along_a_line: point at distance d from (x0,y0) toward (x1,y1)
+Point2D pointAlongLine(Point2D p0, Point2D p1, float d) {
+    float dx = p0.x - p1.x, dy = p0.y - p1.y;
+    float ff = d / std::hypot(dx, dy);
+    return {p0.x - ff * dx, p0.y - ff * dy};
+}
+
+// Fit a quadratic bezier to the sampled connection path (exact when the
+// underlying connection is itself quadratic, e.g. mpl arc3).
+QuadBez quadFit(std::span<const Point2D> path) {
+    Point2D c0 = path.front(), c2 = path.back();
+    Point2D mid = path[path.size() / 2];   // ≈ B(0.5)
+    return {c0, {2*mid.x - 0.5f*(c0.x + c2.x),
+                 2*mid.y - 0.5f*(c0.y + c2.y)}, c2};
+}
+
+// Flattened mpl arrow body built from quad-bézier control points.
+std::vector<Point2D> bezierBodyOutline(const QuadBez& arrow,
+                                       const ArrowStyleSpec& spec,
+                                       float ms) {
+    Path p;
+    auto c3 = [](Path& q, const QuadBez& b) { q.curve3(b[1], b[2]); };
+    if (spec.body == ArrowStyleSpec::Body::Wedge) {
+        auto [bl, br] = makeWedgedBezier2(arrow, spec.tailWidth * ms / 2.0f,
+                                          1.0f, spec.shrinkFactor, 0.0f);
+        p.moveTo(bl[0]); c3(p, bl);
+        p.lineTo(br[2]); c3(p, QuadBez{br[2], br[1], br[0]});
+        p.close();
+    } else if (spec.body == ArrowStyleSpec::Body::Simple) {
+        float hl = spec.headLength * ms;
+        auto split = splitQuadAtCircle(arrow, arrow[2], hl);
+        QuadBez head;
+        std::optional<QuadBez> tail;
+        if (split) { tail = split->first; head = split->second; }
+        else {
+            // Straight-line fallback (mpl NonIntersectingPathException).
+            Point2D h0 = pointAlongLine(arrow[2], arrow[1], hl);
+            head = {h0, {0.5f*(h0.x + arrow[2].x), 0.5f*(h0.y + arrow[2].y)},
+                    arrow[2]};
+        }
+        auto [hl_, hr_] = makeWedgedBezier2(head, spec.headWidth * ms / 2.0f,
+                                            1.0f, 0.5f, 0.0f);
+        if (tail) {
+            auto [tl, tr] = getParallels(*tail, spec.tailWidth * ms / 2.0f);
+            p.moveTo(tr[0]); c3(p, tr);
+            p.lineTo(hr_[0]); c3(p, hr_);
+            p.curve3(hl_[1], hl_[0]);
+            p.lineTo(tl[2]); c3(p, QuadBez{tl[2], tl[1], tl[0]});
+            p.close();
+        } else {
+            p.moveTo(hr_[0]); c3(p, hr_);
+            p.curve3(hl_[1], hl_[0]);
+            p.close();
+        }
+    } else {  // Fancy
+        float hl = spec.headLength * ms;
+        auto split = splitQuadAtCircle(arrow, arrow[2], hl);
+        QuadBez head;
+        if (split) head = split->second;
+        else {
+            Point2D h0 = pointAlongLine(arrow[2], arrow[1], hl);
+            head = {h0, {0.5f*(h0.x + arrow[2].x), 0.5f*(h0.y + arrow[2].y)},
+                    arrow[2]};
+        }
+        auto split2 = splitQuadAtCircle(arrow, arrow[2], hl * 0.8f);
+        QuadBez tail = split2 ? split2->first
+                              : QuadBez{arrow[0], arrow[0], arrow[0]};
+        auto [hl_, hr_] = makeWedgedBezier2(head, spec.headWidth * ms / 2.0f,
+                                            1.0f, 0.6f, 0.0f);
+        auto [tl, tr] = makeWedgedBezier2(tail, spec.tailWidth * ms * 0.5f,
+                                        1.0f, 0.6f, 0.3f);
+        auto split3 = splitQuadAtCircle(arrow, arrow[0],
+                                        spec.tailWidth * ms * 0.3f);
+        Point2D tailStart = split3 ? split3->first[2] : arrow[0];
+        p.moveTo(tailStart);
+        p.lineTo(tr[0]); c3(p, tr);
+        p.lineTo(hr_[0]); c3(p, hr_);
+        p.curve3(hl_[1], hl_[0]);
+        p.lineTo(tl[2]); c3(p, QuadBez{tl[2], tl[1], tl[0]});
+        p.lineTo(tailStart);
+        p.close();
+    }
+    auto pts = p.flatten(24);
+    return pts;
+}
 } // namespace
 
 ArrowGeometry buildArrowGeometry(std::span<const Point2D> path,
@@ -221,36 +436,10 @@ ArrowGeometry buildArrowGeometry(std::span<const Point2D> path,
     float hl = spec.headLength * ms;
     float hw = spec.headWidth * ms;
 
-    // Named full-body styles: one filled polygon swept along the path.
+    // Named full-body styles: mpl Simple/Fancy/Wedge transmute — one
+    // filled bezier outline swept along the connection path.
     if (spec.body != ArrowStyleSpec::Body::None) {
-        Point2D a = path.front(), b = path.back();
-        auto f = frameAt(path, true);
-        if (spec.body == ArrowStyleSpec::Body::Wedge) {
-            // mpl Wedge: closed shape with half-width tail_width·ms/2 at
-            // the start, ×shrink_factor at the middle, 0 at the tip.
-            auto fa = frameAt(path, false);
-            float h1 = spec.tailWidth * ms * 0.5f;
-            float hm = h1 * spec.shrinkFactor;
-            Point2D mid = path[path.size() / 2];
-            g.fills.push_back({
-                {a.x + fa.n.x * h1, a.y + fa.n.y * h1},
-                {mid.x + fa.n.x * hm, mid.y + fa.n.y * hm},
-                b,
-                {mid.x - fa.n.x * hm, mid.y - fa.n.y * hm},
-                {a.x - fa.n.x * h1, a.y - fa.n.y * h1}});
-        } else {
-            // Simple/Fancy: tail rectangle + head triangle along the path.
-            float tw = spec.tailWidth * ms * 0.5f;
-            Point2D headBase = pointBackAlongPath(path, hl);
-            g.fills.push_back({
-                {a.x + f.n.x * tw, a.y + f.n.y * tw},
-                {headBase.x + f.n.x * (hw * 0.5f),
-                 headBase.y + f.n.y * (hw * 0.5f)},
-                b,
-                {headBase.x - f.n.x * (hw * 0.5f),
-                 headBase.y - f.n.y * (hw * 0.5f)},
-                {a.x - f.n.x * tw, a.y - f.n.y * tw}});
-        }
+        g.fills.push_back(bezierBodyOutline(quadFit(path), spec, ms));
         return g;
     }
 

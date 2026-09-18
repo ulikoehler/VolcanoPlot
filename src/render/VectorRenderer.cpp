@@ -489,10 +489,49 @@ void VectorRenderer::emitAnnotations(const plot::Axes& axes, Rect2D rect,
                     spec.mutationSize *= dpi / 72.0f;
                     auto geo = plot::buildArrowGeometry(
                         path, spec, a.arrowWidth);
+                    // Optional artist clip path (data coords → px ring).
+                    std::vector<plot::Point2D> ring;
+                    if (a.clipPath) {
+                        auto subs = a.clipPath->toPolylines();
+                        const plot::Path::Subpath* best = nullptr;
+                        for (auto& sp : subs)
+                            if (!best ||
+                                sp.points.size() > best->points.size())
+                                best = &sp;
+                        if (best && best->points.size() >= 3)
+                            for (auto p : best->points) {
+                                auto f2 = axes.dataToFraction(p);
+                                ring.push_back(
+                                    {rect.x + f2.x * float(rect.width),
+                                     rect.y + (1.0f - f2.y) *
+                                                  float(rect.height)});
+                            }
+                    }
                     Pen p = penOf(a.arrowColor, a.arrowWidth);
-                    for (auto& s : geo.strokes) c.polyline(s, p);
-                    for (auto& f : geo.fills)
-                        c.polygon(f, a.arrowColor);
+                    for (auto& s : geo.strokes) {
+                        if (ring.empty()) {
+                            c.polyline(s, p);
+                        } else {
+                            for (auto& piece :
+                                 plot::clipPolylineToPolygon(
+                                     std::span<const plot::Point2D>{s},
+                                     ring))
+                                c.polyline(piece, p);
+                        }
+                    }
+                    for (auto& f : geo.fills) {
+                        if (ring.empty()) {
+                            c.polygon(f, a.arrowColor);
+                        } else {
+                            auto tris = plot::clipTrianglesToPolygon(
+                                plot::earClip(f), ring);
+                            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                                plot::Point2D t[3] = {tris[i], tris[i+1],
+                                                      tris[i+2]};
+                                c.polygon(t, a.arrowColor);
+                            }
+                        }
+                    }
                 } else if (path.size() >= 2) {
                     Pen p = penOf(a.arrowColor, a.arrowWidth);
                     c.polyline(path, p);
@@ -521,17 +560,34 @@ void VectorRenderer::emitAnnotations(const plot::Axes& axes, Rect2D rect,
                     auto al = plot::alignText(textPos, a.halign, a.valign,
                                               m.width, m.height, m.ascent);
                     float pad = a.bboxPadding;
-                    fillRect(c, {int32_t(al.x - pad),
-                                 int32_t(al.y - m.ascent - pad),
-                                 uint32_t(m.width + 2 * pad),
-                                 uint32_t(m.height + 2 * pad)},
-                             a.bboxFaceColor);
-                    if (a.bboxEdgeColor.a > 0.0f)
-                        strokeRect(c, {int32_t(al.x - pad),
+                    plot::Rect2D brect{int32_t(al.x - pad),
                                        int32_t(al.y - m.ascent - pad),
                                        uint32_t(m.width + 2 * pad),
-                                       uint32_t(m.height + 2 * pad)},
-                                   penOf(a.bboxEdgeColor, 1.0f));
+                                       uint32_t(m.height + 2 * pad)};
+                    if (a.boxStyle) {
+                        auto bs = *a.boxStyle;
+                        bs.mutationSize *= a.fontSize * 16.0f;
+                        auto path = plot::boxStylePath(float(brect.x),
+                                                       float(brect.y),
+                                                       float(brect.width),
+                                                       float(brect.height),
+                                                       bs);
+                        for (auto& sp : path.toPolylines(24)) {
+                            if (a.bboxFaceColor.a > 0.0f)
+                                c.polygon(sp.points, a.bboxFaceColor);
+                            if (a.bboxEdgeColor.a > 0.0f) {
+                                auto ring = sp.points;
+                                if (sp.closed && !ring.empty())
+                                    ring.push_back(ring.front());
+                                c.polyline(ring,
+                                           penOf(a.bboxEdgeColor, 1.0f));
+                            }
+                        }
+                    } else {
+                        fillRect(c, brect, a.bboxFaceColor);
+                        if (a.bboxEdgeColor.a > 0.0f)
+                            strokeRect(c, brect, penOf(a.bboxEdgeColor, 1.0f));
+                    }
                 }
                 auto dp = plot::alignText(textPos, a.halign, a.valign,
                                           m.width, m.height, m.ascent);

@@ -1154,14 +1154,42 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                 spec.mutationSize *= dpi / 72.0f;
                 auto geo = plot::buildArrowGeometry(path, spec,
                                                     a.arrowWidth);
+                // Optional artist clip path (data coords → px ring).
+                std::vector<plot::Point2D> ring;
+                if (a.clipPath) {
+                    auto subs = a.clipPath->toPolylines();
+                    const plot::Path::Subpath* best = nullptr;
+                    for (auto& sp : subs)
+                        if (!best || sp.points.size() > best->points.size())
+                            best = &sp;
+                    if (best && best->points.size() >= 3)
+                        for (auto p : best->points) {
+                            auto f2 = axes.dataToFraction(p);
+                            ring.push_back(
+                                {rect.x + f2.x * float(rect.width),
+                                 rect.y + (1.0f - f2.y) * float(rect.height)});
+                        }
+                }
                 vk::Extent2D res{backend_.extent().width,
                                  backend_.extent().height};
-                for (auto& s : geo.strokes)
-                    spineRenderer_.drawLineStrip(cmd, clipRect,
-                        backend_.extent(), std::span{s},
-                        a.arrowColor, a.arrowWidth);
+                for (auto& s : geo.strokes) {
+                    if (ring.empty()) {
+                        spineRenderer_.drawLineStrip(cmd, clipRect,
+                            backend_.extent(), std::span{s},
+                            a.arrowColor, a.arrowWidth);
+                    } else {
+                        for (auto& piece : plot::clipPolylineToPolygon(
+                                 std::span<const plot::Point2D>{s}, ring))
+                            spineRenderer_.drawLineStrip(cmd, clipRect,
+                                backend_.extent(),
+                                std::span<const plot::Point2D>{piece},
+                                a.arrowColor, a.arrowWidth);
+                    }
+                }
                 for (auto& f : geo.fills) {
                     auto tris = plot::earClip(f);
+                    if (!ring.empty())
+                        tris = plot::clipTrianglesToPolygon(tris, ring);
                     if (!tris.empty())
                         spineRenderer_.drawTriangles(cmd, clipRect, res,
                             std::span{tris}, a.arrowColor);
@@ -1219,12 +1247,45 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                     static_cast<int32_t>(aligned.y - m.ascent - pad),
                     static_cast<uint32_t>(m.width + 2 * pad),
                     static_cast<uint32_t>(m.height + 2 * pad)};
-                spineRenderer_.drawFilledRect(cmd, clipRect,
-                                              backend_.extent(),
-                                              bbox, a.bboxFaceColor);
-                if (a.bboxEdgeColor.a > 0.0f) {
-                    spineRenderer_.drawRect(cmd, clipRect, backend_.extent(),
-                                            bbox, a.bboxEdgeColor, 1.0f);
+                if (a.boxStyle) {
+                    // mpl bbox=dict(boxstyle=...): outline path in px space.
+                    // mutation_size = fontsize (pt) × dpi/72, matching mpl.
+                    auto bs = *a.boxStyle;
+                    bs.mutationSize *= a.fontSize * 16.0f;
+                    auto path = plot::boxStylePath(float(bbox.x),
+                                                   float(bbox.y),
+                                                   float(bbox.width),
+                                                   float(bbox.height),
+                                                   bs);
+                    vk::Extent2D res{backend_.extent().width,
+                                     backend_.extent().height};
+                    for (auto& sp : path.toPolylines(24)) {
+                        if (a.bboxFaceColor.a > 0.0f) {
+                            auto tris = plot::earClip(sp.points);
+                            if (!tris.empty())
+                                spineRenderer_.drawTriangles(
+                                    cmd, clipRect, res,
+                                    std::span{tris}, a.bboxFaceColor);
+                        }
+                        if (a.bboxEdgeColor.a > 0.0f) {
+                            auto ring = sp.points;
+                            if (sp.closed && !ring.empty())
+                                ring.push_back(ring.front());
+                            spineRenderer_.drawLineStrip(
+                                cmd, clipRect, backend_.extent(),
+                                std::span<const plot::Point2D>{ring},
+                                a.bboxEdgeColor, 1.0f);
+                        }
+                    }
+                } else {
+                    spineRenderer_.drawFilledRect(cmd, clipRect,
+                                                  backend_.extent(),
+                                                  bbox, a.bboxFaceColor);
+                    if (a.bboxEdgeColor.a > 0.0f) {
+                        spineRenderer_.drawRect(cmd, clipRect,
+                                                backend_.extent(),
+                                                bbox, a.bboxEdgeColor, 1.0f);
+                    }
                 }
             }
 

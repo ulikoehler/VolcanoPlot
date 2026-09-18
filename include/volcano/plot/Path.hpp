@@ -4,7 +4,9 @@
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Transform.hpp"
 
+#include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -97,5 +99,50 @@ public:
 /// Clip a line segment to a polygon; returns the inside sub-segments.
 [[nodiscard]] std::vector<std::pair<Point2D, Point2D>>
 clipSegmentToPolygon(Point2D a, Point2D b, std::span<const Point2D> poly);
+
+/// Clip a polyline to a polygon; returns the inside sub-polylines
+/// (contiguous runs are stitched back together).
+[[nodiscard]] std::vector<std::vector<Point2D>>
+clipPolylineToPolygon(std::span<const Point2D> points,
+                      std::span<const Point2D> poly);
+
+/// Sutherland–Hodgman clip of a subject ring against a convex clip ring.
+/// Winding of `clipRing` is normalized internally.
+[[nodiscard]] std::vector<Point2D>
+clipRingToRing(std::span<const Point2D> subject,
+               std::span<const Point2D> clipRing);
+
+/// Clip a non-indexed triangle soup (3 verts per triangle) to an
+/// arbitrary simple clip polygon (convex or concave, single ring).
+/// Implemented by ear-clipping `clipRing` into triangles and
+/// Sutherland–Hodgman-clipping each subject triangle against each
+/// clip triangle.
+[[nodiscard]] std::vector<Point2D>
+clipTrianglesToPolygon(std::span<const Point2D> triVerts,
+                       std::span<const Point2D> clipRing);
+
+/// mpl `boxstyle` spec (BoxStyle._Base) — used by `FancyBboxPatch` and
+/// annotation bboxes. Sizes are expressed in units of `mutationSize`
+/// (mpl `mutation_scale`; for annotation bboxes = fontsize × dpi/72).
+struct BoxStyleSpec {
+    enum class Kind { Square, Circle, Ellipse, Round, Round4,
+                      Sawtooth, Roundtooth, LArrow, RArrow, DArrow };
+    Kind kind = Kind::Round;
+    float pad = 0.3f;            ///< mpl `pad` (× mutationSize)
+    float roundingSize = -1.0f;  ///< <0 → mpl default (round: pad, round4: pad/2)
+    float toothSize = -1.0f;     ///< <0 → mpl default (sawtooth: pad/2)
+    float mutationSize = 1.0f;   ///< scale applied to pad/rounding/tooth sizes
+};
+
+/// mpl `BoxStyle("name,pad=0.3,...")` string grammar. Names: square,
+/// circle, ellipse, round, round4, sawtooth, roundtooth, larrow, rarrow,
+/// darrow. Params: pad, rounding_size, tooth_size, mutation_scale.
+/// Returns nullopt for unknown names.
+[[nodiscard]] std::optional<BoxStyleSpec> parseBoxStyle(std::string_view s);
+
+/// Build the outline `Path` of a mpl boxstyle around the rect
+/// (x0, y0, w, h), in the caller's coordinate space.
+[[nodiscard]] Path boxStylePath(float x0, float y0, float w, float h,
+                                const BoxStyleSpec& spec);
 
 } // namespace volcano::plot
