@@ -415,7 +415,7 @@ public:
 
 private:
     /// Apply 5% padding and degenerate-range fixup to a raw min/max viewport.
-    static void finalizeAutoscale(Viewport& v);
+    void finalizeAutoscale(Viewport& v) const;
     /// Install a converter's axisInfo defaults on 'x' or 'y'.
     void applyAxisInfo(const UnitConverter& conv, char axis);
     /// Reinstall FixedLocator/FixedFormatter for the category list.

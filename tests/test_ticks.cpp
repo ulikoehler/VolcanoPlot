@@ -334,15 +334,16 @@ TEST(TickRender, MinorTicksAddMarks) {
     // Enabling minor ticks adds extra marks below the axes edge.
     TickFigure off(256);
     auto imgOff = off.render();
+    uint32_t bot = off.axes->rect.y + off.axes->rect.height;
+    uint32_t x0 = off.axes->rect.x + 4, x1 = x0 + off.axes->rect.width - 8;
 
     TickFigure on(256);
     on.axes->minorticksOn();
     auto imgOn = on.render();
 
-    // Axes rect bottom ≈ y 235 (default margins). Tick marks sit just
-    // below the spine: y 237..243.
-    size_t off_ = darkInStrip(imgOff, 30, 230, 237, 243);
-    size_t on_  = darkInStrip(imgOn, 30, 230, 237, 243);
+    // Tick marks sit just below the bottom spine.
+    size_t off_ = darkInStrip(imgOff, x0, x1, bot + 1, bot + 8);
+    size_t on_  = darkInStrip(imgOn, x0, x1, bot + 1, bot + 8);
     EXPECT_GT(on_, off_) << "minor ticks should add extra tick marks";
 }
 
@@ -352,8 +353,10 @@ TEST(TickRender, TickDirectionIn) {
     tf.axes->tickParams("both", "in");
     auto img = tf.render();
 
-    // Just inside the bottom edge, above the spine (≈ y 234-235).
-    size_t inside = darkInStrip(img, 30, 230, 226, 232);
+    // Just inside the bottom edge, above the spine.
+    uint32_t bot = tf.axes->rect.y + tf.axes->rect.height;
+    uint32_t x0 = tf.axes->rect.x + 4, x1 = x0 + tf.axes->rect.width - 8;
+    size_t inside = darkInStrip(img, x0, x1, bot - 8, bot - 1);
     EXPECT_GT(inside, 4u) << "direction=in should draw ticks inside axes";
 }
 
@@ -362,8 +365,10 @@ TEST(TickRender, TickDirectionOutIsDefault) {
     auto img = tf.render();
 
     // direction=out (default): no ticks inside, marks below the spine.
-    size_t inside = darkInStrip(img, 30, 230, 226, 232);
-    size_t below = darkInStrip(img, 30, 230, 237, 243);
+    uint32_t bot = tf.axes->rect.y + tf.axes->rect.height;
+    uint32_t x0 = tf.axes->rect.x + 4, x1 = x0 + tf.axes->rect.width - 8;
+    size_t inside = darkInStrip(img, x0, x1, bot - 8, bot - 1);
+    size_t below = darkInStrip(img, x0, x1, bot + 1, bot + 8);
     EXPECT_EQ(inside, 0u) << "out ticks should not intrude into the axes";
     EXPECT_GT(below, 4u) << "out ticks should render below the axes";
 }

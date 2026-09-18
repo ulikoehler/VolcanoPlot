@@ -138,10 +138,11 @@ void BarRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
     std::vector<plot::Color> colors;
     verts.reserve(data.heights.size() * 6);
     colors.reserve(data.heights.size() * 6);
-    float n = static_cast<float>(data.heights.size());
-    float bw = data.width / n;
+    // matplotlib semantics: each bar is `width` units wide, centered on
+    // its category index i.
     for (size_t i = 0; i < data.heights.size(); ++i) {
-        float x0 = i * bw + (1.0f - data.width) * 0.5f;
+        float x0 = float(i) + (1.0f - data.width) * 0.5f;
+        float bw = data.width;
         float x1 = x0 + bw;
         float h = data.heights[i];
         plot::Point2D bl{x0, 0}, br{x1, 0}, tl{x0, h}, tr{x1, h};

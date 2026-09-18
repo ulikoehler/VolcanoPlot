@@ -34,8 +34,8 @@ struct CatFigure {
         : harness(size, size, vk::SampleCountFlagBits::e1), figure(1, 1) {
         axes = figure.addAxes(0, 0);
         axes->setStyle(flatTestStyle());
-        figure.layout(Extent2D{size, size});
-        axes->rect = {0, 0, size, size};
+        figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+        figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
     }
     Image render() { return harness.render(figure); }
 };
@@ -339,18 +339,24 @@ TEST(CategoryRender, CategoricalLinePositions) {
     auto isRed = [](const Pixel& p) {
         return p.r > 150 && p.r > p.g + 40 && p.r > p.b + 40;
     };
-    // Peak near column ~128, upper half.
-    size_t centerRed = 0;
-    for (uint32_t y = 10; y < 90; ++y)
-        for (uint32_t x = 118; x < 138; ++x)
-            if (isRed(img.get(x, y))) ++centerRed;
-    EXPECT_GT(centerRed, 0u);
-    // Endpoints near left/right edges, lower half.
-    size_t edgeRed = 0;
-    for (uint32_t y = 170; y < 230; ++y)
-        for (uint32_t x = 0; x < 40; ++x)
-            if (isRed(img.get(x, y))) ++edgeRed;
-    EXPECT_GT(edgeRed, 0u);
+    // Peak at "b" (data 1, 0.9) and endpoints at "a"/"c" (data 0/2, 0.2).
+    // Categories map to x = 0,1,2 → the peak lands mid-axes, endpoints
+    // near the left/right edges in the lower half.
+    auto near = [&](float dx, float dy, int rad) {
+        const auto& v = cf.axes->viewport();
+        const auto& r = cf.axes->rect;
+        float nx = (dx - v.x.min) / v.x.span();
+        float ny = (dy - v.y.min) / v.y.span();
+        int px = int(r.x + nx * r.width);
+        int py = int(r.y + (1.0f - ny) * r.height);
+        size_t n = 0;
+        for (int y = py - rad; y <= py + rad; ++y)
+            for (int x = px - rad; x <= px + rad; ++x)
+                if (x >= 0 && y >= 0 && isRed(img.get(x, y))) ++n;
+        return n;
+    };
+    EXPECT_GT(near(1.0f, 0.9f, 8), 0u) << "peak at 'b' missing";
+    EXPECT_GT(near(0.0f, 0.2f, 8), 0u) << "endpoint at 'a' missing";
 }
 
 TEST(DateRender, DateAxisRendersLine) {

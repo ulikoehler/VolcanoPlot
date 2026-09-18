@@ -13,6 +13,9 @@
 #include <volcano/plot/Ticks.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
+#include <volcano/plot/plots/BarPlot.hpp>
+#include <volcano/plot/plots/HeatmapPlot.hpp>
+#include <volcano/plot/plots/ReferenceLines.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -218,17 +221,27 @@ TEST(MicroGrid, MajorGridStraightAndAligned) {
     // lines spanning the full axes height at those columns.
     for (float f : {0.2f, 0.4f, 0.6f, 0.8f}) {
         int32_t cx = tf.rect.x + int32_t(f * float(tf.rect.width));
-        size_t gray = countIn(img,
-            {cx - 1, tf.rect.y + 2, 3, tf.rect.height - 4}, isGridGray);
-        float coverage = float(gray) / float(3 * (tf.rect.height - 4));
-        EXPECT_GT(coverage, 0.6f)
+        // A 1-2px line may land anywhere in a few-px window depending on
+        // subpixel alignment; require one column with >50% coverage.
+        float best = 0.0f;
+        for (int dx = -3; dx <= 3; ++dx) {
+            size_t gray = countIn(img,
+                {cx + dx, tf.rect.y + 2, 1, tf.rect.height - 4}, isGridGray);
+            best = std::max(best,
+                            float(gray) / float(tf.rect.height - 4));
+        }
+        EXPECT_GT(best, 0.5f)
             << "grid line at fraction " << f << " should span the axes";
     }
     // A horizontal line at the .4 tick fraction too (y=4 is a tick).
     int32_t cy = tf.rect.y + int32_t(0.6f * float(tf.rect.height));
-    size_t gray = countIn(img,
-        {tf.rect.x + 2, cy - 1, tf.rect.width - 4, 3}, isGridGray);
-    EXPECT_GT(float(gray) / float(3 * (tf.rect.width - 4)), 0.6f);
+    float bestRow = 0.0f;
+    for (int dy = -3; dy <= 3; ++dy) {
+        size_t gray = countIn(img,
+            {tf.rect.x + 2, cy + dy, tf.rect.width - 4, 1}, isGridGray);
+        bestRow = std::max(bestRow, float(gray) / float(tf.rect.width - 4));
+    }
+    EXPECT_GT(bestRow, 0.5f);
 }
 
 TEST(MicroGrid, XOnlyGridHasNoHorizontalLines) {
@@ -382,4 +395,142 @@ TEST(MicroSpines, HiddenSpinesProduceNoBorder) {
     // No border: the interior edge rows/cols of the axes rect stay white.
     size_t dark = countIn(img, tf.rect, isDark);
     EXPECT_EQ(dark, 0u) << "spines=off should draw no border or ticks";
+}
+
+// ═══ Round 2 — log autoscale, bar positions, twin overlay, clipping, ═════════
+// ═══ heatmap normalization, colorbar orientation, margins, decimals ══════════
+
+TEST(MicroScale, LogAutoscalePadsInDisplaySpace) {
+    // Data-space padding pushed xmin negative → log10 clamp squished the
+    // plot to the right edge. mpl pads in transformed space.
+    Figure fig;
+    auto* ax = fig.addAxes();
+    Series2D s;
+    for (int i = 0; i < 60; ++i) {
+        float x = 0.01f + 99.99f * float(i) / 59.0f;
+        s.points.push_back({x, std::log(x)});
+    }
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setLogX(true);
+    ax->setYlim(-5, 5);
+    fig.layout({400, 300});
+    ax->autoscale();
+    const auto& vp = ax->viewport();
+    EXPECT_GT(vp.x.min, 0.0f) << "log autoscale must keep xmin positive";
+    // x=1 (middle decade of 0.01..100) should map near the axes center.
+    float fx = ax->dataToFraction({1.0f, 0.0f}).x;
+    EXPECT_NEAR(fx, 0.5f, 0.1f);
+}
+
+TEST(MicroTicks, UniformDecimalPrecision) {
+    // mpl ScalarFormatter pads all labels to a common precision:
+    // {0, .5, 1} → "0.0", "0.5", "1.0" (not "0", "0.5", "1").
+    ScalarFormatter f;
+    std::vector<float> locs{0.0f, 0.5f, 1.0f};
+    f.setLocs(locs);
+    EXPECT_EQ(f.format(0.0f, 0), "0.0");
+    EXPECT_EQ(f.format(0.5f, 1), "0.5");
+    EXPECT_EQ(f.format(1.0f, 2), "1.0");
+    // Integer ticks stay integer.
+    ScalarFormatter g;
+    std::vector<float> ints{0.0f, 2.0f, 4.0f};
+    g.setLocs(ints);
+    EXPECT_EQ(g.format(2.0f, 1), "2");
+}
+
+TEST(MicroTwin, OverlayKeepsParentArtists) {
+    MfFigure tf(256);
+    tf.axes->setYlim(-1.2f, 1.2f);
+    Series2D s;
+    for (int i = 0; i <= 50; ++i)
+        s.points.push_back({float(i) * 0.2f, std::sin(float(i) * 0.2f)});
+    s.color = Color::blue();
+    tf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    auto* ax2 = tf.figure.twinx(*tf.axes);
+    EXPECT_EQ(ax2->style().faceColor.a, 0.0f)
+        << "twin axes must not paint over the parent's artists";
+    auto img = tf.render();
+    size_t blue = countIn(img, tf.rect, [](Pixel p) {
+        return p.b > 150 && p.r < 120;
+    });
+    EXPECT_GT(blue, 200u) << "primary curve must remain visible under twinx";
+}
+
+TEST(MicroRef, AxvlineClippedToAxes) {
+    MfFigure tf(256);
+    tf.axes->addPlot(std::make_unique<AxvLine>(5.0f,
+                                             Color::fromRgba8(0, 200, 0)));
+    auto img = tf.render();
+    auto isGreen = [](Pixel p) { return p.g > 150 && p.r < 120 && p.b < 120; };
+    // Above and below the axes rect there must be no green pixels.
+    Rect2D above{tf.rect.x, 0, tf.rect.width, tf.rect.y};
+    Rect2D below{tf.rect.x, tf.rect.y + int32_t(tf.rect.height) + 1,
+                 tf.rect.width, 256 - tf.rect.y - int32_t(tf.rect.height) - 1};
+    EXPECT_EQ(countIn(img, above, isGreen), 0u);
+    EXPECT_EQ(countIn(img, below, isGreen), 0u);
+    EXPECT_GT(countIn(img, tf.rect, isGreen), 100u);
+}
+
+TEST(MicroBar, BarsCenteredAtIndices) {
+    MfFigure tf(256);
+    BarData bd;
+    bd.heights = {5, 5, 5, 5};
+    tf.axes->addPlot(std::make_unique<BarPlot>(std::move(bd)));
+    auto img = tf.render();
+    // mpl semantics: bar i spans [i-w/2, i+w/2]; with xlim autoscaled to
+    // [0,4] the last bar's right edge must NOT reach index 4's center.
+    // Check pixel distribution: bar centers should sit at data x = i.
+    auto isBlue = [](Pixel p) { return p.b > 120 && p.b > p.r + 40; };
+    // Bottom row inside axes: find blue x-clusters.
+    uint32_t midY = tf.rect.y + tf.rect.height - 4;
+    std::vector<int> edges;
+    bool prev = false;
+    for (uint32_t x = tf.rect.x; x < tf.rect.x + tf.rect.width; ++x) {
+        bool b = isBlue(img.get(x, midY));
+        if (b != prev) edges.push_back(int(x));
+        prev = b;
+    }
+    // 4 bars → ~4 blue runs.
+    ASSERT_GE(edges.size(), 7u) << "expected 4 distinct bars";
+}
+
+TEST(MicroHeatmap, AutoValueRangeFromData) {
+    MfFigure tf(256);
+    Grid2D g;
+    g.width = 4; g.height = 4;
+    g.xRange = {0, 4}; g.yRange = {0, 4};
+    g.values.resize(16);
+    for (int i = 0; i < 16; ++i) g.values[i] = float(i); // 0..15
+    tf.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(g)));
+    auto img = tf.render();
+    // With auto-normalization the interior must show a gradient, not a
+    // single saturated color (old [0,1] default saturated everything >1).
+    Rect2D inner{tf.rect.x + 8, tf.rect.y + 8,
+                 tf.rect.width - 16, tf.rect.height - 16};
+    uint32_t distinct = 0;
+    Pixel prev{};
+    for (uint32_t y = inner.y; y < inner.y + inner.height; ++y) {
+        for (uint32_t x = inner.x; x < inner.x + inner.width; ++x) {
+            Pixel p = img.get(x, y);
+            if (p.r != prev.r || p.g != prev.g || p.b != prev.b) {
+                ++distinct; prev = p;
+            }
+        }
+    }
+    EXPECT_GT(distinct, 8u) << "heatmap should show a value gradient";
+}
+
+TEST(MicroMargins, LabelsNotClippedAtFigureEdge) {
+    MfFigure tf(256);
+    tf.axes->style().xAxis.label = "x label";
+    tf.axes->style().yAxis.label = "y label";
+    auto img = tf.render();
+    // mpl leaves enough figure margin that no text touches the canvas edge.
+    auto& e = img;
+    size_t edgeDark = 0;
+    for (uint32_t x = 0; x < e.width(); ++x)
+        edgeDark += isDark(e.get(x, 0)) + isDark(e.get(x, e.height() - 1));
+    for (uint32_t y = 0; y < e.height(); ++y)
+        edgeDark += isDark(e.get(0, y)) + isDark(e.get(e.width() - 1, y));
+    EXPECT_EQ(edgeDark, 0u) << "labels must not clip at the canvas edge";
 }

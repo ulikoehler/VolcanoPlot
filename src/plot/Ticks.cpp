@@ -231,9 +231,27 @@ std::string StrMethodFormatter::format(float v, int pos) const {
 void ScalarFormatter::setLocs(std::span<const float> locs) {
     offset_ = 0.0f;
     sciExp_ = 0;
+    decimals_ = -1;
     useSci_ = false;
     offsetText_.clear();
     if (locs.empty()) return;
+
+    // Common decimal precision (matplotlib ScalarFormatter._set_format):
+    // enough decimals to represent every tick exactly → uniform labels
+    // like "1.0, 0.5, 0.0" instead of "1, 0.5, 0".
+    {
+        int d = 0;
+        for (; d < 6; ++d) {
+            float m = std::pow(10.0f, d);
+            bool allInt = true;
+            for (float v : locs) {
+                float r = v * m;
+                if (std::abs(r - std::round(r)) > 1e-4f * std::max(1.0f, std::abs(r))) { allInt = false; break; }
+            }
+            if (allInt) break;
+        }
+        decimals_ = (d < 6) ? d : -1;
+    }
 
     float maxAbs = 0.0f, lo = locs.front(), hi = locs.front();
     for (float v : locs) {
@@ -279,6 +297,10 @@ std::string ScalarFormatter::format(float v, int) const {
     float val = v - offset_;
     if (useSci_) val = v / std::pow(10.0f, static_cast<float>(sciExp_));
     if (val == 0.0f) val = std::abs(val); // -0 → 0
+    // Uniform precision in plain mode (matplotlib pads all labels to the
+    // same decimals, e.g. "1.0, 0.5, 0.0").
+    if (!useSci_ && decimals_ > 0)
+        return std::format("{:.{}f}", val, decimals_);
     return gFormat(val);
 }
 

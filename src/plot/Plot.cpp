@@ -126,6 +126,9 @@ Axes* Figure::twinx(Axes& parent) {
     // range + manual flag into the twin).
     parent.shareX(*raw);
     raw->setYTicksRight(true);
+    // matplotlib twin axes have an invisible patch so the parent's
+    // artists stay visible underneath the overlay.
+    raw->style().faceColor = Color::transparent();
     AxesPlacement p;
     p.axes = std::move(a);
     p.mode = PlacementMode::Overlay;
@@ -140,6 +143,7 @@ Axes* Figure::twiny(Axes& parent) {
     raw->setFigure(this);
     parent.shareY(*raw);
     raw->setXTicksTop(true);
+    raw->style().faceColor = Color::transparent();
     AxesPlacement p;
     p.axes = std::move(a);
     p.mode = PlacementMode::Overlay;

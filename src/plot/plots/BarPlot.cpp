@@ -20,18 +20,17 @@ void BarPlot::draw(vk::CommandBuffer cmd, render::Renderer&, const Axes& axes, R
 }
 void BarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                          Rect2D rect) {
-    float n = static_cast<float>(data_.heights.size());
-    if (n <= 0) return;
-    float bw = data_.width / n;
+    if (data_.heights.empty()) return;
+    float bw = data_.width;
     auto toPx = pxMapper(axes, rect);
     for (size_t i = 0; i < data_.heights.size(); ++i) {
         float h = data_.heights[i];
         Point2D a, b;
         if (data_.horizontal) {
-            float y0 = float(i) * bw + (1.0f - data_.width) * 0.5f;
+            float y0 = float(i) + (1.0f - data_.width) * 0.5f;
             a = toPx({0.0f, y0 + bw}); b = toPx({h, y0});
         } else {
-            float x0 = float(i) * bw + (1.0f - data_.width) * 0.5f;
+            float x0 = float(i) + (1.0f - data_.width) * 0.5f;
             a = toPx({x0, 0.0f}); b = toPx({x0 + bw, h});
         }
         Color col = i < data_.colors.size() ? data_.colors[i]

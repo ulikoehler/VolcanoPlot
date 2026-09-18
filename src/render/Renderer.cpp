@@ -412,30 +412,23 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     auto ext = backend_.extent();
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
 
-    // Draw the border rectangle around the axes area.
-    // Use 2.0px width so MSAA produces full-coverage (pure black) pixels.
-    // With 1.5px and 4x MSAA, a line centered at y=N covers pixels y=N-1 and
-    // y=N at 75% coverage each, producing gray (64,64,64) instead of black.
-    // With 2.0px, both pixels get 100% coverage → pure black.
+    // Draw the border as pixel-aligned filled quads (matplotlib draws ~1px
+    // spines). Filled quads aligned to integer pixel coordinates get 100%
+    // coverage → pure black even under MSAA, unlike a stroked line centered
+    // on the boundary which spreads across two pixels.
     auto spineColor = style.xAxis.color;
-    auto spineWidth = std::max(style.xAxis.lineWidth, 2.0f);
+    float t = std::max(style.xAxis.lineWidth, 1.0f);
+    float x0 = float(rect.x), y0 = float(rect.y);
+    float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
     const auto& sp = axes.spines();
-    if (sp.left && sp.right && sp.bottom && sp.top) {
-        spineRenderer_.drawRect(cmd, fullRect, rect, spineColor, spineWidth);
-    } else {
-        // Per-side spines (matplotlib spines[...].set_visible).
-        float x0 = float(rect.x), y0 = float(rect.y);
-        float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
-        auto side = [&](plot::Point2D a, plot::Point2D b) {
-            plot::Point2D seg[2] = {a, b};
-            spineRenderer_.drawLineStrip(cmd, fullRect, seg,
-                                         spineColor, spineWidth);
-        };
-        if (sp.bottom) side({x0, y1}, {x1, y1});
-        if (sp.top)    side({x0, y0}, {x1, y0});
-        if (sp.left)   side({x0, y0}, {x0, y1});
-        if (sp.right)  side({x1, y0}, {x1, y1});
-    }
+    auto quad = [&](float qx0, float qy0, float qx1, float qy1) {
+        spineRenderer_.drawFilledRect(cmd, fullRect,
+            plot::Rect2D{qx0, qy0, qx1 - qx0, qy1 - qy0}, spineColor);
+    };
+    if (sp.bottom) quad(x0, y1 - t, x1, y1);
+    if (sp.top)    quad(x0, y0, x1, y0 + t);
+    if (sp.left)   quad(x0, y0, x0 + t, y1);
+    if (sp.right)  quad(x1 - t, y0, x1, y1);
 
     // Draw tick marks. Use >=2.0px width for the same MSAA reason.
     // Tick positions are converted to axes fractions so scale-aware
@@ -921,7 +914,8 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     uint32_t segments = 64;
     float segH = bodyH / segments;
     for (uint32_t i = 0; i < segments; ++i) {
-        float t = float(i) / float(segments - 1);
+        // Max value at the top of the strip (matplotlib orientation).
+        float t = 1.0f - float(i) / float(segments - 1);
         auto color = sampleAt(t);
         float y = bodyY0 + i * segH;
         spineRenderer_.drawFilledRect(cmd, fullRect,
@@ -966,6 +960,8 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             {stripX + stripW, y},
             {stripX + stripW + 4.0f, y},
         };
+        spineRenderer_.drawLineStrip(cmd, fullRect, tickPts,
+                                     style.colorbar.edgeColor, 1.0f);
         // Draw label.
         std::string label = formatTick(tick, cbStep);
         textRenderer_.draw(cmd, fullRect, label,

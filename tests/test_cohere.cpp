@@ -23,8 +23,8 @@ struct CohereFig {
         : harness(size, size, vk::SampleCountFlagBits::e1), figure(1, 1) {
         axes = figure.addAxes(0, 0);
         axes->setStyle(flatTestStyle());
-        figure.layout(Extent2D{size, size});
-        axes->rect = {0, 0, size, size};
+        figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+        figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
     }
 
     Image render() { return harness.render(figure); }

@@ -217,6 +217,7 @@ public:
 private:
     float offset_ = 0.0f;
     int sciExp_ = 0;
+    int decimals_ = -1;   // common precision across locs (-1 = per-value %g)
     bool useSci_ = false;
     std::string offsetText_;
 };

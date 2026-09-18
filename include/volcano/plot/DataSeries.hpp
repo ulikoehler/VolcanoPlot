@@ -3,6 +3,7 @@
 
 #include "volcano/plot/Types.hpp"
 
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -79,8 +80,9 @@ struct Grid2D {
     uint32_t height = 0;
     Range xRange{0,1};
     Range yRange{0,1};
-    /// Optional value range; if invalid, computed from data.
-    Range valueRange{0,1};
+    /// Optional value range; if invalid (min > max), computed from data.
+    Range valueRange{std::numeric_limits<float>::max(),
+                     std::numeric_limits<float>::lowest()};
 };
 
 /// A function to be evaluated on the GPU.

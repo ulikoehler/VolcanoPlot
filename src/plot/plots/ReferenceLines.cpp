@@ -30,9 +30,10 @@ void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {static_cast<float>(rect.x) - 10.0f, py},
         {static_cast<float>(rect.x + rect.width) + 10.0f, py}
     };
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
-    r.spineRenderer().drawLineStrip(cmd, fullRect,
+    // Clip to the axes patch (matplotlib clips these lines to the axes).
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    r.spineRenderer().drawLineStrip(cmd, clip,
                                     std::span{pts, 2}, color_, width_);
 }
 
@@ -60,9 +61,9 @@ void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {px, static_cast<float>(rect.y) - 10.0f},
         {px, static_cast<float>(rect.y + rect.height) + 10.0f}
     };
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
-    r.spineRenderer().drawLineStrip(cmd, fullRect,
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    r.spineRenderer().drawLineStrip(cmd, clip,
                                     std::span{pts, 2}, color_, width_);
 }
 

@@ -23,8 +23,8 @@ struct BLFigure {
         : harness(size, size, vk::SampleCountFlagBits::e1), figure(1, 1) {
         axes = figure.addAxes(0, 0);
         axes->setStyle(flatTestStyle());
-        figure.layout(Extent2D{size, size});
-        axes->rect = {0, 0, size, size};
+        // Keep the default margins: bar labels draw outside the axes rect
+        // (above bar tops), so the figure needs headroom around it.
     }
 
     Image render() { return harness.render(figure); }

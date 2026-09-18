@@ -214,26 +214,39 @@ void Axes::secondaryYaxis(std::function<float(float)> forward,
                                 std::move(label), true};
 }
 
-void Axes::finalizeAutoscale(Viewport& v) {
+void Axes::finalizeAutoscale(Viewport& v) const {
     // Check each axis independently — a plot may only contribute to one
     // axis (e.g., AxhLine only contributes y, AxvLine only contributes x).
     if (v.x.min > v.x.max) v.x = {0,1};
     if (v.y.min > v.y.max) v.y = {0,1};
+    if (v.z.min > v.z.max) v.z = {0,1};
     // Handle zero-span axes (e.g., single horizontal line at one y value).
     if (v.x.span() == 0) { v.x.min -= 0.5f; v.x.max += 0.5f; }
     if (v.y.span() == 0) { v.y.min -= 0.5f; v.y.max += 0.5f; }
-    // 5% padding
-    float padx = v.x.span() * 0.05f;
-    float pady = v.y.span() * 0.05f;
-    v.x.min -= padx; v.x.max += padx;
-    v.y.min -= pady; v.y.max += pady;
+    // 5% padding. For non-linear scales, pad in display (transformed)
+    // space and map back — padding raw data space can push the lower
+    // bound outside the scale domain (e.g., negative values on log).
+    auto padAxis = [](Range& r, const AxisScale& s) {
+        float pad = r.span() * 0.05f;
+        if (s.kind == ScaleKind::Linear) {
+            r.min -= pad; r.max += pad;
+            return;
+        }
+        float a = s.forward(r.min), b = s.forward(r.max);
+        if (a > b) std::swap(a, b);
+        float tpad = (b - a) * 0.05f;
+        r.min = s.inverse(a - tpad);
+        r.max = s.inverse(b + tpad);
+    };
+    padAxis(v.x, xScale_);
+    padAxis(v.y, yScale_);
 }
 
 void Axes::autoscale() {
     if (manualX_ && manualY_) return;
     Viewport v{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
-                0, 1 };
+                std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
     for (const auto& p : plots_) p->contributeToAutoscale(v);
     finalizeAutoscale(v);
     if (!manualX_) viewport_.x = v.x;
@@ -245,7 +258,7 @@ void Axes::autoscaleGpu(render::primitives::ReduceRenderer& reducer) {
     if (manualX_ && manualY_) return;
     Viewport v{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
-                0, 1 };
+                std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
     // Each layer contributes via GPU reduce where possible, falling back to
     // CPU per-layer (the default IPlot::contributeToAutoscaleGpu behavior).
     for (const auto& p : plots_) p->contributeToAutoscaleGpu(reducer, v);

@@ -271,10 +271,14 @@ TEST(TextRegression, MultiLineTextRendersTwoLines) {
     auto* t = cf.axes->text(0.5f, 0.5f, "AAA\nBBB", CoordSystem::Axes);
     t->color = Color::black();
     auto img = cf.render();
-    // Count dark pixels in upper vs lower half — two lines should paint
-    // in both regions.
-    size_t top = img.countColorInRegion(Pixel::black(), 0, 60, 256, 120, 60);
-    size_t bot = img.countColorInRegion(Pixel::black(), 0, 130, 256, 200, 60);
+    // Count dark pixels in the upper vs lower half of the axes rect —
+    // two lines should paint in both regions.
+    const auto& r = cf.axes->rect;
+    uint32_t midY = r.y + r.height / 2;
+    size_t top = img.countColorInRegion(Pixel::black(), r.x, r.y,
+                                        r.x + r.width, midY - 2, 60);
+    size_t bot = img.countColorInRegion(Pixel::black(), r.x, midY + 2,
+                                        r.x + r.width, r.y + r.height, 60);
     EXPECT_GT(top, 10u);
     EXPECT_GT(bot, 10u);
 }

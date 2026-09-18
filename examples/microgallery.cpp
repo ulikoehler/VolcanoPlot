@@ -488,49 +488,49 @@ void addMarkers(Axes* ax, Series2D s) {
 void f053_marker_circle(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Circle;
-    s.size = 10.0f;
+    s.size = 14.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f054_marker_square(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Square;
-    s.size = 10.0f;
+    s.size = 14.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f055_marker_diamond(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Diamond;
-    s.size = 10.0f;
+    s.size = 14.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f056_marker_triangle(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Triangle;
-    s.size = 10.0f;
+    s.size = 14.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f057_marker_star(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Star;
-    s.size = 14.0f;
+    s.size = 20.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f058_marker_plus(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Plus;
-    s.size = 12.0f;
+    s.size = 17.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f059_marker_size(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Circle;
-    s.size = 20.0f;
+    s.size = 28.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
@@ -538,7 +538,7 @@ void f060_marker_hollow(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Circle;
     s.markerFill = MarkerFill::None;
-    s.size = 12.0f;
+    s.size = 17.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
@@ -547,14 +547,14 @@ void f061_marker_edge_color(Figure& fig) {
     s.marker = MarkerStyle::Circle;
     s.markerFill = MarkerFill::None;
     s.color = Color::fromRgba8(214, 39, 40);
-    s.size = 12.0f;
+    s.size = 17.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f062_marker_with_line(Figure& fig) {
     Series2D s = fewPoints();
     s.marker = MarkerStyle::Circle;
-    s.size = 8.0f;
+    s.size = 11.0f;
     s.lineWidth = 1.5f;
     auto* ax = mfAxes(fig);
     ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
@@ -564,14 +564,14 @@ void f062_marker_with_line(Figure& fig) {
 void f063_marker_path(Figure& fig) {
     Series2D s = fewPoints();
     s.markerPath = Path::unitStar(5);
-    s.size = 16.0f;
+    s.size = 22.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 
 void f064_marker_tex(Figure& fig) {
     Series2D s = fewPoints();
     s.markerTex = "$\\beta$";
-    s.size = 14.0f;
+    s.size = 20.0f;
     addMarkers(mfAxes(fig), std::move(s));
 }
 

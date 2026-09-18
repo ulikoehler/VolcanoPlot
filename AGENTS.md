@@ -218,6 +218,22 @@ for manual inspection.
 - **GTest macros**: `EXPECT_PIXEL_AT`, `EXPECT_PIXEL_COUNT`,
   `EXPECT_REGION_UNIFORM`, `EXPECT_FULLY_OPAQUE`
 
+**Full-bleed fixtures:** `Renderer::renderFrame` calls `figure.layout()`
+which recomputes every `axes->rect`, so assigning `axes->rect` manually in
+a fixture is dead code. To fill the canvas with the axes rect, zero the
+grid margins instead:
+
+```cpp
+figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
+```
+
+Keep the default margins when the test needs headroom outside the axes
+rect (tick marks, bar labels, titles). The default margins follow
+matplotlib rcParams (`left=0.125, right=0.9, bottom=0.11, top=0.88`).
+Prefer rect-relative assertions (`axes->rect` is valid after `render()`)
+over hard-coded pixel windows.
+
 ### Crafted-plot design strategies
 
 Tests use **crafted plots** designed for deterministic verification:

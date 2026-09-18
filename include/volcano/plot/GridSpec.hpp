@@ -41,7 +41,8 @@ public:
     // --- Geometry parameters (fractions of the containing region) ---
     // left/right/bottom/top bound the grid area; wspace/hspace are gaps
     // between cells expressed as a fraction of the mean cell size.
-    float left = 0.08f, right = 0.92f, bottom = 0.08f, top = 0.92f;
+    // matplotlib rcParams figure.subplot.* defaults.
+    float left = 0.125f, right = 0.9f, bottom = 0.11f, top = 0.88f;
     // matplotlib defaults: wspace/hspace ≈ 0.2 of the mean cell size.
     float wspace = 0.2f, hspace = 0.2f;
     /// Per-column/row relative sizes. Empty = uniform.

@@ -2,10 +2,16 @@
 #include "volcano/plot/plots/SurfacePlot.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include <algorithm>
 namespace volcano::plot {
 void SurfacePlot::prepare(render::Renderer& r) {
     auto& ctx = r.backend().context();
     renderer_.init(ctx.device.handle(), r.backend().renderPass(), r.backend().sampleCount(), r.pipelineCache());
+    // Auto-normalize height colors from data when no range is given.
+    if (grid_.valueRange.min > grid_.valueRange.max && !grid_.values.empty()) {
+        auto [lo, hi] = std::ranges::minmax(grid_.values);
+        grid_.valueRange = {lo, hi};
+    }
     renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
                      ctx.allocator.handle(), grid_);
     prepared_ = true;

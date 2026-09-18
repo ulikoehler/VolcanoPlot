@@ -51,11 +51,10 @@ struct CraftedFigure {
         : harness(size, size, samples), figure(1, 1) {
         axes = figure.addAxes(0, 0);
         axes->setStyle(flatTestStyle());
-        // Force the axes rect to fill the entire canvas by overriding layout.
-        // The default layout adds margins; we want pixel-exact control.
-        figure.layout(Extent2D{size, size});
-        // Override rect to fill the whole canvas.
-        axes->rect = {0, 0, size, size};
+        // Fill the entire canvas: layout() runs again inside renderFrame,
+        // so the full-bleed rect must come from the grid margins.
+        figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+        figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
     }
 
     /// Constructor with explicit width and height (non-square canvas).
@@ -64,8 +63,8 @@ struct CraftedFigure {
         : harness(width, height, samples), figure(1, 1) {
         axes = figure.addAxes(0, 0);
         axes->setStyle(flatTestStyle());
-        figure.layout(Extent2D{width, height});
-        axes->rect = {0, 0, width, height};
+        figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+        figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
     }
 
     Image render() {
@@ -374,7 +373,9 @@ TEST(BarRegression, MultipleBarsDistinctColors) {
     };
     data.width = 0.9f;
     cf.axes->addPlot(std::make_unique<BarPlot>(std::move(data)));
-    cf.axes->setViewport({0, 1, 0, 1});
+    // mpl semantics: bar i is `width` units wide centered at x=i, so the
+    // x range must cover [-0.45, 2.45] to see all three bars.
+    cf.axes->setViewport({-0.5f, 2.5f, 0, 1});
     auto img = cf.render();
 
     // All three colors should be present.
@@ -763,12 +764,11 @@ TEST(SpineRegression, BorderRendersAroundAxes) {
     cf.axes->setViewport({0, 1, 0, 1});
     auto img = cf.render();
 
-    // With the default layout, the axes rect is at ~8% margin.
-    // rect.x ≈ 20, rect.y ≈ 20, rect.width ≈ 215, rect.height ≈ 215.
-    // Check for gray (anti-aliased) pixels on the top edge.
+    // CraftedFigure is full-bleed: the axes rect fills the canvas, so the
+    // spines sit at the canvas edges (rows/cols 0..1).
     size_t grayOnTop = 0;
-    for (uint32_t x = 15; x < 240; ++x) {
-        for (uint32_t y = 15; y < 30; ++y) {
+    for (uint32_t x = 0; x < 256; ++x) {
+        for (uint32_t y = 0; y < 4; ++y) {
             Pixel p = img.get(x, y);
             if (p.r < 200 && p.g < 200 && p.b < 200) ++grayOnTop;
         }
@@ -777,8 +777,8 @@ TEST(SpineRegression, BorderRendersAroundAxes) {
 
     // Check for gray pixels on the left edge.
     size_t grayOnLeft = 0;
-    for (uint32_t x = 15; x < 30; ++x) {
-        for (uint32_t y = 15; y < 240; ++y) {
+    for (uint32_t x = 0; x < 4; ++x) {
+        for (uint32_t y = 0; y < 256; ++y) {
             Pixel p = img.get(x, y);
             if (p.r < 200 && p.g < 200 && p.b < 200) ++grayOnLeft;
         }
@@ -797,19 +797,24 @@ TEST(SpineRegression, FlatStyleHasNoBorder) {
 }
 
 TEST(SpineRegression, TickMarksRender) {
-    // A figure with visible axes should have tick marks.
-    CraftedFigure cf(256);
-    cf.axes->style().xAxis.visible = true;
-    cf.axes->style().yAxis.visible = true;
-    cf.axes->setViewport({0, 10, 0, 10});
-    auto img = cf.render();
+    // A figure with visible axes should have tick marks. Ticks point
+    // outward from the spines, so this needs a margined (non-full-bleed)
+    // figure to leave room below the axes rect.
+    PlotTestHarness harness(256, 256, vk::SampleCountFlagBits::e1);
+    Figure figure{1, 1};
+    Axes* axes = figure.addAxes(0, 0);
+    axes->setStyle(flatTestStyle());
+    axes->style().xAxis.visible = true;
+    axes->style().yAxis.visible = true;
+    axes->setViewport({0, 10, 0, 10});
+    auto img = harness.render(figure);
 
-    // Tick marks should appear just below the bottom edge and just left of the left edge.
-    // With viewport [0,10], ticks at 0,2,4,6,8,10.
-    // Check for gray pixels just below the axes rect (tick marks).
+    // Tick marks sit just below the bottom spine.
+    const auto& r = axes->rect;
+    uint32_t bottom = r.y + r.height;
     size_t grayBelow = 0;
-    for (uint32_t x = 15; x < 240; ++x) {
-        for (uint32_t y = 235; y < 245; ++y) {
+    for (uint32_t x = r.x + 4; x < r.x + r.width - 4; ++x) {
+        for (uint32_t y = bottom + 1; y < bottom + 8 && y < 256; ++y) {
             Pixel p = img.get(x, y);
             if (p.r < 200 && p.g < 200 && p.b < 200) ++grayBelow;
         }
@@ -977,16 +982,18 @@ TEST(ColorbarRegression, NoColorbarWhenDisabled) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 10});
     auto img = cf.render();
 
-    // With the default layout (rect fills canvas), the colorbar would be
-    // off-screen. But with colorbar disabled, no colorbar should render.
-    // Check the far right edge of the canvas for absence of colorbar.
+    // CraftedFigure is full-bleed, so the colorbar would sit off-screen
+    // anyway — but with colorbar disabled nothing should render. Count
+    // saturated (colorful) pixels at the right edge: the colorbar strip is
+    // colored, while spines/ticks are black/gray.
     size_t coloredInBar = 0;
     for (uint32_t y = 0; y < 256; ++y) {
         for (uint32_t x = 250; x < 256; ++x) {
             Pixel p = img.get(x, y);
-            if (p != Pixel::white()) ++coloredInBar;
+            int mx = std::max({p.r, p.g, p.b});
+            int mn = std::min({p.r, p.g, p.b});
+            if (mx - mn > 30) ++coloredInBar;
         }
     }
-    // Some border pixels may be present, but no colorbar strip.
     EXPECT_LT(coloredInBar, 20u) << "No colorbar strip when disabled";
 }
