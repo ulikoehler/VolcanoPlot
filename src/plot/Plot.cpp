@@ -242,10 +242,13 @@ void Figure::computeTightMargins(Extent2D extent) {
         // Top: axes title.
         if (!st.title.text.empty())
             needTop = std::max(needTop, (fontPx + 10.0f) / extent.height);
-        // Right: colorbar (strip + gap + tick labels, ~75px for labels).
+        // Right: colorbar (strip + gap + tick labels, ~72px for labels).
+        // fraction/pad reserve (fraction + pad) of the axes width; the
+        // strip itself narrows to height/aspect, so ~72px covers labels.
         if (st.colorbar.visible)
             needRight = std::max(needRight,
-                (st.colorbar.width + st.colorbar.padding + 72.0f) / extent.width);
+                st.colorbar.fraction + st.colorbar.pad +
+                    72.0f / extent.width);
         // Right-side y ticks (twinx) or a secondary axis need margin.
         if ((p.axes->yTicksRight() || p.axes->secondaryY()) &&
             st.yAxis.visible)
@@ -334,14 +337,7 @@ void Figure::layoutInRect(Rect2D rect) {
     // whole canvas. grid_->region applies left/right/bottom/top margins.
     if (tightLayout_ || constrainedLayout_)
         computeTightMargins(Extent2D{rect.width, rect.height});
-    // Legacy title margin: reserve space if any axes has a title.
-    // (Kept for compatibility with the pre-GridSpec margin scheme.)
-    bool hasTitle = false;
-    for (const auto& p : placements_)
-        if (!p.axes->style().title.text.empty()) { hasTitle = true; break; }
-    float savedTop = grid_->top;
-    if (hasTitle && !tightLayout_ && !constrainedLayout_)
-        grid_->top = std::min(grid_->top, 0.92f) - 0.06f;
+    // matplotlib draws the axes title inside the top margin — no shrink.
 
     Rect2D region = grid_->region(fig);
 
@@ -367,12 +363,23 @@ void Figure::layoutInRect(Rect2D rect) {
         // matplotlib shrinks the axes to make room for the colorbar
         // (strip + padding + tick labels live in the reclaimed space).
         const auto& cbs = p.axes->style().colorbar;
+        p.axes->setColorbarRegion({});
         if (cbs.visible &&
             (p.mode == PlacementMode::Grid ||
              p.mode == PlacementMode::FigureFraction)) {
-            uint32_t reserve = static_cast<uint32_t>(
-                cbs.padding + cbs.width + 40.0f);
-            if (reserve < p.axes->rect.width) p.axes->rect.width -= reserve;
+            // mpl make_axes: the parent keeps the left
+            // (1 - fraction - pad) of its original box; the colorbar
+            // region is the right `fraction` slice.
+            float origW = float(p.axes->rect.width);
+            float reserve = origW * (cbs.fraction + cbs.pad);
+            if (reserve < origW) {
+                float cbx = p.axes->rect.x + origW * (1.0f - cbs.fraction);
+                p.axes->setColorbarRegion(Rect2D{
+                    static_cast<int32_t>(cbx), p.axes->rect.y,
+                    static_cast<uint32_t>(origW * cbs.fraction),
+                    p.axes->rect.height});
+                p.axes->rect.width -= static_cast<uint32_t>(reserve);
+            }
         }
     }
 
@@ -423,8 +430,6 @@ void Figure::layoutInRect(Rect2D rect) {
             break;
         }
     }
-
-    grid_->top = savedTop;
 
     // Recurse into subfigures: each gets its cell rect.
     for (auto& s : subfigs_) {
@@ -493,6 +498,7 @@ void Figure::dispatch(Event e) {
     // navigation controller.
     canvas_.emit(e);
     if (legendDragEvent(e)) return;
+    if (artistDragEvent(e)) return;
     for (auto it = widgets_.rbegin(); it != widgets_.rend(); ++it)
         if ((*it)->handleEvent(e)) return;
     if (nav_) nav_->handleEvent(e);
@@ -531,6 +537,56 @@ bool Figure::legendDragEvent(const Event& e) {
         lg.dragOffset.x += e.x - legendDragLast_.x;
         lg.dragOffset.y += e.y - legendDragLast_.y;
         legendDragLast_ = {e.x, e.y};
+        return true;
+    }
+    return false;
+}
+
+bool Figure::artistDragEvent(const Event& e) {
+    if (e.type == Event::Type::ButtonPress && e.button == 1) {
+        auto hit = [](Rect2D r, float x, float y) {
+            return r.width > 0 && x >= float(r.x) &&
+                   x <= float(r.x) + float(r.width) && y >= float(r.y) &&
+                   y <= float(r.y) + float(r.height);
+        };
+        // Topmost artist first: annotations then texts, both in reverse
+        // draw order; axes in reverse placement order.
+        auto tryAxes = [&](Axes* ax) -> Point2D* {
+            if (!ax) return nullptr;
+            for (auto it = ax->annotations().rbegin();
+                 it != ax->annotations().rend(); ++it)
+                if (it->draggable && hit(it->drawBox, e.x, e.y))
+                    return &it->dragOffset;
+            for (auto it = ax->texts().rbegin(); it != ax->texts().rend();
+                 ++it)
+                if (it->draggable && hit(it->drawBox, e.x, e.y))
+                    return &it->dragOffset;
+            return nullptr;
+        };
+        for (auto it = placements_.rbegin(); it != placements_.rend(); ++it)
+            if (auto* off = tryAxes(it->axes.get())) {
+                artistDrag_ = off;
+                artistDragLast_ = {e.x, e.y};
+                return true;
+            }
+        for (auto it = subfigs_.rbegin(); it != subfigs_.rend(); ++it)
+            for (auto* ax : (*it).figure->allAxes())
+                if (auto* off = tryAxes(ax)) {
+                    artistDrag_ = off;
+                    artistDragLast_ = {e.x, e.y};
+                    return true;
+                }
+        return false;
+    }
+    if (!artistDrag_) return false;
+    if (e.type == Event::Type::ButtonRelease && e.button == 1) {
+        artistDrag_ = nullptr;
+        return true;
+    }
+    if (e.type == Event::Type::MotionNotify) {
+        artistDrag_->x += e.x - artistDragLast_.x;
+        artistDrag_->y += e.y - artistDragLast_.y;
+        artistDragLast_ = {e.x, e.y};
         return true;
     }
     return false;

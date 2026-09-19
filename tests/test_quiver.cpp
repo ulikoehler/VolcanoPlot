@@ -146,3 +146,57 @@ TEST(QuiverRegression, QuiverWithCustomColor) {
         }
     EXPECT_GT(redCount, 5u) << "Red arrow should render red pixels";
 }
+
+TEST(QuiverRegression, PivotTipAnchorsArrowTipAtPoint) {
+    // Arrow at (5,5) pointing +x with u=2, scale=1. With pivot=Tail the
+    // arrow spans x∈[5,7]; with pivot=Tip it spans x∈[3,5] — the black
+    // pixel x-centroid must shift left.
+    auto renderWithPivot = [](QuiverConfig::Pivot p) {
+        QuiverFigure cf(256);
+        Viewport vp; vp.x = {0, 10}; vp.y = {0, 10}; vp.z = {0, 1};
+        cf.axes->setViewport(vp);
+        QuiverConfig cfg;
+        cfg.scale = 1.0f;
+        cfg.pivot = p;
+        cf.axes->addPlot(std::make_unique<QuiverPlot>(
+            std::vector<float>{5}, std::vector<float>{5},
+            std::vector<float>{2}, std::vector<float>{0}, cfg));
+        return cf.render();
+    };
+    auto tail = renderWithPivot(QuiverConfig::Pivot::Tail);
+    auto tip = renderWithPivot(QuiverConfig::Pivot::Tip);
+
+    auto xCentroid = [](const Image& img) {
+        double sx = 0; size_t n = 0;
+        for (uint32_t y = 0; y < img.height(); ++y)
+            for (uint32_t x = 0; x < img.width(); ++x)
+                if (isBlack(img.get(x, y))) { sx += x; ++n; }
+        return n > 0 ? sx / double(n) : -1.0;
+    };
+    double cxTail = xCentroid(tail), cxTip = xCentroid(tip);
+    EXPECT_GT(cxTail, 0.0);
+    EXPECT_GT(cxTip, 0.0);
+    EXPECT_GT(cxTail, cxTip + 20.0)
+        << "pivot=Tip should move the arrow ~2 data units (~51px) left";
+}
+
+TEST(QuiverRegression, MplHeadUnitsRenderPolygonHead) {
+    // headwidth/headlength/headaxislength in shaft-width multiples use
+    // mpl's notched polygon head — check it renders.
+    QuiverFigure cf(256);
+    Viewport vp; vp.x = {0, 10}; vp.y = {0, 10}; vp.z = {0, 1};
+    cf.axes->setViewport(vp);
+    QuiverConfig cfg;
+    cfg.scale = 1.0f;
+    cfg.width = 3.0f;
+    cfg.headwidth = 3.0f;
+    cfg.headlength = 5.0f;
+    cfg.headaxislength = 4.5f;
+    cf.axes->addPlot(std::make_unique<QuiverPlot>(
+        std::vector<float>{5}, std::vector<float>{5},
+        std::vector<float>{3}, std::vector<float>{0}, cfg));
+    auto img = cf.render();
+
+    EXPECT_GT(countPixels(img, isBlack), 20u)
+        << "mpl-unit arrowhead should render black pixels";
+}

@@ -187,6 +187,7 @@ TEST(ColorbarExtend, MinMaxTrianglesDraw) {
     ax2->style().colorbar.visible = true;
     ax2->style().colorbar.extend = "both";
     ax2->style().colorbar.width = 16.0f;
+    ax2->style().colorbar.padding = 16.0f;  // explicit px gap override
     ax2->style().colorbar.labelColor = Color{0, 0, 0, 0};
     auto img = h2.render(fig2);
     // The colorbar reserves space, shrinking the axes; the strip lands
@@ -223,6 +224,7 @@ TEST(ColorbarExtend, NormMapsColors) {
     ax2->setViewport({{0, 1}, {0, 1}, {1, 100}});
     ax2->style().colorbar.visible = true;
     ax2->style().colorbar.colormap = "viridis";
+    ax2->style().colorbar.padding = 16.0f;  // explicit px gap override
     ax2->style().colorbar.norm = std::make_shared<LogNorm>(1.0f, 100.0f);
     auto img = h2.render(fig2);
     uint32_t stripX = ax2->rect.x + ax2->rect.width +

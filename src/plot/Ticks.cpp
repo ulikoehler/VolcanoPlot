@@ -306,7 +306,52 @@ std::string ScalarFormatter::format(float v, int) const {
 
 // ─── Log formatters ─────────────────────────────────────────────────────────
 
+void LogFormatter::setViewInterval(float vmin, float vmax) {
+    if (vmin > vmax) std::swap(vmin, vmax);
+    // mpl: non-positive interval (e.g. a colorbar) labels only powers.
+    if (vmin <= 0.0f) {
+        sublabels_ = std::vector<int>{1};
+        return;
+    }
+    float b = base_;
+    float numdec = std::abs(std::log(vmax) / std::log(b) -
+                            std::log(vmin) / std::log(b));
+    if (numdec > minorThresholds.first) {
+        sublabels_ = std::vector<int>{1};  // label only bases
+    } else if (numdec > minorThresholds.second) {
+        // mpl: geomspace(1, b, b//2 + 1) rounded — base 10 gives
+        // {1, 2, 3, 4, 6, 10}.
+        int n = static_cast<int>(b) / 2 + 1;
+        std::vector<int> s;
+        for (int i = 0; i < n; ++i)
+            s.push_back(static_cast<int>(std::lround(
+                std::pow(b, double(i) / (n - 1)))));
+        std::ranges::sort(s);
+        s.erase(std::unique(s.begin(), s.end()), s.end());
+        sublabels_ = std::move(s);
+    } else {
+        std::vector<int> s;
+        for (int i = 1; i <= static_cast<int>(b); ++i) s.push_back(i);
+        sublabels_ = std::move(s);
+    }
+}
+
+bool LogFormatter::passesSublabels(float v) const {
+    if (v <= 0.0f) return true;  // let the subclass format it
+    float fx = std::log(v) / std::log(base_);
+    bool isDecade = std::abs(fx - std::round(fx)) < 1e-6f;
+    float e = isDecade ? std::round(fx) : std::floor(fx);
+    int coeff = static_cast<int>(
+        std::lround(std::pow(base_, double(fx - e))));
+    if (labelOnlyBase && !isDecade) return false;
+    if (sublabels_ &&
+        std::ranges::find(*sublabels_, coeff) == sublabels_->end())
+        return false;
+    return true;
+}
+
 std::string LogFormatter::format(float v, int) const {
+    if (!passesSublabels(v)) return {};
     if (auto e = exactPower(v, base_))
         return std::format("$10^{{{}}}$", *e);
     return gFormat(v);
@@ -314,18 +359,21 @@ std::string LogFormatter::format(float v, int) const {
 
 std::string LogFormatterExponent::format(float v, int) const {
     if (v <= 0.0f) return gFormat(v);
+    if (!passesSublabels(v)) return {};
     int e = static_cast<int>(std::round(std::log(v) / std::log(base_)));
     return std::format("$10^{{{}}}$", e);
 }
 
 std::string LogFormatterMathtext::format(float v, int) const {
     if (v <= 0.0f) return gFormat(v);
+    if (!passesSublabels(v)) return {};
     int e = static_cast<int>(std::round(std::log(v) / std::log(base_)));
     return std::format("${:g}^{{{}}}$", base_, e);
 }
 
 std::string LogFormatterSciNotation::format(float v, int) const {
     if (v <= 0.0f) return gFormat(v);
+    if (!passesSublabels(v)) return {};
     int e = static_cast<int>(std::floor(std::log(v) / std::log(base_)));
     float m = v / std::pow(base_, static_cast<float>(e));
     if (std::abs(m - std::round(m)) < 1e-4f)

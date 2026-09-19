@@ -35,6 +35,7 @@ struct Bar3DConfig {
 /// LineRenderer.
 class Bar3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from base positions and dimensions.
     /// x, y, z: base corner of each bar.
     /// dx, dy, dz: dimensions of each bar.

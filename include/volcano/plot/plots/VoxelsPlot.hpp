@@ -38,6 +38,7 @@ struct VoxelsConfig {
 /// drawn via LineSegmentRenderer.
 class VoxelsPlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from a 3D boolean array.
     /// `filled` is indexed as [x * ny * nz + y * nz + z].
     VoxelsPlot(std::vector<uint8_t> filled, uint32_t nx, uint32_t ny, uint32_t nz,

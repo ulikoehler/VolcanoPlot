@@ -26,6 +26,13 @@ struct StreamConfig {
     float stepSize = 0.2f;
     /// Draw arrowheads on streamlines.
     bool arrows = true;
+    /// mpl `arrowsize`: scale factor for arrowhead length/width.
+    float arrowsize = 1.0f;
+    /// mpl `broken_streamlines`: when true (default) a streamline ends
+    /// where the field vanishes or is masked (NaN); when false, the
+    /// integration coasts through invalid holes using the last valid
+    /// velocity so lines stay continuous.
+    bool brokenStreamlines = true;
     /// Arrowhead length in pixels.
     float arrowLength = 6.0f;
     /// Arrowhead width in pixels.

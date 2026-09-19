@@ -95,10 +95,10 @@ TEST(MatshowRegression, AutoscaleMatchesMatrixDimensions) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, -0.1f, 0.05f);
-    EXPECT_NEAR(av.x.max, 2.1f, 0.05f);
-    EXPECT_NEAR(av.y.min, -0.1f, 0.05f);
-    EXPECT_NEAR(av.y.max, 2.1f, 0.05f);
+    EXPECT_NEAR(av.x.min, 0.0f, 0.05f);
+    EXPECT_NEAR(av.x.max, 2.0f, 0.05f);
+    EXPECT_NEAR(av.y.min, 0.0f, 0.05f);
+    EXPECT_NEAR(av.y.max, 2.0f, 0.05f);
 }
 
 TEST(MatshowRegression, RowZeroAtTop) {

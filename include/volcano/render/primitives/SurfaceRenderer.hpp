@@ -14,7 +14,9 @@ public:
               vk::SampleCountFlagBits samples, core::PipelineCache& cache);
     void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                 VmaAllocator allocator, const plot::Grid2D& grid);
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Camera3D& camera) const;
+    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+              const plot::Camera3D& camera, bool shade = true,
+              float lightAzdeg = 315.0f, float lightAltdeg = 45.0f) const;
 private:
     vk::Device device_;
     core::ShaderModule vert_;

@@ -230,10 +230,12 @@ vk::CommandBuffer HeadlessBackend::beginFrame() {
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cb.begin(bi);
 
-    std::array<vk::ClearValue, 2> clears{};
+    // MSAA adds a resolve attachment at index 1, pushing depth to 2.
+    bool msaa = samples_ != vk::SampleCountFlagBits::e1;
+    std::array<vk::ClearValue, 3> clears{};
     clears[0].color.setFloat32({clearColor_[0], clearColor_[1],
                                 clearColor_[2], clearColor_[3]});
-    clears[1].depthStencil.setDepth(1.0f).setStencil(0);
+    clears[msaa ? 2 : 1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPass_.get())
        .setFramebuffer(framebuffer_.get())
@@ -328,8 +330,9 @@ vk::CommandBuffer HeadlessBackend::beginFrameLoad() {
 
     // Begin the load-variant pass (clear values are ignored but the
     // count must match the attachment list).
-    std::array<vk::ClearValue, 2> clears{};
-    clears[1].depthStencil.setDepth(1.0f).setStencil(0);
+    std::array<vk::ClearValue, 3> clears{};
+    clears[samples_ != vk::SampleCountFlagBits::e1 ? 2 : 1]
+        .depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
     rpi.setRenderPass(renderPassLoad_.get())
        .setFramebuffer(framebuffer_.get())

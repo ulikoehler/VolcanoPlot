@@ -10,6 +10,7 @@
 #include "../MarkerDraw.hpp"
 #include "../VectorEmitHelpers.hpp"
 #include <algorithm>
+#include <cmath>
 namespace volcano::plot {
 void LinePlot::prepare(render::Renderer& r) {
     auto& ctx = r.backend().context();
@@ -30,8 +31,16 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return;
     }
 
-    // Expand the point sequence for step draw styles, then map data → pixels.
-    auto pts = applyDrawStyle(series_.points, series_.drawStyle);
+    // Expand the point sequence for step draw styles, then map data →
+    // pixels. Out-of-domain points (non-positive on log axes) become NaN
+    // sentinels that split the polyline, matching matplotlib masking.
+    std::vector<Point2D> masked;
+    std::span<const Point2D> src = series_.points;
+    if (axes.xscale().clipsDomain() || axes.yscale().clipsDomain()) {
+        masked = maskPointsForScales(src, axes.xscale(), axes.yscale());
+        src = masked;
+    }
+    auto pts = applyDrawStyle(src, series_.drawStyle);
     std::vector<Point2D> px;
     px.reserve(pts.size());
     for (const auto& p : pts) {
@@ -81,6 +90,10 @@ void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
     std::vector<Point2D> px;
     px.reserve(series_.points.size());
     for (const auto& p : series_.points) {
+        // Drop out-of-domain points (log/logit scales mask them).
+        if (!pointInDomain(p, axes.xscale(), axes.yscale()) ||
+            !std::isfinite(p.x) || !std::isfinite(p.y))
+            continue;
         auto f = axes.dataToFraction(p);
         px.push_back({rect.x + f.x * float(rect.width),
                       rect.y + (1.0f - f.y) * float(rect.height)});
@@ -107,9 +120,17 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         return Point2D{rect.x + f.x * float(rect.width),
                        rect.y + (1.0f - f.y) * float(rect.height)};
     };
+    // Mask out-of-domain data (log/logit) — NaN points split polylines
+    // and are skipped by emitMarkerAt.
+    std::vector<Point2D> masked;
+    std::span<const Point2D> src = series_.points;
+    if (axes.xscale().clipsDomain() || axes.yscale().clipsDomain()) {
+        masked = maskPointsForScales(src, axes.xscale(), axes.yscale());
+        src = masked;
+    }
     // Line.
     if (series_.lineStyle != LineStyle::None && series_.points.size() >= 2) {
-        auto pts = applyDrawStyle(series_.points, series_.drawStyle);
+        auto pts = applyDrawStyle(src, series_.drawStyle);
         std::vector<Point2D> px;
         px.reserve(pts.size());
         for (const auto& p : pts) px.push_back(toPx(p));
@@ -137,15 +158,16 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     if (!series_.markerTex.empty()) {
         auto uni = text::mathTextToUnicode(series_.markerTex);
         const float halfW = series_.size * 0.3f * float(uni.size());
-        for (const auto& dp : series_.points) {
+        for (const auto& dp : src) {
             auto p = toPx(dp);
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
             c.text({p.x - halfW, p.y + series_.size * 0.35f},
                    uni, series_.size, series_.resolvedColor());
         }
         return;
     }
     if (series_.markerPath) {
-        emitMarkerAt(c, toPx, series_.points,
+        emitMarkerAt(c, toPx, src,
                      markerGeom(*series_.markerPath), series_.size,
                      series_.resolvedColor(), std::max(1.0f, series_.size * 0.1f));
         return;
@@ -153,12 +175,23 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     if (series_.marker != MarkerStyle::None) {
         auto g = markerGeom(series_.marker, series_.markerNumsides,
                             series_.markerAngle);
-        emitMarkerAt(c, toPx, series_.points, g, series_.size,
+        emitMarkerAt(c, toPx, src, g, series_.size,
                      series_.resolvedColor(), 1.0f);
     }
 }
 void LinePlot::contributeToAutoscale(Viewport& v) const {
     for (const auto& p : series_.points) {
+        v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
+        v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
+    }
+}
+void LinePlot::contributeToAutoscaleScaled(Viewport& v,
+                                           const AxisScale& xscale,
+                                           const AxisScale& yscale) const {
+    for (const auto& p : series_.points) {
+        if (!pointInDomain(p, xscale, yscale) ||
+            !std::isfinite(p.x) || !std::isfinite(p.y))
+            continue;
         v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
         v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
     }

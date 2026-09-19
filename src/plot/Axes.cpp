@@ -122,7 +122,14 @@ EventPlot& Axes::eventplot(std::vector<std::vector<float>> positions) {
 EventPlot& Axes::eventplot(std::vector<float> positions) {
     return addOwned<EventPlot>(*this, std::move(positions));
 }
-HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap) {
+HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap,
+                          std::string_view interpolation,
+                          std::string_view aspect) {
+    grid.interpolation = std::string(interpolation);
+    // mpl imshow defaults to aspect="equal" (rcParams image.aspect);
+    // "auto" stretches the image to fill the axes box.
+    if (aspect == "equal")
+        setAspect(AspectMode::Equal);
     return addOwned<HeatmapPlot>(*this, std::move(grid), cmap);
 }
 
@@ -214,7 +221,7 @@ void Axes::secondaryYaxis(std::function<float(float)> forward,
                                 std::move(label), true};
 }
 
-void Axes::finalizeAutoscale(Viewport& v) const {
+void Axes::finalizeAutoscale(Viewport& v, bool tight) const {
     // Check each axis independently — a plot may only contribute to one
     // axis (e.g., AxhLine only contributes y, AxvLine only contributes x).
     if (v.x.min > v.x.max) v.x = {0,1};
@@ -238,8 +245,10 @@ void Axes::finalizeAutoscale(Viewport& v) const {
         r.min = s.inverse(a - tpad);
         r.max = s.inverse(b + tpad);
     };
-    padAxis(v.x, xScale_);
-    padAxis(v.y, yScale_);
+    if (!tight) {
+        padAxis(v.x, xScale_);
+        padAxis(v.y, yScale_);
+    }
 }
 
 void Axes::autoscale() {
@@ -247,8 +256,12 @@ void Axes::autoscale() {
     Viewport v{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
-    for (const auto& p : plots_) p->contributeToAutoscale(v);
-    finalizeAutoscale(v);
+    bool tight = false;
+    for (const auto& p : plots_) {
+        p->contributeToAutoscaleScaled(v, xScale_, yScale_);
+        tight |= p->tightAutoscale();
+    }
+    finalizeAutoscale(v, tight);
     if (!manualX_) viewport_.x = v.x;
     if (!manualY_) viewport_.y = v.y;
     viewport_.z = v.z;
@@ -261,8 +274,16 @@ void Axes::autoscaleGpu(render::primitives::ReduceRenderer& reducer) {
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
     // Each layer contributes via GPU reduce where possible, falling back to
     // CPU per-layer (the default IPlot::contributeToAutoscaleGpu behavior).
-    for (const auto& p : plots_) p->contributeToAutoscaleGpu(reducer, v);
-    finalizeAutoscale(v);
+    bool tight = false;
+    // Domain-limited scales (log/logit) must drop out-of-domain points,
+    // which the raw GPU min/max reduce can't express — use the CPU path.
+    bool clip = xScale_.clipsDomain() || yScale_.clipsDomain();
+    for (const auto& p : plots_) {
+        if (clip) p->contributeToAutoscaleScaled(v, xScale_, yScale_);
+        else      p->contributeToAutoscaleGpu(reducer, v);
+        tight |= p->tightAutoscale();
+    }
+    finalizeAutoscale(v, tight);
     if (!manualX_) viewport_.x = v.x;
     if (!manualY_) viewport_.y = v.y;
     viewport_.z = v.z;

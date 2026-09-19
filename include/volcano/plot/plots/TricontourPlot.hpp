@@ -43,6 +43,7 @@ struct TricontourConfig {
 /// to 2D NDC. Rendered via LineSegmentRenderer.
 class TricontourPlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from (x, y, z) arrays. z is the scalar field value.
     TricontourPlot(std::vector<float> x, std::vector<float> y,
                    std::vector<float> z, TricontourConfig config = {});
@@ -80,6 +81,7 @@ private:
 /// Equivalent to matplotlib's `Axes3D.tricontourf`.
 class TricontourfPlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     TricontourfPlot(std::vector<float> x, std::vector<float> y,
                     std::vector<float> z, TricontourConfig config = {});
 

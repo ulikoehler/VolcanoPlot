@@ -38,6 +38,7 @@ struct Plot3DConfig {
 /// via LineRenderer. Optional markers are rendered via PointRenderer.
 class Plot3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from (x, y, z) arrays.
     Plot3D(std::vector<float> x, std::vector<float> y, std::vector<float> z,
            Plot3DConfig config = {});

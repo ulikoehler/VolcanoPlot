@@ -39,7 +39,7 @@ void Plot3D::projectPoints() {
         // Perspective divide → NDC [-1, 1].
         if (std::abs(clipW) < 1e-30f) continue;
         float ndcX = clipX / clipW;
-        float ndcY = clipY / clipW;
+        float ndcY = -clipY / clipW;
         (void)clipZ;  // depth not used for 2D line rendering
 
         projectedPoints_.push_back({ndcX, ndcY});

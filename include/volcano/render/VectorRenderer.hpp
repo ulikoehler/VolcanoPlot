@@ -52,6 +52,12 @@ private:
                     VectorCanvas& c);
     void emitAnnotations(const plot::Axes& axes, plot::Rect2D rect,
                          VectorCanvas& c);
+    void emitSizeBars(const plot::Axes& axes, plot::Rect2D rect,
+                      VectorCanvas& c);
+    void emitInsetIndicators(const plot::Axes& axes, plot::Rect2D rect,
+                             VectorCanvas& c);
+    void emitAnchoredTexts(const plot::Axes& axes, plot::Rect2D rect,
+                           VectorCanvas& c);
     void emitLegend(const plot::Axes& axes, plot::Rect2D rect,
                     VectorCanvas& c);
     void emitColorbar(const plot::Axes& axes, plot::Rect2D rect,

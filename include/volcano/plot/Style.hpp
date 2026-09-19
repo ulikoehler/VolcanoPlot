@@ -46,6 +46,12 @@ struct TickConfig {
     std::string format = "%g";
     /// Tick direction: "in", "out", or "inout".
     std::string direction = "out";
+    /// Gap between the major tick mark and its label, in points
+    /// (matplotlib xtick.major.pad / ytick.major.pad = 3.5).
+    float majorPad = 3.5f;
+    /// Gap between the minor tick mark and its label, in points
+    /// (matplotlib xtick.minor.pad / ytick.minor.pad = 3.4).
+    float minorPad = 3.4f;
     /// Major tick size in points.
     float majorSize = 3.5f;
     /// Minor tick size in points.
@@ -89,19 +95,14 @@ struct AxisStyle {
     std::string minorGridLineStyle = "-";
     /// Log scale.
     bool logScale = false;
+    /// Space between the axis label and the tick labels, in points
+    /// (matplotlib axes.labelpad = 4.0).
+    float labelPad = 4.0f;
     /// Label color (defaults to axis color if not set).
     Color labelColor = Color::black();
 };
 
 class IPlot;
-
-/// One legend entry (label + handle appearance). Legend handlers
-/// (LegendStyle::handlerMap) produce these for their plot type.
-struct LegendHandle {
-    std::string label;
-    Color color = Color::black();
-    LegendMarker marker = LegendMarker::Square;
-};
 
 /// Legend configuration.
 struct LegendStyle {
@@ -139,6 +140,9 @@ struct LegendStyle {
     /// columnspacing / borderaxespad).
     float handleLength = 2.0f;
     float handleTextPad = 0.8f;
+    /// Height of the legend handle box in font-size units
+    /// (matplotlib legend.handleheight = 0.7).
+    float handleHeight = 0.7f;
     float borderPad = 0.4f;
     /// Vertical space between legend rows, in font-size units
     /// (matplotlib legend.labelspacing).
@@ -168,8 +172,20 @@ struct ColorbarStyle {
     bool visible = false;
     std::string colormap = "viridis";
     Color edgeColor = Color::black();
-    float width = 10.0f;       // pixel width of the color strip
-    float padding = 16.0f;     // padding from the axes rect
+    /// Fraction of the parent axes width reserved for the colorbar
+    /// region (matplotlib colorbar fraction = 0.15). Together with
+    /// `pad` this drives how much the parent axes shrinks.
+    float fraction = 0.15f;
+    /// Fraction of the parent axes width between the shrunk axes and
+    /// the colorbar region (matplotlib colorbar pad = 0.05 vertical).
+    float pad = 0.05f;
+    /// Vertical shrink of the strip relative to the axes height
+    /// (matplotlib colorbar shrink = 1.0).
+    float shrink = 1.0f;
+    float width = 0.0f;        // pixel width override; 0 → auto
+    float aspect = 20.0f;      // mpl colorbar aspect (height/width)
+    /// Pixel gap after the shrunk axes; <= 0 → auto (pad fraction).
+    float padding = -1.0f;
     FontProperties labelFont;
     Color labelColor = Color::black();
     /// matplotlib `extend`: "neither" (default), "min", "max", or "both" —

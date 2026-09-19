@@ -45,6 +45,8 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
+    /// Per-series legend entries (mpl draws one handle per bar series).
+    [[nodiscard]] std::vector<LegendHandle> legendEntries() const override;
 
 private:
     std::vector<std::vector<float>> heights_;

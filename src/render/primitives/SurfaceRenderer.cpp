@@ -3,6 +3,7 @@
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <array>
+#include <cmath>
 #include <stdexcept>
 
 namespace volcano::render::primitives {
@@ -16,14 +17,20 @@ layout(location = 0) in vec3 a_pos;  // x, y, z (data coords, z = value)
 layout(push_constant) uniform PC {
     mat4 u_vp;          // view-projection matrix
     vec4 u_gridRange;   // xy = xRange min/max, zw = yRange min/max
+    vec4 u_light;       // xyz = light dir (mpl LightSource), w = shade flag
     vec2 u_valueRange;  // min, max of z values
 } pc;
 
 layout(location = 0) out float v_height;
+layout(location = 1) out vec3 v_world;
 
 void main() {
-    // Normalize z to [0,1] for color.
+    // Normalize each axis to [0,1] for color + shading (normals are
+    // scale-dependent in raw data coords).
+    float nx = (a_pos.x - pc.u_gridRange.x) / max(pc.u_gridRange.y - pc.u_gridRange.x, 1e-30);
+    float ny = (a_pos.y - pc.u_gridRange.z) / max(pc.u_gridRange.w - pc.u_gridRange.z, 1e-30);
     v_height = (a_pos.z - pc.u_valueRange.x) / max(pc.u_valueRange.y - pc.u_valueRange.x, 1e-30);
+    v_world = vec3(nx, ny, v_height);
     gl_Position = pc.u_vp * vec4(a_pos, 1.0);
 }
 )";
@@ -31,7 +38,15 @@ void main() {
 constexpr const char* kFragGlsl = R"(
 #version 460
 layout(location = 0) in float v_height;
+layout(location = 1) in vec3 v_world;
 layout(location = 0) out vec4 outColor;
+
+layout(push_constant) uniform PC {
+    mat4 u_vp;
+    vec4 u_gridRange;
+    vec4 u_light;
+    vec2 u_valueRange;
+} pc;
 
 vec3 viridis(float t) {
     // Approximate viridis colormap.
@@ -63,6 +78,18 @@ vec3 viridis(float t) {
 
 void main() {
     vec3 color = viridis(clamp(v_height, 0.0, 1.0));
+    if (pc.u_light.w > 0.5) {
+        // mpl plot_surface shade=True: lambert shading via screen-space
+        // normals (mpl LightSource azdeg=315 altdeg=45).
+        vec3 n = cross(dFdx(v_world), dFdy(v_world));
+        float nl = length(n);
+        n = nl > 1e-12 ? n / nl : vec3(0.0, 0.0, 1.0);
+        if (n.z < 0.0) n = -n;   // shade the upward face
+        float i = clamp(dot(n, normalize(pc.u_light.xyz)), 0.0, 1.0);
+        // mpl hsv blend approximated: darken shadowed faces, slight
+        // brightening toward white at grazing specular angles.
+        color = color * (0.30 + 0.70 * i) + vec3(0.10) * i * i;
+    }
     outColor = vec4(color, 1.0);
 }
 )";
@@ -79,7 +106,7 @@ void SurfaceRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * (16 + 4 + 2));
+       .setOffset(0).setSize(sizeof(float) * (16 + 4 + 2 + 4));
     vk::PipelineLayoutCreateInfo plci;
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -101,7 +128,7 @@ void SurfaceRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PipelineRasterizationStateCreateInfo rsci{};
     rsci.setLineWidth(1.0f).setPolygonMode(vk::PolygonMode::eFill)
-        .setCullMode(vk::CullModeFlagBits::eBack)
+        .setCullMode(vk::CullModeFlagBits::eNone)
         .setFrontFace(vk::FrontFace::eClockwise);
 
     // Depth testing enabled — render pass now has a depth attachment.
@@ -188,20 +215,32 @@ void SurfaceRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
 }
 
 void SurfaceRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-                           const plot::Camera3D& camera) const {
+                           const plot::Camera3D& camera, bool shade,
+                           float lightAzdeg, float lightAltdeg) const {
     if (!inited_ || indexCount_ == 0) return;
 
     struct PC {
         float vp[16];
         float gridXMin, gridXMax, gridYMin, gridYMax;
+        float light[4];
         float valueMin, valueMax;
     } pc;
     auto vp = camera.viewProjection();
-    std::memcpy(pc.vp, vp.data(), sizeof(float) * 16);
+    // Row-major → column-major for the GLSL mat4 push constant.
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            pc.vp[j * 4 + i] = vp[i * 4 + j];
     pc.gridXMin = gridXRange_.min;
     pc.gridXMax = gridXRange_.max;
     pc.gridYMin = gridYRange_.min;
     pc.gridYMax = gridYRange_.max;
+    // mpl LightSource defaults: azdeg=315, altdeg=45 → direction.
+    float az = lightAzdeg * 3.14159265f / 180.0f;
+    float al = lightAltdeg * 3.14159265f / 180.0f;
+    pc.light[0] = std::cos(al) * std::cos(az);
+    pc.light[1] = std::cos(al) * std::sin(az);
+    pc.light[2] = std::sin(al);
+    pc.light[3] = shade ? 1.0f : 0.0f;
     pc.valueMin = valueMin_;
     pc.valueMax = valueMax_;
 

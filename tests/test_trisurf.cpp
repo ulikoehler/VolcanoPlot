@@ -170,8 +170,18 @@ TEST(TrisurfRegression, DifferentColormapsProduceDifferentColors) {
     cf2.axes->addPlot(std::move(plot2));
     auto imgPlasma = cf2.render();
 
-    Pixel pix1 = imgViridis.get(128, 128);
-    Pixel pix2 = imgPlasma.get(128, 128);
+    // Compare the centroid pixel of the rendered surface — its position
+    // depends on the camera, so sample where the surface actually lands.
+    auto nonWhite = [](const Image& im) {
+        Pixel acc{0,0,0,255}; uint64_t n=0, r=0,g=0,b=0;
+        for (uint32_t y=0;y<im.height();++y) for (uint32_t x=0;x<im.width();++x) {
+            Pixel p=im.get(x,y);
+            if (!p.approx(Pixel::white(),40)) {r+=p.r;g+=p.g;b+=p.b;++n;}
+        }
+        return n? Pixel{uint8_t(r/n),uint8_t(g/n),uint8_t(b/n),255} : acc;
+    };
+    Pixel pix1 = nonWhite(imgViridis);
+    Pixel pix2 = nonWhite(imgPlasma);
     EXPECT_FALSE(pix1.approx(pix2, 30))
         << "Different colormaps should produce different colors";
 }

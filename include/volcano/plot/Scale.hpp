@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,27 @@ struct AxisScale {
     [[nodiscard]] float forward(float v) const;
     /// display space -> data.
     [[nodiscard]] float inverse(float v) const;
+
+    /// Whether `v` lies inside the scale's data domain. Log scales drop
+    /// non-positive values, logit drops values outside (0, 1) —
+    /// matplotlib masks such points at data-conversion time.
+    [[nodiscard]] bool inDomain(float v) const noexcept {
+        switch (kind) {
+        case ScaleKind::Log:
+        case ScaleKind::FunctionLog:
+            return v > 0.0f;
+        case ScaleKind::Logit:
+            return v > 0.0f && v < 1.0f;
+        default:
+            return true;
+        }
+    }
+    /// Whether the scale can reject any data values (inDomain is not
+    /// always true).
+    [[nodiscard]] bool clipsDomain() const noexcept {
+        return kind == ScaleKind::Log || kind == ScaleKind::FunctionLog ||
+               kind == ScaleKind::Logit;
+    }
 
     [[nodiscard]] bool isLinear() const { return kind == ScaleKind::Linear; }
     /// Whether the GPU shaders implement this scale.
@@ -79,5 +101,18 @@ scaleTicks(const AxisScale& scale, float vmin, float vmax, int nbins = 9);
 /// Nice step size for the scale at the given range (used for label format).
 [[nodiscard]] float
 scaleTickStep(const AxisScale& scale, float vmin, float vmax, int nbins = 9);
+
+/// Whether a data point is valid under both axis scales.
+[[nodiscard]] inline bool pointInDomain(Point2D p, const AxisScale& sx,
+                                        const AxisScale& sy) noexcept {
+    return sx.inDomain(p.x) && sy.inDomain(p.y);
+}
+
+/// Replace out-of-domain points with NaN sentinels so downstream
+/// consumers split polylines / skip markers (matplotlib masks
+/// non-positive data on log axes at conversion time).
+[[nodiscard]] std::vector<Point2D>
+maskPointsForScales(std::span<const Point2D> points, const AxisScale& sx,
+                    const AxisScale& sy);
 
 } // namespace volcano::plot

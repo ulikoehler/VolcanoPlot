@@ -33,6 +33,9 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport&) const override {} // axes-frac space
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
 };
 
 /// Sankey — simplified `matplotlib.sankey.Sankey`: a horizontal trunk with

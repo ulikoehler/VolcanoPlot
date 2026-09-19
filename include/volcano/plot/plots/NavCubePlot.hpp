@@ -64,6 +64,7 @@ struct NavCubeConfig {
 ///   axes->addPlot(std::make_unique<NavCubePlot>(nav));
 class NavCubePlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     explicit NavCubePlot(NavCubeConfig config = {});
 
     /// Update the camera (e.g. after interactive rotation).

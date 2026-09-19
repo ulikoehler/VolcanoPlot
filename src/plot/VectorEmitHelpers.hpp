@@ -6,6 +6,8 @@
 #include "volcano/plot/Stroke.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 
+#include <cmath>
+
 namespace volcano::plot {
 
 /// Data-space → figure-pixel mapper for an axes rect.
@@ -29,6 +31,7 @@ void emitMarkerAt(render::VectorCanvas& c, const Map& toPx,
     pen.width = strokeW;
     for (const auto& dp : pts) {
         Point2D c0 = toPx(dp);
+        if (!std::isfinite(c0.x) || !std::isfinite(c0.y)) continue;
         auto scaled = [&](std::span<const Point2D> v) {
             std::vector<Point2D> out;
             out.reserve(v.size());

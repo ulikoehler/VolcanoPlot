@@ -41,11 +41,12 @@ Color HexbinPlot::legendColor() const {
 std::array<Point2D, 6> HexbinPlot::hexVertices(float cx, float cy, float r) const {
     std::array<Point2D, 6> verts;
     if (config_.orientation == HexOrientation::PointyTop) {
-        // Pointy-top: vertices at 30, 90, 150, 210, 270, 330 degrees.
-        for (int i = 0; i < 6; ++i) {
-            float angle = (30.0f + 60.0f * i) * static_cast<float>(M_PI) / 180.0f;
-            verts[i] = {cx + r * std::cos(angle), cy + r * std::sin(angle)};
-        }
+        // mpl polygon: [sx, sy/3] * [[.5,-.5],[.5,.5],[0,1],[-.5,.5],
+        //                            [-.5,-.5],[0,-1]]  (sx/sy = cell pitch)
+        constexpr float kX[6] = {.5f, .5f, 0.f, -.5f, -.5f, 0.f};
+        constexpr float kY[6] = {-.5f, .5f, 1.f, .5f, -.5f, -1.f};
+        for (int i = 0; i < 6; ++i)
+            verts[i] = {cx + kX[i] * hexSX_, cy + kY[i] * (hexSY_ / 3.0f)};
     } else {
         // Flat-top: vertices at 0, 60, 120, 180, 240, 300 degrees.
         for (int i = 0; i < 6; ++i) {
@@ -57,11 +58,9 @@ std::array<Point2D, 6> HexbinPlot::hexVertices(float cx, float cy, float r) cons
 }
 
 void HexbinPlot::computeBins() {
-    if (x_.empty()) {
-        centers_.clear();
-        counts_.clear();
-        return;
-    }
+    centers_.clear();
+    counts_.clear();
+    if (x_.empty()) return;
 
     // Determine data range.
     xMin_ = *std::ranges::min_element(x_);
@@ -70,71 +69,78 @@ void HexbinPlot::computeBins() {
     yMax_ = *std::ranges::max_element(y_);
     if (xMax_ <= xMin_) xMax_ = xMin_ + 1.0f;
     if (yMax_ <= yMin_) yMax_ = yMin_ + 1.0f;
-
     float xSpan = xMax_ - xMin_;
     float ySpan = yMax_ - yMin_;
 
-    // Compute hex size.
-    // For pointy-top: hex width = sqrt(3) * r, hex height = 2 * r.
-    // Horizontal spacing = sqrt(3) * r, vertical spacing = 1.5 * r.
-    // For flat-top: hex width = 2 * r, hex height = sqrt(3) * r.
-    // Horizontal spacing = 1.5 * r, vertical spacing = sqrt(3) * r.
-    // gridsize = number of hexes along x.
-    int gs = std::max(1, config_.gridsize);
     if (config_.orientation == HexOrientation::PointyTop) {
-        float hexWidth = xSpan / gs;
-        hexRadius_ = hexWidth / std::sqrt(3.0f);
+        // matplotlib hexbin (axes/_axes.py::hexbin):
+        //   nx = gridsize, ny = int(nx / sqrt(3))
+        //   sx = (xmax-xmin)/nx, sy = (ymax-ymin)/ny
+        // Two interleaved lattices: A = (nx+1)x(ny+1) at (i*sx, j*sy),
+        // B = nx*ny offset by (+0.5sx, +0.5sy). Each point goes to the
+        // nearer cell under d = dx^2 + 3*dy^2 (hex-metric in index space).
+        int nx = std::max(1, config_.gridsize);
+        int ny = std::max(1, int(nx / std::sqrt(3.0)));
+        float sx = xSpan / nx, sy = ySpan / ny;
+        hexSX_ = sx; hexSY_ = sy;
+        hexRadius_ = sy / 3.0f;  // vertical vertex distance (mpl polygon)
+
+        // counts indexed [lattice][q][r]: A in [0..nx]x[0..ny],
+        // B in [0..nx)x[0..ny).
+        std::vector<int> cA((nx + 1) * (ny + 1), 0), cB(nx * ny, 0);
+        for (size_t k = 0; k < x_.size(); ++k) {
+            float ix = (x_[k] - xMin_) / sx;
+            float iy = (y_[k] - yMin_) / sy;
+            int ix1 = int(std::round(ix)), iy1 = int(std::round(iy));
+            int ix2 = int(std::floor(ix)), iy2 = int(std::floor(iy));
+            float d1 = (ix - ix1) * (ix - ix1) + 3.0f * (iy - iy1) * (iy - iy1);
+            float d2 = (ix - ix2 - 0.5f) * (ix - ix2 - 0.5f) +
+                       3.0f * (iy - iy2 - 0.5f) * (iy - iy2 - 0.5f);
+            if (d1 < d2) {
+                if (ix1 >= 0 && ix1 <= nx && iy1 >= 0 && iy1 <= ny)
+                    cA[ix1 * (ny + 1) + iy1]++;
+            } else {
+                if (ix2 >= 0 && ix2 < nx && iy2 >= 0 && iy2 < ny)
+                    cB[ix2 * ny + iy2]++;
+            }
+        }
+        // Emit every lattice cell (mpl draws all cells; mincnt filters).
+        for (int i = 0; i <= nx; ++i)
+            for (int j = 0; j <= ny; ++j) {
+                if (cA[i * (ny + 1) + j] < config_.minCount) continue;
+                centers_.push_back({xMin_ + i * sx, yMin_ + j * sy});
+                counts_.push_back(float(cA[i * (ny + 1) + j]));
+            }
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < ny; ++j) {
+                if (cB[i * ny + j] < config_.minCount) continue;
+                centers_.push_back({xMin_ + (i + 0.5f) * sx,
+                                    yMin_ + (j + 0.5f) * sy});
+                counts_.push_back(float(cB[i * ny + j]));
+            }
     } else {
-        float hexWidth = xSpan / gs;
+        // Flat-top axial coordinates (non-mpl extension).
+        float hexWidth = xSpan / std::max(1, config_.gridsize);
         hexRadius_ = hexWidth / 2.0f;
-    }
-
-    // Bin points into hex cells using axial coordinates.
-    std::unordered_map<std::pair<int,int>, int, IntPairHash> bins;
-
-    for (size_t k = 0; k < x_.size(); ++k) {
-        float px = x_[k] - xMin_;
-        float py = y_[k] - yMin_;
-
-        int q, r;
-        if (config_.orientation == HexOrientation::PointyTop) {
-            // Pointy-top axial coordinates.
-            // q = (sqrt(3)/3 * x - 1/3 * y) / r
-            // r = (2/3 * y) / r
-            float qf = (std::sqrt(3.0f) / 3.0f * px - 1.0f / 3.0f * py) / hexRadius_;
-            float rf = (2.0f / 3.0f * py) / hexRadius_;
-            // Round to nearest hex.
-            q = static_cast<int>(std::round(qf));
-            r = static_cast<int>(std::round(rf));
-        } else {
-            // Flat-top axial coordinates.
-            // q = (2/3 * x) / r
-            // r = (-1/3 * x + sqrt(3)/3 * y) / r
-            float qf = (2.0f / 3.0f * px) / hexRadius_;
-            float rf = (-1.0f / 3.0f * px + std::sqrt(3.0f) / 3.0f * py) / hexRadius_;
-            q = static_cast<int>(std::round(qf));
-            r = static_cast<int>(std::round(rf));
+        hexSX_ = hexRadius_ * 1.5f;
+        hexSY_ = hexRadius_ * std::sqrt(3.0f);
+        std::unordered_map<std::pair<int,int>, int, IntPairHash> bins;
+        for (size_t k = 0; k < x_.size(); ++k) {
+            float px = x_[k] - xMin_, py = y_[k] - yMin_;
+            int q = int(std::round((2.0f / 3.0f * px) / hexRadius_));
+            int r = int(std::round((-1.0f / 3.0f * px +
+                                    std::sqrt(3.0f) / 3.0f * py) / hexRadius_));
+            bins[{q, r}]++;
         }
-        bins[{q, r}]++;
-    }
-
-    // Convert axial coordinates to pixel centers.
-    centers_.clear();
-    counts_.clear();
-    for (const auto& [key, count] : bins) {
-        if (count < config_.minCount) continue;
-        int q = key.first;
-        int r = key.second;
-        float cx, cy;
-        if (config_.orientation == HexOrientation::PointyTop) {
-            cx = xMin_ + hexRadius_ * (std::sqrt(3.0f) * q + std::sqrt(3.0f) / 2.0f * r);
-            cy = yMin_ + hexRadius_ * 1.5f * r;
-        } else {
-            cx = xMin_ + hexRadius_ * 1.5f * q;
-            cy = yMin_ + hexRadius_ * (std::sqrt(3.0f) / 2.0f * q + std::sqrt(3.0f) * r);
+        for (const auto& [key, count] : bins) {
+            if (count < config_.minCount) continue;
+            int q = key.first, r = key.second;
+            centers_.push_back(
+                {xMin_ + hexRadius_ * 1.5f * q,
+                 yMin_ + hexRadius_ * (std::sqrt(3.0f) / 2.0f * q +
+                                       std::sqrt(3.0f) * r)});
+            counts_.push_back(static_cast<float>(count));
         }
-        centers_.push_back({cx, cy});
-        counts_.push_back(static_cast<float>(count));
     }
 
     // Apply normalization.
@@ -216,14 +222,19 @@ void HexbinPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
 }
 
 void HexbinPlot::contributeToAutoscale(Viewport& v) const {
-    for (float xv : x_) {
-        v.x.min = std::min(v.x.min, xv);
-        v.x.max = std::max(v.x.max, xv);
-    }
-    for (float yv : y_) {
-        v.y.min = std::min(v.y.min, yv);
-        v.y.max = std::max(v.y.max, yv);
-    }
+    // mpl's datalim covers the hex lattice: data range + half a cell.
+    if (x_.empty()) return;
+    float xMin = *std::ranges::min_element(x_);
+    float xMax = *std::ranges::max_element(x_);
+    float yMin = *std::ranges::min_element(y_);
+    float yMax = *std::ranges::max_element(y_);
+    int nx = std::max(1, config_.gridsize);
+    int ny = std::max(1, int(nx / std::sqrt(3.0)));
+    float sx = (xMax - xMin) / nx, sy = (yMax - yMin) / ny;
+    v.x.min = std::min(v.x.min, xMin - sx * 0.5f);
+    v.x.max = std::max(v.x.max, xMax + sx * 0.5f);
+    v.y.min = std::min(v.y.min, yMin - sy / 3.0f);
+    v.y.max = std::max(v.y.max, yMax + sy / 3.0f);
 }
 
 } // namespace volcano::plot

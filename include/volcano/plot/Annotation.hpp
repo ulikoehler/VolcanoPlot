@@ -13,6 +13,8 @@
 #include "volcano/plot/Path.hpp"
 #include "volcano/plot/Types.hpp"
 
+#include <array>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -148,6 +150,14 @@ struct TextAnnotation {
     /// Whether to clip the text to the axes rect (matplotlib clip_on).
     /// Default false (matplotlib default); set true to clip data-space text.
     bool clipOn = false;
+
+    /// mpl draggable(): allow dragging the text with the mouse.
+    bool draggable = false;
+    /// Accumulated pixel-space drag displacement (figure px, Y-down).
+    mutable Point2D dragOffset{0.0f, 0.0f};
+    /// Text bounding box in figure px from the last draw (hit-testing).
+    /// Set by the renderers; empty when never drawn.
+    mutable Rect2D drawBox{};
 };
 
 /// An annotation with an arrow connecting text to a data point.
@@ -212,9 +222,151 @@ struct Annotation {
     /// mpl set_clip_path: optional clip path in data coords; the arrow
     /// geometry is clipped to its outline at draw time.
     std::optional<Path> clipPath;
+
+    /// mpl draggable(): allow dragging the annotation text (the arrow
+    /// follows, keeping its data-space anchor).
+    bool draggable = false;
+    /// Accumulated pixel-space drag displacement (figure px, Y-down).
+    mutable Point2D dragOffset{0.0f, 0.0f};
+    /// Text bounding box in figure px from the last draw (hit-testing).
+    mutable Rect2D drawBox{};
+};
+
+/// An anchored scale bar (mpl_toolkits.axes_grid1 `AnchoredSizeBar`):
+/// a horizontal bar of `size` data-x units with a centered label,
+/// anchored at `loc` inside the axes with an optional frame.
+struct SizeBar {
+    /// Horizontal bar length in data-x units (mpl `size`).
+    float size = 0.0f;
+    /// Label text under (or over, when labelTop) the bar.
+    std::string label;
+    /// Anchor location — same names as legend loc ("lower right",
+    /// "upper left", ... or mpl numeric codes "1".."9").
+    std::string loc = "lower right";
+    /// Padding inside the frame, fraction of the font size (mpl pad).
+    float pad = 0.1f;
+    /// Padding between the frame and the axes edge, fraction of the
+    /// font size (mpl borderpad).
+    float borderpad = 0.1f;
+    /// Separation between bar and label in points (mpl sep).
+    float sep = 2.0f;
+    /// Draw a frame box around bar + label (mpl frameon).
+    bool frameon = true;
+    /// Bar height in data-y units (mpl size_vertical). 0 = thin line.
+    float sizeVertical = 0.0f;
+    /// Bar and label color.
+    Color color = Color::black();
+    /// Label above the bar instead of below (mpl label_top).
+    bool labelTop = false;
+    /// Fill the bar instead of stroking its outline (mpl fill_bar;
+    /// default: fill when sizeVertical > 0).
+    std::optional<bool> fillBar;
+    /// Font size scale (1.0 = default 16px).
+    float fontSize = 1.0f;
+    /// Frame fill color (mpl legend-style white@0.8).
+    Color frameFaceColor{1.0f, 1.0f, 1.0f, 0.8f};
 };
 
 class Axes;
+
+/// Text metrics for anchored-artist layout (width/height/ascent, px).
+struct SizeBarTextMeasure { float width = 0, height = 0, ascent = 0; };
+
+/// An anchored text box (mpl_toolkits.axes_grid1 `AnchoredText`):
+/// text anchored at `loc` inside the axes with an optional frame.
+struct AnchoredText {
+    /// Text content (multi-line via '\n').
+    std::string text;
+    /// Anchor location — mpl loc names or numeric codes ("1".."10").
+    std::string loc = "upper left";
+    /// Padding inside the frame, fraction of font size (mpl pad=0.4).
+    float pad = 0.4f;
+    /// Padding between frame and axes edge, fraction of font size
+    /// (mpl borderpad=0.5).
+    float borderpad = 0.5f;
+    /// Draw a frame box (mpl frameon=True).
+    bool frameon = true;
+    /// Font size scale (1.0 = default 16px).
+    float fontSize = 1.0f;
+    Color color = Color::black();
+    /// mpl patch facecolor/edgecolor defaults ('white'/'0.8' at 0.8 alpha
+    /// via the offset-box frame).
+    Color frameFaceColor{1.0f, 1.0f, 1.0f, 0.8f};
+    Color frameEdgeColor{0.8f, 0.8f, 0.8f, 0.8f};
+};
+
+/// Pixel-space layout of an AnchoredText (shared by raster + vector).
+struct AnchoredTextLayout {
+    Rect2Df box;                          ///< frame rect
+    std::vector<Point2D> lineBaselines;   ///< one baseline origin per line
+    bool valid = false;
+};
+
+AnchoredTextLayout layoutAnchoredText(
+    const AnchoredText& at, const Axes& axes, Rect2D axesRect,
+    const std::function<SizeBarTextMeasure(std::string_view,
+                                           float)>& measure);
+
+/// Pixel-space layout of a SizeBar (shared by raster + vector paths).
+/// A zoom indicator rectangle + connectors drawn on a parent axes,
+/// marking the data region shown by an inset axes
+/// (mpl `Axes.indicate_inset` / `indicate_inset_zoom`).
+struct InsetIndicator {
+    /// The inset axes this indicator points to (owns rect + viewport).
+    /// May be null when explicit `bounds` are given without connectors.
+    const Axes* inset = nullptr;
+    /// Explicit rectangle in this axes' data coords (mpl `bounds`,
+    /// transData default). When false, the inset axes' viewport limits
+    /// supply the rectangle.
+    bool hasBounds = false;
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    /// Rectangle fill (mpl facecolor; 'none' default → transparent).
+    Color faceColor = Color::transparent();
+    /// Rectangle edge + connector color (mpl edgecolor '0.5').
+    Color edgeColor{0.5f, 0.5f, 0.5f, 1.0f};
+    /// mpl alpha (multiplies both colors).
+    float alpha = 0.5f;
+    /// Connector line width in px (mpl linewidth, patch default 1.0).
+    float lineWidth = 1.0f;
+    /// Per-corner connector visibility [LL, UL, LR, UR]; nullopt = auto
+    /// (mpl picks the two corners that don't overlap the inset box).
+    std::optional<std::array<bool, 4>> connectors;
+};
+
+/// Pixel-space layout of an InsetIndicator (shared by raster + vector).
+struct InsetIndicatorLayout {
+    Rect2Df rect;   ///< indicator rectangle, figure px
+    /// px segments: rect-corner → inset-axes corner, order LL,UL,LR,UR.
+    std::array<std::pair<Point2D, Point2D>, 4> connectors{};
+    std::array<bool, 4> connVisible{};
+    bool valid = false;
+};
+
+InsetIndicatorLayout layoutInsetIndicator(const InsetIndicator& ind,
+                                          const Axes& parent,
+                                          Rect2D parentRect,
+                                          Extent2D figExtent);
+
+struct SizeBarLayout {
+    Rect2Df box;            ///< frame rect (== content when !frameon)
+    Rect2Df bar;            ///< bar rect
+    Point2D labelBaseline;  ///< left end of the label baseline
+    bool fill = true;       ///< bar filled vs. stroked outline
+    bool valid = false;     ///< false when size <= 0 or label empty path
+};
+
+/// Text metrics needed by `layoutSizeBar` (matches TextRenderer's
+/// TextMetrics / text::TextMeasure shape) — declared above with the
+/// anchored-artist structs.
+
+/// Lay out a SizeBar inside `axesRect` (figure pixels, Y-down).
+/// `measure` returns {width, height, ascent} for the label at scale
+/// `bar.fontSize` (matches TextRenderer::measureText / VectorRenderer).
+[[nodiscard]] SizeBarLayout
+layoutSizeBar(const SizeBar& bar, const Axes& axes, Rect2D axesRect,
+              Extent2D figExtent, float dpi,
+              const std::function<SizeBarTextMeasure(std::string_view,
+                                                   float)>& measure);
 
 /// Convert a position from a coordinate system to display (pixel) coordinates.
 /// `axesRect` is the pixel rect of the axes, `figExtent` is the full framebuffer,

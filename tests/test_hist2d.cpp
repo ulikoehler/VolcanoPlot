@@ -109,15 +109,16 @@ TEST(Hist2DRegression, ClusterAtCenter) {
     auto img = cf.render();
 
     // Center should be colored (high count).
-    auto vp = expectedViewport(0, 10, 0, 10);
+    auto vp = cf.axes->viewport();
     auto [px, py] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
     Pixel center = img.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
     EXPECT_FALSE(center.approx(Pixel::white(), 40))
         << "Center should be colored (high count)";
 
-    // Corners should be white (no points).
-    EXPECT_TRUE(img.get(10, 10).approx(Pixel::white(), 40))
-        << "Corner should be white (no points)";
+    // Corners hold zero-count bins → colormap low end (mpl behavior).
+    Pixel low = Pixel{68, 1, 84, 255};  // viridis(0)
+    EXPECT_TRUE(img.get(10, 10).approx(low, 40))
+        << "Corner should be the colormap low end (zero count)";
 }
 
 TEST(Hist2DRegression, AutoscaleMatchesData) {
@@ -240,7 +241,7 @@ TEST(Hist2DRegression, TwoClustersRender) {
     auto img = cf.render();
 
     // Both cluster centers should be colored.
-    auto vp = expectedViewport(0, 10, 0, 10);
+    auto vp = cf.axes->viewport();
     auto [px1, py1] = dataToPixel(vp, cf.axes->rect, 2.0f, 2.0f);
     auto [px2, py2] = dataToPixel(vp, cf.axes->rect, 8.0f, 8.0f);
     Pixel c1 = img.get(static_cast<uint32_t>(px1), static_cast<uint32_t>(py1));
@@ -250,9 +251,10 @@ TEST(Hist2DRegression, TwoClustersRender) {
     EXPECT_FALSE(c2.approx(Pixel::white(), 40))
         << "Second cluster should be colored";
 
-    // Middle area (between clusters) should be mostly white.
+    // Middle area (between clusters) → zero-count bins = colormap low end.
     auto [mx, my] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
     Pixel mid = img.get(static_cast<uint32_t>(mx), static_cast<uint32_t>(my));
-    EXPECT_TRUE(mid.approx(Pixel::white(), 40))
-        << "Middle between clusters should be white";
+    Pixel low = Pixel{68, 1, 84, 255};  // viridis(0)
+    EXPECT_TRUE(mid.approx(low, 40))
+        << "Middle between clusters should be the colormap low end";
 }

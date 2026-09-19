@@ -146,9 +146,10 @@ TEST(ContourRegression, ContourLinesOnRampAreVerticalish) {
 
     // The contour lines should be roughly vertical (spanning many y values
     // at certain x positions). Check that black pixels exist at multiple
-    // y positions for a given x.
-    auto vp = expectedViewport(0, 10, 0, 10);
-    auto [px, py] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
+    // y positions for a given x. Contour autoscales tight (no 5% margin).
+    Viewport vp;
+    vp.x = {0, 10}; vp.y = {0, 10}; vp.z = {0, 1};
+    auto [px, py] = dataToPixel(vp, cf.axes->rect, 6.0f, 5.0f);
     uint32_t xMid = static_cast<uint32_t>(px);
     int yHits = 0;
     for (uint32_t y = 20; y < 236; y += 8)
@@ -164,10 +165,10 @@ TEST(ContourRegression, ContourAutoscaleMatchesGrid) {
     cf.render();  // trigger autoscale
 
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, -0.5f, 0.1f) << "X min should match grid xRange";
-    EXPECT_NEAR(av.x.max, 10.5f, 0.1f) << "X max should match grid xRange";
-    EXPECT_NEAR(av.y.min, -0.5f, 0.1f) << "Y min should match grid yRange";
-    EXPECT_NEAR(av.y.max, 10.5f, 0.1f) << "Y max should match grid yRange";
+    EXPECT_NEAR(av.x.min, 0.0f, 0.1f) << "X min should match grid xRange";
+    EXPECT_NEAR(av.x.max, 10.0f, 0.1f) << "X max should match grid xRange";
+    EXPECT_NEAR(av.y.min, 0.0f, 0.1f) << "Y min should match grid yRange";
+    EXPECT_NEAR(av.y.max, 10.0f, 0.1f) << "Y max should match grid yRange";
 }
 
 TEST(ContourRegression, ExplicitLevelsRespected) {
@@ -279,10 +280,10 @@ TEST(ContourRegression, ContourfAutoscaleMatchesGrid) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, -0.5f, 0.1f);
-    EXPECT_NEAR(av.x.max, 10.5f, 0.1f);
-    EXPECT_NEAR(av.y.min, -0.5f, 0.1f);
-    EXPECT_NEAR(av.y.max, 10.5f, 0.1f);
+    EXPECT_NEAR(av.x.min, 0.0f, 0.1f);
+    EXPECT_NEAR(av.x.max, 10.0f, 0.1f);
+    EXPECT_NEAR(av.y.min, 0.0f, 0.1f);
+    EXPECT_NEAR(av.y.max, 10.0f, 0.1f);
 }
 
 TEST(ContourRegression, ContourfExplicitLevels) {
@@ -370,4 +371,38 @@ TEST(ContourRegression, ContourfPlusContourLines) {
     size_t filledCount = countPixels(img, isNotWhite);
     EXPECT_GT(filledCount, 5000u) << "Should have filled bands";
     EXPECT_GT(blackCount, 20u) << "Should have contour lines on top";
+}
+
+TEST(ContourRegression, ClabelBreaksLineUnderLabel) {
+    // Single-level ramp → one vertical contour line. With clabel=true
+    // the line is broken under the label, so the black column pixels
+    // shrink while red label text appears.
+    auto renderWith = [](bool clabel) {
+        ContourFigure cf(256);
+        auto grid = rampGrid(50, 50);
+        ContourConfig config;
+        config.levels = {0.5f};
+        config.lineColor = Color::black();
+        config.lineWidth = 2.0f;
+        config.clabel = clabel;
+        config.clabelColor = Color::red();
+        cf.axes->addPlot(std::make_unique<ContourPlot>(std::move(grid), config));
+        return cf.render();
+    };
+    auto plain = renderWith(false);
+    auto labeled = renderWith(true);
+
+    size_t plainBlack = countPixels(plain, isBlack);
+    size_t labeledBlack = countPixels(labeled, isBlack);
+    EXPECT_GT(plainBlack, 100u);
+    EXPECT_GT(plainBlack, labeledBlack)
+        << "clabel should open a gap in the contour line";
+
+    size_t red = 0;
+    for (uint32_t y = 0; y < labeled.height(); ++y)
+        for (uint32_t x = 0; x < labeled.width(); ++x) {
+            Pixel p = labeled.get(x, y);
+            if (p.r > 150 && p.r > p.g + 50 && p.r > p.b + 50) ++red;
+        }
+    EXPECT_GT(red, 5u) << "clabel text should render in red";
 }

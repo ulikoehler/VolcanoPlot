@@ -141,6 +141,18 @@ private:
     void drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                          plot::Rect2D rect);
 
+    /// Draw anchored scale bars (mpl AnchoredSizeBar) for one axes.
+    void drawSizeBars(vk::CommandBuffer cmd, const plot::Axes& axes,
+                      plot::Rect2D rect);
+    /// Draw anchored text boxes (mpl AnchoredText) for one axes.
+    void drawAnchoredTexts(vk::CommandBuffer cmd, const plot::Axes& axes,
+                           plot::Rect2D rect);
+    /// Draw inset-zoom indicator rectangles + connectors (mpl
+    /// indicate_inset_zoom) for one axes.
+    void drawInsetIndicators(vk::CommandBuffer cmd,
+                             const plot::Axes& axes,
+                             plot::Rect2D rect);
+
     /// Vector-backend savefig (pdf/svg/eps/pgf). See savefig.
     [[nodiscard]] bool savefigVector(plot::Figure& figure,
                                      const std::filesystem::path& path,

@@ -182,7 +182,7 @@ void Hist2DPlot::buildGeometry() {
     for (uint32_t j = 0; j < nBinsY_; ++j) {
         for (uint32_t i = 0; i < nBinsX_; ++i) {
             float count = counts_[j * nBinsX_ + i];
-            if (count <= 0.0f) continue;  // skip empty bins
+            // mpl hist2d renders every bin (zero count → colormap low end).
 
             float x0 = xEdges_[i], x1 = xEdges_[i + 1];
             float y0 = yEdges_[j], y1 = yEdges_[j + 1];

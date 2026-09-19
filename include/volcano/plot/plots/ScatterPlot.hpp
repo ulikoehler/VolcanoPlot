@@ -20,6 +20,9 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// Log/logit scales drop out-of-domain points from the data limits.
+    void contributeToAutoscaleScaled(Viewport& v, const AxisScale& xscale,
+                                     const AxisScale& yscale) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
                                   Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return series_.label; }

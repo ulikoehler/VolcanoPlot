@@ -258,3 +258,63 @@ TEST(LogScaleRegression, LogScaleHandlesSmallValues) {
     size_t filledCount = countPixels(img, isNotWhite);
     EXPECT_GT(filledCount, 10u) << "Log scale should handle small values";
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Domain clipping: non-positive data is dropped on log axes (and data
+// outside (0,1) on logit axes), matching matplotlib's masking.
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(LogClip, MaskPointsForScalesDropsNonPositive) {
+    AxisScale sx = AxisScale::linear();
+    AxisScale sy = AxisScale::log();
+    std::vector<Point2D> pts{{0, 1}, {1, -2}, {2, 0}, {3, 10}};
+    auto m = maskPointsForScales(pts, sx, sy);
+    ASSERT_EQ(m.size(), pts.size());
+    EXPECT_TRUE(std::isfinite(m[0].x) && std::isfinite(m[0].y));
+    EXPECT_FALSE(std::isfinite(m[1].x)) << "y=-2 must be masked";
+    EXPECT_FALSE(std::isfinite(m[2].x)) << "y=0 must be masked";
+    EXPECT_TRUE(std::isfinite(m[3].x));
+}
+
+TEST(LogClip, LogitMasksOutsideUnitInterval) {
+    AxisScale s = AxisScale::logit();
+    EXPECT_TRUE(s.inDomain(0.5f));
+    EXPECT_FALSE(s.inDomain(0.0f));
+    EXPECT_FALSE(s.inDomain(1.0f));
+    EXPECT_FALSE(s.inDomain(-0.5f));
+    EXPECT_FALSE(s.inDomain(1.5f));
+}
+
+TEST(LogClip, SemilogyAutoscaleIgnoresNonPositive) {
+    LogFigure cf(256);
+    Series2D series;
+    series.points = {{1, -50}, {2, -1}, {3, 10}, {4, 1000}};
+    series.color = Color::blue();
+    cf.axes->semilogy();
+    cf.axes->addPlot(std::make_unique<LinePlot>(series));
+    cf.render();
+
+    const auto& av = cf.axes->viewport();
+    // Only positive y data [10, 1000] contributes to the limits; the
+    // log-space padding must stay inside the domain (min > 0).
+    EXPECT_GT(av.y.min, 0.0f);
+    EXPECT_LT(av.y.min, 10.0f);
+    EXPECT_GT(av.y.max, 1000.0f);
+}
+
+TEST(LogClip, SemilogyScatterDropsNonPositiveMarkers) {
+    LogFigure cf(256);
+    Series2D series;
+    series.points = {{0.5f, -1.0f}, {0.5f, 100.0f}};
+    series.color = Color::blue();
+    series.size = 20.0f;
+    cf.axes->semilogy();
+    cf.axes->setXlim(0, 1);
+    cf.axes->addPlot(std::make_unique<ScatterPlot>(series));
+    auto img = cf.render();
+
+    size_t filled = countPixels(img, isBlue);
+    // Only the y=100 marker renders — one marker's worth of pixels.
+    EXPECT_GT(filled, 100u);
+    EXPECT_LT(filled, 500u);
+}

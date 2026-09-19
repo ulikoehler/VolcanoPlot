@@ -63,7 +63,7 @@ float gridLine(float coord, float step) {
 }
 
 void main() {
-    vec3 nearPoint = unproject(vec3(v_ndc, -1.0));
+    vec3 nearPoint = unproject(vec3(v_ndc, 0.0));  // Vulkan NDC near = 0
     vec3 farPoint  = unproject(vec3(v_ndc,  1.0));
     vec3 rayDir = farPoint - nearPoint;
 

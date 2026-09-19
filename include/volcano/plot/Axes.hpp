@@ -261,8 +261,14 @@ public:
     class EventPlot& eventplot(std::vector<std::vector<float>> positions);
     class EventPlot& eventplot(std::vector<float> positions);
     /// mpl `ax.imshow(grid)`: 2D image/heatmap display.
+    /// `interpolation` mirrors mpl: "nearest" (default), "bilinear",
+    /// "bicubic", "antialiased" (GPU-approximated by bilinear).
+    /// `aspect` mirrors mpl imshow: "equal" (default — square pixels,
+    /// mpl rcParams image.aspect) or "auto" (fill the axes box).
     class HeatmapPlot& imshow(Grid2D grid,
-        const Colormap& cmap = colormaps::viridis());
+        const Colormap& cmap = colormaps::viridis(),
+        std::string_view interpolation = "nearest",
+        std::string_view aspect = "equal");
 
     // ── Specialized (§15) ──
     /// Word cloud: `ax.wordcloud({{"word", weight}, …})` — words packed
@@ -344,6 +350,12 @@ public:
                y >= legendBox_.y &&
                y <= legendBox_.y + float(legendBox_.height);
     }
+    /// Colorbar region rect in figure pixels (the right `fraction`
+    /// slice of the pre-shrink axes rect), computed by Figure layout.
+    /// Empty when no colorbar is reserved for this axes.
+    void setColorbarRegion(Rect2D r) const { colorbarRegion_ = r; }
+    [[nodiscard]] Rect2D colorbarRegion() const { return colorbarRegion_; }
+
     [[nodiscard]] Cycler& propCycle() noexcept { return cycler_; }
     [[nodiscard]] const Cycler& propCycle() const noexcept { return cycler_; }
     /// Reset the cycler position to the first entry.
@@ -385,6 +397,44 @@ public:
     [[nodiscard]] const std::vector<TextAnnotation>& texts() const noexcept { return texts_; }
     [[nodiscard]] const std::vector<Annotation>& annotations() const noexcept { return annotations_; }
 
+    /// Add an anchored scale bar (mpl_toolkits.axes_grid1
+    /// AnchoredSizeBar). `size` is the bar length in data-x units.
+    SizeBar* addSizeBar(SizeBar bar) {
+        sizeBars_.push_back(std::move(bar));
+        return &sizeBars_.back();
+    }
+    [[nodiscard]] const std::vector<SizeBar>& sizeBars() const noexcept { return sizeBars_; }
+
+    /// mpl `ax.indicate_inset_zoom(inset_ax)`: mark the data region the
+    /// inset zooms into, with connectors to the inset axes box.
+    InsetIndicator& indicateInsetZoom(const Axes& inset) {
+        insetIndicators_.push_back(InsetIndicator{.inset = &inset});
+        return insetIndicators_.back();
+    }
+    /// mpl `ax.indicate_inset(bounds, inset_ax)`: explicit data-space
+    /// rectangle, optional connectors to `inset` (may be nullptr).
+    InsetIndicator& indicateInset(float x0, float y0, float x1, float y1,
+                                  const Axes* inset = nullptr) {
+        InsetIndicator ind;
+        ind.inset = inset;
+        ind.hasBounds = true;
+        ind.x0 = x0; ind.y0 = y0; ind.x1 = x1; ind.y1 = y1;
+        insetIndicators_.push_back(ind);
+        return insetIndicators_.back();
+    }
+    [[nodiscard]] const std::vector<InsetIndicator>&
+    insetIndicators() const noexcept { return insetIndicators_; }
+
+    /// mpl_toolkits AnchoredText: anchored text box at `loc`.
+    AnchoredText& addAnchoredText(std::string text,
+                                  std::string loc = "upper left") {
+        anchoredTexts_.push_back(
+            AnchoredText{std::move(text), std::move(loc)});
+        return anchoredTexts_.back();
+    }
+    [[nodiscard]] const std::vector<AnchoredText>&
+    anchoredTexts() const noexcept { return anchoredTexts_; }
+
     /// Compute the data viewport from all layers if not manually set (CPU).
     void autoscale();
 
@@ -422,7 +472,7 @@ public:
 
 private:
     /// Apply 5% padding and degenerate-range fixup to a raw min/max viewport.
-    void finalizeAutoscale(Viewport& v) const;
+    void finalizeAutoscale(Viewport& v, bool tight = false) const;
     /// Install a converter's axisInfo defaults on 'x' or 'y'.
     void applyAxisInfo(const UnitConverter& conv, char axis);
     /// Reinstall FixedLocator/FixedFormatter for the category list.
@@ -446,10 +496,14 @@ private:
     std::vector<std::unique_ptr<IPlot>> plots_;
     std::vector<TextAnnotation> texts_;
     std::vector<Annotation> annotations_;
+    std::vector<SizeBar> sizeBars_;
+    std::vector<InsetIndicator> insetIndicators_;
+    std::vector<AnchoredText> anchoredTexts_;
     /// Category labels per axis (mpl Axis.units unit_data).
     std::vector<std::string> xCategories_, yCategories_;
     /// Legend box rect tracked by the renderer for hit-testing.
     mutable Rect2D legendBox_{};
+    mutable Rect2D colorbarRegion_{};
 };
 
 } // namespace volcano::plot

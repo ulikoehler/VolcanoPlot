@@ -522,6 +522,94 @@ TEST(HeatmapRegression, GradientGridHasColorVariation) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// imshow interpolation variants
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+/// Two-cell step: texel centers sit at u=0.25 and u=0.75 (pixels 63/191 on
+/// a 256-wide canvas); u=0.5 (pixel 127) is the cell boundary.
+Grid2D stepGrid() {
+    Grid2D grid;
+    grid.width = 2;
+    grid.height = 1;
+    grid.values = {0.0f, 1.0f};
+    grid.xRange = {0, 1};
+    grid.yRange = {0, 1};
+    grid.valueRange = {0, 1};
+    return grid;
+}
+
+} // namespace
+
+TEST(HeatmapRegression, BilinearSmoothsCellBoundary) {
+    // Nearest keeps the sharp step; bilinear blends the boundary pixel
+    // toward t=0.5 while leaving texel centers untouched.
+    CraftedFigure cfN(256, 64, vk::SampleCountFlagBits::e1);
+    cfN.axes->addPlot(std::make_unique<HeatmapPlot>(stepGrid()));
+    cfN.axes->setViewport({0, 1, 0, 1});
+    auto imgN = cfN.render();
+
+    CraftedFigure cfB(256, 64, vk::SampleCountFlagBits::e1);
+    auto g = stepGrid();
+    g.interpolation = "bilinear";
+    cfB.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(g)));
+    cfB.axes->setViewport({0, 1, 0, 1});
+    auto imgB = cfB.render();
+
+    // Texel center: both modes sample the same cell value.
+    EXPECT_TRUE(imgN.get(63, 32).approx(imgB.get(63, 32), 20))
+        << "Bilinear should equal nearest at texel centers";
+    // Cell boundary: bilinear blends toward the midpoint color.
+    EXPECT_FALSE(imgN.get(127, 32).approx(imgB.get(127, 32), 30))
+        << "Bilinear should smooth the cell boundary";
+}
+
+TEST(HeatmapRegression, BicubicSmoothsCellBoundary) {
+    CraftedFigure cfN(256, 64, vk::SampleCountFlagBits::e1);
+    cfN.axes->addPlot(std::make_unique<HeatmapPlot>(stepGrid()));
+    cfN.axes->setViewport({0, 1, 0, 1});
+    auto imgN = cfN.render();
+
+    CraftedFigure cfC(256, 64, vk::SampleCountFlagBits::e1);
+    auto g = stepGrid();
+    g.interpolation = "bicubic";
+    cfC.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(g)));
+    cfC.axes->setViewport({0, 1, 0, 1});
+    auto imgC = cfC.render();
+
+    EXPECT_TRUE(imgN.get(63, 32).approx(imgC.get(63, 32), 20))
+        << "Bicubic should equal nearest at texel centers";
+    EXPECT_FALSE(imgN.get(127, 32).approx(imgC.get(127, 32), 30))
+        << "Bicubic should smooth the cell boundary";
+}
+
+TEST(HeatmapRegression, AntialiasedRendersSmooth) {
+    // mpl 'antialiased' maps to its auto resampler; we approximate with
+    // bilinear — the boundary pixel should be blended.
+    CraftedFigure cf(256, 64, vk::SampleCountFlagBits::e1);
+    auto g = stepGrid();
+    g.interpolation = "antialiased";
+    cf.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(g)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+
+    Pixel boundary = img.get(127, 32);
+    Pixel left = img.get(63, 32);
+    EXPECT_FALSE(boundary.approx(left, 30))
+        << "Antialiased should blend the boundary pixel";
+}
+
+TEST(HeatmapRegression, InvalidInterpolationThrows) {
+    CraftedFigure cf(128);
+    auto g = stepGrid();
+    g.interpolation = "lanczos";  // not implemented on the GPU path
+    cf.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(g)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    EXPECT_THROW(cf.render(), std::invalid_argument);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Viewport / coordinate mapping tests
 // ═══════════════════════════════════════════════════════════════════════════
 

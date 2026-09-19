@@ -44,6 +44,7 @@ struct MexicanHatConfig {
 /// An optional wireframe overlay shows the grid structure.
 class MexicanHatPlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct a Mexican hat wavelet plot.
     /// `sigma` controls the width of the wavelet.
     /// `xRange`, `yRange` define the evaluation domain.

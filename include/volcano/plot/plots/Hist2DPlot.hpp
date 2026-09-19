@@ -57,6 +57,12 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl sticky edges: tight autoscale, no 5% margin.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
+    /// Bin-count range (drives the colorbar).
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        return valueRange_.valid() ? std::optional{valueRange_} : std::nullopt;
+    }
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
 

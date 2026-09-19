@@ -21,13 +21,38 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 # Use the same RNG seed as the C++ gallery (42) for reproducibility.
 np.random.seed(42)
 
+
+class _SharedRng:
+    """Deterministic RNG shared with examples/gallery.cpp — a uint64 LCG
+    feeding Irwin-Hall gaussians (sum of 12 uniforms - 6). Bit-identical
+    on both sides so the gallery renders the same datasets."""
+
+    def __init__(self, seed=42):
+        self.state = seed
+
+    def uniform(self):
+        self.state = (self.state * 6364136223846793005
+                      + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+        return (self.state >> 11) / 9007199254740992.0
+
+    def gauss(self):
+        return sum(self.uniform() for _ in range(12)) - 6.0
+
+
+_shared = _SharedRng(42)
+
+
+def randn(n, scale=1.0, offset=0.0):
+    return np.array([_shared.gauss() * scale + offset
+                     for _ in range(n)])
+
 WIDTH, HEIGHT = 800, 600
 DPI = 100
 
 
 def save(fig, out_dir, name):
     path = os.path.join(out_dir, f"{name}.png")
-    fig.savefig(path, dpi=DPI, bbox_inches="tight", facecolor="white")
+    fig.savefig(path, dpi=DPI, facecolor="white")
     plt.close(fig)
     print(f"  wrote {path}")
 
@@ -41,8 +66,8 @@ def setup_ax(ax, title, xlabel="X", ylabel="Y"):
 def gen_scatter(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     setup_ax(ax, "Scatter")
-    x = np.random.randn(200)
-    y = np.random.randn(200)
+    x = randn(200)
+    y = randn(200)
     ax.scatter(x, y, s=25, c="#1f77b4", label="data")
     ax.legend()
     save(fig, out_dir, "scatter")
@@ -88,7 +113,7 @@ def gen_grouped_bar(out_dir):
 def gen_hist(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     setup_ax(ax, "Histogram", "Value", "Count")
-    data = np.random.randn(1000)
+    data = randn(1000)
     ax.hist(data, bins=30, color="#1f77b4", alpha=0.5)
     save(fig, out_dir, "hist")
 
@@ -105,7 +130,7 @@ def gen_pie(out_dir):
 def gen_box(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     setup_ax(ax, "Box Plot", "Group", "Value")
-    data = [np.random.normal(g, 1.0 + g * 0.2, 100) for g in range(4)]
+    data = [randn(100, 1.0 + g * 0.2, g) for g in range(4)]
     ax.boxplot(data, labels=["G1", "G2", "G3", "G4"])
     save(fig, out_dir, "box")
 
@@ -113,7 +138,7 @@ def gen_box(out_dir):
 def gen_violin(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     setup_ax(ax, "Violin Plot", "Group", "Value")
-    data = [np.random.normal(g * 0.5, 1.0, 150) for g in range(4)]
+    data = [randn(150, 1.0, g * 0.5) for g in range(4)]
     ax.violinplot(data, showmeans=True)
     ax.set_xticks(range(1, 5))
     ax.set_xticklabels(["G1", "G2", "G3", "G4"])
@@ -199,8 +224,8 @@ def gen_heatmap(out_dir):
 def gen_hist2d(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     ax.set_title("2D Histogram")
-    x = np.random.randn(5000) * 2
-    y = np.random.randn(5000) * 2
+    x = randn(5000, 2.0)
+    y = randn(5000, 2.0)
     h = ax.hist2d(x, y, bins=[40, 30], cmap="viridis")
     plt.colorbar(h[3], ax=ax)
     save(fig, out_dir, "hist2d")
@@ -209,8 +234,8 @@ def gen_hist2d(out_dir):
 def gen_hexbin(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     ax.set_title("Hexbin")
-    x = np.random.randn(3000) * 2
-    y = np.random.randn(3000) * 2
+    x = randn(3000, 2.0)
+    y = randn(3000, 2.0)
     hb = ax.hexbin(x, y, gridsize=25, cmap="viridis")
     plt.colorbar(hb, ax=ax)
     save(fig, out_dir, "hexbin")
@@ -243,8 +268,8 @@ def gen_kde(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     ax.set_title("KDE")
     from scipy.stats import gaussian_kde
-    x = np.random.randn(500)
-    y = np.random.randn(500)
+    x = randn(500)
+    y = randn(500)
     try:
         kde = gaussian_kde(np.vstack([x, y]))
         xi, yi = np.mgrid[-4:4:100j, -4:4:100j]
@@ -259,7 +284,7 @@ def gen_kde(out_dir):
 def gen_ecdf(out_dir):
     fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
     setup_ax(ax, "ECDF", "Value", "CDF")
-    data = np.sort(np.random.randn(500))
+    data = np.sort(randn(500))
     y = np.arange(1, len(data) + 1) / len(data)
     ax.fill_between(data, 0, y, color="#1f77b4", alpha=0.3)
     ax.plot(data, y, color="#1f77b4", linewidth=1.5)
@@ -294,9 +319,9 @@ def gen_scatter3d(out_dir):
     fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
     ax = fig.add_subplot(111, projection="3d")
     ax.set_title("3D Scatter")
-    x = np.random.randn(100) * 3
-    y = np.random.randn(100) * 3
-    z = np.random.randn(100) * 3
+    x = randn(100, 3.0)
+    y = randn(100, 3.0)
+    z = randn(100, 3.0)
     ax.scatter(x, y, z, c="#1f77b4", s=25)
     save(fig, out_dir, "scatter3d")
 

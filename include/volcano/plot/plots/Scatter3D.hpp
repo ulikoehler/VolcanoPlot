@@ -29,6 +29,7 @@ struct Scatter3DConfig {
 /// Per-point colors and sizes are supported.
 class Scatter3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from (x, y, z) arrays with uniform color/size.
     Scatter3D(std::vector<float> x, std::vector<float> y, std::vector<float> z,
                Scatter3DConfig config = {});

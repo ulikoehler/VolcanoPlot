@@ -38,6 +38,7 @@ struct Quiver3DConfig {
 /// in screen space based on the projected shaft direction.
 class Quiver3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from positions (x, y, z) and vectors (u, v, w).
     Quiver3D(std::vector<float> x, std::vector<float> y, std::vector<float> z,
              std::vector<float> u, std::vector<float> v, std::vector<float> w,

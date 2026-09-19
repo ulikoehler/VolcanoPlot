@@ -237,6 +237,10 @@ struct Camera3D {
     float aspect = 1.0f;
     float nearZ = 0.1f;
     float farZ = 100.0f;
+    /// matplotlib 3D box normalization: when dataMin < dataMax, data is
+    /// remapped into mpl's (4,4,3) box centered at the origin before the
+    /// view transform. Disabled when dataMin == dataMax.
+    Point3D dataMin{0, 0, 0}, dataMax{0, 0, 0};
 
     /// Compute view matrix (row-major 4x4).
     [[nodiscard]] std::array<float, 16> viewMatrix() const noexcept;

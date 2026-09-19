@@ -19,7 +19,7 @@ ProjResult project3D(const std::array<float, 16>& vp, float x, float y, float z)
     float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
     float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
     if (std::abs(clipW) < 1e-30f) return {0, 0, 1e-30f};
-    return {clipX / clipW, clipY / clipW, clipW};
+    return {clipX / clipW, -clipY / clipW, clipW};
 }
 
 } // namespace

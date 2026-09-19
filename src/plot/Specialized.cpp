@@ -5,6 +5,7 @@
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/text/TextRenderer.hpp"
+#include "volcano/render/VectorCanvas.hpp"
 #include "volcano/backend/Backend.hpp"
 
 #include <algorithm>
@@ -544,6 +545,76 @@ void NetworkPlot::contributeToAutoscale(Viewport& v) const {
     for (const auto& p : pos_) {
         v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
         v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
+    }
+}
+
+
+void TablePlot::emitVector(render::VectorCanvas& c, const Axes&,
+                           Rect2D rect) {
+    if (cellText.empty()) return;
+    size_t cols = 0;
+    for (const auto& row : cellText) cols = std::max(cols, row.size());
+    bool hasRowLabels = !rowLabels.empty();
+    bool hasColLabels = !colLabels.empty();
+    size_t totalCols = cols + (hasRowLabels ? 1 : 0);
+    size_t totalRows = cellText.size() + (hasColLabels ? 1 : 0);
+    if (totalCols == 0 || totalRows == 0) return;
+
+    float cellW = float(rect.width) / float(totalCols);
+    float cellH = heightFrac > 0
+                      ? float(rect.height) * heightFrac / float(totalRows)
+                      : std::min(float(rect.height) / float(totalRows), 28.0f);
+    float tableH = cellH * float(totalRows);
+    float y0 = (loc == "top") ? float(rect.y) - tableH
+                              : float(rect.y) + float(rect.height);
+    float x0 = float(rect.x);
+    const float sizePx = 16.0f * cellFontScale;
+
+    auto emitCell = [&](size_t row, size_t col, const std::string& str,
+                        Color bg) {
+        float cx = x0 + float(col) * cellW, cy = y0 + float(row) * cellH;
+        Point2D quad[4] = {{cx, cy}, {cx + cellW, cy},
+                           {cx + cellW, cy + cellH}, {cx, cy + cellH}};
+        if (bg.a > 0) c.polygon(std::span{quad}, bg);
+        Point2D ring[5] = {quad[0], quad[1], quad[2], quad[3], quad[0]};
+        render::VectorCanvas::Pen pen;
+        pen.color = edgeColor; pen.width = 1.0f;
+        c.polyline(std::span{ring}, pen);
+        if (str.empty()) return;
+        // Approximate glyph metrics (vector writers lack font metrics):
+        // ~0.6em advance, baseline at ~70% of the cell height.
+        float tw = 0.6f * sizePx * float(str.size());
+        c.text({cx + (cellW - tw) * 0.5f, cy + cellH * 0.72f},
+               str, sizePx, textColor);
+    };
+
+    for (size_t row = 0; row < totalRows; ++row) {
+        for (size_t col = 0; col < totalCols; ++col) {
+            bool labelCol = hasRowLabels && col == 0;
+            bool labelRow = hasColLabels && row == 0;
+            if (labelRow && labelCol) { emitCell(row, col, "", labelColor); continue; }
+            if (labelRow) {
+                size_t ci = col - (hasRowLabels ? 1 : 0);
+                emitCell(row, col,
+                         ci < colLabels.size() ? colLabels[ci] : "",
+                         labelColor);
+            } else if (labelCol) {
+                size_t ri = row - (hasColLabels ? 1 : 0);
+                emitCell(row, col,
+                         ri < rowLabels.size() ? rowLabels[ri] : "",
+                         labelColor);
+            } else {
+                size_t ri = row - (hasColLabels ? 1 : 0);
+                size_t ci = col - (hasRowLabels ? 1 : 0);
+                Color bg = Color::transparent();
+                if (ri < cellColors.size() && ci < cellColors[ri].size())
+                    bg = cellColors[ri][ci];
+                emitCell(row, col,
+                         ri < cellText.size() && ci < cellText[ri].size()
+                             ? cellText[ri][ci] : "",
+                         bg);
+            }
+        }
     }
 }
 

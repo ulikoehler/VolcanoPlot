@@ -23,7 +23,7 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
     float cy = float(rect.y) + float(rect.height) * 0.5f;
     float halfW = float(rect.width) * 0.5f;
     float halfH = float(rect.height) * 0.5f;
-    float radius = std::min(halfW, halfH) * 0.9f;
+    float radius = std::min(halfW, halfH) * 0.8f;  // mpl pie fills ~80%
 
     constexpr float PI = 3.14159265358979323846f;
 
@@ -43,7 +43,7 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
         float ey = cy - radius * std::sin(angle);  // Y flipped
         plot::Point2D edgePts[2] = {{cx, cy}, {ex, ey}};
         spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
-                            edgePts, Color::white(), 3.0f);
+                            edgePts, Color::white(), 1.0f);
         angle += sweep;
     }
 
@@ -94,7 +94,7 @@ void PiePlot::emitVector(render::VectorCanvas& c, const Axes&, Rect2D rect) {
     float cx = float(rect.x) + float(rect.width) * 0.5f;
     float cy = float(rect.y) + float(rect.height) * 0.5f;
     float radius = std::min(float(rect.width), float(rect.height)) * 0.5f
-                   * 0.9f;
+                   * 0.8f;
     constexpr float PI = 3.14159265358979323846f;
     float total = 0;
     for (auto v : data_.values) total += v;

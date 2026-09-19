@@ -35,6 +35,7 @@ struct Line3DCollectionConfig {
 /// LineSegmentRenderer. Per-segment colors are supported.
 class Line3DCollection : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from segment endpoints.
     /// `segs` is a vector of (start, end) pairs: [x0,y0,z0, x1,y1,z1, ...].
     /// Each segment is 6 floats (2 points × 3 coords).
@@ -98,6 +99,7 @@ struct Poly3DCollectionConfig {
 /// Per-polygon colors are supported.
 class Poly3DCollection : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from a vector of polygons, each a vector of 3D vertices.
     Poly3DCollection(std::vector<std::vector<Point3D>> polygons,
                      Poly3DCollectionConfig config = {});

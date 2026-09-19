@@ -54,6 +54,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl sticky edges: tight autoscale, no 5% margin.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
 

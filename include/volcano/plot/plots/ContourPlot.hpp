@@ -6,6 +6,7 @@
 #include "volcano/plot/Colormap.hpp"
 #include "volcano/render/primitives/LineSegmentRenderer.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include <map>
 #include <vector>
 #include <string>
 
@@ -25,7 +26,7 @@ struct ContourConfig {
     /// Color for contour lines when no colormap is set.
     Color lineColor = Color::black();
     /// Line width for contour lines.
-    float lineWidth = 1.0f;
+    float lineWidth = 1.5f;
     /// matplotlib `clabel`: draw level-value labels on the contour lines.
     bool clabel = false;
     /// Label text scale for clabel (TextRenderer scale, ~0.6 default size).
@@ -47,6 +48,8 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl contour sets tight autoscale on the grid extent.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return config_.lineColor; }
     void setLabel(std::string l) { label_ = std::move(l); }
@@ -65,6 +68,9 @@ private:
 
     void computeLevels();
     void marchingSquares();
+    /// Representative data-space anchor point per labeled level (midpoint
+    /// of the segment closest to the level's centroid of midpoints).
+    [[nodiscard]] std::map<float, Point2D> clabelAnchors() const;
     /// Draw clabel text at the representative midpoint of each level.
     void drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect);
@@ -82,8 +88,15 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl contour sets tight autoscale on the grid extent.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override;
+    /// Level range (drives the colorbar; mpl normalizes to the levels).
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        if (config_.levels.size() < 2) return {};
+        return Range{config_.levels.front(), config_.levels.back()};
+    }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,

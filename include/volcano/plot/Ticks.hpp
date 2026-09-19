@@ -26,6 +26,12 @@ public:
     /// Called once per axis draw with the full set of located ticks
     /// (matplotlib set_locs). Used by offset/scientific formatters.
     virtual void setLocs(std::span<const float> locs) { (void)locs; }
+    /// Called once per axis draw with the axis view interval
+    /// (matplotlib set_locs uses axis.get_view_interval()). Log
+    /// formatters use it for minor_thresholds label suppression.
+    virtual void setViewInterval(float vmin, float vmax) {
+        (void)vmin; (void)vmax;
+    }
     [[nodiscard]] virtual std::string format(float v, int pos) const = 0;
     /// Optional offset text drawn at the axis end (e.g. "+1e5").
     [[nodiscard]] virtual std::string offsetText() const { return {}; }
@@ -226,10 +232,26 @@ private:
 /// plain "%g" otherwise (matplotlib LogFormatter family).
 class LogFormatter : public Formatter {
 public:
+    /// matplotlib labelOnlyBase: only powers of the base get labels.
+    bool labelOnlyBase = false;
+    /// matplotlib minor_thresholds (subset, all): based on the number
+    /// of decades in the view interval, controls which non-decade
+    /// coefficients get labels — numdec > subset → bases only,
+    /// numdec > all → log-spaced subset ({1,2,3,4,6,10} for base 10),
+    /// else all integer multiples. Default (1, 0.4).
+    std::pair<float, float> minorThresholds{1.0f, 0.4f};
+
     explicit LogFormatter(float base = 10.0f) : base_(base) {}
+    /// Computes the allowed coefficient set from the view interval
+    /// (matplotlib LogFormatter.set_locs).
+    void setViewInterval(float vmin, float vmax) override;
     [[nodiscard]] std::string format(float v, int pos) const override;
 protected:
     float base_;
+    /// mpl __call__ filter: false → the label is suppressed for v.
+    [[nodiscard]] bool passesSublabels(float v) const;
+private:
+    std::optional<std::vector<int>> sublabels_;
 };
 
 /// Always "$10^{k}$" exponent form.

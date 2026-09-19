@@ -2,6 +2,7 @@
 #include "PlotTestHarness.hpp"
 
 #include <volcano/plot/plots/Plot3D.hpp>
+#include <volcano/plot/plots/SurfacePlot.hpp>
 #include <volcano/plot/Transform.hpp>
 
 #include <gtest/gtest.h>
@@ -264,4 +265,89 @@ TEST(Plot3DRegression, PointsBehindCameraSkipped) {
 
     // Should not crash, may or may not render depending on projection.
     SUCCEED();
+}
+
+// ─── SurfacePlot light-source shading (mpl plot_surface shade) ─────────────
+
+namespace {
+
+struct SurfFig {
+    PlotTestHarness harness;
+    Figure figure{1, 1};
+    Axes* axes = nullptr;
+
+    SurfFig() : harness(256, 256, vk::SampleCountFlagBits::e1), figure(1, 1) {
+        axes = figure.addAxes(0, 0);
+        axes->setStyle(flatTestStyle());
+        figure.grid().left = 0.0f; figure.grid().right = 1.0f;
+        figure.grid().bottom = 0.0f; figure.grid().top = 1.0f;
+        axes->setViewport({-5, 5, -5, 5});
+    }
+
+    Image render() { return harness.render(figure); }
+
+    std::unique_ptr<SurfacePlot> makeSurf(bool shade) {
+        Grid2D g;
+        g.width = 20; g.height = 20;
+        g.xRange = {-5, 5}; g.yRange = {-5, 5};
+        g.values.resize(400);
+        for (uint32_t j = 0; j < 20; ++j)
+            for (uint32_t i = 0; i < 20; ++i) {
+                float x = -5 + i * 0.5f, y = -5 + j * 0.5f;
+                g.values[j * 20 + i] = std::sin(x * 0.7f) * std::cos(y * 0.7f);
+            }
+        Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}};
+        cam.dataMin = {-5, -5, -1}; cam.dataMax = {5, 5, 1};
+        cam.aspect = 1.0f;
+        auto p = std::make_unique<SurfacePlot>(std::move(g), cam);
+        p->shade = shade;
+        return p;
+    }
+};
+
+} // namespace
+
+TEST(SurfaceShade, ShadedSurfaceDiffersFromUnshaded) {
+    SurfFig a, b;
+    a.axes->addPlot(a.makeSurf(true));
+    auto imgA = a.render();
+    b.axes->addPlot(b.makeSurf(false));
+    auto imgB = b.render();
+    size_t diff = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x) {
+            auto p = imgA.get(x, y);
+            auto q = imgB.get(x, y);
+            if (std::abs(int(p.r) - int(q.r)) +
+                std::abs(int(p.g) - int(q.g)) +
+                std::abs(int(p.b) - int(q.b)) > 8) ++diff;
+        }
+    size_t nonwhite = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x) {
+            auto p = imgB.get(x, y);
+            if (!(p.r > 230 && p.g > 230 && p.b > 230)) ++nonwhite;
+        }
+    EXPECT_GT(nonwhite, 1000u) << "surface should cover part of the canvas";
+    EXPECT_GT(diff, 500u) << "shade=true should modulate surface colors";
+}
+
+TEST(SurfaceShade, LightDirectionChangesImage) {
+    SurfFig a, b;
+    auto pa = a.makeSurf(true), pb = b.makeSurf(true);
+    pa->lightAzdeg = 0.0f;
+    pb->lightAzdeg = 180.0f;
+    a.axes->addPlot(std::move(pa));
+    b.axes->addPlot(std::move(pb));
+    auto imgA = a.render(), imgB = b.render();
+    size_t diff = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x) {
+            auto p = imgA.get(x, y);
+            auto q = imgB.get(x, y);
+            if (std::abs(int(p.r) - int(q.r)) +
+                std::abs(int(p.g) - int(q.g)) +
+                std::abs(int(p.b) - int(q.b)) > 8) ++diff;
+        }
+    EXPECT_GT(diff, 200u);
 }

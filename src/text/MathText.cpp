@@ -132,9 +132,23 @@ struct SpaceBox : Box {
 struct RunBox : Box {
     std::string text;
     float rel = 1.0f;  // render scale relative to baseScale
+    bool bigOp = false;    // large operator (\sum, \int, ...)
+    bool limits = false;   // scripts stack above/below (not \int-family)
     void emit(MathLayout& out, float x, float baseline) const override {
         if (text.empty()) return;
         out.runs.push_back({text, x, baseline, rel});
+    }
+};
+
+/// Large operator with limits stacked above/below (display style).
+struct BigOpBox : Box {
+    BoxPtr op, sup, sub;
+    float supBase = 0, subBase = 0;  // baseline offsets (px)
+    void emit(MathLayout& out, float x, float baseline) const override {
+        float cx = x + w / 2.0f;
+        op->emit(out, cx - op->w / 2.0f, baseline);
+        if (sup) sup->emit(out, cx - sup->w / 2.0f, baseline + supBase);
+        if (sub) sub->emit(out, cx - sub->w / 2.0f, baseline + subBase);
     }
 };
 
@@ -297,6 +311,27 @@ struct Parser {
             else break;
         }
         if (!sup && !sub) return base;
+        if (auto* rb = dynamic_cast<RunBox*>(base.get());
+            rb && rb->bigOp && rb->limits) {
+            auto b = std::make_unique<BigOpBox>();
+            float e = em(rel);
+            float gap = 0.25f * e;
+            b->sup = std::move(sup);
+            b->sub = std::move(sub);
+            if (b->sup)
+                b->supBase = -(rb->h + gap + b->sup->d);
+            if (b->sub)
+                b->subBase = rb->d + gap + b->sub->h;
+            float opW = rb->w;
+            b->w = std::max({opW, b->sup ? b->sup->w : 0.0f,
+                             b->sub ? b->sub->w : 0.0f});
+            b->h = rb->h;
+            b->d = rb->d;
+            if (b->sup) b->h = std::max(b->h, -b->supBase + b->sup->h);
+            if (b->sub) b->d = std::max(b->d, b->subBase + b->sub->d);
+            b->op = std::move(base);
+            return b;
+        }
         auto sb = std::make_unique<ScriptBox>();
         float e = em(rel);
         sb->supShift = -0.45f * e;   // up
@@ -312,6 +347,57 @@ struct Parser {
         if (sb->sup) sb->h = std::max(sb->h, -sb->supShift + sb->sup->h);
         if (sb->sub) sb->d = std::max(sb->d, sb->subShift + sb->sub->d);
         return sb;
+    }
+
+    // True when the next token is exactly command `n` (not consumed).
+    bool atCmd(std::string_view n) const {
+        if (peek() != '\\') return false;
+        size_t i = pos + 1, e = i + n.size();
+        return e <= s.size() && s.substr(i, n.size()) == n &&
+               (e >= s.size() ||
+                !std::isalpha(static_cast<unsigned char>(s[e])));
+    }
+
+    // Consume one delimiter token after \left/\right/\big… and return
+    // its glyph text ("" for '.').
+    std::string readDelim() {
+        skipSpaces();
+        if (eof()) return {};
+        if (peek() == '.') { ++pos; return {}; }
+        if (peek() == '\\') {
+            ++pos;
+            size_t st = pos;
+            if (std::isalpha(static_cast<unsigned char>(peek()))) {
+                while (std::isalpha(static_cast<unsigned char>(peek())))
+                    ++pos;
+            } else if (!eof()) {
+                ++pos;
+            }
+            auto nm = s.substr(st, pos - st);
+            if (nm == "|") return "\xe2\x80\x96";          // \| → ‖
+            if (nm == "{") return "{";
+            if (nm == "}") return "}";
+            if (auto it = symbolMap().find(nm); it != symbolMap().end())
+                return std::string(it->second);
+            return std::string(nm);
+        }
+        size_t st = pos;
+        pos += cpLen();
+        return std::string(s.substr(st, pos - st));
+    }
+
+    // A delimiter run at render scale `relD` (metrics at relD).
+    BoxPtr delimBox(const std::string& glyph, float /*rel*/, float relD) {
+        if (glyph.empty()) return spaceBox(0.0f, relD);
+        return runBox(glyph, relD);
+    }
+
+    // Render scale so `glyph` spans `target` height (never shrinks).
+    float sizeFor(const std::string& glyph, float rel, float target) {
+        if (glyph.empty() || target <= 0.0f) return 1.0f;
+        auto m = ctx.measure(glyph, ctx.baseScale * rel);
+        if (m.height <= 0.0f) return 1.0f;
+        return std::max(1.0f, target / m.height);
     }
 
     BoxPtr parseCommand(float rel) {
@@ -391,15 +477,49 @@ struct Parser {
             finishHBox(*h);
             return h;
         }
-        // \left \right \big … — render the following delimiter plainly.
-        if (name == "left" || name == "right" || name == "big" ||
-            name == "Big" || name == "bigg" || name == "Bigg" ||
-            name == "bigl" || name == "bigr" || name == "Bigl" ||
-            name == "Bigr") {
-            skipSpaces();
-            if (peek() == '\\') return parseCommand(rel);  // e.g. \langle
-            if (peek() == '.') { ++pos; return spaceBox(0.0f, rel); }
-            return parseArg(rel);
+        // \left … \right — auto-sized delimiters spanning the group.
+        if (name == "left" || name == "right") {
+            std::string glyph = readDelim();
+            if (name == "right")  // stray \right: render plainly
+                return delimBox(glyph, rel, rel);
+            // Parse the enclosed group until the matching \right.
+            // Nested \left…\right pairs are consumed recursively by
+            // parseAtom, so a \right here always closes this group.
+            auto h = std::make_unique<HBox>();
+            while (!eof() && !atCmd("right")) {
+                auto atom = parseAtom(rel);
+                if (!atom) break;
+                h->kids.push_back(std::move(atom));
+            }
+            finishHBox(*h);
+            std::string rglyph;
+            if (atCmd("right")) {
+                pos += 6;  // consume "\right"
+                rglyph = readDelim();
+            }
+            // Size each delimiter to span the content (10% margin).
+            float target = (h->h + h->d) * 1.1f;
+            auto l = delimBox(glyph, rel, rel * sizeFor(glyph, rel, target));
+            auto r = delimBox(rglyph, rel, rel * sizeFor(rglyph, rel, target));
+            auto out = std::make_unique<HBox>();
+            out->kids.push_back(std::move(l));
+            out->kids.push_back(std::move(h));
+            out->kids.push_back(std::move(r));
+            finishHBox(*out);
+            return out;
+        }
+        // Explicit-size delimiters: \big \Big \bigg \Bigg (+l/r/m).
+        {
+            std::string_view base = name;
+            if (base.size() > 1 &&
+                (base.back() == 'l' || base.back() == 'r' ||
+                 base.back() == 'm'))
+                base = base.substr(0, base.size() - 1);
+            float factor = base == "big"  ? 1.2f : base == "Big"  ? 1.8f
+                         : base == "bigg" ? 2.4f : base == "Bigg" ? 3.0f
+                                                                       : 0.0f;
+            if (factor > 0.0f)
+                return delimBox(readDelim(), rel, rel * factor);
         }
         // Font-variant groups: render contents plainly.
         if (name == "mathrm" || name == "mathbf" || name == "mathit" ||
@@ -413,8 +533,30 @@ struct Parser {
         if (auto it = spaceMap().find(name); it != spaceMap().end())
             return spaceBox(it->second, rel);
         // Symbol lookup.
-        if (auto it = symbolMap().find(name); it != symbolMap().end())
+        if (auto it = symbolMap().find(name); it != symbolMap().end()) {
+            static const std::map<std::string_view, bool> bigOps = {
+                {"sum", true}, {"prod", true}, {"coprod", true},
+                {"bigcup", true}, {"bigcap", true}, {"bigoplus", true},
+                {"bigotimes", true}, {"bigodot", true},
+                {"biguplus", true}, {"bigsqcup", true},
+                {"bigvee", true}, {"bigwedge", true},
+                {"int", false}, {"iint", false}, {"iiint", false},
+                {"oint", false},
+            };
+            if (auto bo = bigOps.find(name); bo != bigOps.end()) {
+                // Display-style large operators render enlarged.
+                auto b = std::make_unique<RunBox>();
+                b->text = std::string(it->second);
+                b->rel = rel * 1.25f;
+                b->bigOp = true;
+                b->limits = bo->second;
+                auto m = ctx.measure(b->text, ctx.baseScale * b->rel);
+                b->w = m.width; b->h = m.ascent;
+                b->d = m.height - m.ascent;
+                return b;
+            }
             return runBox(std::string(it->second), rel);
+        }
         // Escaped chars / unknown commands render literally.
         if (name.size() == 1)
             return runBox(std::string(name), rel);

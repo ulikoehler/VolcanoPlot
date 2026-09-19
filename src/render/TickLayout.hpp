@@ -44,14 +44,21 @@ std::vector<float> axisMinorTicks(const plot::TickConfig& tc,
                                   std::span<const float> majors);
 /// Formatter for an axis: explicit formatter, legacy format string,
 /// log-scale sci-notation, or default ScalarFormatter (setLocs gives
-/// offset/scientific detection).
+/// offset/scientific detection). The view interval [vmin, vmax] is
+/// forwarded via Formatter::setViewInterval (mpl set_locs) so log
+/// formatters can apply minor_thresholds label suppression.
 plot::Formatter* axisFormatter(const plot::TickConfig& tc,
                                std::span<const float> ticks,
                                const plot::FigureStyle& style,
                                const plot::AxisScale& scale,
+                               float vmin, float vmax,
                                plot::ScalarFormatter& defaultFmt,
                                plot::FormatStrFormatter& strFmt,
                                plot::LogFormatterMathtext& logFmt);
+/// Whether this axis defaults to log-scale minor tick labels
+/// (matplotlib log axes label minor subs via LogFormatterSciNotation).
+bool logMinorLabels(const plot::TickConfig& tc,
+                    const plot::AxisScale& scale);
 /// Label for tick `t` at index `i`, honoring fixed labels first.
 std::string tickLabel(const plot::TickConfig& tc, const plot::Formatter& f,
                       float t, int i);

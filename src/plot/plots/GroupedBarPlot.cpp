@@ -51,6 +51,19 @@ Color GroupedBarPlot::legendColor() const {
     return seriesColor(0);
 }
 
+std::vector<LegendHandle> GroupedBarPlot::legendEntries() const {
+    // mpl: one legend handle per bar series; falls back to label().
+    if (config_.seriesLabels.empty()) return IPlot::legendEntries();
+    std::vector<LegendHandle> out;
+    out.reserve(config_.seriesLabels.size());
+    for (uint32_t s = 0; s < config_.seriesLabels.size(); ++s) {
+        const auto& lbl = config_.seriesLabels[s];
+        if (lbl.empty()) continue;
+        out.push_back({lbl, seriesColor(s), LegendMarker::Square});
+    }
+    return out;
+}
+
 void GroupedBarPlot::buildGeometry() {
     fillPositions_.clear();
     fillColors_.clear();
@@ -133,12 +146,17 @@ void GroupedBarPlot::contributeToAutoscale(Viewport& v) const {
             }
         v.x.min = std::min(v.x.min, config_.baseline);
         v.x.max = std::max(v.x.max, config_.baseline);
-        v.y.min = std::min(v.y.min, 0.0f);
-        v.y.max = std::max(v.y.max, static_cast<float>(nGroups_));
+        float groupStart = (1.0f - config_.barWidth) * 0.5f;
+        v.y.min = std::min(v.y.min, groupStart);
+        v.y.max = std::max(v.y.max,
+            static_cast<float>(nGroups_ - 1) + groupStart + config_.barWidth);
     } else {
-        // Vertical: x = 0..nGroups, y = heights
-        v.x.min = std::min(v.x.min, 0.0f);
-        v.x.max = std::max(v.x.max, static_cast<float>(nGroups_));
+        // Vertical: x = bar-edge extent (matplotlib's bar datalim is the
+        // union of the bar rectangles, not the full category span).
+        float groupStart = (1.0f - config_.barWidth) * 0.5f;
+        v.x.min = std::min(v.x.min, groupStart);
+        v.x.max = std::max(v.x.max,
+            static_cast<float>(nGroups_ - 1) + groupStart + config_.barWidth);
         v.y.min = std::min(v.y.min, config_.baseline);
         v.y.max = std::max(v.y.max, config_.baseline);
         for (const auto& series : heights_)

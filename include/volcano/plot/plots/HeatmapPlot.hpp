@@ -12,6 +12,17 @@ public:
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl sticky edges: tight autoscale, no 5% margin.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
+    /// Scalar range (drives the colorbar).
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        Range vr = grid_.valueRange;
+        if (!vr.valid() && !grid_.values.empty()) {
+            auto [lo, hi] = std::ranges::minmax(grid_.values);
+            vr = {lo, hi};
+        }
+        return vr.valid() ? std::optional{vr} : std::nullopt;
+    }
 private:
     Grid2D grid_;
     const Colormap& cmap_;

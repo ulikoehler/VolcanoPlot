@@ -86,6 +86,10 @@ struct Grid2D {
     /// Grid row origin: "upper" places row 0 at the top of the axes
     /// (matplotlib imshow default), "lower" places it at the bottom.
     std::string origin = "upper";
+    /// mpl imshow `interpolation`: "nearest" (default, discrete cells),
+    /// "bilinear", "bicubic", or "antialiased" (approximated by bilinear
+    /// on the GPU; mpl maps it to its auto/hanning resampler).
+    std::string interpolation = "nearest";
 };
 
 /// A function to be evaluated on the GPU.

@@ -74,10 +74,10 @@ TEST(PcolorfastRegression, ExtentAutoscale) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, 0.8f, 0.1f);
-    EXPECT_NEAR(av.x.max, 5.2f, 0.1f);
-    EXPECT_NEAR(av.y.min, 1.8f, 0.1f);
-    EXPECT_NEAR(av.y.max, 6.2f, 0.1f);
+    EXPECT_NEAR(av.x.min, 1.0f, 0.1f);
+    EXPECT_NEAR(av.x.max, 5.0f, 0.1f);
+    EXPECT_NEAR(av.y.min, 2.0f, 0.1f);
+    EXPECT_NEAR(av.y.max, 6.0f, 0.1f);
 }
 
 TEST(PcolorfastRegression, ExtentUniformGrid) {

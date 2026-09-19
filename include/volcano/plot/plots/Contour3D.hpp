@@ -41,6 +41,7 @@ struct Contour3DConfig {
 /// to 2D NDC. Rendered via LineSegmentRenderer.
 class Contour3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     Contour3D(Grid2D grid, Contour3DConfig config = {});
 
     /// Set the camera for 3D projection. Must be called before prepare().
@@ -70,6 +71,7 @@ private:
 /// fixed z-level in 3D space. Equivalent to matplotlib's `Axes3D.contourf`.
 class Contourf3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     Contourf3D(Grid2D grid, Contour3DConfig config = {});
 
     /// Set the camera for 3D projection. Must be called before prepare().

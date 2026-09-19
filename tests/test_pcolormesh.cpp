@@ -147,10 +147,10 @@ TEST(PcolormeshRegression, AutoscaleMatchesEdges) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, -0.5f, 0.1f);
-    EXPECT_NEAR(av.x.max, 10.5f, 0.1f);
-    EXPECT_NEAR(av.y.min, -0.5f, 0.1f);
-    EXPECT_NEAR(av.y.max, 10.5f, 0.1f);
+    EXPECT_NEAR(av.x.min, 0.0f, 0.1f);
+    EXPECT_NEAR(av.x.max, 10.0f, 0.1f);
+    EXPECT_NEAR(av.y.min, 0.0f, 0.1f);
+    EXPECT_NEAR(av.y.max, 10.0f, 0.1f);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -433,4 +433,121 @@ TEST(PcolormeshRegression, TwoSlopeNormCenterAtZero) {
     // With coolwarm, t=0.25 is cool (blue-ish), t=0.75 is warm (red-ish).
     EXPECT_GT(cPos.r - cNeg.r, 20)
         << "Positive value should be warmer (more red) than negative";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// shading="gouraud"
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(PcolormeshRegression, GouraudInterpolatesAcrossQuad) {
+    // Corner-aligned grid: x={0,10}, y={0,10}, C gives a horizontal
+    // gradient (left corners = 0, right corners = 1).
+    // C[j*2 + i]: (0,0)=0, (1,0)=1, (0,1)=0, (1,1)=1 → {0, 1, 0, 1}.
+    PcmFigure cf(256);
+    std::vector<float> x{0, 10};
+    std::vector<float> y{0, 10};
+    std::vector<float> C{0, 1, 0, 1};
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.shading = PcmShading::Gouraud;
+    cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, 2, 2, cfg));
+    auto img = cf.render();
+
+    auto vp = expectedViewport(0, 10, 0, 10);
+    auto [lx, ly] = dataToPixel(vp, cf.axes->rect, 1.0f, 5.0f);
+    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
+    auto [rx, ry] = dataToPixel(vp, cf.axes->rect, 9.0f, 5.0f);
+    Pixel left = img.get(static_cast<uint32_t>(lx), static_cast<uint32_t>(ly));
+    Pixel center = img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy));
+    Pixel right = img.get(static_cast<uint32_t>(rx), static_cast<uint32_t>(ry));
+
+    // Gouraud: the quad center blends corner colors — it must differ
+    // from both the left (~t=0) and right (~t=1) edge colors.
+    EXPECT_FALSE(center.approx(left, 30))
+        << "Gouraud center should blend toward t=0.5, not match left edge";
+    EXPECT_FALSE(center.approx(right, 30))
+        << "Gouraud center should blend toward t=0.5, not match right edge";
+    EXPECT_FALSE(left.approx(right, 30))
+        << "Gouraud left and right edges should differ";
+}
+
+TEST(PcolormeshRegression, GouraudDiffersFromFlatAtCellCenter) {
+    // Same logical data as SimpleGrid but expressed corner-aligned.
+    // Flat shading puts a constant color per cell; gouraud blends, so
+    // the color at the quad center must differ between the two modes.
+    PcmFigure cfG(256);
+    std::vector<float> gx{0, 10};
+    std::vector<float> gy{0, 10};
+    std::vector<float> gC{0, 1, 0, 1};
+    PcolormeshConfig gcfg;
+    gcfg.cmap = &colormaps::viridis();
+    gcfg.shading = PcmShading::Gouraud;
+    cfG.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        gx, gy, gC, 2, 2, gcfg));
+    auto imgG = cfG.render();
+
+    PcmFigure cfF(256);
+    SimpleGrid g;  // same gradient, flat shading
+    PcolormeshConfig fcfg;
+    fcfg.cmap = &colormaps::viridis();
+    cfF.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        g.x, g.y, g.C, g.nCols, g.nRows, fcfg));
+    auto imgF = cfF.render();
+
+    // Compare at data (5, 2.5): flat lands on the x=5 cell boundary
+    // (one side t=0, other t=1 — either way a step endpoint), while
+    // gouraud blends smoothly toward the t=0.5 midpoint.
+    auto vp = expectedViewport(0, 10, 0, 10);
+    auto [px, py] = dataToPixel(vp, cfF.axes->rect, 5.0f, 2.5f);
+    Pixel pf = imgF.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+    auto [px2, py2] = dataToPixel(vp, cfG.axes->rect, 5.0f, 2.5f);
+    Pixel pg2 = imgG.get(static_cast<uint32_t>(px2), static_cast<uint32_t>(py2));
+    EXPECT_FALSE(pf.approx(pg2, 30))
+        << "Gouraud at the x=5 seam should differ from flat's sharp step";
+}
+
+TEST(PcolormeshRegression, GouraudNaNDropsAdjacentQuads) {
+    // 3x2 corner grid; NaN at corner (0,0) drops the only quad touching
+    // it (the left quad). The right quad has no NaN corners → drawn.
+    // C[j*3 + i]: {NaN, 0.5, 1,  0, 0.5, 1}
+    PcmFigure cf(256);
+    std::vector<float> x{0, 5, 10};
+    std::vector<float> y{0, 10};
+    std::vector<float> C{std::nanf(""), 0.5f, 1.0f, 0.0f, 0.5f, 1.0f};
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.shading = PcmShading::Gouraud;
+    cfg.skipNaN = true;
+    cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, C, 3, 2, cfg));
+    auto img = cf.render();
+
+    auto vp = expectedViewport(0, 10, 0, 10);
+    auto [lx, ly] = dataToPixel(vp, cf.axes->rect, 1.0f, 5.0f);
+    auto [rx, ry] = dataToPixel(vp, cf.axes->rect, 8.0f, 5.0f);
+    Pixel left = img.get(static_cast<uint32_t>(lx), static_cast<uint32_t>(ly));
+    Pixel right = img.get(static_cast<uint32_t>(rx), static_cast<uint32_t>(ry));
+    EXPECT_TRUE(left.approx(Pixel::white(), 40))
+        << "Quad with a NaN corner should be dropped (white)";
+    EXPECT_FALSE(right.approx(Pixel::white(), 40))
+        << "Quad without NaN corners should be drawn";
+}
+
+TEST(PcolormeshRegression, GouraudValidatesCornerShape) {
+    // mpl requires X, Y, C to share the same shape under gouraud.
+    PcolormeshConfig cfg;
+    cfg.shading = PcmShading::Gouraud;
+    // x has nCols+1 (edge-style) — invalid under gouraud.
+    EXPECT_THROW(
+        PcolormeshPlot({0, 5, 10}, {0, 10}, {0, 1, 0, 1}, 3, 2, cfg),
+        std::invalid_argument);
+    // y has nRows+1 — invalid under gouraud.
+    EXPECT_THROW(
+        PcolormeshPlot({0, 10}, {0, 5, 10}, {0, 1, 0, 1}, 2, 3, cfg),
+        std::invalid_argument);
+    // 1x1 corner grid has no quads to shade.
+    EXPECT_THROW(
+        PcolormeshPlot({0}, {0}, {0.5f}, 1, 1, cfg),
+        std::invalid_argument);
 }

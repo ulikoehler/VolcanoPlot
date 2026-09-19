@@ -87,12 +87,41 @@ void StreamPlot::integrateStreamline(float x0, float y0, int dir,
         return sampleField(px, py);
     };
 
+    // mpl `broken_streamlines=False`: coast through invalid (zero/NaN)
+    // field regions with the last strong velocity instead of ending.
+    // Velocity ramps to zero as a hole is approached, so we keep the
+    // last sample at >=50% of the running max magnitude.
+    float lastU = 0.0f, lastV = 0.0f, maxMag = 0.0f;
+
     for (uint32_t step = 0; step < config_.maxPoints; ++step) {
         points.push_back({x, y});
         auto [u, v] = sampleField(x, y);
         float mag = std::sqrt(u * u + v * v);
-        if (mag < 1e-10f) break;
+        if (!std::isfinite(mag) || mag < 1e-10f) {
+            if (config_.brokenStreamlines ||
+                (lastU == 0.0f && lastV == 0.0f))
+                break;
+            x += h * lastU;
+            y += h * lastV;
+            if (x < g.xRange.min || x > g.xRange.max ||
+                y < g.yRange.min || y > g.yRange.max)
+                break;
+            continue;
+        }
+        maxMag = std::max(maxMag, mag);
+        if (mag >= 0.5f * maxMag) {
+            lastU = u;
+            lastV = v;
+        }
         Point2D next = rk4Step(x, y, h, field);
+        if (!std::isfinite(next.x) || !std::isfinite(next.y)) {
+            // An intermediate sample hit an invalid region — same rule:
+            // break when brokenStreamlines, otherwise coast through.
+            if (config_.brokenStreamlines ||
+                (lastU == 0.0f && lastV == 0.0f))
+                break;
+            next = {x + h * lastU, y + h * lastV};
+        }
         if (next.x < g.xRange.min || next.x > g.xRange.max ||
             next.y < g.yRange.min || next.y > g.yRange.max)
             break;
@@ -237,8 +266,8 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             if (plen < 1.0f) continue;
             float ux = ddx / plen, uy = ddy / plen;
             float px = -uy, py = ux;
-            float hl = config_.arrowLength;
-            float hw = config_.arrowWidth * 0.5f;
+            float hl = config_.arrowLength * config_.arrowsize;
+            float hw = config_.arrowWidth * config_.arrowsize * 0.5f;
 
             Point2D tip = pp1;
             Point2D base1 = {pp1.x - ux * hl + px * hw, pp1.y - uy * hl + py * hw};

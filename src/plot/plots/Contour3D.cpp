@@ -1,4 +1,5 @@
 // volcano/plot/plots/Contour3D.cpp — 3D contour and contourf implementation
+#include "volcano/plot/Ticks.hpp"
 #include "volcano/plot/plots/Contour3D.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -85,10 +86,8 @@ std::vector<ClipVertex> clipBelow(std::span<const ClipVertex> poly, float level)
 std::vector<float> autoLevels(float vmin, float vmax, int n) {
     if (n < 2) n = 2;
     if (vmax <= vmin) vmax = vmin + 1.0f;
-    std::vector<float> levels(n);
-    for (int i = 0; i < n; ++i)
-        levels[i] = vmin + (vmax - vmin) * i / (n - 1);
-    return levels;
+    // matplotlib _autolev: MaxNLocator(N+1) nice-number levels.
+    return MaxNLocator(n + 1).tickValues(vmin, vmax);
 }
 
 std::pair<float, float> gridValueRange(const Grid2D& grid) {
@@ -109,7 +108,7 @@ Point2D project3D(const std::array<float, 16>& vp, float x, float y, float z) {
     float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
     float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
     if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, clipY / clipW};
+    return {clipX / clipW, -clipY / clipW};
 }
 
 } // namespace

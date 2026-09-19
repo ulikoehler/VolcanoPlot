@@ -28,10 +28,8 @@ Point2D interpEdge(Point2D p0, float z0, Point2D p1, float z1, float level) {
 /// Compute auto levels from data range.
 std::vector<float> autoLevels(float vmin, float vmax, int n) {
     if (vmin >= vmax) { vmax = vmin + 1.0f; }
-    std::vector<float> levels(n);
-    for (int i = 0; i < n; ++i)
-        levels[i] = vmin + (vmax - vmin) * i / (n - 1);
-    return levels;
+    // matplotlib _autolev: MaxNLocator(N+1) nice-number levels.
+    return MaxNLocator(n + 1).tickValues(vmin, vmax);
 }
 
 } // namespace

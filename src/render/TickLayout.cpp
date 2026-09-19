@@ -147,6 +147,7 @@ plot::Formatter* axisFormatter(const plot::TickConfig& tc,
                                std::span<const float> ticks,
                                const plot::FigureStyle& style,
                                const plot::AxisScale& scale,
+                               float vmin, float vmax,
                                plot::ScalarFormatter& defaultFmt,
                                plot::FormatStrFormatter& strFmt,
                                plot::LogFormatterMathtext& logFmt) {
@@ -166,8 +167,20 @@ plot::Formatter* axisFormatter(const plot::TickConfig& tc,
         defaultFmt.useMathText = style.formatterUseMathText;
         f = &defaultFmt;
     }
+    f->setViewInterval(vmin, vmax);
     f->setLocs(ticks);
     return f;
+}
+
+/// mpl log axes get a default minor formatter (LogFormatterSciNotation)
+/// that labels minor subs; suppression of crowded cases happens inside
+/// the formatter via minor_thresholds.
+bool logMinorLabels(const plot::TickConfig& tc,
+                    const plot::AxisScale& scale) {
+    if (tc.minorFormatter) return true;
+    return minorEnabled(tc, scale) &&
+           (scale.kind == plot::ScaleKind::Log ||
+            scale.kind == plot::ScaleKind::FunctionLog);
 }
 
 /// Label for tick `t` at index `i`, honoring fixed labels first.

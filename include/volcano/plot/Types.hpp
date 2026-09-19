@@ -78,6 +78,14 @@ struct Color {
     static Color parseOr(std::string_view s, Color fallback = black());
 };
 
+/// One legend entry (label + handle appearance). Plots with multiple
+/// legend items (e.g. per-series) produce several handles.
+struct LegendHandle {
+    std::string label;
+    Color color = Color::black();
+    LegendMarker marker = LegendMarker::Square;
+};
+
 /// Default color cycle (matplotlib's "tab10" palette).
 /// Used by "C0"–"C9" color strings and for automatic plot coloring.
 class ColorCycle {

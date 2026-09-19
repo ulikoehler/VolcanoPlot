@@ -6,6 +6,7 @@
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
+#include <format>
 #include <stdexcept>
 #include <string>
 
@@ -65,10 +66,43 @@ layout(push_constant) uniform PC {
     vec4 u_scaleY;
     vec4 u_proj;
     vec2 u_valueRange;
+    float u_interp;  // 0 = nearest, 1 = bilinear, 2 = bicubic
+    float u_interpPad;
 } pc;
 
+// Catmull-Rom bicubic weights for fractional offset f (taps at -1..2).
+vec4 crWeights(float f) {
+    float f2 = f * f;
+    float f3 = f2 * f;
+    return vec4(-0.5 * f3 + f2 - 0.5 * f,
+                 1.5 * f3 - 2.5 * f2 + 1.0,
+                -1.5 * f3 + 2.0 * f2 + 0.5 * f,
+                 0.5 * f3 - 0.5 * f2);
+}
+
+float bicubicSample(vec2 uv) {
+    ivec2 sz = textureSize(u_grid, 0);
+    vec2 tc = uv * vec2(sz) - 0.5;
+    vec2 f = fract(tc);
+    ivec2 base = ivec2(floor(tc));
+    vec4 wx = crWeights(f.x);
+    vec4 wy = crWeights(f.y);
+    float acc = 0.0;
+    for (int j = 0; j < 4; ++j) {
+        int ty = clamp(base.y + j - 1, 0, sz.y - 1);
+        for (int i = 0; i < 4; ++i) {
+            int tx = clamp(base.x + i - 1, 0, sz.x - 1);
+            acc += wx[i] * wy[j] * texelFetch(u_grid, ivec2(tx, ty), 0).r;
+        }
+    }
+    return acc;
+}
+
 void main() {
-    float v = texture(u_grid, v_uv).r;
+    // nearest/bilinear differ only by the bound sampler's filter mode;
+    // bicubic fetches texels explicitly.
+    float v = pc.u_interp > 1.5 ? bicubicSample(v_uv)
+                                : texture(u_grid, v_uv).r;
     float t = (v - pc.u_valueRange.x) / max(pc.u_valueRange.y - pc.u_valueRange.x, 1e-30);
     t = clamp(t, 0.0, 1.0);
     outColor = texture(u_cmap, vec2(t, 0.5));
@@ -105,7 +139,7 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * 22);
+       .setOffset(0).setSize(sizeof(float) * 24);
     vk::PipelineLayoutCreateInfo plci;
     plci.setSetLayouts(descLayout_.get()).setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -301,9 +335,28 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
         quadBuffer_.upload(device, queue, pool, std::as_bytes(std::span{kQuad, 12}));
     }
 
+    // mpl imshow interpolation: bilinear binds the linear sampler;
+    // antialiased/auto are approximated by bilinear (mpl maps them to
+    // its auto/hanning resampler); bicubic is done with texelFetch in
+    // the shader so the sampler filter is irrelevant.
+    if (grid.interpolation == "bilinear" || grid.interpolation == "antialiased" ||
+        grid.interpolation == "hanning") {
+        interpMode_ = 1;
+    } else if (grid.interpolation == "bicubic") {
+        interpMode_ = 2;
+    } else if (grid.interpolation == "nearest" || grid.interpolation == "none" ||
+               grid.interpolation.empty()) {
+        interpMode_ = 0;
+    } else {
+        throw std::invalid_argument(
+            std::format("HeatmapRenderer: unsupported interpolation '{}'",
+                        grid.interpolation));
+    }
+
     // Update descriptor set
     vk::DescriptorImageInfo gridInfo{};
-    gridInfo.setSampler(samplerNearest_.get())
+    gridInfo.setSampler(interpMode_ == 1 ? sampler_.get()
+                                         : samplerNearest_.get())
             .setImageView(gridView_.get())
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
     vk::DescriptorImageInfo cmapInfo{};
@@ -338,6 +391,7 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         float syCode, syP1, syP2, syPad;
         float prCode, thetaOff, thetaDir, prPad;
         float valueMin, valueMax;
+        float interp, interpPad;
     } pc;
     pc.viewMinX = transform.view.x.min;
     pc.viewMinY = transform.view.y.min;
@@ -359,6 +413,8 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.prPad = originLower_ ? 1.0f : 0.0f;
     pc.valueMin = valueMin_;
     pc.valueMax = valueMax_;
+    pc.interp = static_cast<float>(interpMode_);
+    pc.interpPad = 0.0f;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout_.get(), 0, descSet_, {});

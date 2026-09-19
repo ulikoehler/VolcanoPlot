@@ -45,6 +45,7 @@ struct Errorbar3DConfig {
 /// Caps are short perpendicular line segments at the error bar ends.
 class Errorbar3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from (x, y, z) arrays and configuration.
     Errorbar3D(std::vector<float> x, std::vector<float> y, std::vector<float> z,
                Errorbar3DConfig config = {});

@@ -1,5 +1,7 @@
 // volcano/plot/plots/ContourPlot.cpp — contour and contourf implementation
+#include "volcano/plot/Ticks.hpp"
 #include "volcano/plot/plots/ContourPlot.hpp"
+#include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 #include "../VectorEmitHelpers.hpp"
@@ -15,6 +17,10 @@
 namespace volcano::plot {
 
 namespace {
+
+const Colormap& defaultColormap() {
+    return colormaps::viridis();
+}
 
 // ─── Marching Squares Lookup Table ──────────────────────────────────────────
 //
@@ -157,10 +163,8 @@ std::vector<ClipVertex> clipBelow(std::span<const ClipVertex> poly, float level)
 std::vector<float> autoLevels(float vmin, float vmax, int n) {
     if (n < 2) n = 2;
     if (vmax <= vmin) vmax = vmin + 1.0f;
-    std::vector<float> levels(n);
-    for (int i = 0; i < n; ++i)
-        levels[i] = vmin + (vmax - vmin) * i / (n - 1);
-    return levels;
+    // matplotlib _autolev: MaxNLocator(N+1) nice-number levels.
+    return MaxNLocator(n + 1).tickValues(vmin, vmax);
 }
 
 /// Find the value range of a grid.
@@ -258,29 +262,92 @@ void ContourPlot::prepare(render::Renderer& r) {
 void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
-    Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    // mpl colors each level from the colormap (default: image.cmap =
+    // viridis) and renders negative levels dashed. Stroke per level into
+    // pixel-space triangle meshes so colors/dashes differ per level.
+    auto toPx = [&](const Point2D& p) {
+        auto f = axes.dataToFraction(p);
+        return Point2D{rect.x + f.x * float(rect.width),
+                       rect.y + (1.0f - f.y) * float(rect.height)};
+    };
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    vk::Extent2D res = r.backend().extent();
+    auto& spine = r.spineRenderer();
+
+    // Group segment indices by level (levels are few).
+    std::map<float, std::vector<size_t>> byLevel;
+    for (size_t i = 0; i + 1 < segments_.size(); i += 2)
+        byLevel[segLevels_[i / 2]].push_back(i);
+
+    // Inline clabel gaps: measure each label's pixel-space box up front
+    // and skip segments running underneath it (matplotlib `clabel`
+    // `inline=True` behavior — the contour line is broken under labels).
+    std::map<float, Point2D> anchors;
+    std::map<float, Rect2Df> labelBoxes;
+    if (config_.clabel) {
+        anchors = clabelAnchors();
+        auto& text = r.textRenderer();
+        constexpr float pad = 2.0f;
+        for (const auto& [level, a] : anchors) {
+            auto m = text.measureText(std::format("{:g}", level),
+                                      config_.clabelFontScale);
+            auto f = axes.dataToFraction(a);
+            float px = rect.x + f.x * float(rect.width);
+            float py = rect.y + (1.0f - f.y) * float(rect.height);
+            labelBoxes[level] = {px - m.width * 0.5f - pad,
+                                 py - m.height * 0.5f - pad,
+                                 m.width + 2.0f * pad,
+                                 m.height + 2.0f * pad};
+        }
+    }
+
+    float lMin = config_.levels.front(), lMax = config_.levels.back();
+    float lRange = std::max(1e-9f, lMax - lMin);
+    StrokeParams sp;
+    sp.width = config_.lineWidth;
+    for (const auto& [level, idx] : byLevel) {
+        // mpl: negative contour levels are dashed by default.
+        sp.dashes.clear();
+        if (level < 0.0f)
+            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        auto boxIt = labelBoxes.find(level);
+        const Rect2Df* box = boxIt != labelBoxes.end() ? &boxIt->second
+                                                       : nullptr;
+        std::vector<Point2D> tris;
+        for (size_t i : idx) {
+            Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};
+            if (box) {
+                float mx = (seg[0].x + seg[1].x) * 0.5f;
+                float my = (seg[0].y + seg[1].y) * 0.5f;
+                if (mx >= box->x && mx <= box->x + box->w &&
+                    my >= box->y && my <= box->y + box->h)
+                    continue;
+            }
+            auto mesh = strokePolyline(seg, sp);
+            tris.insert(tris.end(), mesh.verts.begin(), mesh.verts.end());
+        }
+        Color color = config_.lineColor;
+        if (config_.cmap) {
+            float t = (level - lMin) / lRange;
+            color = config_.cmap->sample(std::clamp(t, 0.0f, 1.0f));
+        }
+        if (!tris.empty())
+            spine.drawTriangles(cmd, clip, res, tris, color);
+    }
     if (config_.clabel) drawClabels(cmd, r, axes, rect);
 }
 
-void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
-                              const Axes& axes, Rect2D rect) {
-    // One label per level: midpoint of the segment closest to the level's
-    // centroid of segment midpoints (lands on the contour ring).
+std::map<float, Point2D> ContourPlot::clabelAnchors() const {
+    // One anchor per level: midpoint of the segment closest to the
+    // level's centroid of segment midpoints (lands on the contour ring).
     std::map<float, std::vector<Point2D>> byLevel;
     for (size_t i = 0; i + 1 < segments_.size(); i += 2)
         byLevel[segLevels_[i / 2]].push_back(
             {(segments_[i].x + segments_[i + 1].x) * 0.5f,
              (segments_[i].y + segments_[i + 1].y) * 0.5f});
 
-    Color color = config_.clabelColor.a > 0 ? config_.clabelColor
-                                            : config_.lineColor;
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
-    auto& text = r.textRenderer();
-
+    std::map<float, Point2D> out;
     for (const auto& [level, mids] : byLevel) {
         if (!config_.clabelLevels.empty() &&
             std::find(config_.clabelLevels.begin(),
@@ -288,7 +355,6 @@ void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
                 config_.clabelLevels.end())
             continue;
         if (mids.empty()) continue;
-        // Centroid of midpoints.
         Point2D c{0, 0};
         for (auto& m : mids) { c.x += m.x; c.y += m.y; }
         c.x /= float(mids.size()); c.y /= float(mids.size());
@@ -298,8 +364,22 @@ void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
             float d = (m.x - c.x) * (m.x - c.x) + (m.y - c.y) * (m.y - c.y);
             if (d < bestD) { bestD = d; best = &m; }
         }
+        out[level] = *best;
+    }
+    return out;
+}
+
+void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
+                              const Axes& axes, Rect2D rect) {
+    Color color = config_.clabelColor.a > 0 ? config_.clabelColor
+                                            : config_.lineColor;
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    auto& text = r.textRenderer();
+
+    for (const auto& [level, anchor] : clabelAnchors()) {
         // Data → pixel.
-        auto f = axes.dataToFraction(*best);
+        auto f = axes.dataToFraction(anchor);
         float px = rect.x + f.x * float(rect.width);
         float py = rect.y + (1.0f - f.y) * float(rect.height);
         std::string s = std::format("{:g}", level);
@@ -314,6 +394,21 @@ void ContourPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     if (segments_.empty()) { computeLevels(); marchingSquares(); }
     if (segments_.empty()) return;
     auto toPx = pxMapper(axes, rect);
+    // Inline clabel gaps: approximate each label's pixel box (writers
+    // lack font metrics) and skip segments underneath it.
+    std::map<float, Rect2Df> labelBoxes;
+    std::map<float, Point2D> anchors;
+    if (config_.clabel) {
+        anchors = clabelAnchors();
+        float size = 16.0f * config_.clabelFontScale;
+        for (const auto& [level, a] : anchors) {
+            auto s = std::format("{:g}", level);
+            float w = float(s.size()) * size * 0.55f + 4.0f;
+            float h = size + 4.0f;
+            auto p = toPx(a);
+            labelBoxes[level] = {p.x - w * 0.5f, p.y - h * 0.5f, w, h};
+        }
+    }
     render::VectorCanvas::Pen pen;
     pen.color = config_.lineColor;
     pen.width = config_.lineWidth;
@@ -325,35 +420,22 @@ void ContourPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
             pen.color = config_.cmap->sample(std::clamp(t, 0.0f, 1.0f));
         }
         Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};
+        auto boxIt = labelBoxes.find(segLevels_[i / 2]);
+        if (boxIt != labelBoxes.end()) {
+            const auto& b = boxIt->second;
+            float mx = (seg[0].x + seg[1].x) * 0.5f;
+            float my = (seg[0].y + seg[1].y) * 0.5f;
+            if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h)
+                continue;
+        }
         c.polyline(seg, pen);
     }
     // clabel text at each level's representative midpoint.
     if (config_.clabel) {
-        std::map<float, std::vector<Point2D>> byLevel;
-        for (size_t i = 0; i + 1 < segments_.size(); i += 2)
-            byLevel[segLevels_[i / 2]].push_back(
-                {(segments_[i].x + segments_[i + 1].x) * 0.5f,
-                 (segments_[i].y + segments_[i + 1].y) * 0.5f});
         Color tcol = config_.clabelColor.a > 0 ? config_.clabelColor
                                                : config_.lineColor;
-        for (const auto& [level, mids] : byLevel) {
-            if (!config_.clabelLevels.empty() &&
-                std::find(config_.clabelLevels.begin(),
-                          config_.clabelLevels.end(), level) ==
-                    config_.clabelLevels.end())
-                continue;
-            if (mids.empty()) continue;
-            Point2D ctr{0, 0};
-            for (auto& m : mids) { ctr.x += m.x; ctr.y += m.y; }
-            ctr.x /= float(mids.size()); ctr.y /= float(mids.size());
-            const Point2D* best = &mids[0];
-            float bestD = 1e30f;
-            for (const auto& m : mids) {
-                float d = (m.x - ctr.x) * (m.x - ctr.x) +
-                          (m.y - ctr.y) * (m.y - ctr.y);
-                if (d < bestD) { bestD = d; best = &m; }
-            }
-            auto p = toPx(*best);
+        for (const auto& [level, anchor] : anchors) {
+            auto p = toPx(anchor);
             c.text(p, std::format("{:g}", level),
                    16.0f * config_.clabelFontScale, tcol);
         }
@@ -440,11 +522,9 @@ void ContourfPlot::marchingSquaresFilled() {
                 float mid = (lo + hi) * 0.5f;
                 float t = (mid - vmin) / vrange;
                 t = std::clamp(t, 0.0f, 1.0f);
-                Color color = config_.cmap ? config_.cmap->sample(t)
-                                           : Color::fromRgba8(
-                                                 static_cast<uint8_t>(255 * t),
-                                                 static_cast<uint8_t>(255 * t),
-                                                 static_cast<uint8_t>(255 * t));
+                Color color = config_.cmap
+                                  ? config_.cmap->sample(t)
+                                  : defaultColormap().sample(t);
 
                 // Fan triangulate.
                 for (size_t k = 1; k + 1 < poly.size(); ++k) {

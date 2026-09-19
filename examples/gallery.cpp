@@ -38,6 +38,7 @@
 #include <volcano/plot/plots/Scatter3D.hpp>
 #include <volcano/plot/plots/Plot3D.hpp>
 #include <volcano/plot/plots/Bar3D.hpp>
+#include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/plots/MexicanHatPlot.hpp>
 #include <volcano/plot/plots/ChirpPlot.hpp>
 
@@ -87,26 +88,41 @@ struct GalleryCtx {
 };
 
 FigureStyle galleryStyle() {
-    FigureStyle s = styles::seabornStyle();
-    s.faceColor = Color::white();
-    return s;
+    // matplotlib default style: white bg, black spines, no grid.
+    return styles::defaultStyle();
 }
 
-Axes* setupAxes(Figure& fig, std::string_view title) {
+Axes* setupAxes(Figure& fig, std::string_view title,
+                const char* xlabel = "X", const char* ylabel = "Y") {
     auto* ax = fig.addAxes();
     ax->setStyle(galleryStyle());
     ax->setTitle(std::string(title));
     ax->style().xAxis.visible = true;
     ax->style().yAxis.visible = true;
-    ax->style().xAxis.label = "X";
-    ax->style().yAxis.label = "Y";
+    ax->style().xAxis.label = xlabel;
+    ax->style().yAxis.label = ylabel;
     return ax;
 }
 
 // ── Data generators ───────────────────────────────────────────────────────
 
-std::mt19937& rng() {
-    static std::mt19937 r(42);
+// Deterministic RNG shared with scripts/matplotlib_gallery.py — a uint64
+// LCG feeding Irwin-Hall gaussians (sum of 12 uniforms - 6). Bit-identical
+// on both sides so the gallery renders the same datasets.
+struct SharedRng {
+    uint64_t state = 42;
+    double uniform() {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return double(state >> 11) * (1.0 / 9007199254740992.0);
+    }
+    double gauss() {
+        double s = 0.0;
+        for (int i = 0; i < 12; ++i) s += uniform();
+        return s - 6.0;
+    }
+};
+SharedRng& sRng() {
+    static SharedRng r;
     return r;
 }
 
@@ -129,9 +145,12 @@ void plotScatter(GalleryCtx& ctx) {
     s.marker = MarkerStyle::Circle;
     s.size = 5.0f;
     s.label = "data";
-    std::normal_distribution<float> d(0, 1);
+    // Same draw order as mpl: x=randn(200), then y=randn(200).
+    std::vector<float> sx(200), sy(200);
+    for (auto& v : sx) v = float(sRng().gauss());
+    for (auto& v : sy) v = float(sRng().gauss());
     for (int i = 0; i < 200; ++i)
-        s.points.push_back({d(rng()), d(rng())});
+        s.points.push_back({sx[i], sy[i]});
     ax->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
     ax->style().legend.visible = true;
     ctx.render(fig, "scatter");
@@ -173,6 +192,7 @@ void plotGroupedBar(GalleryCtx& ctx) {
     ax->style().xAxis.label = "Category";
     ax->style().yAxis.label = "Value";
     GroupedBarConfig cfg;
+    cfg.barWidth = 0.75f;  // mpl: ax.bar(x + (i-1)*w, s, w) with w=0.25
     cfg.groupLabels = {"A", "B", "C", "D"};
     cfg.seriesLabels = {"Series 1", "Series 2", "Series 3"};
     std::vector<std::vector<float>> heights = {
@@ -182,6 +202,9 @@ void plotGroupedBar(GalleryCtx& ctx) {
     };
     ax->addPlot(std::make_unique<GroupedBarPlot>(std::move(heights), cfg));
     ax->style().legend.visible = true;
+    // mpl: ax.set_xticks(x) + xticklabels at group centers (i+0.5 here).
+    ax->style().xAxis.ticks.positions = {0.5f, 1.5f, 2.5f, 3.5f};
+    ax->style().xAxis.ticks.labels = {"A", "B", "C", "D"};
     ctx.render(fig, "grouped_bar");
 }
 
@@ -190,10 +213,9 @@ void plotHist(GalleryCtx& ctx) {
     auto* ax = setupAxes(fig, "Histogram");
     ax->style().xAxis.label = "Value";
     ax->style().yAxis.label = "Count";
-    std::normal_distribution<float> d(0, 1);
     std::vector<float> samples;
     for (int i = 0; i < 1000; ++i)
-        samples.push_back(d(rng()));
+        samples.push_back(float(sRng().gauss()));
     HistConfig cfg;
     cfg.binCount = 30;
     ax->addPlot(std::make_unique<HistPlot>(std::move(samples), cfg));
@@ -230,17 +252,16 @@ void plotBox(GalleryCtx& ctx) {
     auto* ax = setupAxes(fig, "Box Plot");
     ax->style().xAxis.label = "Group";
     ax->style().yAxis.label = "Value";
-    std::normal_distribution<float> d(0, 1);
     std::vector<std::vector<float>> groups;
     for (int g = 0; g < 4; ++g) {
         std::vector<float> group;
-        std::normal_distribution<float> gd(g, 1.0f + g * 0.2f);
         for (int i = 0; i < 100; ++i)
-            group.push_back(gd(rng()));
+            group.push_back(float(sRng().gauss() * (1.0 + g * 0.2) + g));
         groups.push_back(std::move(group));
     }
     BoxPlotConfig cfg;
     cfg.labels = {"G1", "G2", "G3", "G4"};
+    cfg.fillBox = false;  // mpl boxplot default: patch_artist=False
     ax->addPlot(std::make_unique<BoxPlot>(std::move(groups), cfg));
     ctx.render(fig, "box");
 }
@@ -253,9 +274,8 @@ void plotViolin(GalleryCtx& ctx) {
     std::vector<std::vector<float>> groups;
     for (int g = 0; g < 4; ++g) {
         std::vector<float> group;
-        std::normal_distribution<float> gd(g * 0.5f, 1.0f);
         for (int i = 0; i < 150; ++i)
-            group.push_back(gd(rng()));
+            group.push_back(float(sRng().gauss() + g * 0.5));
         groups.push_back(std::move(group));
     }
     ViolinConfig cfg;
@@ -377,11 +397,10 @@ void plotBrokenBarH(GalleryCtx& ctx) {
         {8, 2, 2, 1},
     };
     BrokenBarHConfig cfg;
+    // mpl: row y∈[0,1] → #1f77b4, row y∈[2,3] → #2ca02c (opaque).
     cfg.colors = {
-        Color::fromRgba8(31, 119, 180, 200),
-        Color::fromRgba8(255, 127, 14, 200),
-        Color::fromRgba8(44, 160, 44, 200),
-        Color::fromRgba8(214, 39, 40, 200),
+        Color::fromRgba8(31, 119, 180), Color::fromRgba8(31, 119, 180),
+        Color::fromRgba8(44, 160, 44), Color::fromRgba8(44, 160, 44),
     };
     ax->addPlot(std::make_unique<BrokenBarHPlot>(std::move(segs), cfg));
     ctx.render(fig, "broken_barh");
@@ -389,12 +408,13 @@ void plotBrokenBarH(GalleryCtx& ctx) {
 
 void plotHeatmap(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "Heatmap");
+    auto* ax = setupAxes(fig, "Heatmap", "", "");
     Grid2D grid;
     grid.width = 30;
     grid.height = 20;
     grid.xRange = {0, 10};
     grid.yRange = {0, 10};
+    grid.origin = "lower";  // mpl: imshow(..., origin="lower")
     grid.values.resize(30 * 20);
     for (uint32_t j = 0; j < 20; ++j)
         for (uint32_t i = 0; i < 30; ++i) {
@@ -410,14 +430,13 @@ void plotHeatmap(GalleryCtx& ctx) {
 
 void plotHist2D(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "2D Histogram");
-    std::normal_distribution<float> d(0, 2);
-    std::vector<float> x, y;
-    for (int i = 0; i < 5000; ++i) {
-        x.push_back(d(rng()));
-        y.push_back(d(rng()));
-    }
+    auto* ax = setupAxes(fig, "2D Histogram", "", "");
+    // Same draw order as mpl: x=randn(5000)*2, then y=randn(5000)*2.
+    std::vector<float> x(5000), y(5000);
+    for (auto& v : x) v = float(sRng().gauss() * 2);
+    for (auto& v : y) v = float(sRng().gauss() * 2);
     Hist2DConfig cfg;
+    cfg.bins = Hist2DBinMethod::Fixed;  // mpl: bins=[40, 30]
     cfg.nBinsX = 40;
     cfg.nBinsY = 30;
     ax->addPlot(std::make_unique<Hist2DPlot>(x, y, cfg));
@@ -427,13 +446,10 @@ void plotHist2D(GalleryCtx& ctx) {
 
 void plotHexbin(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "Hexbin");
-    std::normal_distribution<float> d(0, 2);
-    std::vector<float> x, y;
-    for (int i = 0; i < 3000; ++i) {
-        x.push_back(d(rng()));
-        y.push_back(d(rng()));
-    }
+    auto* ax = setupAxes(fig, "Hexbin", "", "");
+    std::vector<float> x(3000), y(3000);
+    for (auto& v : x) v = float(sRng().gauss() * 2);
+    for (auto& v : y) v = float(sRng().gauss() * 2);
     HexbinConfig cfg;
     cfg.gridsize = 25;
     ax->addPlot(std::make_unique<HexbinPlot>(x, y, cfg));
@@ -477,6 +493,8 @@ void plotContourf(GalleryCtx& ctx) {
             grid.values[j * 50 + i] = -(x*x + y*y);
         }
     ContourConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.numLevels = 20;  // mpl: ax.contourf(..., levels=20, cmap="viridis")
     ax->addPlot(std::make_unique<ContourfPlot>(std::move(grid), cfg));
     ax->style().colorbar.visible = true;
     ctx.render(fig, "contourf");
@@ -484,12 +502,16 @@ void plotContourf(GalleryCtx& ctx) {
 
 void plotKDE(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "KDE");
-    std::normal_distribution<float> d(0, 1);
-    std::vector<Point2D> samples;
-    for (int i = 0; i < 500; ++i)
-        samples.push_back({d(rng()), d(rng())});
-    ax->addPlot(std::make_unique<KDEPlot>(std::move(samples)));
+    auto* ax = setupAxes(fig, "KDE", "", "");
+    std::vector<Point2D> samples(500);
+    for (auto& s : samples) s.x = float(sRng().gauss());
+    for (auto& s : samples) s.y = float(sRng().gauss());
+    // mpl: gaussian_kde evaluated on np.mgrid[-4:4:100j, -4:4:100j].
+    auto kde = std::make_unique<KDEPlot>(std::move(samples), 100, 100);
+    kde->evalRange({-4, 4}, {-4, 4});
+    ax->addPlot(std::move(kde));
+    ax->setXlim(-4, 4);
+    ax->setYlim(-4, 4);
     ax->style().colorbar.visible = true;
     ctx.render(fig, "kde");
 }
@@ -499,19 +521,29 @@ void plotECDF(GalleryCtx& ctx) {
     auto* ax = setupAxes(fig, "ECDF");
     ax->style().xAxis.label = "Value";
     ax->style().yAxis.label = "CDF";
-    std::normal_distribution<float> d(0, 1);
     std::vector<float> samples;
     for (int i = 0; i < 500; ++i)
-        samples.push_back(d(rng()));
+        samples.push_back(float(sRng().gauss()));
+    std::ranges::sort(samples);
     ECDFConfig cfg;
     cfg.fill = true;
     ax->addPlot(std::make_unique<ECDFPlot>(std::move(samples), cfg));
     ctx.render(fig, "ecdf");
 }
 
+
+/// mpl mplot3d: draw the pane/box/tick-label frame behind the 3D artists.
+static void addAxes3D(Axes* ax, const Camera3D& cam) {
+    Viewport v;
+    v.x = {cam.dataMin.x, cam.dataMax.x};
+    v.y = {cam.dataMin.y, cam.dataMax.y};
+    v.z = {cam.dataMin.z, cam.dataMax.z};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+}
+
 void plotSurface(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "3D Surface");
+    auto* ax = setupAxes(fig, "3D Surface", "", "");
     Grid2D grid;
     grid.width = 40;
     grid.height = 40;
@@ -524,8 +556,10 @@ void plotSurface(GalleryCtx& ctx) {
             float y = -5 + float(j) / 39 * 10;
             grid.values[j * 40 + i] = std::sin(x * 0.5f) * std::cos(y * 0.5f);
         }
-    Camera3D cam{{8, 8, 8}, {0, 0, 0}, {0, 0, 1}};
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-5, -5, -1}; cam.dataMax = {5, 5, 1};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     auto p = std::make_unique<SurfacePlot>(std::move(grid), cam);
     ax->addPlot(std::move(p));
     ctx.render(fig, "surface");
@@ -533,7 +567,7 @@ void plotSurface(GalleryCtx& ctx) {
 
 void plotWireframe(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "3D Wireframe");
+    auto* ax = setupAxes(fig, "3D Wireframe", "", "");
     Grid2D grid;
     grid.width = 20;
     grid.height = 20;
@@ -546,8 +580,10 @@ void plotWireframe(GalleryCtx& ctx) {
             float y = -5 + float(j) / 19 * 10;
             grid.values[j * 20 + i] = std::sin(x * 0.5f) * std::cos(y * 0.5f);
         }
-    Camera3D cam{{8, 8, 8}, {0, 0, 0}, {0, 0, 1}};
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-5, -5, -1}; cam.dataMax = {5, 5, 1};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     WireframeConfig cfg;
     auto p = std::make_unique<WireframePlot>(std::move(grid), cfg);
     p->setCamera(cam);
@@ -557,16 +593,15 @@ void plotWireframe(GalleryCtx& ctx) {
 
 void plotScatter3D(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "3D Scatter");
-    std::normal_distribution<float> d(0, 1);
-    std::vector<float> x, y, z;
-    for (int i = 0; i < 100; ++i) {
-        x.push_back(d(rng()) * 3);
-        y.push_back(d(rng()) * 3);
-        z.push_back(d(rng()) * 3);
-    }
-    Camera3D cam{{8, 8, 8}, {0, 0, 0}, {0, 0, 1}};
+    auto* ax = setupAxes(fig, "3D Scatter", "", "");
+    std::vector<float> x(100), y(100), z(100);
+    for (auto& v : x) v = float(sRng().gauss() * 3);
+    for (auto& v : y) v = float(sRng().gauss() * 3);
+    for (auto& v : z) v = float(sRng().gauss() * 3);
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-9, -9, -9}; cam.dataMax = {9, 9, 9};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     Scatter3DConfig cfg;
     auto p = std::make_unique<Scatter3D>(x, y, z, cfg);
     p->setCamera(cam);
@@ -576,7 +611,7 @@ void plotScatter3D(GalleryCtx& ctx) {
 
 void plotPlot3D(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "3D Line");
+    auto* ax = setupAxes(fig, "3D Line", "", "");
     std::vector<float> x, y, z;
     for (int i = 0; i < 200; ++i) {
         float t = float(i) / 199 * 4 * M_PI;
@@ -584,8 +619,10 @@ void plotPlot3D(GalleryCtx& ctx) {
         y.push_back(std::sin(t) * 3);
         z.push_back(t * 0.5f);
     }
-    Camera3D cam{{10, 10, 10}, {0, 0, 3}, {0, 0, 1}};
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-3, -3, 0}; cam.dataMax = {3, 3, 6.3f};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     Plot3DConfig cfg;
     auto p = std::make_unique<Plot3D>(x, y, z, cfg);
     p->setCamera(cam);
@@ -595,7 +632,7 @@ void plotPlot3D(GalleryCtx& ctx) {
 
 void plotBar3D(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "3D Bar");
+    auto* ax = setupAxes(fig, "3D Bar", "", "");
     std::vector<float> bx, by, bz, dx, dy, dz;
     for (int i = 0; i < 4; ++i)
         for (int j = 0; j < 4; ++j) {
@@ -606,8 +643,10 @@ void plotBar3D(GalleryCtx& ctx) {
             dy.push_back(0.7f);
             dz.push_back(float(i + j + 1));
         }
-    Camera3D cam{{10, 10, 10}, {1.5f, 1.5f, 2}, {0, 0, 1}};
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-0.3f, -0.3f, 0}; cam.dataMax = {3.7f, 3.7f, 7};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     auto p = std::make_unique<Bar3D>(bx, by, bz, dx, dy, dz);
     p->setCamera(cam);
     ax->addPlot(std::move(p));
@@ -616,9 +655,11 @@ void plotBar3D(GalleryCtx& ctx) {
 
 void plotMexicanHat(GalleryCtx& ctx) {
     Figure fig(1, 1);
-    auto* ax = setupAxes(fig, "Mexican Hat Wavelet");
-    Camera3D cam{{8, 8, 8}, {0, 0, 0}, {0, 0, 1}};
+    auto* ax = setupAxes(fig, "Mexican Hat Wavelet", "", "");
+    Camera3D cam{{3.3f, -5.78f, 3.85f}, {0, 0, 0}, {0, 0, 1}}; // mpl elev=30 azim=-60
+    cam.dataMin = {-5, -5, -0.5f}; cam.dataMax = {5, 5, 2};
     cam.aspect = float(kWidth) / float(kHeight);
+    addAxes3D(ax, cam);
     MexicanHatConfig cfg;
     auto p = std::make_unique<MexicanHatPlot>(1.0f, Range{-5, 5}, Range{-5, 5}, 40, 40, cfg);
     p->setCamera(cam);

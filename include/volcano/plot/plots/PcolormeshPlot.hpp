@@ -12,8 +12,17 @@
 
 namespace volcano::plot {
 
+/// mpl pcolormesh `shading`: how cell values map onto the mesh.
+enum class PcmShading {
+    Flat,    ///< One color per cell; x/y are cell edges (N+1 x M+1).
+    Gouraud, ///< Per-corner colors interpolated across each quad;
+             ///< x/y are corner coordinates (N x M, same shape as C).
+};
+
 /// Configuration for PcolormeshPlot.
 struct PcolormeshConfig {
+    /// Shading mode (matplotlib `shading='flat'`/`'gouraud'`).
+    PcmShading shading = PcmShading::Flat;
     /// Colormap for cell coloring. If nullptr, uses viridis.
     const Colormap* cmap = nullptr;
     /// Explicit value range for color mapping. If invalid, computed from data.
@@ -38,13 +47,18 @@ struct PcolormeshConfig {
 ///   - Per-cell edge drawing
 ///   - NaN cell skipping
 ///
-/// `x` has N+1 elements (cell edges), `y` has M+1 elements,
-/// `C` has N*M values (row-major, C[j*N + i] is cell (i, j)).
+/// For `PcmShading::Flat` (default), `x` has N+1 elements (cell edges),
+/// `y` has M+1 elements, `C` has N*M values (row-major, C[j*N + i] is
+/// cell (i, j)). For `PcmShading::Gouraud`, `x`/`y`/`C` all share the
+/// same N x M corner shape — matching matplotlib's shape rules.
 class PcolormeshPlot : public IPlot {
 public:
-    /// Construct from cell edges and values.
-    /// x: N+1 vertical edge coordinates, y: M+1 horizontal edge coordinates,
-    /// C: N*M cell values (row-major, C[j*N + i] = cell at column i, row j).
+    /// Construct from cell edges (flat) or corner coordinates (gouraud)
+    /// and values.
+    /// Flat:    x: N+1 vertical edges, y: M+1 horizontal edges,
+    ///          C: N*M cell values (row-major, C[j*N + i] = cell (i, j)).
+    /// Gouraud: x: N corner x-coords, y: M corner y-coords,
+    ///          C: N*M corner values; draws (N-1)*(M-1) quads.
     PcolormeshPlot(std::vector<float> x, std::vector<float> y,
                    std::vector<float> C, uint32_t nCols, uint32_t nRows,
                    PcolormeshConfig config = {});
@@ -53,11 +67,15 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl sticky edges: tight autoscale, no 5% margin.
+    [[nodiscard]] bool tightAutoscale() const override { return true; }
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
 
     /// The computed value range (valid after prepare()).
-    [[nodiscard]] Range valueRange() const { return valueRange_; }
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        return valueRange_.valid() ? std::optional{valueRange_} : std::nullopt;
+    }
 
 private:
     std::vector<float> x_, y_, C_;

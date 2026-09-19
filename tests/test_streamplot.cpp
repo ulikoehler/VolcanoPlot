@@ -235,3 +235,63 @@ TEST(StreamRegression, ZeroFieldProducesNoLines) {
     size_t blackCount = countPixels(img, isBlack);
     EXPECT_EQ(blackCount, 0u) << "Zero field should produce no streamlines";
 }
+
+TEST(StreamRegression, ArrowsizeScalesArrowheads) {
+    // mpl `arrowsize` scales arrowhead length/width — bigger arrows mean
+    // more black pixels.
+    auto renderWith = [](float arrowsize) {
+        StreamFigure cf(256);
+        auto [gu, gv] = uniformRightward(16, 16);
+        StreamConfig cfg;
+        cfg.density = 0.5f;
+        cfg.arrowsize = arrowsize;
+        cf.axes->addPlot(std::make_unique<StreamPlot>(gu, gv, cfg));
+        return cf.render();
+    };
+    auto small = renderWith(0.3f);
+    auto big = renderWith(3.0f);
+    size_t smallBlack = countPixels(small, isBlack);
+    size_t bigBlack = countPixels(big, isBlack);
+    EXPECT_GT(smallBlack, 0u);
+    EXPECT_GT(bigBlack, smallBlack)
+        << "arrowsize=3 should produce more pixels than arrowsize=0.3";
+}
+
+TEST(StreamRegression, BrokenStreamlinesFalseCoastsThroughHole) {
+    // Rightward field with a masked (NaN) hole in the middle columns.
+    // With brokenStreamlines=false, lines coast through the hole and
+    // produce more covered pixels than with the default true.
+    auto field = [](uint32_t w, uint32_t h) {
+        auto [u, v] = uniformRightward(w, h);
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (uint32_t j = 0; j < h; ++j)
+            for (uint32_t i = w / 2 - 3; i <= w / 2 + 3; ++i)
+                u.values[j * w + i] = nan;
+        return std::pair{u, v};
+    };
+    auto renderWith = [&](bool broken) {
+        StreamFigure cf(256);
+        auto [gu, gv] = field(16, 16);
+        StreamConfig cfg;
+        cfg.density = 0.5f;
+        cfg.arrows = false;
+        cfg.brokenStreamlines = broken;
+        cf.axes->addPlot(std::make_unique<StreamPlot>(gu, gv, cfg));
+        return cf.render();
+    };
+    auto broken = renderWith(true);
+    auto coasted = renderWith(false);
+
+    // The hole spans columns 5..10 of 16 → data x ≈ 3.3..6.7 → pixel
+    // x ≈ 84..170. Broken lines stop at the hole edge (no black inside);
+    // coasted lines cross it.
+    auto holeBlack = [](const Image& img) {
+        size_t n = 0;
+        for (uint32_t y = 0; y < img.height(); ++y)
+            for (uint32_t x = 90; x < 165; ++x)
+                if (isBlack(img.get(x, y))) ++n;
+        return n;
+    };
+    EXPECT_GT(holeBlack(coasted), holeBlack(broken))
+        << "unbroken streamlines should cross the zero-field hole";
+}

@@ -69,6 +69,7 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/plots/Plot3D.cpp
     ${VOLCANO_ROOT}/src/plot/plots/Scatter3D.cpp
     ${VOLCANO_ROOT}/src/plot/plots/Bar3D.cpp
+    ${VOLCANO_ROOT}/src/plot/plots/Axes3DPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/Errorbar3D.cpp
     ${VOLCANO_ROOT}/src/plot/plots/WireframePlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/TrisurfPlot.cpp

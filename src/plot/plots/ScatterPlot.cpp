@@ -31,11 +31,17 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!prepared_) return;
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y}, vk::Extent2D{rect.width, rect.height}};
 
-    // Custom Path / TeX markers bypass the SDF point pipeline.
-    if (series_.markerPath || !series_.markerTex.empty()) {
+    // Custom Path / TeX markers, and domain-limited scales (log/logit
+    // masks out-of-domain points), bypass the SDF point pipeline and
+    // draw markers CPU-side so invalid points can be dropped.
+    bool clip = axes.xscale().clipsDomain() || axes.yscale().clipsDomain();
+    if (series_.markerPath || !series_.markerTex.empty() || clip) {
         std::vector<Point2D> px;
         px.reserve(series_.points.size());
         for (const auto& p : series_.points) {
+            if (!pointInDomain(p, axes.xscale(), axes.yscale()) ||
+                !std::isfinite(p.x) || !std::isfinite(p.y))
+                continue;
             auto f = axes.dataToFraction(p);
             px.push_back({rect.x + f.x * float(rect.width),
                           rect.y + (1.0f - f.y) * float(rect.height)});
@@ -44,9 +50,15 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             drawMarkersPx(r, cmd, vrect, px,
                           markerGeom(*series_.markerPath), series_.size,
                           series_.resolvedColor(), std::max(1.0f, series_.size * 0.1f));
-        else
+        else if (!series_.markerTex.empty())
             drawTexMarkersPx(r, cmd, vrect, px, series_.markerTex,
                              series_.resolvedColor(), series_.size);
+        else
+            drawMarkersPx(r, cmd, vrect, px,
+                          markerGeom(series_.marker, series_.markerNumsides,
+                                     series_.markerAngle),
+                          series_.size, series_.resolvedColor(),
+                          std::max(1.0f, series_.size * 0.1f));
         return;
     }
 
@@ -64,13 +76,22 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                              Rect2D rect) {
     auto toPx = pxMapper(axes, rect);
+    // Mask out-of-domain data (log/logit); NaN points are skipped by
+    // emitMarkerAt.
+    std::vector<Point2D> masked;
+    std::span<const Point2D> src = series_.points;
+    if (axes.xscale().clipsDomain() || axes.yscale().clipsDomain()) {
+        masked = maskPointsForScales(src, axes.xscale(), axes.yscale());
+        src = masked;
+    }
     // TeX marker: emit the Unicode-flattened glyph string centered per
     // point (approximate centering — writers lack font metrics).
     if (!series_.markerTex.empty()) {
         auto uni = text::mathTextToUnicode(series_.markerTex);
         const float halfW = series_.size * 0.3f * float(uni.size());
-        for (const auto& dp : series_.points) {
+        for (const auto& dp : src) {
             auto p = toPx(dp);
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
             c.text({p.x - halfW, p.y + series_.size * 0.35f},
                    uni, series_.size, series_.resolvedColor());
         }
@@ -81,7 +102,7 @@ void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         : markerGeom(series_.marker, series_.markerNumsides,
                      series_.markerAngle);
     bool fill = series_.markerFill != MarkerFill::None;
-    emitMarkerAt(c, toPx, series_.points, g,
+    emitMarkerAt(c, toPx, src, g,
                  series_.size, fill ? series_.resolvedColor() : Color::transparent(),
                  std::max(1.0f, series_.size * 0.1f));
 }
@@ -91,6 +112,18 @@ void ScatterPlot::contributeToAutoscale(Viewport& v) const {
         v.x.max = std::max(v.x.max, p.x);
         v.y.min = std::min(v.y.min, p.y);
         v.y.max = std::max(v.y.max, p.y);
+    }
+}
+
+void ScatterPlot::contributeToAutoscaleScaled(Viewport& v,
+                                              const AxisScale& xscale,
+                                              const AxisScale& yscale) const {
+    for (const auto& p : series_.points) {
+        if (!pointInDomain(p, xscale, yscale) ||
+            !std::isfinite(p.x) || !std::isfinite(p.y))
+            continue;
+        v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
+        v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
     }
 }
 

@@ -532,3 +532,82 @@ TEST(ProjectionRegression, PolarLineRenders) {
     EXPECT_NEAR(c.x, 128.0, 30.0);
     EXPECT_NEAR(c.y, 128.0, 30.0);
 }
+
+// ─── Inset-zoom indicator (mpl Axes.indicate_inset_zoom) ───────────────────
+
+TEST(InsetIndicator, RectMatchesInsetViewport) {
+    Figure fig;
+    auto* parent = fig.addAxes(0, 0);
+    parent->setViewport({0, 10, 0, 10});
+    auto* inset = fig.insetAxes(*parent, 0.55f, 0.55f, 0.4f, 0.4f);
+    inset->setViewport({4, 6, 4, 6});
+    fig.layout(Extent2D{400, 400});
+
+    auto& ind = parent->indicateInsetZoom(*inset);
+    auto L = plot::layoutInsetIndicator(ind, *parent, parent->rect,
+                                        {400, 400});
+    ASSERT_TRUE(L.valid);
+    // Rect should span parent data 4..6 on both axes.
+    auto f0 = parent->dataToFraction({4, 4});
+    auto f1 = parent->dataToFraction({6, 6});
+    float ex0 = parent->rect.x + f0.x * float(parent->rect.width);
+    float ex1 = parent->rect.x + f1.x * float(parent->rect.width);
+    float ey0 = parent->rect.y + (1.0f - f0.y) * float(parent->rect.height);
+    float ey1 = parent->rect.y + (1.0f - f1.y) * float(parent->rect.height);
+    EXPECT_NEAR(L.rect.x, ex0, 0.5f);
+    EXPECT_NEAR(L.rect.w, ex1 - ex0, 0.5f);
+    EXPECT_NEAR(L.rect.y, ey1, 0.5f);
+    EXPECT_NEAR(L.rect.h, ey0 - ey1, 0.5f);
+    // mpl auto: exactly two connectors visible.
+    int nvis = 0;
+    for (bool v : L.connVisible) nvis += v ? 1 : 0;
+    EXPECT_EQ(nvis, 2);
+}
+
+TEST(InsetIndicator, ExplicitBoundsWithoutInset) {
+    Figure fig;
+    auto* parent = fig.addAxes(0, 0);
+    parent->setViewport({0, 1, 0, 1});
+    fig.layout(Extent2D{400, 400});
+    auto& ind = parent->indicateInset(0.2f, 0.2f, 0.4f, 0.4f);
+    auto L = plot::layoutInsetIndicator(ind, *parent, parent->rect,
+                                        {400, 400});
+    ASSERT_TRUE(L.valid);
+    for (bool v : L.connVisible) EXPECT_FALSE(v);  // no inset → no lines
+}
+
+TEST(InsetIndicator, ConnectorsCanBeForced) {
+    Figure fig;
+    auto* parent = fig.addAxes(0, 0);
+    parent->setViewport({0, 1, 0, 1});
+    auto* inset = fig.insetAxes(*parent, 0.5f, 0.5f, 0.4f, 0.4f);
+    inset->setViewport({0.2f, 0.4f, 0.2f, 0.4f});
+    fig.layout(Extent2D{400, 400});
+    auto& ind = parent->indicateInsetZoom(*inset);
+    ind.connectors = std::array<bool, 4>{true, true, true, true};
+    auto L = plot::layoutInsetIndicator(ind, *parent, parent->rect,
+                                        {400, 400});
+    ASSERT_TRUE(L.valid);
+    for (bool v : L.connVisible) EXPECT_TRUE(v);
+    // Connector 0 (LL) runs from the rect's lower-left px corner to the
+    // inset box's lower-left px corner.
+    EXPECT_NEAR(L.connectors[0].second.x, float(inset->rect.x), 0.5f);
+    EXPECT_NEAR(L.connectors[0].second.y,
+                float(inset->rect.y + inset->rect.height), 0.5f);
+}
+
+TEST(InsetIndicator, RendersInRaster) {
+    PlotTestHarness harness(256, 256, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* parent = fig.addAxes(0, 0);
+    parent->setStyle(flatTestStyle());
+    parent->setViewport({0, 10, 0, 10});
+    auto* inset = fig.insetAxes(*parent, 0.6f, 0.05f, 0.35f, 0.35f);
+    inset->setViewport({4, 6, 4, 6});
+    auto& ind = parent->indicateInsetZoom(*inset);
+    ind.edgeColor = Color::black();
+    ind.alpha = 1.0f;
+    auto img = harness.render(fig);
+    // The indicator rect + connectors paint black-ish pixels.
+    EXPECT_GT(img.countColor(Pixel::black(), 100), 30u);
+}

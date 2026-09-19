@@ -19,7 +19,7 @@ void SurfacePlot::prepare(render::Renderer& r) {
 void SurfacePlot::draw(vk::CommandBuffer cmd, render::Renderer&, const Axes&, Rect2D rect) {
     if (!prepared_) return;
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y}, vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, camera_);
+    renderer_.draw(cmd, vrect, camera_, shade, lightAzdeg, lightAltdeg);
 }
 void SurfacePlot::contributeToAutoscale(Viewport& v) const {
     v.x.min = std::min(v.x.min, grid_.xRange.min);

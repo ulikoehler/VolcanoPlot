@@ -1,5 +1,6 @@
 // tests/test_text.cpp — §5 text features: MathText layout, connection
 // styles, multi-line, clipping, font rotation/alignment.
+#include <volcano/plot/Events.hpp>
 #include <gtest/gtest.h>
 #include <volcano/text/MathText.hpp>
 #include <volcano/plot/Annotation.hpp>
@@ -296,4 +297,225 @@ TEST(TextRegression, CurvedArrowRenders) {
     auto img = cf.render();
     // The curve should paint pixels off the straight diagonal.
     EXPECT_GT(img.countColor(Pixel::black(), 60), 30u);
+}
+
+// ─── §5.1 MathText expansion: big operators, auto-sized delimiters ─────────
+
+static const text::MathRun* findRun(const text::MathLayout& l,
+                                    std::string_view t) {
+    for (const auto& r : l.runs)
+        if (r.text == t) return &r;
+    return nullptr;
+}
+
+TEST(MathText, SumIsEnlargedWithStackedLimits) {
+    auto lay = text::layoutMathText("$\\sum_{i=0}^{n}$", 1.0f, fakeMeasure);
+    auto* op = findRun(lay, "∑");
+    ASSERT_NE(op, nullptr);
+    EXPECT_GT(op->scale, 1.2f);              // display-size operator
+    auto* sup = findRun(lay, "n");
+    auto* sub = findRun(lay, "i=0");
+    ASSERT_NE(sup, nullptr);
+    ASSERT_NE(sub, nullptr);
+    EXPECT_LT(sup->baseline, 0.0f);        // above
+    EXPECT_GT(sub->baseline, 0.0f);        // below
+    // Stacked: limit runs are horizontally centered on the operator,
+    // not hung off its right edge.
+    EXPECT_LT(sup->x, op->x + op->scale * 16.0f);
+    EXPECT_GT(lay.descent, 0.0f);
+}
+
+TEST(MathText, IntKeepsSideScripts) {
+    auto lay = text::layoutMathText("$\\int_0^1 x$", 1.0f, fakeMeasure);
+    auto* op = findRun(lay, "∫");
+    ASSERT_NE(op, nullptr);
+    EXPECT_GT(op->scale, 1.2f);
+    auto* sup = findRun(lay, "1");
+    auto* sub = findRun(lay, "0");
+    ASSERT_NE(sup, nullptr);
+    ASSERT_NE(sub, nullptr);
+    // Side scripts: positioned to the right of the operator.
+    EXPECT_GT(sup->x, op->x);
+    EXPECT_GT(sub->x, op->x);
+}
+
+TEST(MathText, LeftRightAutoSizesDelimiters) {
+    auto bare = text::layoutMathText("$\\frac{a}{b}$", 1.0f, fakeMeasure);
+    auto lay = text::layoutMathText("$\\left(\\frac{a}{b}\\right)$",
+                                    1.0f, fakeMeasure);
+    auto* l = findRun(lay, "(");
+    auto* r = findRun(lay, ")");
+    ASSERT_NE(l, nullptr);
+    ASSERT_NE(r, nullptr);
+    EXPECT_GT(l->scale, 1.5f);   // grown to cover the fraction
+    EXPECT_FLOAT_EQ(l->scale, r->scale);
+    // The delimited layout is at least as tall as the bare fraction.
+    EXPECT_GE(lay.ascent + lay.descent,
+              bare.ascent + bare.descent);
+    // Left paren is emitted before the fraction's numerator run.
+    auto* num = findRun(lay, "a");
+    ASSERT_NE(num, nullptr);
+    EXPECT_LT(l->x, num->x);
+    EXPECT_GT(r->x, num->x);
+}
+
+TEST(MathText, LeftDotProducesNoDelimiter) {
+    auto lay = text::layoutMathText("$\\left. x \\right|$", 1.0f,
+                                    fakeMeasure);
+    EXPECT_EQ(findRun(lay, "."), nullptr);
+    EXPECT_NE(findRun(lay, "|"), nullptr);
+    EXPECT_NE(findRun(lay, "x"), nullptr);
+}
+
+TEST(MathText, BigDelimitersScale) {
+    auto lay = text::layoutMathText("$\\big( x \\big)$", 1.0f, fakeMeasure);
+    auto* l = findRun(lay, "(");
+    ASSERT_NE(l, nullptr);
+    EXPECT_GT(l->scale, 1.0f);
+}
+
+TEST(MathText, NestedScriptsNest) {
+    auto lay = text::layoutMathText("$x^{y^{z}}$", 1.0f, fakeMeasure);
+    auto* x = findRun(lay, "x");
+    auto* y = findRun(lay, "y");
+    auto* z = findRun(lay, "z");
+    ASSERT_NE(x, nullptr);
+    ASSERT_NE(y, nullptr);
+    ASSERT_NE(z, nullptr);
+    EXPECT_FLOAT_EQ(x->scale, 1.0f);
+    EXPECT_FLOAT_EQ(y->scale, 0.7f);
+    EXPECT_FLOAT_EQ(z->scale, 0.49f);   // nested script shrinks again
+    EXPECT_LT(z->baseline, y->baseline);  // z sits above y
+}
+
+TEST(MathText, NestedSubscript) {
+    auto lay = text::layoutMathText("$x_{i_j}$", 1.0f, fakeMeasure);
+    auto* j = findRun(lay, "j");
+    ASSERT_NE(j, nullptr);
+    EXPECT_FLOAT_EQ(j->scale, 0.49f);
+    EXPECT_GT(j->baseline, 0.0f);
+}
+
+TEST(TextRegression, SizeBarRendersLowerRight) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 10, 0, 10, 0, 1});
+    SizeBar sb;
+    sb.size = 3.0f;
+    sb.label = "3";
+    sb.loc = "lower right";
+    cf.axes->addSizeBar(sb);
+    auto img = cf.render();
+    const auto& r = cf.axes->rect;
+    // Bar + label should paint dark pixels in the lower-right quadrant.
+    size_t n = img.countColorInRegion(
+        Pixel::black(), r.x + r.width / 2, r.y + r.height / 2,
+        r.x + r.width, r.y + r.height, 80);
+    EXPECT_GT(n, 20u);
+}
+
+// ─── Draggable annotations (mpl Annotation.draggable / Text.draggable) ─────
+
+TEST(AnnotationDrag, DraggableTextMoves) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* t = cf.axes->text(0.5f, 0.5f, "dragme", CoordSystem::Axes);
+    t->color = Color::black();
+    t->draggable = true;
+    auto img0 = cf.render();
+    const auto box0 = t->drawBox;
+    ASSERT_GT(box0.width, 0u);
+
+    const float cx = box0.x + box0.width / 2.0f;
+    const float cy = box0.y + box0.height / 2.0f;
+    Event press{Event::Type::ButtonPress};
+    press.x = cx; press.y = cy; press.button = 1;
+    cf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = cx + 40.0f; move.y = cy + 30.0f; move.buttons = 1;
+    cf.figure.dispatch(move);
+    Event release{Event::Type::ButtonRelease};
+    release.x = move.x; release.y = move.y; release.button = 1;
+    cf.figure.dispatch(release);
+
+    EXPECT_NEAR(t->dragOffset.x, 40.0f, 0.01f);
+    EXPECT_NEAR(t->dragOffset.y, 30.0f, 0.01f);
+    auto img1 = cf.render();
+    EXPECT_NEAR(t->drawBox.x, box0.x + 40.0f, 1.0f);
+    EXPECT_NEAR(t->drawBox.y, box0.y + 30.0f, 1.0f);
+}
+
+TEST(AnnotationDrag, NonDraggableIgnoresPress) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* t = cf.axes->text(0.5f, 0.5f, "still", CoordSystem::Axes);
+    t->color = Color::black();
+    cf.render();
+    ASSERT_GT(t->drawBox.width, 0u);
+    Event press{Event::Type::ButtonPress};
+    press.x = t->drawBox.x + 2.0f; press.y = t->drawBox.y + 2.0f;
+    press.button = 1;
+    cf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = press.x + 50.0f; move.y = press.y + 50.0f; move.buttons = 1;
+    cf.figure.dispatch(move);
+    EXPECT_FLOAT_EQ(t->dragOffset.x, 0.0f);
+    EXPECT_FLOAT_EQ(t->dragOffset.y, 0.0f);
+}
+
+TEST(AnnotationDrag, ArrowFollowsDraggedText) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto* a = cf.axes->annotate(0.8f, 0.8f, 0.3f, 0.3f, "pt",
+                                CoordSystem::Axes);
+    a->color = Color::black();
+    a->arrowColor = Color::black();
+    a->draggable = true;
+    cf.render();
+    const auto box0 = a->drawBox;
+    ASSERT_GT(box0.width, 0u);
+    const float cx = box0.x + 2.0f, cy = box0.y + 2.0f;
+    Event press{Event::Type::ButtonPress};
+    press.x = cx; press.y = cy; press.button = 1;
+    cf.figure.dispatch(press);
+    Event move{Event::Type::MotionNotify};
+    move.x = cx - 30.0f; move.y = cy - 30.0f; move.buttons = 1;
+    cf.figure.dispatch(move);
+    Event rel{Event::Type::ButtonRelease};
+    rel.x = move.x; rel.y = move.y; rel.button = 1;
+    cf.figure.dispatch(rel);
+    EXPECT_NEAR(a->dragOffset.x, -30.0f, 0.01f);
+    cf.render();
+    EXPECT_NEAR(a->drawBox.x, box0.x - 30.0f, 1.0f);
+}
+
+// ─── AnchoredText (mpl_toolkits AnchoredText) ──────────────────────────────
+
+TEST(AnchoredText, RendersAtLoc) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto& at = cf.axes->addAnchoredText("hello", "upper left");
+    at.color = Color::black();
+    auto img = cf.render();
+    const auto& r = cf.axes->rect;
+    // Upper-left quadrant should hold the text + frame.
+    size_t n = img.countColorInRegion(Pixel::black(), r.x, r.y,
+                                      r.x + r.width / 2,
+                                      r.y + r.height / 2, 100);
+    EXPECT_GT(n, 10u);
+}
+
+TEST(AnchoredText, LayoutHonorsLoc) {
+    TFig cf(256);
+    cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+    auto& at = cf.axes->addAnchoredText("x", "lower right");
+    auto m = [](std::string_view t, float s) {
+        return SizeBarTextMeasure{float(t.size()) * 8.0f * s,
+                                  16.0f * s, 12.8f * s};
+    };
+    auto L = layoutAnchoredText(at, *cf.axes, cf.axes->rect, m);
+    ASSERT_TRUE(L.valid);
+    const auto& r = cf.axes->rect;
+    // Lower-right: box right/bottom near the rect's right/bottom edges.
+    EXPECT_GT(L.box.x + L.box.w, r.x + r.width * 0.8f);
+    EXPECT_GT(L.box.y + L.box.h, r.y + r.height * 0.8f);
 }

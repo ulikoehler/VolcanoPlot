@@ -51,11 +51,26 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
         scale = maxMag > 0.0f ? (vp.x.span() * 0.15f / maxMag) : 1.0f;
     }
 
+    // mpl `pivot`: fraction of the arrow placed before the grid point.
+    float pivot = cfg_.pivot == QuiverConfig::Pivot::Tip ? 1.0f
+                : cfg_.pivot == QuiverConfig::Pivot::Middle ? 0.5f : 0.0f;
+
+    // mpl-style head dims (multiples of shaft width) take precedence over
+    // the pixel headLength/headWidth when any is set.
+    float shaftW = cfg_.width > 0.0f ? cfg_.width : cfg_.lineWidth;
+    bool mplHead = cfg_.headwidth > 0.0f || cfg_.headlength > 0.0f ||
+                   cfg_.headaxislength > 0.0f;
+    float hw2 = (cfg_.headwidth > 0.0f ? cfg_.headwidth : 3.0f) * shaftW * 0.5f;
+    float hl = (cfg_.headlength > 0.0f ? cfg_.headlength : 5.0f) * shaftW;
+    float hal = (cfg_.headaxislength > 0.0f ? cfg_.headaxislength : 4.5f) *
+                shaftW;
+
     for (size_t i = 0; i < n; ++i) {
-        // Arrow start and end in data space.
-        float sx = x_[i], sy = y_[i];
-        float ex = sx + u_[i] * scale;
-        float ey = sy + v_[i] * scale;
+        // Arrow start and end in data space; pivot shifts the whole arrow
+        // along its direction so tail/middle/tip anchors at (x, y).
+        float ax = u_[i] * scale, ay = v_[i] * scale;
+        float sx = x_[i] - ax * pivot, sy = y_[i] - ay * pivot;
+        float ex = sx + ax, ey = sy + ay;
 
         // Shaft as a line segment in data space.
         shaftSegs_.push_back({sx, sy});
@@ -73,19 +88,35 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
         // Perpendicular.
         float px = -uy, py = ux;
 
-        // Arrowhead triangle: tip at pEnd, base at pEnd - headLen*u ± headW/2*p.
-        float hl = cfg_.headLength;
-        float hw = cfg_.headWidth * 0.5f;
-        Point2D tip = pEnd;
-        Point2D base1 = {pEnd.x - ux * hl + px * hw, pEnd.y - uy * hl + py * hw};
-        Point2D base2 = {pEnd.x - ux * hl - px * hw, pEnd.y - uy * hl - py * hw};
-
         // Keep arrowheads in pixel space — drawn with an identity
         // transform so non-linear scales don't warp the head shape.
-        headFillPos_.push_back(tip);
-        headFillPos_.push_back(base1);
-        headFillPos_.push_back(base2);
-        for (int j = 0; j < 3; ++j) headFillColors_.push_back(cfg_.color);
+        Point2D tip = pEnd;
+        if (mplHead) {
+            // mpl head polygon: tip, ±headwidth/2 at headlength back, and
+            // a notch on the shaft axis at headaxislength back.
+            Point2D base1 = {pEnd.x - ux * hl + px * hw2,
+                             pEnd.y - uy * hl + py * hw2};
+            Point2D base2 = {pEnd.x - ux * hl - px * hw2,
+                             pEnd.y - uy * hl - py * hw2};
+            Point2D axis = {pEnd.x - ux * hal, pEnd.y - uy * hal};
+            headFillPos_.push_back(tip);
+            headFillPos_.push_back(base1);
+            headFillPos_.push_back(axis);
+            headFillPos_.push_back(tip);
+            headFillPos_.push_back(axis);
+            headFillPos_.push_back(base2);
+            for (int j = 0; j < 6; ++j) headFillColors_.push_back(cfg_.color);
+        } else {
+            // Arrowhead triangle: tip at pEnd, base at pEnd - headLen*u ± headW/2*p.
+            float l = cfg_.headLength;
+            float hw = cfg_.headWidth * 0.5f;
+            Point2D base1 = {pEnd.x - ux * l + px * hw, pEnd.y - uy * l + py * hw};
+            Point2D base2 = {pEnd.x - ux * l - px * hw, pEnd.y - uy * l - py * hw};
+            headFillPos_.push_back(tip);
+            headFillPos_.push_back(base1);
+            headFillPos_.push_back(base2);
+            for (int j = 0; j < 3; ++j) headFillColors_.push_back(cfg_.color);
+        }
     }
 }
 
@@ -119,11 +150,12 @@ void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
-    // Upload shaft segments.
+    // Upload shaft segments (mpl `width` overrides lineWidth when set).
+    float shaftW = cfg_.width > 0.0f ? cfg_.width : cfg_.lineWidth;
     if (!shaftSegs_.empty()) {
         shaftRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                               ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{shaftSegs_}, cfg_.color, cfg_.lineWidth);
+                              std::span{shaftSegs_}, cfg_.color, shaftW);
         shaftRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
     }
 

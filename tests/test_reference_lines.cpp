@@ -515,3 +515,37 @@ TEST(RefAxesApi, SpansAndEventplotCanEmitVector) {
     EXPECT_TRUE(ep.canEmitVector());
     EXPECT_TRUE(hl.canEmitVector());
 }
+
+// ─── imshow aspect (mpl imshow aspect="equal" default) ─────────────────────
+
+TEST(ImshowApi, EqualAspectIsDefault) {
+    RefFigure cf(256);
+    Grid2D g;
+    g.width = g.height = 2;
+    g.values = {0.f, 1.f, 1.f, 0.f};
+    g.xRange = {0, 4};
+    g.yRange = {0, 1};
+    g.valueRange = {0, 1};
+    cf.axes->imshow(g);
+    EXPECT_EQ(cf.axes->aspect(), AspectMode::Equal);
+    auto img = cf.render();
+    // 4:1 data ratio → the axes box letterboxes to ~4:1.
+    const auto& r = cf.axes->rect;
+    EXPECT_NEAR(float(r.width) / float(r.height), 4.0f, 0.4f);
+}
+
+TEST(ImshowApi, AutoAspectFillsAxes) {
+    RefFigure cf(256);
+    Grid2D g;
+    g.width = g.height = 2;
+    g.values = {0.f, 1.f, 1.f, 0.f};
+    g.xRange = {0, 4};
+    g.yRange = {0, 1};
+    g.valueRange = {0, 1};
+    cf.axes->imshow(g, colormaps::viridis(), "nearest", "auto");
+    EXPECT_EQ(cf.axes->aspect(), AspectMode::Auto);
+    auto img = cf.render();
+    // Full-bleed figure → the image fills the whole canvas.
+    const auto& r = cf.axes->rect;
+    EXPECT_NEAR(float(r.width) / float(r.height), 1.0f, 0.1f);
+}

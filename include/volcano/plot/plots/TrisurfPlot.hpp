@@ -45,6 +45,7 @@ struct TrisurfConfig {
 /// Optional edge outlines are drawn via LineSegmentRenderer.
 class TrisurfPlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from (x, y, z) arrays.
     TrisurfPlot(std::vector<float> x, std::vector<float> y, std::vector<float> z,
                 TrisurfConfig config = {});

@@ -40,8 +40,9 @@ struct HexbinConfig {
     HexOrientation orientation = HexOrientation::PointyTop;
     /// Normalization mode.
     HexbinNorm normMode = HexbinNorm::Count;
-    /// Minimum count to display a cell. Cells with fewer points are skipped.
-    int minCount = 1;
+    /// Minimum count to display a cell (matplotlib `mincnt`; the mpl
+    /// default draws every lattice cell, empty ones colored at the low end).
+    int minCount = 0;
     /// Optional edge color for hex borders. If alpha=0, no edges.
     Color edgeColor = Color::transparent();
     float edgeWidth = 1.0f;
@@ -61,6 +62,10 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// Bin-count range (drives the colorbar).
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        return valueRange_.valid() ? std::optional{valueRange_} : std::nullopt;
+    }
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
 
@@ -70,6 +75,7 @@ private:
 
     // Computed in prepare().
     float hexRadius_ = 0.0f;   // distance from center to vertex
+    float hexSX_ = 0.0f, hexSY_ = 0.0f; // cell pitch (mpl sx, sy)
     float xMin_ = 0, xMax_ = 0, yMin_ = 0, yMax_ = 0;
     Range valueRange_;
 

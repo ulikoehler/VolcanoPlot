@@ -10,8 +10,9 @@ namespace volcano::plot {
 
 namespace {
 
-/// Silverman's rule of thumb for bandwidth.
-float silvermanBandwidth(const std::vector<Point2D>& samples, int dim) {
+/// Scott's rule (scipy gaussian_kde default): factor = n^(-1/(d+4))
+/// applied to the per-dimension sample stddev. For d=2: n^(-1/6).
+float scottBandwidth(const std::vector<Point2D>& samples, int dim) {
     if (samples.size() < 2) return 1.0f;
     double mean = 0;
     for (const auto& s : samples) mean += (dim == 0 ? s.x : s.y);
@@ -23,7 +24,7 @@ float silvermanBandwidth(const std::vector<Point2D>& samples, int dim) {
     }
     var /= samples.size();
     double sigma = std::sqrt(var);
-    return float(0.9 * sigma * std::pow(samples.size(), -0.2));
+    return float(sigma * std::pow(samples.size(), -1.0 / 6.0));
 }
 
 } // namespace
@@ -32,8 +33,8 @@ void KDEPlot::evaluateKdeOnGpu(render::Renderer& r) {
     grid_.width = gridW_;
     grid_.height = gridH_;
 
-    float bwX = bandwidth_ > 0 ? bandwidth_ : silvermanBandwidth(samples_, 0);
-    float bwY = bandwidth_ > 0 ? bandwidth_ : silvermanBandwidth(samples_, 1);
+    float bwX = bandwidth_ > 0 ? bandwidth_ : scottBandwidth(samples_, 0);
+    float bwY = bandwidth_ > 0 ? bandwidth_ : scottBandwidth(samples_, 1);
 
     // Compute data range
     Range rx{1e30f, -1e30f}, ry{1e30f, -1e30f};
@@ -41,6 +42,9 @@ void KDEPlot::evaluateKdeOnGpu(render::Renderer& r) {
         rx.min = std::min(rx.min, s.x); rx.max = std::max(rx.max, s.x);
         ry.min = std::min(ry.min, s.y); ry.max = std::max(ry.max, s.y);
     }
+    // Fixed eval range (mpl np.mgrid-style) overrides the data range.
+    if (evalX_.valid()) rx = evalX_;
+    if (evalY_.valid()) ry = evalY_;
     grid_.xRange = rx; grid_.yRange = ry;
 
     if (samples_.empty()) {

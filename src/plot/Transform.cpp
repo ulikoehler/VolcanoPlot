@@ -271,27 +271,49 @@ Point3D cross(const Point3D& a, const Point3D& b) {
 } // namespace
 
 std::array<float, 16> Camera3D::viewMatrix() const noexcept {
-    Point3D f = { target.x - eye.x, target.y - eye.y, target.z - eye.z };
+    // eye/target are in box space when dataMin < dataMax (mpl 3D: the
+    // (4,4,3)-aspect box is centered at the origin).
+    const Point3D eye_ = eye, target_ = target;
+    Point3D f = { target_.x - eye_.x, target_.y - eye_.y, target_.z - eye_.z };
     normalize(f);
     Point3D s = cross(f, up); normalize(s);
     Point3D u = cross(s, f);
-    // Row-major
-    return {
-        s.x, s.y, s.z, -(s.x*eye.x + s.y*eye.y + s.z*eye.z),
-        u.x, u.y, u.z, -(u.x*eye.x + u.y*eye.y + u.z*eye.z),
-        -f.x, -f.y, -f.z, (f.x*eye.x + f.y*eye.y + f.z*eye.z),
+    // Row-major view matrix in box space.
+    std::array<float, 16> v = {
+        s.x, s.y, s.z, -(s.x*eye_.x + s.y*eye_.y + s.z*eye_.z),
+        u.x, u.y, u.z, -(u.x*eye_.x + u.y*eye_.y + u.z*eye_.z),
+        -f.x, -f.y, -f.z, (f.x*eye_.x + f.y*eye_.y + f.z*eye_.z),
         0,0,0,1
     };
+    // Right-multiply by the data→box transform M (scale + translate) so
+    // incoming data coordinates land in the mpl box.
+    auto scale = [](float lo, float hi, float box) {
+        return lo < hi ? box / (hi - lo) : 1.0f;
+    };
+    float sc[3] = { scale(dataMin.x, dataMax.x, 4.0f),
+                    scale(dataMin.y, dataMax.y, 4.0f),
+                    scale(dataMin.z, dataMax.z, 3.0f) };
+    float tc[3] = { -(dataMin.x + dataMax.x) * 0.5f * sc[0],
+                    -(dataMin.y + dataMax.y) * 0.5f * sc[1],
+                    -(dataMin.z + dataMax.z) * 0.5f * sc[2] };
+    std::array<float, 16> out{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 3; ++j) out[i*4+j] = v[i*4+j] * sc[j];
+        out[i*4+3] = v[i*4+0]*tc[0] + v[i*4+1]*tc[1] +
+                     v[i*4+2]*tc[2] + v[i*4+3];
+    }
+    return out;
 }
 
 std::array<float, 16> Camera3D::projectionMatrix() const noexcept {
     float fovRad = fov * 3.14159265358979f / 180.0f;
     float f = 1.0f / std::tan(fovRad * 0.5f);
+    // Vulkan NDC has +y down; negate so world up renders upward.
     return {
         f / aspect, 0, 0, 0,
-        0, f, 0, 0,
-        0, 0, farZ / (farZ - nearZ), -(nearZ * farZ) / (farZ - nearZ),
-        0, 0, 1, 0
+        0, -f, 0, 0,
+        0, 0, -farZ / (farZ - nearZ), -(nearZ * farZ) / (farZ - nearZ),
+        0, 0, -1, 0
     };
 }
 

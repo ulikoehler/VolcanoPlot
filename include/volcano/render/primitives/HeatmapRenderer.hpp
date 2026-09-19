@@ -36,6 +36,8 @@ private:
     float valueMin_ = 0, valueMax_ = 1;
     plot::Range gridXRange_{0,1}, gridYRange_{0,1};
     bool originLower_ = false;
+    /// mpl imshow interpolation: 0 = nearest, 1 = bilinear, 2 = bicubic.
+    int interpMode_ = 0;
     bool inited_ = false;
 };
 } // namespace volcano::render::primitives

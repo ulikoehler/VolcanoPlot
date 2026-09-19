@@ -66,13 +66,18 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `volcano` (genomics — VolcanoPlot)
 
 ### 1.4 2D — Arrays / images
-- [x] `imshow` (HeatmapPlot — stub)
+- [x] `imshow` (HeatmapPlot — GPU texture path with `interpolation=`:
+      "nearest"/"none", "bilinear" (linear sampler), "bicubic"
+      (Catmull-Rom texelFetch in shader), "antialiased"/"hanning"
+      approximated by bilinear)
 - [x] `matshow` (MatshowPlot — matrix display with row-0-at-top convention,
       colormap coloring, NaN cell skipping, explicit value range, nearest-
       neighbor display via FillRenderer triangle tessellation)
 - [x] `pcolor`, `pcolormesh` (PcolormeshPlot — rectangular cells with per-cell
       colormap colors via FillRenderer, non-uniform cell edges, NaN skipping,
-      explicit value range support)
+      explicit value range support, `shading="flat"/"gouraud"` — gouraud
+      uses mpl's 4-triangle center-averaged quad split with per-corner
+      colors interpolated by the rasterizer)
 - [x] `pcolorfast` (PcolorfastPlot — fast pseudocolor with extent-based
       regular grid constructor and explicit edges constructor, colormap
       coloring, NaN skipping, explicit value range, FillRenderer tessellation)
@@ -684,14 +689,19 @@ tri_*) are checked off in the sections above.
       drives axes shrink — `ColorbarStyle` only has pixel `width`),
       minor tick-label suppression on crowded axes, `labelpad`/
       `tick pad` fine tuning.
-- [ ] **Vector/raster parity pass** — sweep the vector (SVG/PDF) path
-      for fixes that landed raster-only: secondary axis labels, table
-      placement outside axes, legend shadow, faux-bold titles, colorbar
-      extend triangles, tick-label rotation anchoring.
-- [ ] **`draggable` legends/annotations** — pick+drag wiring (event
-      system + picking exist; see §8).
-- [ ] **Deterministic vector regression tests** — pixel tests cover the
-      raster path; add golden-geometry tests for `emitVector` output.
+- [~] **Vector/raster parity pass** — secondary x/y axis tick labels,
+      tick-label rotation anchoring, and native `TablePlot::emitVector`
+      (cells/borders/text, may extend outside the axes rect) emit in
+      vector now; legend shadow, faux-bold titles, and colorbar extend
+      triangles remain raster-only.
+- [x] **`draggable` legends/annotations** — `legend.draggable` and
+      `TextAnnotation`/`Annotation.draggable` drag via `dragOffset`
+      (pixel displacement, arrow follows the text end); hit-testing uses
+      the text box recorded each draw (`Figure::artistDragEvent`).
+- [x] **Deterministic vector regression tests** — golden-geometry tests
+      parse `emitVector` path data and check coordinates against the
+      data→pixel transform, byte-stability across runs, and native
+      size-bar geometry (`VectorSvgDeterministic.*`).
 
 ### P1 — High-value features
 - [x] **`set_clip_path` for artists** — done (CPU polygon clipping on
@@ -700,15 +710,16 @@ tri_*) are checked off in the sections above.
 - [x] **Bezier-accurate arrow bodies** — `simple`/`fancy`/`wedge` now
       use mpl's `make_wedged_bezier2`/`get_parallels`/circle-split
       construction (quad-Bézier outlines flattened at draw time).
-- [ ] **MathText coverage** — expand the subset: `\sum`/`\int` large
-      operators, `\left(\right` auto-sized delimiters, nested scripts
-      (fractions/radicals/accents already done; §5).
-- [ ] **`contour`/`clabel` inline label gaps** — labels exist; the
+- [x] **MathText coverage** — `\sum`/`\prod`/big-op family enlarged
+      with stacked limits, `\int`-family enlarged with side scripts,
+      `\left…\right` auto-sized delimiters (+`\big`/`\Big`/`\bigg`/
+      `\Bigg` fixed sizes), nested scripts verified (§5).
+- [x] **`contour`/`clabel` inline label gaps** — labels exist; the
       contour line isn't broken under them.
-- [ ] **`pcolormesh shading="gouraud"`** and `imshow interpolation=`
+- [x] **`pcolormesh shading="gouraud"`** and `imshow interpolation=`
       variants (`"bilinear"`, `"bicubic"`, `"antialiased"` — `"nearest"`
       done) in the heatmap shader.
-- [ ] **Log-scale data clipping** — non-positive points in log mode
+- [x] **Log-scale data clipping** — non-positive points in log mode
       should be dropped at data-conversion time (currently clamps).
 
 ### P2 — Performance & GPU leverage
@@ -726,16 +737,24 @@ tri_*) are checked off in the sections above.
       for million-cell meshes.
 
 ### P3 — Broader matplotlib surface
-- [ ] **`AxesImage` transforms** — `imshow` `extent` + `transform=`
-      non-affine support (polar projection of images).
-- [ ] **`mpl_toolkits.axes_grid1` extras** — `AnchoredSizeBar`,
-      `anchored_artists`, zoom-effect inset (`inset_axes`/
-      `make_axes_locatable` done).
-- [ ] **3D polish** — `plot_surface` colormap shading (light source),
-      `view_init` interactive rotation on screen backend, 3D tick
-      labels on pane edges, `scatter` size/depth cueing.
-- [ ] **`quiver`/`streamplot` params** — quiver `scale`, `width`,
-      `headwidth`; streamplot `arrowsize`/`broken_streamlines`.
+- [~] **`AxesImage` transforms** — `imshow` `extent` (`Grid2D.xRange`/
+      `yRange`) and mpl `aspect=` ("equal" default letterboxes the axes;
+      "auto" fills it) done; `transform=` non-affine (polar projection
+      of images) remains.
+- [x] **`mpl_toolkits.axes_grid1` extras** — `AnchoredSizeBar`
+      (`Axes::addSizeBar`), zoom-effect inset (`Axes::indicateInset`/
+      `indicateInsetZoom`, mpl auto connector visibility), and generic
+      `AnchoredText` (`Axes::addAnchoredText` — loc names/codes,
+      frameon, pad/borderpad) done, raster + native vector;
+      `inset_axes`/`make_axes_locatable` done.
+- [~] **3D polish** — `plot_surface` light-source shading done
+      (`SurfacePlot::shade`, mpl LightSource azdeg=315/altdeg=45
+      lambert via screen-space normals); `view_init` interactive
+      rotation, 3D tick labels on pane edges, and `scatter` size/depth
+      cueing remain.
+- [x] **`quiver`/`streamplot` params** — quiver `scale`, `width`,
+      `headwidth` (+ `headlength`/`headaxislength`/`pivot`); streamplot
+      `arrowsize`/`broken_streamlines`.
 
 ### P4 — Ecosystem & ergonomics
 - [ ] **pybind11 bindings (`volcanoplot` Python module)** — the single

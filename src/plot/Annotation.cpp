@@ -642,4 +642,206 @@ Point2D alignText(Point2D pos, HAlign ha, VAlign va,
     return result;
 }
 
+// mpl legend/anchored-artist loc → axes anchor fraction (fx,fy, y-up)
+// plus the box's own anchor point (bx,by).
+struct AnchorLoc { float fx, fy, bx, by; };
+
+static AnchorLoc anchorForLoc(std::string_view loc) {
+    if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
+    if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
+    if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
+    if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
+    if (loc == "right" || loc == "center right" || loc == "5" ||
+        loc == "7")                          return {1, 0.5f, 1, 0.5f};
+    if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
+    if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
+    if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
+    return {1, 1, 1, 1};  // "upper right" / "1" / unknown
+}
+
+// Position a cw×ch px box at anchor `a` inside axesRect, `bp` px from
+// the axes edge (y-down pixel space).
+static Rect2Df anchoredBox(AnchorLoc a, float cw, float ch,
+                           Rect2D axesRect, float bp) {
+    float px = axesRect.x + a.fx * float(axesRect.width);
+    float py = axesRect.y + (1.0f - a.fy) * float(axesRect.height);
+    if (a.bx > 0.5f) px -= bp; else if (a.bx < 0.5f) px += bp;
+    if (a.by > 0.5f) py += bp; else if (a.by < 0.5f) py -= bp;
+    return {px - a.bx * cw, py - (1.0f - a.by) * ch, cw, ch};
+}
+
+AnchoredTextLayout layoutAnchoredText(
+    const AnchoredText& at, const Axes& /*axes*/, Rect2D axesRect,
+    const std::function<SizeBarTextMeasure(std::string_view,
+                                           float)>& measure) {
+    AnchoredTextLayout out;
+    if (at.text.empty()) return out;
+    const float fontPx = 16.0f * at.fontSize;
+    // Split lines; measure each.
+    float maxW = 0, firstAscent = 0, lineH = 0;
+    size_t start = 0;
+    while (true) {
+        size_t nl = at.text.find('\n', start);
+        auto line = std::string_view(at.text).substr(
+            start, nl == std::string_view::npos
+                       ? std::string_view::npos : nl - start);
+        auto m = measure(line, at.fontSize);
+        maxW = std::max(maxW, m.width);
+        if (lineH == 0) { firstAscent = m.ascent; lineH = m.height * 1.25f; }
+        out.lineBaselines.push_back({});
+        if (nl == std::string_view::npos) break;
+        start = nl + 1;
+    }
+    const float pad = at.pad * fontPx;
+    const float contentH = firstAscent + lineH *
+                           (out.lineBaselines.size() - 1) +
+                           (lineH / 1.25f - firstAscent);
+    float boxW = maxW + 2 * pad;
+    float boxH = contentH + 2 * pad;
+    out.box = anchoredBox(anchorForLoc(at.loc), boxW, boxH, axesRect,
+                          at.borderpad * fontPx);
+    for (size_t i = 0; i < out.lineBaselines.size(); ++i)
+        out.lineBaselines[i] = {out.box.x + pad,
+                                out.box.y + pad + firstAscent +
+                                    float(i) * lineH};
+    out.valid = true;
+    return out;
+}
+
+SizeBarLayout layoutSizeBar(
+    const SizeBar& bar, const Axes& axes, Rect2D axesRect,
+    Extent2D /*figExtent*/, float dpi,
+    const std::function<SizeBarTextMeasure(std::string_view, float)>& measure) {
+    SizeBarLayout out;
+    if (bar.size <= 0.0f) return out;
+
+    const float fontPx = 16.0f * bar.fontSize;
+    const auto& vp = axes.viewport();
+
+    // Bar extent: data units → axes-fraction → px (mpl evaluates the
+    // rectangle through transData at x=0; fall back to the viewport min
+    // when 0 is out of domain, e.g. log scales).
+    auto fracLenX = [&](float d) {
+        float a = axes.dataToFraction({0.0f, 0.0f}).x;
+        float b = axes.dataToFraction({d, 0.0f}).x;
+        if (!std::isfinite(b - a)) {
+            a = axes.dataToFraction({vp.x.min, 0.0f}).x;
+            b = axes.dataToFraction({vp.x.min + d, 0.0f}).x;
+        }
+        return std::fabs(b - a) * float(axesRect.width);
+    };
+    auto fracLenY = [&](float d) {
+        float a = axes.dataToFraction({0.0f, 0.0f}).y;
+        float b = axes.dataToFraction({0.0f, d}).y;
+        if (!std::isfinite(b - a)) {
+            a = axes.dataToFraction({0.0f, vp.y.min}).y;
+            b = axes.dataToFraction({0.0f, vp.y.min + d}).y;
+        }
+        return std::fabs(b - a) * float(axesRect.height);
+    };
+
+    const float barW = fracLenX(bar.size);
+    // mpl: size_vertical=0 → a stroked 0-height rect ≈ a thin line.
+    const float lineH = 0.8f * dpi / 72.0f;
+    const float barH = bar.sizeVertical > 0.0f
+                           ? fracLenY(bar.sizeVertical) : lineH;
+    const bool fill = bar.fillBar.value_or(bar.sizeVertical > 0.0f) ||
+                      bar.sizeVertical <= 0.0f;
+
+    auto lm = measure(bar.label, bar.fontSize);
+    const float labelW = bar.label.empty() ? 0.0f : lm.width;
+    const float labelH = bar.label.empty() ? 0.0f : lm.height;
+    const float sepPx = bar.label.empty() ? 0.0f : bar.sep * dpi / 72.0f;
+
+    const float contentW = std::max(barW, labelW);
+    const float contentH = barH + sepPx + labelH;
+    const float pad = bar.pad * fontPx;
+    const float boxW = contentW + 2.0f * pad;
+    const float boxH = contentH + 2.0f * pad;
+
+    const float bp = bar.borderpad * fontPx;
+    out.box = anchoredBox(anchorForLoc(bar.loc), boxW, boxH,
+                          axesRect, bp);
+    const float boxX = out.box.x, boxY = out.box.y;
+
+    // Content: bar centered horizontally; label under (or over) it.
+    const float cx = boxX + pad + contentW * 0.5f;
+    float barY, labelBaseline;
+    if (bar.labelTop) {
+        labelBaseline = boxY + pad + lm.ascent;
+        barY = labelBaseline + (lm.height - lm.ascent) + sepPx;
+    } else {
+        barY = boxY + pad;
+        labelBaseline = barY + barH + sepPx + lm.ascent;
+    }
+    out.bar = {cx - barW * 0.5f, barY, barW, barH};
+    out.labelBaseline = {cx - labelW * 0.5f, labelBaseline};
+    out.fill = fill;
+    out.valid = true;
+    return out;
+}
+
+
+InsetIndicatorLayout layoutInsetIndicator(const InsetIndicator& ind,
+                                          const Axes& parent,
+                                          Rect2D parentRect,
+                                          Extent2D figExtent) {
+    InsetIndicatorLayout out;
+    // Rectangle in parent data coords: explicit bounds or the inset's
+    // viewport limits (mpl: bounds default = inset_ax data limits).
+    float dx0 = ind.x0, dy0 = ind.y0, dx1 = ind.x1, dy1 = ind.y1;
+    if (!ind.hasBounds) {
+        if (!ind.inset) return out;
+        const auto& vp = ind.inset->viewport();
+        dx0 = vp.x.min; dx1 = vp.x.max;
+        dy0 = vp.y.min; dy1 = vp.y.max;
+    }
+    auto toPx = [&](float dx, float dy) {
+        auto f = parent.dataToFraction({dx, dy});
+        return Point2D{float(parentRect.x) + f.x * float(parentRect.width),
+                       float(parentRect.y) +
+                           (1.0f - f.y) * float(parentRect.height)};
+    };
+    Point2D p00 = toPx(dx0, dy0), p11 = toPx(dx1, dy1);
+    if (!std::isfinite(p00.x) || !std::isfinite(p00.y) ||
+        !std::isfinite(p11.x) || !std::isfinite(p11.y))
+        return out;
+    float rx0 = std::min(p00.x, p11.x), rx1 = std::max(p00.x, p11.x);
+    float ry0 = std::min(p00.y, p11.y), ry1 = std::max(p00.y, p11.y);
+    out.rect = {rx0, ry0, rx1 - rx0, ry1 - ry0};
+    // Rect corners in px, labeled geometrically: LL, UL, LR, UR.
+    const Point2D rc[4] = {{rx0, ry1}, {rx0, ry0}, {rx1, ry1}, {rx1, ry0}};
+
+    std::array<bool, 4> vis{false, false, false, false};
+    Point2D ic[4]{};
+    if (ind.inset) {
+        const auto& ir = ind.inset->rect;
+        ic[0] = {float(ir.x), float(ir.y) + float(ir.height)};   // LL
+        ic[1] = {float(ir.x), float(ir.y)};                       // UL
+        ic[2] = {float(ir.x) + float(ir.width),
+                 float(ir.y) + float(ir.height)};                 // LR
+        ic[3] = {float(ir.x) + float(ir.width), float(ir.y)};     // UR
+        if (ind.connectors) {
+            vis = *ind.connectors;
+        } else {
+            // mpl auto visibility: compare the indicator rect against
+            // the inset axes bbox in figure space (y-up).
+            float H = float(figExtent.height);
+            float bx0 = float(ir.x), bx1 = float(ir.x + ir.width);
+            float by0 = H - float(ir.y + ir.height);
+            float by1 = H - float(ir.y);
+            float rby0 = H - ry1, rby1 = H - ry0;
+            bool x0 = rx0 < bx0, x1 = rx1 < bx1;
+            bool y0 = rby0 < by0, y1 = rby1 < by1;
+            vis = {bool(x0 ^ y0), bool(x0 == y1),
+                   bool(x1 == y0), bool(x1 ^ y1)};
+        }
+        for (int i = 0; i < 4; ++i)
+            out.connectors[i] = {rc[i], ic[i]};
+    }
+    out.connVisible = vis;
+    out.valid = true;
+    return out;
+}
+
 } // namespace volcano::plot

@@ -27,6 +27,7 @@ struct Text3DItem {
 /// in 3D — only a 2D screen-space rotation is applied).
 class Text3D : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from a list of text items.
     explicit Text3D(std::vector<Text3DItem> items);
 

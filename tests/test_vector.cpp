@@ -14,6 +14,7 @@
 #include <volcano/plot/plots/ContourPlot.hpp>
 #include <volcano/plot/Collections.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -401,4 +402,201 @@ TEST(VectorDriver, ContourEmitsSegments) {
     TmpFile f("volcano_vec_contour.svg");
     ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
     EXPECT_NE(readText(f.path).find("<path"), std::string::npos);
+}
+
+// ─── deterministic geometry ─────────────────────────────────────────────────
+
+namespace {
+
+/// Extract the numbers from the `d` attribute of the first <path>
+/// element containing `needle`.
+std::vector<float> pathNums(const std::string& doc,
+                            const std::string& needle) {
+    auto pos = doc.find(needle);
+    if (pos == std::string::npos) return {};
+    auto el = doc.rfind("<path", pos);
+    auto ds = doc.find("d=\"", el);
+    auto de = doc.find('\"', ds + 3);
+    std::vector<float> out;
+    const char* p = doc.c_str() + ds + 3;
+    const char* end = doc.c_str() + de;
+    while (p < end) {
+        while (p < end && !std::isdigit(*p) && *p != '-' && *p != '.')
+            ++p;
+        if (p >= end) break;
+        char* next = nullptr;
+        out.push_back(std::strtof(p, &next));
+        p = next;
+    }
+    return out;
+}
+
+/// All <path> number-lists whose element contains `needle`.
+std::vector<std::vector<float>> allPathNums(const std::string& doc,
+                                            const std::string& needle) {
+    std::vector<std::vector<float>> out;
+    size_t pos = 0;
+    while ((pos = doc.find("<path", pos)) != std::string::npos) {
+        auto end = doc.find("/>", pos);
+        if (end == std::string::npos) break;
+        auto el = doc.substr(pos, end - pos);
+        if (el.find(needle) != std::string::npos)
+            out.push_back(pathNums(doc.substr(pos), "d=\""));
+        pos = end + 2;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(VectorSvgDeterministic, LinePathMatchesDataTransform) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    TmpFile f("volcano_vec_golden_line.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto nums = pathNums(readText(f.path), "stroke=\"#ff0000\"");
+    // Three points → M x y L x y L x y = 6 numbers.
+    ASSERT_EQ(nums.size(), 6u);
+    const std::vector<Point2D> pts = {{0, 0}, {0.5f, 1.0f}, {1, 0.2f}};
+    for (size_t i = 0; i < pts.size(); ++i) {
+        auto fr = ax->dataToFraction(pts[i]);
+        float ex = ax->rect.x + fr.x * float(ax->rect.width);
+        float ey = ax->rect.y + (1.0f - fr.y) * float(ax->rect.height);
+        EXPECT_NEAR(nums[i * 2], ex, 0.5f) << "point " << i << " x";
+        EXPECT_NEAR(nums[i * 2 + 1], ey, 0.5f) << "point " << i << " y";
+    }
+}
+
+TEST(VectorSvgDeterministic, GeometryStableAcrossRuns) {
+    auto emit = [] {
+        PlotTestHarness harness(256, 256);
+        Figure fig;
+        auto* ax = fig.addAxes();
+        ax->addPlot(makeLine());
+        ax->addPlot(makeScatter());
+        TmpFile f("volcano_vec_golden_rep.svg");
+        EXPECT_TRUE(harness.renderer().savefig(fig, f.path));
+        return readText(f.path);
+    };
+    EXPECT_EQ(emit(), emit());  // byte-identical output
+}
+
+TEST(VectorSvgDeterministic, SizeBarEmitsNativeGeometry) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->setViewport({0, 10, 0, 10, 0, 1});
+    SizeBar sb;
+    sb.size = 2.0f;
+    sb.label = "2 units";
+    sb.loc = "lower right";
+    ax->addSizeBar(sb);
+    TmpFile f("volcano_vec_sizebar.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Label emitted as text.
+    EXPECT_NE(doc.find(">2 units</text>"), std::string::npos);
+    // Bar: a filled black quad whose width matches the data transform.
+    float f0 = ax->dataToFraction({0, 0}).x;
+    float f1 = ax->dataToFraction({2, 0}).x;
+    float barW = std::fabs(f1 - f0) * float(ax->rect.width);
+    bool found = false;
+    for (auto& nums : allPathNums(doc, "fill=\"#000000\"")) {
+        if (nums.size() < 8) continue;
+        float w = std::fabs(nums[2] - nums[0]);
+        float h = std::fabs(nums[5] - nums[1]);
+        if (std::fabs(w - barW) < 1.0f && h < 4.0f) found = true;
+    }
+    EXPECT_TRUE(found) << "no filled bar quad of width " << barW;
+}
+
+// ─── vector/raster parity ───────────────────────────────────────────────────
+
+TEST(VectorSvgParity, SecondaryYAxisEmitsRightLabels) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->setViewport({0, 1, 0, 1});
+    ax->secondaryYaxis([](float y) { return y * 2.0f; },
+                      [](float y) { return y * 0.5f; }, "dbl");
+    ax->addPlot(makeLine());
+    TmpFile f("volcano_vec_sec.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Secondary labels sit right of the axes rect.
+    float edge = ax->rect.x + float(ax->rect.width);
+    bool found = false;
+    size_t pos = 0;
+    while ((pos = doc.find("<text x=\"", pos)) != std::string::npos) {
+        float tx = std::strtof(doc.c_str() + pos + 9, nullptr);
+        if (tx > edge + 2.0f) { found = true; break; }
+        ++pos;
+    }
+    EXPECT_TRUE(found) << "no tick label right of the axes";
+}
+
+TEST(VectorSvgParity, SecondaryXAxisEmitsTopLabels) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->setViewport({0, 1, 0, 1});
+    ax->secondaryXaxis([](float x) { return x * 100.0f; },
+                      [](float x) { return x * 0.01f; }, "pct");
+    ax->addPlot(makeLine());
+    TmpFile f("volcano_vec_secx.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Secondary x labels sit above the axes rect.
+    bool found = false;
+    size_t pos = 0;
+    while ((pos = doc.find("<text x=\"", pos)) != std::string::npos) {
+        auto ys = doc.find("y=\"", pos);
+        float ty = std::strtof(doc.c_str() + ys + 3, nullptr);
+        if (ty < float(ax->rect.y) - 2.0f) { found = true; break; }
+        ++pos;
+    }
+    EXPECT_TRUE(found) << "no tick label above the axes";
+}
+
+TEST(VectorSvgParity, RotatedTickLabelsEmitTransform) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->style().xAxis.tickFont.rotation = 0.6f;
+    TmpFile f("volcano_vec_rot.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    EXPECT_NE(readText(f.path).find("rotate("), std::string::npos);
+}
+
+TEST(VectorSvgParity, TableEmitsNativeCells) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->table({{"a", "b"}, {"1", "2"}});
+    TmpFile f("volcano_vec_table.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    EXPECT_NE(doc.find(">a</text>"), std::string::npos);
+    EXPECT_NE(doc.find(">2</text>"), std::string::npos);
+    EXPECT_EQ(doc.find("<image"), std::string::npos)
+        << "table should emit native vector cells";
+}
+
+TEST(VectorSvgParity, AnchoredTextEmitsFrameAndText) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->addAnchoredText("note", "lower right");
+    TmpFile f("volcano_vec_anchored.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    EXPECT_NE(doc.find(">note</text>"), std::string::npos);
+    // Frame: a filled rect + stroked border around the text.
+    EXPECT_NE(doc.find("fill-opacity=\"0.8"), std::string::npos);
 }

@@ -35,6 +35,7 @@ struct WireframeConfig {
 /// LineSegmentRenderer.
 class WireframePlot : public IPlot {
 public:
+    [[nodiscard]] bool is3D() const override { return true; }
     /// Construct from a Grid2D (values = z-heights, xRange/yRange = axes).
     WireframePlot(Grid2D grid, WireframeConfig config = {});
 

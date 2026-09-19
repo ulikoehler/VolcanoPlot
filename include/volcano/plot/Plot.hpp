@@ -34,6 +34,16 @@ public:
                       const Axes& axes, Rect2D rect) = 0;
     /// Contribute to autoscale (extend the viewport).
     virtual void contributeToAutoscale(Viewport& v) const = 0;
+    /// Scale-aware autoscale contribution: called with the axes' scales
+    /// so point-series plots can drop out-of-domain data (e.g.
+    /// non-positive values on log axes). The default forwards to
+    /// `contributeToAutoscale`.
+    virtual void contributeToAutoscaleScaled(Viewport& v,
+                                             const AxisScale& xscale,
+                                             const AxisScale& yscale) const {
+        (void)xscale; (void)yscale;
+        contributeToAutoscale(v);
+    }
     /// GPU-side autoscale contribution. Runs a parallel min/max reduce over
     /// the plot's uploaded GPU buffers when available. The default
     /// implementation falls back to the CPU `contributeToAutoscale`.
@@ -46,6 +56,25 @@ public:
     [[nodiscard]] virtual Color legendColor() const { return Color::black(); }
     /// Legend marker shape (default: filled square).
     [[nodiscard]] virtual LegendMarker legendMarker() const { return LegendMarker::Square; }
+    /// Legend entries. Default: a single handle from label()/legendColor()/
+    /// legendMarker() when label() is non-empty; plots with several legend
+    /// items (per-series) override to return multiple handles.
+    [[nodiscard]] virtual std::vector<LegendHandle> legendEntries() const {
+        if (label().empty()) return {};
+        return {{label(), legendColor(), legendMarker()}};
+    }
+    /// mpl "sticky edges": image/quadmesh-style artists disable the 5%
+    /// autoscale margin (imshow/pcolormesh/hist2d/hexbin request tight
+    /// autoscaling). If any plot returns true, axes margins are skipped.
+    [[nodiscard]] virtual bool tightAutoscale() const { return false; }
+    /// True for 3D plots (matplotlib projection="3d") — the renderer
+    /// suppresses the 2D spine rectangle and axis tick labels since
+    /// mplot3d draws its own box/panes instead.
+    [[nodiscard]] virtual bool is3D() const { return false; }
+    /// Scalar value range for colormap-mapped plots (the "mappable"'s norm
+    /// range in matplotlib — drives the colorbar's tick range). Empty for
+    /// plots without a scalar mapping.
+    [[nodiscard]] virtual std::optional<Range> valueRange() const { return {}; }
     /// Apply one entry of the axes' property cycler (matplotlib
     /// axes.prop_cycle). Return true when the entry was consumed — the
     /// cycle position only advances for consuming plots. Called by
@@ -237,8 +266,13 @@ private:
     /// is being dragged and the pointer position at the last event.
     Axes* legendDragAxes_ = nullptr;
     Point2D legendDragLast_{};
+    /// Draggable TextAnnotation/Annotation: pointer to its dragOffset.
+    Point2D* artistDrag_ = nullptr;
+    Point2D artistDragLast_{};
     /// Legend drag handling; returns true when the event was consumed.
     bool legendDragEvent(const Event& e);
+    /// Draggable text/annotation handling; true when event consumed.
+    bool artistDragEvent(const Event& e);
 
     /// Compute effective grid margins for tight/constrained layout.
     void computeTightMargins(Extent2D extent);

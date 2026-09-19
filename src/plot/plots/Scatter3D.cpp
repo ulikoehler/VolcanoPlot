@@ -59,7 +59,7 @@ void Scatter3D::projectPoints() {
 
         if (std::abs(clipW) < 1e-30f) continue;
         float ndcX = clipX / clipW;
-        float ndcY = clipY / clipW;
+        float ndcY = -clipY / clipW;
 
         projectedPoints_.push_back({ndcX, ndcY});
 

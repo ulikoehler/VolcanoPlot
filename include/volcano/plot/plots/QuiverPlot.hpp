@@ -13,12 +13,24 @@ namespace volcano::plot {
 struct QuiverConfig {
     Color color = Color::black();
     float lineWidth = 1.0f;
+    /// mpl `width`: shaft width; >0 overrides lineWidth.
+    float width = 0.0f;
     /// Scale factor for arrow lengths. 0 = auto (fit to grid spacing).
     float scale = 0.0f;
     /// Arrowhead length in pixels.
     float headLength = 8.0f;
     /// Arrowhead width in pixels.
     float headWidth = 6.0f;
+    /// mpl head dimensions in multiples of shaft width. When any of these
+    /// is >0 the arrowhead uses mpl's polygon construction
+    /// (headwidth×width across, headlength×width long, headaxislength×width
+    /// axis notch); unset fields fall back to the mpl defaults 3/5/4.5.
+    float headwidth = 0.0f;
+    float headlength = 0.0f;
+    float headaxislength = 0.0f;
+    /// mpl `pivot`: which part of the arrow is anchored at (x, y).
+    enum class Pivot { Tail, Middle, Tip };
+    Pivot pivot = Pivot::Tail;
     /// If true, arrowheads are drawn as filled triangles.
     bool filledHeads = true;
     std::string label;

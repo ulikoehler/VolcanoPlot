@@ -180,4 +180,20 @@ float scaleTickStep(const AxisScale& scale, float vmin, float vmax, int nbins) {
     return span > 0 ? span / std::max(nbins - 1, 1) : 1.0f;
 }
 
+std::vector<Point2D> maskPointsForScales(std::span<const Point2D> points,
+                                         const AxisScale& sx,
+                                         const AxisScale& sy) {
+    std::vector<Point2D> out;
+    out.reserve(points.size());
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    for (Point2D p : points) {
+        if (!sx.inDomain(p.x) || !sy.inDomain(p.y) ||
+            !std::isfinite(p.x) || !std::isfinite(p.y))
+            out.push_back({kNaN, kNaN});
+        else
+            out.push_back(p);
+    }
+    return out;
+}
+
 } // namespace volcano::plot
