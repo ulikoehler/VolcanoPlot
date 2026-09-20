@@ -2,7 +2,7 @@
 # scripts/llm_compare_plot.py — Ask an LLM to spot issues in the right plot
 # of a side-by-side comparison image, using the left plot as the reference.
 #
-# The comparison images produced by scripts/generate_gallery.sh place the
+# The comparison images produced by scripts/generate_gallery.py place the
 # matplotlib reference on the LEFT and the VolcanoPlot rendering on the RIGHT.
 # This script sends the image to a vision-capable LLM and prints a detailed
 # description of any issues found in the right plot.

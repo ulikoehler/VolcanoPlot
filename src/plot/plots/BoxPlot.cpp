@@ -161,10 +161,15 @@ void BoxPlot::buildGeometry() {
                 for (int j = 0; j < 6; ++j) boxFillColors_.push_back(cfg_.boxColor);
             }
 
-            // Box edges: left, right, top, bottom (4 line segments).
+            // Box edges: left, right, bottom (q1), top (q3) — a full
+            // rectangle outline like matplotlib's bxp box Line2D.
             boxEdgeSegs_.push_back({x - halfWidth, s.q1});
             boxEdgeSegs_.push_back({x - halfWidth, s.q3});
             boxEdgeSegs_.push_back({x + halfWidth, s.q1});
+            boxEdgeSegs_.push_back({x + halfWidth, s.q3});
+            boxEdgeSegs_.push_back({x - halfWidth, s.q1});
+            boxEdgeSegs_.push_back({x + halfWidth, s.q1});
+            boxEdgeSegs_.push_back({x - halfWidth, s.q3});
             boxEdgeSegs_.push_back({x + halfWidth, s.q3});
 
             // Lower whisker: (x, q1) → (x, whiskerLo)

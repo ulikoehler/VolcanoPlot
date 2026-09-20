@@ -71,6 +71,9 @@ public:
     /// suppresses the 2D spine rectangle and axis tick labels since
     /// mplot3d draws its own box/panes instead.
     [[nodiscard]] virtual bool is3D() const { return false; }
+    /// Mutable camera for 3D plots — used by interactive 3D rotation
+    /// (Navigation drags update every 3D plot's camera on an axes).
+    [[nodiscard]] virtual Camera3D* camera3D() noexcept { return nullptr; }
     /// Scalar value range for colormap-mapped plots (the "mappable"'s norm
     /// range in matplotlib — drives the colorbar's tick range). Empty for
     /// plots without a scalar mapping.
@@ -196,8 +199,8 @@ public:
     void subplotsAdjust(float left, float bottom, float right, float top,
                         float wspace, float hspace);
     /// matplotlib tight_layout / constrained_layout toggles.
-    void setTightLayout(bool on) { tightLayout_ = on; }
-    void setConstrainedLayout(bool on) { constrainedLayout_ = on; }
+    void setTightLayout(bool on) { tightLayout_ = on; markStale(); }
+    void setConstrainedLayout(bool on) { constrainedLayout_ = on; markStale(); }
 
     [[nodiscard]] const std::vector<AxesPlacement>& placements() const noexcept { return placements_; }
     [[nodiscard]] const std::vector<SubfigPlacement>& subfigs() const noexcept { return subfigs_; }
@@ -206,7 +209,16 @@ public:
     [[nodiscard]] FigureStyle& style() noexcept { return style_; }
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
 
-    void setTitle(std::string t) { style_.title.text = std::move(t); }
+    void setTitle(std::string t) { style_.title.text = std::move(t); markStale(); }
+
+    /// matplotlib `fig.suptitle` — figure-level centered title.
+    void suptitle(std::string t) { style_.title.text = std::move(t); markStale(); }
+    /// matplotlib `fig.supxlabel` / `fig.supylabel` — figure-level axis
+    /// labels (bottom center / left center, rotated).
+    void supxlabel(std::string t) { supXlabel_ = std::move(t); markStale(); }
+    void supylabel(std::string t) { supYlabel_ = std::move(t); markStale(); }
+    [[nodiscard]] const std::string& supxlabel() const { return supXlabel_; }
+    [[nodiscard]] const std::string& supylabel() const { return supYlabel_; }
 
     /// Merge viewports of axes linked via shareX/shareY. Called by layout().
     void syncSharedAxes();
@@ -246,14 +258,24 @@ public:
     /// then feeds widgets and the navigation controller.
     void dispatch(Event e);
 
+    // --- Stale tracking (matplotlib `figure.stale`) ---
+    /// Mark the figure dirty — the next draw must re-render.
+    void markStale() noexcept { stale_ = true; }
+    /// True when the figure or any axes was mutated since the last draw.
+    [[nodiscard]] bool stale() const;
+    /// Clear the stale flag on the figure and every axes (after a draw).
+    void setStale(bool v);
+
 private:
     std::shared_ptr<GridSpec> grid_;
     /// Grids replaced by subplotMosaic/subplot2grid/subfigures — kept alive
     /// because existing SubplotSpecs hold raw GridSpec pointers.
     std::vector<std::shared_ptr<GridSpec>> retiredGrids_;
     FigureStyle style_;
+    std::string supXlabel_, supYlabel_;
     std::vector<AxesPlacement> placements_;
     std::vector<SubfigPlacement> subfigs_;
+    bool stale_ = true;
     bool tightLayout_ = false;
     bool constrainedLayout_ = false;
     Rect2D figRect_{};

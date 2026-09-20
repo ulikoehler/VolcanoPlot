@@ -20,9 +20,15 @@ namespace volcano::plot {
 
 Axes::Axes() : style_(rc::params()) { reseedCycler(); }
 
+void Axes::touch() noexcept {
+    stale_ = true;
+    if (figure_) figure_->markStale();
+}
+
 void Axes::setStyle(FigureStyle s) {
     style_ = std::move(s);
     reseedCycler();
+    touch();
 }
 
 void Axes::reseedCycler() {
@@ -45,6 +51,7 @@ IPlot* Axes::addPlot(std::unique_ptr<IPlot> plot) {
         if (raw->applyCycleProps(props)) cycler_.advance();
     }
     plots_.push_back(std::move(plot));
+    touch();
     return raw;
 }
 
@@ -62,6 +69,7 @@ void Axes::setSpineVisible(std::string_view side, bool visible) {
     else if (side == "top")    spines_.top = visible;
     else if (side == "all")
         spines_ = {visible, visible, visible, visible};
+    touch();
 }
 
 std::vector<const IPlot*> Axes::drawOrder() const {
@@ -172,6 +180,7 @@ void Axes::setXscale(std::string_view name) {
     else if (name == "logit")  xScale_ = AxisScale::logit();
     else if (name == "asinh")  xScale_ = AxisScale::asinh();
     else if (name == "mercator") xScale_ = AxisScale::mercator();
+    touch();
 }
 
 void Axes::setYscale(std::string_view name) {
@@ -181,6 +190,7 @@ void Axes::setYscale(std::string_view name) {
     else if (name == "logit")  yScale_ = AxisScale::logit();
     else if (name == "asinh")  yScale_ = AxisScale::asinh();
     else if (name == "mercator") yScale_ = AxisScale::mercator();
+    touch();
 }
 
 void Axes::setThetaZeroLocation(std::string_view loc) {
@@ -194,6 +204,7 @@ void Axes::setThetaZeroLocation(std::string_view loc) {
     else if (loc == "NW") projection_.thetaOffset = 3.0f * kHalfPi / 2.0f;
     else if (loc == "SE") projection_.thetaOffset = -kHalfPi / 2.0f;
     else if (loc == "SW") projection_.thetaOffset = -3.0f * kHalfPi / 2.0f;
+    touch();
 }
 
 void Axes::shareX(Axes& other) {
@@ -201,6 +212,8 @@ void Axes::shareX(Axes& other) {
     other.shareXWith_.push_back(this);
     other.viewport_.x = viewport_.x;
     other.manualX_ = manualX_;
+    touch();
+    other.touch();
 }
 
 void Axes::shareY(Axes& other) {
@@ -208,6 +221,8 @@ void Axes::shareY(Axes& other) {
     other.shareYWith_.push_back(this);
     other.viewport_.y = viewport_.y;
     other.manualY_ = manualY_;
+    touch();
+    other.touch();
 }
 
 Axes* Axes::twinx() {
@@ -227,6 +242,7 @@ void Axes::secondaryXaxis(std::function<float(float)> forward,
                           std::string label) {
     secondaryX_ = SecondaryAxis{std::move(forward), std::move(inverse),
                                 std::move(label), true};
+    touch();
 }
 
 void Axes::secondaryYaxis(std::function<float(float)> forward,
@@ -234,6 +250,7 @@ void Axes::secondaryYaxis(std::function<float(float)> forward,
                           std::string label) {
     secondaryY_ = SecondaryAxis{std::move(forward), std::move(inverse),
                                 std::move(label), true};
+    touch();
 }
 
 void Axes::finalizeAutoscale(Viewport& v, bool tight) const {
@@ -392,6 +409,7 @@ void Axes::tickParams(std::string_view axis, std::string_view direction,
     };
     if (axis == "x" || axis == "both") apply(style_.xAxis.ticks);
     if (axis == "y" || axis == "both") apply(style_.yAxis.ticks);
+    touch();
 }
 
 void Axes::ticklabelFormat(std::string_view axis, std::string_view style,
@@ -409,6 +427,7 @@ void Axes::ticklabelFormat(std::string_view axis, std::string_view style,
     }
     if (axis == "x" || axis == "both") style_.xAxis.ticks.formatter = f;
     if (axis == "y" || axis == "both") style_.yAxis.ticks.formatter = f;
+    touch();
 }
 
 void Axes::grid(bool on, std::string_view which, std::string_view axis) {
@@ -419,6 +438,7 @@ void Axes::grid(bool on, std::string_view which, std::string_view axis) {
     };
     if (axis == "x" || axis == "both") apply(style_.xAxis);
     if (axis == "y" || axis == "both") apply(style_.yAxis);
+    touch();
 }
 
 // ── Units / categorical & date axes ─────────────────────────────────────────
@@ -450,12 +470,14 @@ void Axes::xaxis_date() {
     registerBuiltinConverters();
     dates::DateConverter conv;
     applyAxisInfo(conv, 'x');
+    touch();
 }
 
 void Axes::yaxis_date() {
     registerBuiltinConverters();
     dates::DateConverter conv;
     applyAxisInfo(conv, 'y');
+    touch();
 }
 
 void Axes::installCategoryTicks(char axis) {
@@ -476,11 +498,13 @@ void Axes::installCategoryTicks(char axis) {
 void Axes::setXCategories(std::vector<std::string> labels) {
     xCategories_ = std::move(labels);
     installCategoryTicks('x');
+    touch();
 }
 
 void Axes::setYCategories(std::vector<std::string> labels) {
     yCategories_ = std::move(labels);
     installCategoryTicks('y');
+    touch();
 }
 
 int Axes::xCategoryIndex(std::string_view label) {

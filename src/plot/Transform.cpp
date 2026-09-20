@@ -356,6 +356,9 @@ Camera3D Camera3D::viewInit(float elevDeg, float azimDeg, float rollDeg,
                target.z + dist * w.z};
     cam.target = target;
     cam.up = v;
+    cam.elevDeg = elevDeg;
+    cam.azimDeg = azimDeg;
+    cam.rollDeg = rollDeg;
     return cam;
 }
 

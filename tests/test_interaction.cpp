@@ -6,6 +6,7 @@
 #include <volcano/plot/Interaction.hpp>
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/Widgets.hpp>
+#include <volcano/plot/plots/Scatter3D.hpp>
 
 #include <cmath>
 #include <memory>
@@ -485,6 +486,79 @@ TEST(Widgets, SubplotToolAdjusts) {
     // sliders laid out: 6 rows of ~16px; first row y<16.
     // After apply(), grid left changed from 0.
     EXPECT_GT(f.fig.grid().left, 0.5f);
+}
+
+// ═══ Interactive 3D rotation (mpl Axes3D button1 rotate / button3 zoom) ═══
+
+TEST(Navigation3D, LeftDragRotatesCamera) {
+    Fig f;
+    auto p = std::make_unique<Scatter3D>(
+        std::vector<float>{0, 1}, std::vector<float>{0, 1},
+        std::vector<float>{0, 1});
+    p->setCamera(Camera3D::viewInit(30.0f, -60.0f));
+    auto* raw = p.get();
+    f.ax->addPlot(std::move(p));
+    f.fig.nav();
+    f.fig.dispatch(press(50, 50));
+    f.fig.dispatch(motion(60, 40, 1));  // 10px right, 10px up
+    f.fig.dispatch(release(60, 40));
+    // Axes fills 100×100 canvas: azim -= dx/w*360 = -36°,
+    // elev -= dy/h*180 → +18° (dragging up raises the viewpoint).
+    auto* cam = raw->camera3D();
+    ASSERT_NE(cam, nullptr);
+    EXPECT_NEAR(cam->azimDeg, -96.0f, 1e-3f);
+    EXPECT_NEAR(cam->elevDeg, 48.0f, 1e-3f);
+}
+
+TEST(Navigation3D, RightDragDolliesCamera) {
+    Fig f;
+    auto p = std::make_unique<Scatter3D>(
+        std::vector<float>{0, 1}, std::vector<float>{0, 1},
+        std::vector<float>{0, 1});
+    p->setCamera(Camera3D::viewInit(30.0f, -60.0f));
+    auto* raw = p.get();
+    f.ax->addPlot(std::move(p));
+    auto dist0 = std::hypot(raw->camera3D()->eye.x,
+                            raw->camera3D()->eye.y, raw->camera3D()->eye.z);
+    f.fig.nav();
+    f.fig.dispatch(press(50, 50, 3));
+    f.fig.dispatch(motion(50, 30, 8));  // 20px up → zoom in (dist shrinks)
+    f.fig.dispatch(release(50, 30, 3));
+    auto* cam = raw->camera3D();
+    float dist = std::hypot(cam->eye.x, cam->eye.y, cam->eye.z);
+    EXPECT_LT(dist, dist0);
+    // Angles unchanged by a zoom drag.
+    EXPECT_NEAR(cam->elevDeg, 30.0f, 1e-3f);
+    EXPECT_NEAR(cam->azimDeg, -60.0f, 1e-3f);
+}
+
+TEST(Navigation3D, No3DPlotsFallsBackToNav) {
+    Fig f;
+    f.fig.nav();
+    f.fig.dispatch(press(50, 50));
+    f.fig.dispatch(motion(60, 50, 1));
+    f.fig.dispatch(release(60, 50));
+    // No 3D plots → drag does nothing (mode is None).
+    EXPECT_FLOAT_EQ(f.ax->viewport().x.min, 0.0f);
+}
+
+TEST(InteractionRender, SupLabelsDrawText) {
+    test::PlotTestHarness h(200, 200);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->setStyle(test::flatTestStyle());
+    fig.subplotsAdjust(0.2f, 0.15f, 0.8f, 0.85f, 0.0f, 0.0f);
+    fig.suptitle("Suptitle");
+    fig.supxlabel("Shared X");
+    fig.supylabel("Shared Y");
+    auto img = h.render(fig);
+    const test::Pixel black{0, 0, 0, 255};
+    // Bottom strip: supxlabel draws dark text pixels below the axes.
+    EXPECT_GT(img.countColorInRegion(black, 40, 180, 160, 200, 160), 0);
+    // Left strip: supylabel (rotated) draws dark text pixels.
+    EXPECT_GT(img.countColorInRegion(black, 0, 40, 30, 160, 160), 0);
+    // Top strip: suptitle draws dark text pixels above the axes.
+    EXPECT_GT(img.countColorInRegion(black, 60, 0, 140, 30, 160), 0);
 }
 
 // ═══ Render: widget overlay + rubber band ═══════════════════════════════════

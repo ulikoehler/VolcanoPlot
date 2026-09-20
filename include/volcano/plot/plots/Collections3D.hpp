@@ -47,6 +47,7 @@ public:
 
     /// Set the camera for 3D projection. Must be called before prepare().
     void setCamera(const Camera3D& camera) { camera_ = camera; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
@@ -75,7 +76,7 @@ private:
 /// Configuration for a 3D polygon collection.
 struct Poly3DCollectionConfig {
     /// Default face color (used when per-polygon colors are empty).
-    Color faceColor = Color::fromRgba8(31, 119, 180, 200);
+    Color faceColor = Color::fromRgba8(31, 119, 180, 255);
     /// Per-polygon face colors (optional, overrides `faceColor`).
     std::vector<Color> faceColors;
     /// Edge color for polygon outlines.
@@ -106,6 +107,7 @@ public:
 
     /// Set the camera for 3D projection. Must be called before prepare().
     void setCamera(const Camera3D& camera) { camera_ = camera; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

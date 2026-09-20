@@ -7,9 +7,9 @@ instead of by eyeballing complex plots.
 Generate with:
 
 ```bash
-./scripts/generate_microgallery.sh gallery_micro          # all features
-./scripts/generate_microgallery.sh gallery_micro --jobs 8 # parallel width
-./scripts/generate_microgallery.sh gallery_micro --filter grid,line
+./scripts/generate_microgallery.py gallery_micro          # all features
+./scripts/generate_microgallery.py gallery_micro --jobs 8 # parallel width
+./scripts/generate_microgallery.py gallery_micro --filter grid,line
 ```
 
 Output: `gallery_micro/{matplotlib,volcano,comparison}/NNN_name.png`.
@@ -266,7 +266,7 @@ interpreting any data-carrying tier.
 
 ## Debugging workflow
 
-1. Run the gallery: `./scripts/generate_microgallery.sh`
+1. Run the gallery: `./scripts/generate_microgallery.py`
 2. Scan `comparison/` top-down (filename order = check order).
 3. At the **first** mismatch: fix that feature, regenerate with
    `--filter <name>`, then rescan — higher-tier failures often evaporate.

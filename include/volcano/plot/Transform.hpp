@@ -6,6 +6,7 @@
 #include "volcano/plot/Projection.hpp"
 
 #include <array>
+#include <cmath>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -241,6 +242,10 @@ struct Camera3D {
     /// remapped into mpl's (4,4,3) box centered at the origin before the
     /// view transform. Disabled when dataMin == dataMax.
     Point3D dataMin{0, 0, 0}, dataMax{0, 0, 0};
+    /// Spherical view angles in degrees — set by viewInit, NaN when the
+    /// camera was built from explicit eye/target. Interactive rotation
+    /// reads/updates these.
+    float elevDeg = NAN, azimDeg = NAN, rollDeg = 0.0f;
 
     /// Compute view matrix (row-major 4x4).
     [[nodiscard]] std::array<float, 16> viewMatrix() const noexcept;

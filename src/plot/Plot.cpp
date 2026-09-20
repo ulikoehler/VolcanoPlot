@@ -41,6 +41,7 @@ Axes* Figure::addAxes(const SubplotSpec& spec) {
     p.spec = spec;
     p.mode = PlacementMode::Grid;
     placements_.push_back(std::move(p));
+    markStale();
     return raw;
 }
 
@@ -55,6 +56,7 @@ Axes* Figure::addAxesFraction(float l, float b, float w, float h) {
     // framebuffer is top-left origin so convert y.
     p.fx = l; p.fy = b; p.fw = w; p.fh = h;
     placements_.push_back(std::move(p));
+    markStale();
     return raw;
 }
 
@@ -188,6 +190,7 @@ void Figure::subplotsAdjust(float left, float bottom, float right, float top,
     grid_->top = top;
     grid_->wspace = wspace;
     grid_->hspace = hspace;
+    markStale();
 }
 
 void Figure::syncSharedAxes() {
@@ -495,6 +498,18 @@ std::vector<const Axes*> Figure::allAxes() const {
     for (auto& s : subfigs_)
         for (auto* ax : s.figure->allAxes()) out.push_back(ax);
     return out;
+}
+
+bool Figure::stale() const {
+    if (stale_) return true;
+    for (const auto* ax : allAxes())
+        if (ax->stale()) return true;
+    return false;
+}
+
+void Figure::setStale(bool v) {
+    stale_ = v;
+    for (auto* ax : allAxes()) ax->setStale(v);
 }
 
 Navigation& Figure::nav() {

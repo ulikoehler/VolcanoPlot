@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <functional>
 
 namespace volcano::plot {
 namespace {
@@ -109,24 +110,44 @@ void Axes3DPlot::prepare(render::Renderer& r) {
             float nx = P(ex, ey, cz).x;
             if (nx > bestX) { bestX = nx; zx = ex; zy = ey; }
         }
-    // Box center in NDC — labels are pushed away from it.
+    // Box center in NDC — tick marks and labels point away from it.
     auto ctr = P(cx, cy, cz);
-    auto outDir = [&](Point2D p) {
-        float dx = p.x - ctr.x, dy = p.y - ctr.y;
+
+    // Axis lines: the three tick edges are drawn darker than the pane
+    // edges (matplotlib draws the mplot3d axis line over the box edge).
+    // Tick marks protrude outward perpendicular to each edge (mpl
+    // tick_out); labels are centered just beyond the marks.
+    auto axisEdge = [&](Point2D a, Point2D b, const std::vector<float>& ts,
+                        const std::function<Point2D(float)>& tickPt) {
+        axisSegs_.push_back(a); axisSegs_.push_back(b);
+        float dx = b.x - a.x, dy = b.y - a.y;
         float n = std::sqrt(dx*dx + dy*dy);
-        return n > 1e-9f ? Point2D{dx / n, dy / n} : Point2D{0, -1};
-    };
-    if (config_.tickLabels) {
+        if (n < 1e-9f) return;
+        Point2D perp{-dy / n, dx / n};
+        // Flip perp so it points away from the box center.
+        Point2D mid{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+        if (perp.x * (mid.x - ctr.x) + perp.y * (mid.y - ctr.y) < 0.0f) {
+            perp.x = -perp.x; perp.y = -perp.y;
+        }
         ScalarFormatter fmt;
-        auto add = [&](Point2D p, float v) {
-            auto d = outDir(p);
-            labels_.push_back({p.x + d.x * 0.10f, p.y + d.y * 0.10f,
-                               fmt.format(v, 0)});
-        };
-        for (float t : xt) add(P(t, yf, z0), t);
-        for (float t : yt) add(P(xf, t, z0), t);
-        for (float t : zt) add(P(zx, zy, t), t);
-    }
+        fmt.setLocs(ts);  // uniform precision across labels, like mpl
+        for (float t : ts) {
+            Point2D p = tickPt(t);
+            axisSegs_.push_back(p);
+            axisSegs_.push_back({p.x + perp.x * config_.tickSize,
+                                 p.y + perp.y * config_.tickSize});
+            if (config_.tickLabels)
+                labels_.push_back({p.x + perp.x * config_.labelPad,
+                                   p.y + perp.y * config_.labelPad,
+                                   fmt.format(t, 0)});
+        }
+    };
+    axisEdge(P(x0, yf, z0), P(x1, yf, z0), xt,
+             [&](float t) { return P(t, yf, z0); });
+    axisEdge(P(xf, y0, z0), P(xf, y1, z0), yt,
+             [&](float t) { return P(xf, t, z0); });
+    axisEdge(P(zx, zy, z0), P(zx, zy, z1), zt,
+             [&](float t) { return P(zx, zy, t); });
 
     auto& ctx = r.backend().context();
     if (!paneTris_.empty()) {
@@ -143,6 +164,14 @@ void Axes3DPlot::prepare(render::Renderer& r) {
         lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
                              std::span{lineSegs_}, config_.edgeColor,
+                             config_.lineWidth);
+    }
+    if (!axisSegs_.empty()) {
+        axisRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
+                           r.backend().sampleCount(), r.pipelineCache());
+        axisRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                             std::span{axisSegs_}, config_.axisColor,
                              config_.lineWidth);
     }
     prepared_ = true;
@@ -164,6 +193,9 @@ void Axes3DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!lineSegs_.empty())
         lineRenderer_.draw(cmd, vrect, t,
                            static_cast<uint32_t>(lineSegs_.size()));
+    if (!axisSegs_.empty())
+        axisRenderer_.draw(cmd, vrect, t,
+                           static_cast<uint32_t>(axisSegs_.size()));
 
     // Tick labels in pixel space. NDC (x, y-up) → pixel.
     if (config_.tickLabels && !labels_.empty()) {

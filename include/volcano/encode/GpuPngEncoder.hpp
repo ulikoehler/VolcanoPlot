@@ -4,13 +4,16 @@
 #include "volcano/encode/ImageEncoder.hpp"
 
 #include <vk_mem_alloc.h>
+#include <vulkan/vulkan.hpp>
+
+#include <memory>
+#include <vector>
 
 namespace volcano::encode {
 
-/// GPU PNG encoder. Performs PNG filtering (None/Sub/Up/Average/Paeth) on the
-/// GPU via a compute shader, then assembles the PNG stream on the CPU.
-/// DEFLATE compression is done on the CPU (zlib) — a future enhancement could
-/// use a GPU DEFLATE implementation.
+/// GPU PNG encoder. Performs adaptive PNG row filtering (None/Sub/Up/
+/// Average/Paeth, min sum-of-absolute-differences per row) on the GPU via a
+/// compute shader; DEFLATE (zlib) and container assembly run on the CPU.
 class GpuPngEncoder : public IImageEncoder {
 public:
     GpuPngEncoder(vk::Device device, vk::Queue queue, vk::CommandPool pool, VmaAllocator allocator);
@@ -23,12 +26,19 @@ public:
                                     const std::filesystem::path& path) override;
     [[nodiscard]] ImageFormat format() const noexcept override { return ImageFormat::Png; }
 
+    /// GPU-filtered scanline stream: `h` rows of `1 filter byte + w*4 bytes`.
+    /// Empty on failure. Used by the APNG writer so animation frames get
+    /// GPU-side filtering too.
+    [[nodiscard]] std::vector<uint8_t> filterScanlines(std::span<const uint8_t> rgba,
+                                                       uint32_t width, uint32_t height);
+
 private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
     vk::Device device_;
     vk::Queue queue_;
     vk::CommandPool pool_;
     VmaAllocator allocator_;
-    // TODO: compute pipeline + descriptor set for filtering.
 };
 
 } // namespace volcano::encode

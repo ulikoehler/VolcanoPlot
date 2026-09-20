@@ -169,7 +169,8 @@ void plotScatter(GalleryCtx& ctx) {
     Series2D s;
     s.color = Color::fromRgba8(31, 119, 180);
     s.marker = MarkerStyle::Circle;
-    s.size = 5.0f;
+    // mpl s=25 pt² → marker diameter = 2·sqrt(25/π)·(dpi/72) ≈ 15.7 px.
+    s.size = 15.7f;
     s.label = "data";
     // Same draw order as mpl: x=randn(200), then y=randn(200).
     std::vector<float> sx(200), sy(200);
@@ -289,6 +290,7 @@ void plotBox(GalleryCtx& ctx) {
     cfg.labels = {"G1", "G2", "G3", "G4"};
     cfg.fillBox = false;  // mpl boxplot default: patch_artist=False
     ax->addPlot(std::make_unique<BoxPlot>(std::move(groups), cfg));
+    ax->setXCategories({"G1", "G2", "G3", "G4"});  // mpl labels=
     ctx.render(fig, "box");
 }
 
@@ -347,7 +349,9 @@ void plotStem(GalleryCtx& ctx) {
         x.push_back(float(i));
         y.push_back(std::sin(float(i) * 0.5f));
     }
-    ax->addPlot(std::make_unique<StemPlot>(x, y));
+    StemConfig scfg;
+    scfg.markerSize = 16.7f;  // mpl markersize=6pt → 16.7 px at 200 dpi
+    ax->addPlot(std::make_unique<StemPlot>(x, y, scfg));
     ctx.render(fig, "stem");
 }
 
@@ -377,6 +381,9 @@ void plotErrorbar(GalleryCtx& ctx) {
     }
     ErrorbarConfig cfg;
     cfg.yerr = yerr;
+    cfg.markerSize = 16.7f;  // mpl markersize=6pt → 16.7 px at 200 dpi
+    cfg.capSize = 8.3f;      // mpl capsize=3pt → 8.3 px at 200 dpi
+    cfg.drawLine = false;    // mpl fmt="o" draws markers only
     ax->addPlot(std::make_unique<ErrorbarPlot>(x, y, cfg));
     ctx.render(fig, "errorbar");
 }
@@ -629,6 +636,7 @@ void plotScatter3D(GalleryCtx& ctx) {
     cam.aspect = float(kWidth) / float(kHeight);
     addAxes3D(ax, cam);
     Scatter3DConfig cfg;
+    cfg.size = 15.7f;  // mpl s=25 pt² → ~15.7 px diameter at 200 dpi
     auto p = std::make_unique<Scatter3D>(x, y, z, cfg);
     p->setCamera(cam);
     ax->addPlot(std::move(p));
@@ -1224,6 +1232,8 @@ void plotErrorbar3D(GalleryCtx& ctx) {
     addAxes3D(ax, cam);
     Errorbar3DConfig cfg;
     cfg.zerr = ze;
+    cfg.markerSize = 16.7f;  // mpl markersize=6pt → 16.7 px at 200 dpi
+    cfg.capSize = 13.9f;     // mpl capsize=5pt → 13.9 px at 200 dpi
     auto p = std::make_unique<Errorbar3D>(std::move(x), std::move(y),
                                           std::move(z), cfg);
     p->setCamera(cam);

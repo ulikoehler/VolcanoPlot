@@ -52,6 +52,7 @@ public:
 
     /// Set the camera for 3D projection. Must be called before prepare().
     void setCamera(const Camera3D& camera) { camera_ = camera; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
@@ -77,7 +78,7 @@ private:
     bool prepared_ = false;
     bool hasErrors_ = false;
 
-    void projectGeometry();
+    void projectGeometry(float canvasW, float canvasH);
     /// Get effective error bounds for point i along an axis.
     /// Returns (lower, upper) offsets from the data point.
     void errBounds(size_t i, const std::vector<float>& sym,

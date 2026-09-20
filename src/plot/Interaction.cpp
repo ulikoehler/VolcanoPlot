@@ -47,6 +47,64 @@ void Navigation::forward() {
     applySnapshot(history_[histPos_]);
 }
 
+void Navigation::startDrag3D(const Event& e) {
+    // Collect every 3D camera on the axes (mpl rotates the whole scene).
+    cams3D_.clear();
+    for (auto& p : e.inaxes->plots()) {
+        if (Camera3D* cam = p->camera3D()) {
+            Cam3DState s{cam, cam->elevDeg, cam->azimDeg, cam->rollDeg, 0};
+            if (std::isnan(s.elev) || std::isnan(s.azim)) {
+                // Camera built from explicit eye: derive spherical angles.
+                float dx = cam->eye.x - cam->target.x;
+                float dy = cam->eye.y - cam->target.y;
+                float dz = cam->eye.z - cam->target.z;
+                float r = std::sqrt(dx*dx + dy*dy + dz*dz);
+                s.dist = r;
+                s.elev = std::asin(dz / std::max(r, 1e-9f)) * 180.0f
+                         / float(M_PI);
+                s.azim = std::atan2(dy, dx) * 180.0f / float(M_PI);
+            } else {
+                float dx = cam->eye.x - cam->target.x;
+                float dy = cam->eye.y - cam->target.y;
+                float dz = cam->eye.z - cam->target.z;
+                s.dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+            }
+            cams3D_.push_back(s);
+        }
+    }
+    if (cams3D_.empty()) return;
+    dragging_ = true;
+    dragAxes_ = e.inaxes;
+    dragStartCanvas_ = {e.x, e.y};
+    drag3DButton_ = e.button;
+}
+
+void Navigation::dragTo3D(const Event& e) {
+    float dx = e.x - dragStartCanvas_.x;
+    float dy = e.y - dragStartCanvas_.y;  // canvas px, y-down
+    float w = float(std::max(dragAxes_->rect.width, 1u));
+    float h = float(std::max(dragAxes_->rect.height, 1u));
+    for (auto& s : cams3D_) {
+        Camera3D& cam = *s.cam;
+        float elev = s.elev, azim = s.azim, dist = s.dist;
+        if (drag3DButton_ == 3) {
+            // Right-drag: zoom — dolly in/out (drag up zooms in).
+            dist = s.dist * std::exp(dy * 0.01f);
+        } else {
+            // Left-drag: rotate — mpl Axes3D._on_move:
+            // azim -= dx/w*360, elev += dy_up/h*180 (y-down → -dy).
+            azim = s.azim - dx / w * 360.0f;
+            elev = std::clamp(s.elev - dy / h * 180.0f, -180.0f, 180.0f);
+        }
+        Camera3D n = Camera3D::viewInit(elev, azim, s.roll, cam.target, dist);
+        // Preserve projection/box-normalization settings.
+        n.fov = cam.fov; n.aspect = cam.aspect;
+        n.nearZ = cam.nearZ; n.farZ = cam.farZ;
+        n.dataMin = cam.dataMin; n.dataMax = cam.dataMax;
+        cam = n;
+    }
+}
+
 void Navigation::startDrag(const Event& e) {
     if (mode_ == Mode::None || !e.inaxes) return;
     dragging_ = true;
@@ -150,11 +208,19 @@ bool Navigation::handleEvent(const Event& e) {
             return handleKey(e);
         case Event::Type::ButtonPress:
             if (e.button == 1 || e.button == 3) {
+                // mpl Axes3D: plain drag rotates (button1) / zooms
+                // (button3) when the axes holds 3D plots.
+                if (e.inaxes && std::ranges::any_of(e.inaxes->plots(),
+                        [](const auto& p) { return p->camera3D(); })) {
+                    startDrag3D(e);
+                    return true;
+                }
                 startDrag(e);
                 return dragging_;
             }
             return false;
         case Event::Type::MotionNotify:
+            if (dragging_ && !cams3D_.empty()) { dragTo3D(e); return true; }
             if (dragging_) { dragTo(e); return true; }
             // Cursor data readout (toolbar coordinate display).
             if (onCursorMove && e.inaxes) {
@@ -162,7 +228,12 @@ bool Navigation::handleEvent(const Event& e) {
             }
             return false;
         case Event::Type::ButtonRelease:
-            if (dragging_) { endDrag(e); return true; }
+            if (dragging_) {
+                endDrag(e);
+                cams3D_.clear();
+                drag3DButton_ = 0;
+                return true;
+            }
             return false;
         case Event::Type::Scroll: {
             // Scroll zoom: scale both view ranges by 1.2^-step about the

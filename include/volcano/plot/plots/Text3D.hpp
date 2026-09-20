@@ -37,6 +37,7 @@ public:
 
     /// Set the camera for 3D projection. Must be called before prepare().
     void setCamera(const Camera3D& camera) { camera_ = camera; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

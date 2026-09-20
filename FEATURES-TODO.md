@@ -742,18 +742,35 @@ tri_*) are checked off in the sections above.
       msdfgen core (FreeType outline → Shape → generateMSDF → RGBA
       atlas), `font_manager_ft::msdf_enabled`, R8G8B8A8 atlas texture,
       median-of-3 + fwidth fragment shader.
-- [ ] **Multi-frame animation GPU encode** — APNG/GIF encoders are CPU;
-      wire the compute-shader encoder into the animation path.
-- [ ] **Partial redraw / damage tracking** — screen backend re-renders
-      everything; cache the framebuffer and blit overlays.
-- [ ] **GPU `pcolormesh`/`contour`** — move CPU tessellation to compute
-      for million-cell meshes.
+- [x] **Multi-frame animation GPU encode** — `GpuPngEncoder` computes
+      adaptive PNG row filtering (all 5 filters, min sum-of-abs) in a
+      compute shader (one workgroup/row); `saveAnimation` wires it into
+      `ApngWriter` via `setFrameFilter` so APNG frames are GPU-filtered
+      (zlib deflate stays on CPU; verified decoded output).
+- [x] **Partial redraw / damage tracking** — mpl `figure.stale`/`axes.stale`
+      dirty tracking: every Axes mutator calls `touch()` which propagates
+      to `Figure::markStale()`; `Figure::stale()`/`setStale()` aggregate
+      over all axes (incl. subfigures); `Renderer::renderFrame` clears the
+      flags and new `Renderer::renderIfStale()` skips re-recording when
+      nothing changed (StaleTracking tests). Blit-based overlay restore
+      already existed via `blitCaptureBackground`/`blitDrawAnimated`.
+- [x] **GPU `pcolormesh` tessellation** — compute shader expands the
+      cell grid directly into `VertexStorage` position/color buffers
+      (flat + Gouraud, 259-entry LUT incl. under/over/bad, NaN-skip),
+      adopted by `FillRenderer::adoptBuffers` with compute→vertex barriers;
+      `PcmShading::gpuTessellate` (-1 auto large meshes, 0 CPU, 1 force),
+      CPU fallback on failure. `GpuTessellationMatchesCpu` verifies
+      pixel-identical output. Contour remains CPU (per-level restroking
+      needs host-side segments).
 
 ### P3 — Broader matplotlib surface
-- [~] **`AxesImage` transforms** — `imshow` `extent` (`Grid2D.xRange`/
-      `yRange`) and mpl `aspect=` ("equal" default letterboxes the axes;
-      "auto" fills it) done; `transform=` non-affine (polar projection
-      of images) remains.
+- [x] **`AxesImage` transforms** — `imshow` `extent` (`Grid2D.xRange`/
+      `yRange`), mpl `aspect=`, and `transform=` non-affine projections
+      all done: `HeatmapRenderer` draws a fullscreen quad and
+      inverse-maps each fragment through `projInv`/`scaleInv` GLSL
+      (analytic polar inverse + theta mod-2pi wrap, Newton solve for
+      geo projections), so images curve correctly on polar axes
+      (ProjectionRegression.PolarImshowCurves).
 - [x] **`mpl_toolkits.axes_grid1` extras** — `AnchoredSizeBar`
       (`Axes::addSizeBar`), zoom-effect inset (`Axes::indicateInset`/
       `indicateInsetZoom`, mpl auto connector visibility), and generic
@@ -766,16 +783,26 @@ tri_*) are checked off in the sections above.
       (mpl art3d._zalpha: alpha *= 1 − norm(depth)·0.7) done;
       and `Camera3D::viewInit(elev, azim, roll)` (mpl axes3d u/v/w
       basis, roll rotation about the view axis) done; interactive
-      mouse-drag rotation remains.
+      mouse-drag rotation done (left-drag orbits elev/azim, right-drag
+      dollies; `Navigation` detects 3D plot layers, `IPlot::camera3D()`,
+      Navigation3D tests).
 - [x] **`quiver`/`streamplot` params** — quiver `scale`, `width`,
       `headwidth` (+ `headlength`/`headaxislength`/`pivot`); streamplot
       `arrowsize`/`broken_streamlines`.
 
 ### P4 — Ecosystem & ergonomics
-- [ ] **pybind11 bindings (`volcanoplot` Python module)** — the single
-      biggest adoption driver; keep the API mirroring `matplotlib.pyplot`.
-- [ ] **`xarray`/`pandas` plotting hooks** — `__array__` + `plot`
-      dispatch, index/date handling via existing unit converters.
+- [x] **pybind11 bindings (`volcanoplot` Python module)** — pybind11
+      module (`python/volcanoplot.cpp`, `VOLCANO_BUILD_PYTHON`, built
+      to build/python/): Figure/Axes, plot/scatter/bar/imshow,
+      xlim/ylim/xscale/yscale/xlabel/ylabel/title/grid/legend/
+      set_projection, suptitle/supxlabel/supylabel, savefig (all
+      raster+vector formats). Keeps the API mirroring `matplotlib.pyplot`.
+- [x] **`xarray`/`pandas` plotting hooks** — `toFloats()` in
+      volcanoplot.cpp accepts numpy arrays (buffer fast-path via
+      forcecast), pandas Series/Index and xarray via `.values`,
+      datetime64/timedelta64 → days-since-epoch (date2num) with automatic
+      `xaxis_date`/`yaxis_date` converter install; string x in `bar()`
+      installs category ticks (mpl categorical semantics).
 - [ ] **Nix/Homebrew packaging + CI matrix** — prebuilt binaries,
       Vulkan ICD (lavapipe) in CI for headless tests.
 - [ ] **Documentation site** — API reference (Doxygen/mkdocs), gallery

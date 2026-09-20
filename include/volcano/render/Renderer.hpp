@@ -31,6 +31,12 @@ public:
     /// Render one frame of the figure.
     void renderFrame(plot::Figure& figure);
 
+    /// Partial-redraw entry point (mpl `fig.stale` semantics): re-renders
+    /// only when the figure or an axes was mutated since the last draw.
+    /// Returns true when a frame was actually recorded; false means the
+    /// previous framebuffer is still current and can be reused as-is.
+    bool renderIfStale(plot::Figure& figure);
+
     /// Blitting (mpl canvas.copy_from_bbox + restore_region + draw_artist):
     /// render the frame *without* animated artists and snapshot the
     /// result as the restorable background. Returns false when the
@@ -114,6 +120,7 @@ private:
     bool reduceInited_ = false;
     bool textReady_ = false;
     bool prepared_ = false;
+    bool frameValid_ = false;
 
     /// Draw axis labels, tick labels, and title for one axes.
     void drawText(vk::CommandBuffer cmd, const plot::Axes& axes,

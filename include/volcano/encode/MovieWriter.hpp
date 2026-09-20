@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <span>
@@ -45,12 +46,23 @@ public:
         return bytes_;
     }
 
+    /// Optional hook producing PNG-filtered scanlines (`h` rows of
+    /// `1 filter byte + w*4 bytes`) per frame — e.g. GpuPngEncoder's
+    /// compute-shader filter. Replaces the default filter-0 CPU path.
+    void setFrameFilter(
+        std::function<std::vector<uint8_t>(std::span<const uint8_t>,
+                                         uint32_t, uint32_t)> f) {
+        frameFilter_ = std::move(f);
+    }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::string error_;
     std::filesystem::path path_;
     std::vector<uint8_t> bytes_;
+    std::function<std::vector<uint8_t>(std::span<const uint8_t>,
+                                     uint32_t, uint32_t)> frameFilter_;
 };
 
 /// Self-contained GIF89a writer (animated GIF, global 256-color palette

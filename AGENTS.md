@@ -34,11 +34,11 @@ cmake --build build -j4
 ./build/examples/example_headless_scatter
 
 # Generate side-by-side matplotlib vs VolcanoPlot gallery
-./scripts/generate_gallery.sh gallery
+./scripts/generate_gallery.py gallery
 
 # Generate per-microfeature comparison gallery (parallelized; see
 # docs/MICROFEATURES.md for the ordered verification checklist)
-./scripts/generate_microgallery.sh gallery_micro --jobs 8
+./scripts/generate_microgallery.py gallery_micro --jobs 8
 ```
 
 ## Dependencies (system)

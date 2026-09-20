@@ -13,13 +13,14 @@ namespace volcano::plot {
 /// Bar3D configuration.
 struct Bar3DConfig {
     /// Fill color for all bars (used if perBarColors is empty).
-    Color color = Color::fromRgba8(31, 119, 180, 200);
+    Color color = Color::fromRgba8(31, 119, 180, 255);
     /// Edge color for bar outlines.
     Color edgeColor = Color::black();
     /// Edge line width.
     float edgeWidth = 1.0f;
-    /// Whether to draw edges.
-    bool drawEdges = true;
+    /// Whether to draw edges (matplotlib bar3d default: face-colored,
+    /// i.e. invisible edges → false).
+    bool drawEdges = false;
     /// Label for legend.
     std::string label;
 };
@@ -45,6 +46,7 @@ public:
 
     /// Set the camera for 3D projection. Must be called before prepare().
     void setCamera(const Camera3D& camera) { camera_ = camera; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

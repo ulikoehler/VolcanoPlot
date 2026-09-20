@@ -11,6 +11,7 @@
 
 #include <volcano/plot/plots/ScatterPlot.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
+#include <volcano/plot/plots/HeatmapPlot.hpp>
 
 #include <cmath>
 
@@ -533,6 +534,39 @@ TEST(ProjectionRegression, PolarLineRenders) {
     EXPECT_NEAR(c.y, 128.0, 30.0);
 }
 
+TEST(ProjectionRegression, PolarImshowCurves) {
+    SFig cf(256);
+    // Grid: theta x r; value varies with theta so wedges are visible.
+    Grid2D grid;
+    grid.width = 64;
+    grid.height = 16;
+    grid.xRange = {0.0, 6.2831853};   // theta
+    grid.yRange = {0.0, 1.0};         // r
+    grid.valueRange = {0.0, 1.0};
+    grid.values.resize(grid.width * grid.height);
+    for (uint32_t j = 0; j < grid.height; ++j)
+        for (uint32_t i = 0; i < grid.width; ++i)
+            grid.values[j * grid.width + i] = float(i) / float(grid.width - 1);
+    cf.axes->addPlot(std::make_unique<HeatmapPlot>(std::move(grid)));
+    cf.axes->setProjection("polar");
+    cf.axes->setViewport({0.0, 6.2831853, 0.0, 1.0, 0, 1});
+    auto img = cf.render();
+
+    // The image must fill a disk: center pixel covered (r=0), corners empty.
+    Pixel center = img.get(128, 128);
+    EXPECT_FALSE(center.approx(Pixel::white(), 10))
+        << "Polar imshow should cover the canvas center";
+    EXPECT_TRUE(img.get(4, 4).approx(Pixel::white(), 10))
+        << "Corners should be outside the polar disk";
+    // Angular gradient (viridis: dark at v=0, yellow at v=1): just above
+    // the +x axis theta ~ 0+ (dark); just below, theta wraps to ~2pi
+    // (bright). Assert the wrap seam lands in the right place.
+    Pixel above = img.get(240, 116);
+    Pixel below = img.get(240, 140);
+    EXPECT_LT(int(above.r) + int(above.g), int(below.r) + int(below.g))
+        << "theta gradient should wrap dark->bright across the +x axis";
+}
+
 // ─── Inset-zoom indicator (mpl Axes.indicate_inset_zoom) ───────────────────
 
 TEST(InsetIndicator, RectMatchesInsetViewport) {
@@ -610,4 +644,37 @@ TEST(InsetIndicator, RendersInRaster) {
     auto img = harness.render(fig);
     // The indicator rect + connectors paint black-ish pixels.
     EXPECT_GT(img.countColor(Pixel::black(), 100), 30u);
+}
+
+TEST(StaleTracking, InitialStateAndRenderClear) {
+    PlotTestHarness h(128, 96);
+    Figure fig;
+    EXPECT_TRUE(fig.stale());
+    auto* ax = fig.addAxes(0, 0);
+    ax->plot(std::vector<float>{0, 1}, std::vector<float>{0, 1});
+    h.render(fig);
+    EXPECT_FALSE(fig.stale());
+    EXPECT_FALSE(ax->stale());
+}
+
+TEST(StaleTracking, MutatorsMarkStale) {
+    PlotTestHarness h(128, 96);
+    Figure fig;
+    auto* ax = fig.addAxes(0, 0);
+    ax->plot(std::vector<float>{0, 1}, std::vector<float>{0, 1});
+    h.render(fig);
+    EXPECT_FALSE(fig.stale());
+
+    ax->setXlim(0, 2);
+    EXPECT_TRUE(ax->stale());
+    EXPECT_TRUE(fig.stale());
+
+    h.render(fig);
+    EXPECT_FALSE(fig.stale());
+    fig.suptitle("t");
+    EXPECT_TRUE(fig.stale());
+    h.render(fig);
+    EXPECT_FALSE(fig.stale());
+    ax->grid(true);
+    EXPECT_TRUE(fig.stale());
 }

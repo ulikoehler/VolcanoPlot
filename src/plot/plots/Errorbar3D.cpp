@@ -44,7 +44,7 @@ void Errorbar3D::errBounds(size_t i, const std::vector<float>& sym,
     }
 }
 
-void Errorbar3D::projectGeometry() {
+void Errorbar3D::projectGeometry(float canvasW, float canvasH) {
     errorSegments_.clear();
     markerPoints_.clear();
     markerColors_.clear();
@@ -54,10 +54,10 @@ void Errorbar3D::projectGeometry() {
 
     auto vp = camera_.viewProjection();
 
-    // Cap size in NDC: convert pixel cap size to NDC (approximate).
-    // NDC spans [-1, 1] = 2 units over the canvas. Cap is in pixels.
-    // We use a fixed small NDC offset for caps.
-    float capNdc = config_.capSize / 128.0f;  // approximate
+    // Cap size in NDC: capSize is pixels; NDC spans [-1,1] = 2 units over
+    // the canvas extent (mpl capsize is absolute points → absolute px).
+    float capNdcX = config_.capSize * 2.0f / canvasW;
+    float capNdcY = config_.capSize * 2.0f / canvasH;
 
     hasErrors_ = false;
 
@@ -89,10 +89,10 @@ void Errorbar3D::projectGeometry() {
             if (config_.drawCaps) {
                 // Caps perpendicular to the error bar direction in screen space.
                 // For X error bars, caps are vertical in screen space (approximate).
-                errorSegments_.push_back({p1.x, p1.y - capNdc});
-                errorSegments_.push_back({p1.x, p1.y + capNdc});
-                errorSegments_.push_back({p2.x, p2.y - capNdc});
-                errorSegments_.push_back({p2.x, p2.y + capNdc});
+                errorSegments_.push_back({p1.x, p1.y - capNdcY});
+                errorSegments_.push_back({p1.x, p1.y + capNdcY});
+                errorSegments_.push_back({p2.x, p2.y - capNdcY});
+                errorSegments_.push_back({p2.x, p2.y + capNdcY});
             }
         }
 
@@ -105,10 +105,10 @@ void Errorbar3D::projectGeometry() {
             errorSegments_.push_back(p2);
 
             if (config_.drawCaps) {
-                errorSegments_.push_back({p1.x - capNdc, p1.y});
-                errorSegments_.push_back({p1.x + capNdc, p1.y});
-                errorSegments_.push_back({p2.x - capNdc, p2.y});
-                errorSegments_.push_back({p2.x + capNdc, p2.y});
+                errorSegments_.push_back({p1.x - capNdcX, p1.y});
+                errorSegments_.push_back({p1.x + capNdcX, p1.y});
+                errorSegments_.push_back({p2.x - capNdcX, p2.y});
+                errorSegments_.push_back({p2.x + capNdcX, p2.y});
             }
         }
 
@@ -122,17 +122,18 @@ void Errorbar3D::projectGeometry() {
 
             if (config_.drawCaps) {
                 // Z error bars project roughly vertically, so caps are horizontal.
-                errorSegments_.push_back({p1.x - capNdc, p1.y});
-                errorSegments_.push_back({p1.x + capNdc, p1.y});
-                errorSegments_.push_back({p2.x - capNdc, p2.y});
-                errorSegments_.push_back({p2.x + capNdc, p2.y});
+                errorSegments_.push_back({p1.x - capNdcX, p1.y});
+                errorSegments_.push_back({p1.x + capNdcX, p1.y});
+                errorSegments_.push_back({p2.x - capNdcX, p2.y});
+                errorSegments_.push_back({p2.x + capNdcX, p2.y});
             }
         }
     }
 }
 
 void Errorbar3D::prepare(render::Renderer& r) {
-    projectGeometry();
+    auto ext = r.backend().extent();
+    projectGeometry(float(ext.width), float(ext.height));
 
     auto& ctx = r.backend().context();
 

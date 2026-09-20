@@ -8,7 +8,7 @@ on:
       - 'include/**'
       - 'examples/gallery.cpp'
       - 'scripts/matplotlib_gallery.py'
-      - 'scripts/generate_gallery.sh'
+      - 'scripts/generate_gallery.py'
       - '.github/workflows/gallery.yml'
   pull_request:
     branches: [main, master]
@@ -17,7 +17,7 @@ on:
       - 'include/**'
       - 'examples/gallery.cpp'
       - 'scripts/matplotlib_gallery.py'
-      - 'scripts/generate_gallery.sh'
+      - 'scripts/generate_gallery.py'
       - '.github/workflows/gallery.yml'
   workflow_dispatch:  # Allow manual triggering
 
@@ -45,7 +45,8 @@ jobs:
             libwebp-dev \
             libfreetype-dev \
             libharfbuzz-dev \
-            imagemagick
+            imagemagick \
+            python3-dev
 
       - name: Install Python dependencies
         run: |
@@ -71,8 +72,18 @@ jobs:
       - name: Run tests
         run: ./build/tests/volcano_tests
 
+      - name: Python module smoke test
+        run: |
+          PYTHONPATH=build/python python3 - <<'PY'
+          import volcanoplot as vp
+          fig = vp.Figure(320, 240)
+          ax = fig.add_axes()
+          ax.plot([0, 1], [0, 1])
+          assert fig.savefig("/tmp/vp_smoke.png")
+          PY
+
       - name: Generate gallery
-        run: ./scripts/generate_gallery.sh gallery
+        run: ./scripts/generate_gallery.py gallery
 
       - name: Upload VolcanoPlot PNGs
         uses: actions/upload-artifact@v4

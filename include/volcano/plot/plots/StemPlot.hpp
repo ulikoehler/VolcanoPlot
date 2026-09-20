@@ -23,10 +23,10 @@ struct StemConfig {
     std::string markerStyle = "circle";
     /// Baseline value (y-coordinate where stems start).
     float baseline = 0.0f;
-    /// Baseline color.
-    Color baselineColor = Color::fromRgba8(31, 119, 180, 128);
-    /// Baseline line width.
-    float baselineWidth = 1.0f;
+    /// Baseline color (mpl stem default basefmt 'C3-' → red).
+    Color baselineColor = Color::fromRgba8(214, 39, 40, 255);
+    /// Baseline line width (mpl lines.linewidth default).
+    float baselineWidth = 1.5f;
     /// Draw markers at the top of each stem.
     bool markers = true;
     /// Draw the baseline horizontal line.

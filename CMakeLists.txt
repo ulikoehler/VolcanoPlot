@@ -51,6 +51,7 @@ option(VOLCANO_BUILD_EXAMPLES "Build example applications" ON)
 option(VOLCANO_BUILD_TESTS "Build tests (requires GoogleTest)" ON)
 option(VOLCANO_ENABLE_VALIDATION "Enable Vulkan validation layers in debug" ON)
 option(VOLCANO_GPU_ENCODE "Enable GPU-side image encoding (compute shaders)" ON)
+option(VOLCANO_BUILD_PYTHON "Build the pybind11 volcanoplot Python module" ON)
 
 # Parallelism guard — match Tether convention to avoid OOM on limited-RAM machines.
 if(NOT DEFINED VOLCANO_BUILD_PARALLELISM)
@@ -311,6 +312,13 @@ endif()
 # -----------------------------------------------------------------------------
 if(VOLCANO_BUILD_TESTS)
     add_subdirectory(tests)
+endif()
+
+# -----------------------------------------------------------------------------
+# Python module (pybind11)
+# -----------------------------------------------------------------------------
+if(VOLCANO_BUILD_PYTHON)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/python.cmake)
 endif()
 
 # -----------------------------------------------------------------------------

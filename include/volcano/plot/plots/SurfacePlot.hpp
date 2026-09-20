@@ -14,6 +14,7 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     Camera3D& camera() noexcept { return camera_; }
+    Camera3D* camera3D() noexcept override { return &camera_; }
     /// mpl plot_surface `shade` (default True): lambert light shading.
     bool shade = true;
     /// mpl LightSource defaults (degrees).

@@ -76,6 +76,16 @@ void pngChunk(std::vector<uint8_t>& out, const char* type,
         reinterpret_cast<const char*>(out.data() + t), 4), data));
 }
 
+std::vector<uint8_t> deflateScanlines(std::vector<uint8_t>& scan) {
+    uLongf bound = compressBound(uLong(scan.size()));
+    std::vector<uint8_t> z(bound);
+    if (compress2(z.data(), &bound, scan.data(), uLong(scan.size()),
+                  Z_BEST_SPEED) != Z_OK)
+        return {};
+    z.resize(bound);
+    return z;
+}
+
 std::vector<uint8_t> deflateRgba(std::span<const uint8_t> rgba,
                                  uint32_t w, uint32_t h) {
     // Scanlines: filter byte 0 + RGBA row.
@@ -86,13 +96,7 @@ std::vector<uint8_t> deflateRgba(std::span<const uint8_t> rgba,
         row[0] = 0;
         std::memcpy(row + 1, rgba.data() + size_t(y) * w * 4, w * 4);
     }
-    uLongf bound = compressBound(uLong(raw));
-    std::vector<uint8_t> z(bound);
-    if (compress2(z.data(), &bound, scan.data(), uLong(raw),
-                  Z_BEST_SPEED) != Z_OK)
-        return {};
-    z.resize(bound);
-    return z;
+    return deflateScanlines(scan);
 }
 
 void apngFctl(std::vector<uint8_t>& out, uint32_t seq, uint32_t w,
@@ -145,7 +149,13 @@ bool ApngWriter::writeFrame(std::span<const uint8_t> rgba) {
         error_ = "bad frame";
         return false;
     }
-    auto z = deflateRgba(rgba, impl_->w, impl_->h);
+    std::vector<uint8_t> z;
+    if (frameFilter_) {
+        auto scan = frameFilter_(rgba, impl_->w, impl_->h);
+        if (!scan.empty()) z = deflateScanlines(scan);
+    } else {
+        z = deflateRgba(rgba, impl_->w, impl_->h);
+    }
     if (z.empty()) { error_ = "deflate failed"; return false; }
     impl_->frames.push_back(std::move(z));
     return true;

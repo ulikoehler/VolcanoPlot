@@ -31,6 +31,12 @@ public:
                 std::span<const plot::Point2D> positions,
                 std::span<const plot::Color> colors);
 
+    /// Adopt buffers filled externally (e.g. by a compute-shader
+    /// tessellator). Same layout as upload(): vec2 pos + vec4 color,
+    /// `count` vertices. The caller must ensure writes are visible.
+    void adoptBuffers(core::Buffer positions, core::Buffer colors,
+                      uint32_t count);
+
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               const plot::Transform2D& transform) const;
 

@@ -2,6 +2,7 @@
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorRenderer.hpp"
 #include "volcano/render/VectorWriters.hpp"
+#include <volcano/encode/GpuPngEncoder.hpp>
 #include <volcano/encode/MovieWriter.hpp>
 #include <volcano/plot/Animation.hpp>
 #include <volcano/plot/Colormap.hpp>
@@ -1117,6 +1118,17 @@ void Renderer::renderFrame(plot::Figure& figure) {
                                 ctx.graphicsPool.handle());
         renderFrameSubset(figure, DrawSubset::All);
     }
+    figure.setStale(false);
+}
+
+bool Renderer::renderIfStale(plot::Figure& figure) {
+    if (!frameValid_ || figure.stale()) {
+        prepare(figure);
+        renderFrame(figure);   // clears fig.stale
+        frameValid_ = true;
+        return true;
+    }
+    return false;
 }
 
 bool Renderer::blitCaptureBackground(plot::Figure& figure) {
@@ -1238,6 +1250,35 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                          ext.width * 0.5f - m.width * 0.5f + 0.6f,
                          m.ascent + 2.0f, ft.color, scale,
                          ft.font.rotation, plot::HAlign::Center);
+    }
+
+    // Figure-level axis labels (mpl fig.supxlabel / fig.supylabel):
+    // bottom-center horizontal and left-center rotated bottom-to-top.
+    // Font follows figure.labelsize ('large' ≈ 12pt).
+    if (subset != DrawSubset::AnimatedOnly && textInited_ && textReady_ &&
+        (!figure.supxlabel().empty() || !figure.supylabel().empty())) {
+        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        float dpi = figure.style().dpi;
+        float labScale = 12.0f * dpi / (72.0f * 16.0f);
+        if (!figure.supxlabel().empty()) {
+            auto m = measureRichText(figure.supxlabel(), labScale);
+            drawRichText(cmd, fullRect, figure.supxlabel(),
+                         ext.width * 0.5f - m.width * 0.5f,
+                         ext.height - 4.0f - m.height + m.ascent,
+                         plot::Color::black(), labScale, 0.0f,
+                         plot::HAlign::Center);
+        }
+        if (!figure.supylabel().empty()) {
+            auto m = measureRichText(figure.supylabel(), labScale);
+            // Rotated text reads bottom-to-top at the left margin
+            // (mpl supylabel at fig fraction (0.02, 0.5)).
+            drawRichText(cmd, fullRect, figure.supylabel(),
+                         4.0f + m.ascent,
+                         ext.height * 0.5f + m.width * 0.5f,
+                         plot::Color::black(), labScale,
+                         -1.5707963267948966f /* -π/2, bottom-to-top */,
+                         plot::HAlign::Center);
+        }
     }
 
     // Interactive overlays (§11): widgets + nav zoom rubber-band.
@@ -1790,6 +1831,20 @@ bool Renderer::saveAnimation(plot::Animation& anim,
     if (!w) return false;
     auto ext = backend_.extent();
     if (!w->open(path, ext.width, ext.height, fps)) return false;
+    // GPU-side PNG filtering for APNG frames (compute shader picks the
+    // per-row filter; zlib deflate stays on the CPU).
+    std::unique_ptr<encode::GpuPngEncoder> gpuEnc;
+    if (auto* apng = dynamic_cast<encode::ApngWriter*>(w.get())) {
+        auto& ctx = backend_.context();
+        gpuEnc = std::make_unique<encode::GpuPngEncoder>(
+            ctx.device.handle(), ctx.device.graphicsQueue(),
+            ctx.graphicsPool.handle(), ctx.allocator.handle());
+        auto* enc = gpuEnc.get();
+        apng->setFrameFilter([enc](std::span<const uint8_t> rgba,
+                                   uint32_t fw, uint32_t fh) {
+            return enc->filterScanlines(rgba, fw, fh);
+        });
+    }
     size_t n = anim.frameCount();
     // Blit path (mpl blit=True): snapshot the static background once,
     // then per frame restore it and draw only `animated` artists.

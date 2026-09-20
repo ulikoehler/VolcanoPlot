@@ -58,8 +58,14 @@ public:
 
     /// Set the data viewport (axis limits).
     void setViewport(Viewport v) {
-        viewport_ = v; manualX_ = manualY_ = true;
+        viewport_ = v; manualX_ = manualY_ = true; touch();
     }
+    /// matplotlib `axes.stale`: mark this axes (and its figure) dirty so
+    /// the next draw re-renders. Called automatically by mutators.
+    void touch() noexcept;
+    /// True when a mutator ran since the last draw cleared the flag.
+    [[nodiscard]] bool stale() const noexcept { return stale_; }
+    void setStale(bool v) noexcept { stale_ = v; }
     [[nodiscard]] const Viewport& viewport() const noexcept { return viewport_; }
     [[nodiscard]] Viewport& viewport() noexcept { return viewport_; }
     [[nodiscard]] bool manualViewport() const noexcept {
@@ -69,18 +75,18 @@ public:
     [[nodiscard]] bool manualY() const noexcept { return manualY_; }
 
     /// matplotlib set_xlim / set_ylim / xlim / ylim.
-    void setXlim(float lo, float hi) { viewport_.x = {lo, hi}; manualX_ = true; }
-    void setYlim(float lo, float hi) { viewport_.y = {lo, hi}; manualY_ = true; }
+    void setXlim(float lo, float hi) { viewport_.x = {lo, hi}; manualX_ = true; touch(); }
+    void setYlim(float lo, float hi) { viewport_.y = {lo, hi}; manualY_ = true; touch(); }
     [[nodiscard]] Range xlim() const { return viewport_.x; }
     [[nodiscard]] Range ylim() const { return viewport_.y; }
     [[nodiscard]] bool xAxisInverted() const { return viewport_.x.min > viewport_.x.max; }
     [[nodiscard]] bool yAxisInverted() const { return viewport_.y.min > viewport_.y.max; }
-    void invertXAxis() { std::swap(viewport_.x.min, viewport_.x.max); manualX_ = true; }
-    void invertYAxis() { std::swap(viewport_.y.min, viewport_.y.max); manualY_ = true; }
+    void invertXAxis() { std::swap(viewport_.x.min, viewport_.x.max); manualX_ = true; touch(); }
+    void invertYAxis() { std::swap(viewport_.y.min, viewport_.y.max); manualY_ = true; touch(); }
 
     // --- Scales (matplotlib set_xscale/set_yscale) ---
-    void setXscale(AxisScale s) { xScale_ = std::move(s); }
-    void setYscale(AxisScale s) { yScale_ = std::move(s); }
+    void setXscale(AxisScale s) { xScale_ = std::move(s); touch(); }
+    void setYscale(AxisScale s) { yScale_ = std::move(s); touch(); }
     void setXscale(std::string_view name);   ///< "linear","log","symlog","logit","asinh","mercator"
     void setYscale(std::string_view name);
     [[nodiscard]] const AxisScale& xscale() const noexcept { return xScale_; }
@@ -89,8 +95,8 @@ public:
     [[nodiscard]] AxisScale& yscale() noexcept { return yScale_; }
 
     /// Back-compat log toggles (equivalent to setXscale("log")).
-    void setLogX(bool v) { if (v) xScale_ = AxisScale::log(); else xScale_ = {}; }
-    void setLogY(bool v) { if (v) yScale_ = AxisScale::log(); else yScale_ = {}; }
+    void setLogX(bool v) { if (v) xScale_ = AxisScale::log(); else xScale_ = {}; touch(); }
+    void setLogY(bool v) { if (v) yScale_ = AxisScale::log(); else yScale_ = {}; touch(); }
     [[nodiscard]] bool logX() const noexcept { return xScale_.kind == ScaleKind::Log; }
     [[nodiscard]] bool logY() const noexcept { return yScale_.kind == ScaleKind::Log; }
 
@@ -104,6 +110,7 @@ public:
     // --- Projection (matplotlib projection="polar" etc.) ---
     void setProjection(Projection p) {
         projection_ = p;
+        touch();
         // matplotlib polar axes are always aspect-equal (adjustable box)
         // and show the theta/r grid by default (rcParam polaraxes.grid).
         if (p.kind == ProjectionKind::Polar) {
@@ -116,16 +123,16 @@ public:
     [[nodiscard]] const Projection& projection() const noexcept { return projection_; }
 
     /// Polar helpers (matplotlib set_rgrids/set_thetagrids/...).
-    void setRgrids(std::vector<float> radii) { rgrids_ = std::move(radii); }
-    void setThetagrids(std::vector<float> degrees) { thetagrids_ = std::move(degrees); }
-    void setThetaOffset(float radians) { projection_.thetaOffset = radians; }
-    void setThetaDirection(int dir) { projection_.thetaDir = dir < 0 ? -1.0f : 1.0f; }
+    void setRgrids(std::vector<float> radii) { rgrids_ = std::move(radii); touch(); }
+    void setThetagrids(std::vector<float> degrees) { thetagrids_ = std::move(degrees); touch(); }
+    void setThetaOffset(float radians) { projection_.thetaOffset = radians; touch(); }
+    void setThetaDirection(int dir) { projection_.thetaDir = dir < 0 ? -1.0f : 1.0f; touch(); }
     void setThetaZeroLocation(std::string_view loc); ///< "N","E","S","W",...
     [[nodiscard]] const std::vector<float>& rgrids() const { return rgrids_; }
     [[nodiscard]] const std::vector<float>& thetagrids() const { return thetagrids_; }
 
     // --- Aspect ---
-    void setAspect(AspectMode m) { aspect_ = m; }
+    void setAspect(AspectMode m) { aspect_ = m; touch(); }
     void setAspectEqual() { aspect_ = AspectMode::Equal; }
     void setAdjustable(Adjustable a) { adjustable_ = a; }
     [[nodiscard]] AspectMode aspect() const noexcept { return aspect_; }
@@ -227,10 +234,10 @@ public:
     void grid(bool on, std::string_view which = "major",
               std::string_view axis = "both");
 
-    void setTitle(std::string t) { style_.title.text = std::move(t); }
+    void setTitle(std::string t) { style_.title.text = std::move(t); touch(); }
     /// matplotlib ax.legend(): enable the legend and return its style for
     /// configuration (`axes.legend().location = "upper left";`).
-    LegendStyle& legend() { style_.legend.visible = true; return style_.legend; }
+    LegendStyle& legend() { style_.legend.visible = true; touch(); return style_.legend; }
     /// Replaces the style AND reseeds the prop cycler (matplotlib:
     /// style()/rcParams control the cycle for subsequently added plots).
     void setStyle(FigureStyle s);
@@ -380,6 +387,9 @@ public:
     void resetPropCycle() { cycler_.reset(); }
 
     [[nodiscard]] const std::vector<std::unique_ptr<IPlot>>& plots() const noexcept { return plots_; }
+    /// Mutable access — needed by interactive 3D rotation to update
+    /// per-plot cameras (IPlot::camera3D is non-const).
+    [[nodiscard]] std::vector<std::unique_ptr<IPlot>>& plots() noexcept { return plots_; }
     /// Plots in ascending zorder (stable — matplotlib draw order).
     [[nodiscard]] std::vector<const IPlot*> drawOrder() const;
     /// Picking: layers hit by the data-space point, topmost first
@@ -509,6 +519,8 @@ private:
     bool xTickMarksTop_ = false, yTickMarksRight_ = false;
     SpineSet spines_{};
     Figure* figure_ = nullptr;
+    /// mpl `axes.stale`: set by mutators, cleared after a draw.
+    bool stale_ = true;
     FigureStyle style_;
     Cycler cycler_;
     std::vector<std::unique_ptr<IPlot>> plots_;

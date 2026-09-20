@@ -35,6 +35,9 @@ struct PcolormeshConfig {
     float edgeWidth = 1.0f;
     /// If true, cells with NaN values are skipped (transparent).
     bool skipNaN = true;
+    /// GPU tessellation: -1 = auto (on for large meshes), 0 = CPU,
+    /// 1 = force compute-shader tessellation.
+    int gpuTessellate = -1;
     std::string label;
 };
 
@@ -90,6 +93,10 @@ private:
 
     void computeValueRange();
     void buildGeometry();
+    /// Compute-shader tessellation into VertexStorage buffers adopted by
+    /// fillRenderer_. Returns false when the GPU path can't be used
+    /// (caller falls back to buildGeometry()).
+    bool buildGeometryGpu(render::Renderer& r);
 };
 
 } // namespace volcano::plot

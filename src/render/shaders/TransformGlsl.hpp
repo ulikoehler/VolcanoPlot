@@ -78,4 +78,53 @@ vec2 projFwd(vec2 p, vec3 pr) {
 }
 )";
 
+/// GLSL: inverse of scaleFwd — maps a scaled axis value back to data.
+inline constexpr const char* kScaleInvFn = R"(
+float scaleInv(float w, vec3 s) {
+    int c = int(s.x + 0.5);
+    if (c == 1) return pow(10.0, w);                             // log
+    if (c == 2) {                                                // symlog
+        float lt = s.y, ls = s.z;
+        float aw = abs(w);
+        if (aw <= ls * lt) return w / ls;
+        return sign(w) * lt * pow(10.0, aw / lt - ls);
+    }
+    if (c == 3) return 1.0 / (1.0 + exp(-w));                    // logit
+    if (c == 4) {                                                // asinh
+        float a = max(s.y, 1e-30);
+        return a * sinh(w / a);
+    }
+    if (c == 5) return 2.0 * atan(exp(w)) - 1.5707963;           // mercator
+    return w;
+}
+)";
+
+/// GLSL: inverse of projFwd — display plane back to data (theta, r) /
+/// (lon, lat). Polar is analytic; geo projections use Newton iteration.
+inline constexpr const char* kProjInvFn = R"(
+vec2 projInv(vec2 d, vec3 pr) {
+    int c = int(pr.x + 0.5);
+    if (c == 0) return d;                                        // rectilinear
+    if (c == 1) {                                                // polar
+        float r = length(d);
+        float th = atan(d.y, d.x);
+        return vec2((th - pr.y) / pr.z, r);
+    }
+    // Newton solve projFwd(p) = d (aitoff/hammer/lambert/mollweide).
+    vec2 p = d;
+    for (int i = 0; i < 12; ++i) {
+        vec2 f = projFwd(p, pr) - d;
+        if (dot(f, f) < 1e-14) break;
+        float e = 1e-4;
+        vec2 fx = (projFwd(p + vec2(e, 0.0), pr) - projFwd(p - vec2(e, 0.0), pr)) / (2.0 * e);
+        vec2 fy = (projFwd(p + vec2(0.0, e), pr) - projFwd(p - vec2(0.0, e), pr)) / (2.0 * e);
+        float det = fx.x * fy.y - fx.y * fy.x;
+        if (abs(det) < 1e-12) break;
+        p -= vec2(fy.y * f.x - fx.y * f.y,
+                  -fy.x * f.x + fx.x * f.y) / det;
+    }
+    return p;
+}
+)";
+
 } // namespace volcano::render::shaders

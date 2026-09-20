@@ -551,3 +551,35 @@ TEST(PcolormeshRegression, GouraudValidatesCornerShape) {
         PcolormeshPlot({0}, {0}, {0.5f}, 1, 1, cfg),
         std::invalid_argument);
 }
+
+TEST(PcolormeshRegression, GpuTessellationMatchesCpu) {
+    // 8x8 flat-shaded grid with a gradient + one NaN cell, rendered via
+    // the CPU tessellator and the compute-shader path — must match.
+    std::vector<float> x(9), y(9), C(64);
+    for (int i = 0; i <= 8; ++i) { x[i] = float(i); y[i] = float(i) * 1.5f; }
+    for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < 8; ++i)
+            C[j * 8 + i] = float(i + j * 8) / 63.0f;
+    C[3 * 8 + 4] = std::nanf("");  // skipped cell
+
+    auto renderWith = [&](int gpu) {
+        PcmFigure cf(256);
+        PcolormeshConfig cfg;
+        cfg.cmap = &colormaps::viridis();
+        cfg.gpuTessellate = gpu;
+        cf.axes->addPlot(std::make_unique<PcolormeshPlot>(
+            x, y, C, 8, 8, cfg));
+        return cf.render();
+    };
+    auto cpu = renderWith(0);
+    auto gpu = renderWith(1);
+
+    // Full-canvas pixel equality (small tolerance for float raster noise).
+    size_t mismatches = 0;
+    for (uint32_t yy = 0; yy < 256; ++yy)
+        for (uint32_t xx = 0; xx < 256; ++xx)
+            if (!cpu.get(xx, yy).approx(gpu.get(xx, yy), 8)) ++mismatches;
+    EXPECT_LT(mismatches, 64u)
+        << "GPU-tessellated pcolormesh differs from CPU in " << mismatches
+        << " pixels";
+}

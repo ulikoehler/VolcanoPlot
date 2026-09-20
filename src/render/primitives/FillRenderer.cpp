@@ -160,6 +160,13 @@ void FillRenderer::upload(vk::Device device, vk::Queue queue,
                         std::as_bytes(colors));
 }
 
+void FillRenderer::adoptBuffers(core::Buffer positions, core::Buffer colors,
+                                uint32_t count) {
+    posBuffer_ = std::move(positions);
+    colorBuffer_ = std::move(colors);
+    vertexCount_ = count;
+}
+
 void FillRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                         const plot::Transform2D& transform) const {
     if (!inited_ || vertexCount_ == 0) return;

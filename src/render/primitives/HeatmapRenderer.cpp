@@ -27,11 +27,20 @@ layout(push_constant) uniform PC {
     vec2 u_valueRange;   // min, max of scalar values
 } pc;
 
-layout(location = 0) out vec2 v_uv;  // texture coords [0,1]
+layout(location = 0) out vec2 v_uv;   // texture coords [0,1]
+layout(location = 1) out vec2 v_ndc;  // raw quad pos (non-affine path)
 )";
 
 constexpr const char* kVertMain = R"(
 void main() {
+    v_ndc = a_pos;
+    // Non-affine projection: fill the axes rect; the fragment shader
+    // inverse-maps each pixel to data space so the image curves.
+    if (int(pc.u_proj.x + 0.5) != 0) {
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+        v_uv = vec2(0.0);
+        return;
+    }
     // u_gridRange = (xMin, xMax, yMin, yMax)
     // Map NDC quad position to data coords within the grid range.
     vec2 data = vec2(pc.u_gridRange.x, pc.u_gridRange.z) +
@@ -51,12 +60,13 @@ void main() {
 }
 )";
 
-constexpr const char* kFragGlsl = R"(
+constexpr const char* kFragHead = R"(
 #version 460
 layout(set = 0, binding = 0) uniform sampler2D u_grid;
 layout(set = 0, binding = 1) uniform sampler2D u_cmap;
 
 layout(location = 0) in vec2 v_uv;
+layout(location = 1) in vec2 v_ndc;
 layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform PC {
@@ -97,12 +107,38 @@ float bicubicSample(vec2 uv) {
     }
     return acc;
 }
+)";
 
+constexpr const char* kFragMain = R"(
 void main() {
+    vec2 uv = v_uv;
+    if (int(pc.u_proj.x + 0.5) != 0) {
+        // Non-affine: recover the display-space point for this fragment
+        // (v_ndc is the raw quad pos; the vertex y-flip is undone here),
+        // invert the projection + scales to data coords, then to grid UV.
+        vec2 disp = vec2((v_ndc.x + 1.0) * 0.5 * pc.u_viewMinSpan.z + pc.u_viewMinSpan.x,
+                         (-v_ndc.y + 1.0) * 0.5 * pc.u_viewMinSpan.w + pc.u_viewMinSpan.y);
+        vec2 pre = projInv(disp, pc.u_proj.xyz);
+        vec2 data = vec2(scaleInv(pre.x, pc.u_scaleX.xyz),
+                         scaleInv(pre.y, pc.u_scaleY.xyz));
+        // mpl polar wraps theta mod 2pi so negative atan2 angles land in
+        // the image's theta range instead of clipping to a half-disk.
+        if (int(pc.u_proj.x + 0.5) == 1) {
+            float dx = data.x - pc.u_gridRange.x;
+            data.x = pc.u_gridRange.x + dx - floor(dx / 6.283185307179586) * 6.283185307179586;
+        }
+        uv.x = (data.x - pc.u_gridRange.x) / (pc.u_gridRange.y - pc.u_gridRange.x);
+        float fy = (data.y - pc.u_gridRange.z) / (pc.u_gridRange.w - pc.u_gridRange.z);
+        uv.y = pc.u_proj.w > 0.5 ? fy : 1.0 - fy;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            outColor = vec4(0.0);
+            return;
+        }
+    }
     // nearest/bilinear differ only by the bound sampler's filter mode;
     // bicubic fetches texels explicitly.
-    float v = pc.u_interp > 1.5 ? bicubicSample(v_uv)
-                                : texture(u_grid, v_uv).r;
+    float v = pc.u_interp > 1.5 ? bicubicSample(uv)
+                                : texture(u_grid, uv).r;
     float t = (v - pc.u_valueRange.x) / max(pc.u_valueRange.y - pc.u_valueRange.x, 1e-30);
     t = clamp(t, 0.0, 1.0);
     outColor = texture(u_cmap, vec2(t, 0.5));
@@ -122,8 +158,10 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
+    auto fragSrc = std::string(kFragHead) + shaders::kScaleInvFn +
+                   shaders::kProjFn + shaders::kProjInvFn + kFragMain;
     auto v = core::ShaderModule::compileGlsl(vertSrc, "vert");
-    auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
+    auto f = core::ShaderModule::compileGlsl(fragSrc, "frag");
     vert_ = core::ShaderModule(device, v);
     frag_ = core::ShaderModule(device, f);
 

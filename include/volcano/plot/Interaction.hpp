@@ -2,6 +2,7 @@
 #pragma once
 
 #include "volcano/plot/Events.hpp"
+#include "volcano/plot/Transform.hpp"
 #include "volcano/plot/Types.hpp"
 
 #include <deque>
@@ -75,6 +76,10 @@ private:
     void dragTo(const Event& e);
     void endDrag(const Event& e);
     bool handleKey(const Event& e);
+    /// mpl Axes3D mouse handling: left-drag rotates (elev/azim),
+    /// right-drag zooms (camera distance).
+    void startDrag3D(const Event& e);
+    void dragTo3D(const Event& e);
 
     Figure* figure_;
     Mode mode_ = Mode::None;
@@ -87,6 +92,14 @@ private:
     Point2D dragStartCanvas_{0, 0}; // canvas px
     Point2D dragStartData_{0, 0};
     Viewport dragStartVp_{};
+    // 3D camera drag state: per-camera initial angles/distance captured
+    // at drag start (mpl Axes3D._on_move semantics).
+    struct Cam3DState {
+        Camera3D* cam;
+        float elev, azim, roll, dist;
+    };
+    std::vector<Cam3DState> cams3D_;
+    int drag3DButton_ = 0;
     // Zoom-rect selection (canvas px), drawn as rubber band.
     Point2D rectEnd_{0, 0};
 public:
