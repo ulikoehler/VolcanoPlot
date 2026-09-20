@@ -162,6 +162,13 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
+
+    /// Call after mutating `path` to re-upload the GPU template.
+    void markTemplateDirty() noexcept { templateDirty_ = true; }
+
+private:
+    /// True until the GPU instancing template reflects `path`.
+    bool templateDirty_ = true;
 };
 
 /// LineCollection — independent line segments/curves with per-line style.

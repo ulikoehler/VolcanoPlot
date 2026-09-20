@@ -146,17 +146,14 @@ void GroupedBarPlot::contributeToAutoscale(Viewport& v) const {
             }
         v.x.min = std::min(v.x.min, config_.baseline);
         v.x.max = std::max(v.x.max, config_.baseline);
-        float groupStart = (1.0f - config_.barWidth) * 0.5f;
-        v.y.min = std::min(v.y.min, groupStart);
-        v.y.max = std::max(v.y.max,
-            static_cast<float>(nGroups_ - 1) + groupStart + config_.barWidth);
+        // Category axis: each group owns a unit slot [g, g+1] regardless
+        // of barWidth, so narrower bars show as narrower on screen.
+        v.y.min = std::min(v.y.min, 0.0f);
+        v.y.max = std::max(v.y.max, static_cast<float>(nGroups_));
     } else {
-        // Vertical: x = bar-edge extent (matplotlib's bar datalim is the
-        // union of the bar rectangles, not the full category span).
-        float groupStart = (1.0f - config_.barWidth) * 0.5f;
-        v.x.min = std::min(v.x.min, groupStart);
-        v.x.max = std::max(v.x.max,
-            static_cast<float>(nGroups_ - 1) + groupStart + config_.barWidth);
+        // Vertical: x covers the full category slots.
+        v.x.min = std::min(v.x.min, 0.0f);
+        v.x.max = std::max(v.x.max, static_cast<float>(nGroups_));
         v.y.min = std::min(v.y.min, config_.baseline);
         v.y.max = std::max(v.y.max, config_.baseline);
         for (const auto& series : heights_)

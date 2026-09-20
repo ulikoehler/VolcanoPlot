@@ -5,6 +5,7 @@
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
+#include <volcano/render/primitives/InstancedPathRenderer.hpp>
 #include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
 
@@ -87,6 +88,10 @@ public:
     [[nodiscard]] text::TextRenderer& textRenderer() noexcept { return textRenderer_; }
     [[nodiscard]] primitives::ReduceRenderer& reduceRenderer() noexcept { return reduceRenderer_; }
     [[nodiscard]] primitives::SpineRenderer& spineRenderer() noexcept { return spineRenderer_; }
+    /// Instanced path renderer — lazily inited with the spine renderer.
+    [[nodiscard]] primitives::InstancedPathRenderer& instancedPathRenderer() noexcept {
+        return instancedPathRenderer_;
+    }
     /// True when the text renderer pipeline + atlas are ready to draw.
     [[nodiscard]] bool textReady() const noexcept { return textInited_ && textReady_; }
     /// True when the spine renderer pipeline is ready.
@@ -113,6 +118,7 @@ private:
     std::unique_ptr<core::PipelineCache> pipelineCache_;
     std::unique_ptr<core::DescriptorPool> descriptorPool_;
     primitives::SpineRenderer spineRenderer_;
+    primitives::InstancedPathRenderer instancedPathRenderer_;
     primitives::ReduceRenderer reduceRenderer_;
     text::TextRenderer textRenderer_;
     bool textInited_ = false;

@@ -1,0 +1,14 @@
+site_name: VolcanoPlot
+site_description: Vulkan-accelerated, matplotlib-compatible C++23 plotting library
+repo_url: https://github.com/ulikoehler/VolcanoPlot
+theme:
+  name: readthedocs
+  highlightjs: true
+nav:
+  - Home: index.md
+  - Architecture: ARCHITECTURE.md
+  - Microfeatures: MICROFEATURES.md
+  - Gallery: gallery.md
+markdown_extensions:
+  - tables
+  - fenced_code

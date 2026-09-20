@@ -4,6 +4,7 @@
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 #include "volcano/render/primitives/SpineRenderer.hpp"
+#include "volcano/render/primitives/InstancedPathRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 
 #include <algorithm>
@@ -549,6 +550,44 @@ void PathCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
                 std::max(1e-9f, axes.viewport().x.span());
     float ppv = float(rect.height) /
                 std::max(1e-9f, axes.viewport().y.span());
+
+    // GPU fast path: instance the template triangles. Eligible when the
+    // per-item work is a pure scale+translate fill — no per-item
+    // transforms, hatch, dashes, sketch, clip path, or edge stroke.
+    auto& inst = r.instancedPathRenderer();
+    bool edgesVisible = std::ranges::any_of(edgeColors,
+                                            [](Color c) { return c.a > 0; });
+    if (inst.inited() && transforms.empty() && hatch.empty() && ring.empty()
+        && !strokeOnly && !edgesVisible
+        && axes.style().sketchScale == 0.0f
+        && std::ranges::all_of(proto, [](const Path::Subpath& sp) {
+               return sp.closed && sp.points.size() >= 3; })) {
+        if (templateDirty_) {
+            std::vector<Point2D> tris;
+            for (const auto& sp : proto) {
+                auto t = earClip(sp.points);
+                tris.insert(tris.end(), t.begin(), t.end());
+            }
+            auto& ctx = r.backend().context();
+            inst.setTemplate(ctx.device.handle(), ctx.device.graphicsQueue(),
+                             ctx.graphicsPool.handle(), tris);
+            templateDirty_ = false;
+        }
+        std::vector<render::primitives::PathInstance> insts;
+        insts.reserve(offsets.size());
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            Point2D size = at(sizes, i, Point2D{1, 1});
+            Point2D center = offsetPx(axes, rect, offsetTransform.get(),
+                                      offsets[i], {});
+            Color face = at(faceColors, i, defFace);
+            insts.push_back({center.x, center.y,
+                             size.x * ppu, -size.y * ppv,
+                             face.r, face.g, face.b, face.a});
+        }
+        inst.drawInstanced(cmd, clip, res, insts);
+        return;
+    }
+
     for (size_t i = 0; i < offsets.size(); ++i) {
         Point2D size = at(sizes, i, Point2D{1, 1});
         Point2D center = offsetPx(axes, rect, offsetTransform.get(),

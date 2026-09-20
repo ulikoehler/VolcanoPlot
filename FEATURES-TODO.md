@@ -735,9 +735,14 @@ tri_*) are checked off in the sections above.
       should be dropped at data-conversion time (currently clamps).
 
 ### P2 — Performance & GPU leverage
-- [ ] **GPU-side marker/path tessellation** — marker quads currently
-      use SDF; large `PathCollection`s should triangulate on GPU or use
-      instanced glyph atlases.
+- [x] **GPU-side marker/path tessellation** — `PointRenderer` already
+      draws point sprites (one vertex per marker, SDF shapes in the
+      fragment shader); `PathCollection` now uses
+      `InstancedPathRenderer` (template triangle mesh uploaded once,
+      per-instance center/scale/color buffer, single instanced draw)
+      for eligible collections — no per-item transforms/hatch/edges/
+      clip/sketch, closed triangulatable template; conservative CPU
+      fallback otherwise (CollectionRender tests).
 - [x] **MSDF text atlas** — real `glyph_renderer_msdf` via bundled
       msdfgen core (FreeType outline → Shape → generateMSDF → RGBA
       atlas), `font_manager_ft::msdf_enabled`, R8G8B8A8 atlas texture,
@@ -793,7 +798,9 @@ tri_*) are checked off in the sections above.
 ### P4 — Ecosystem & ergonomics
 - [x] **pybind11 bindings (`volcanoplot` Python module)** — pybind11
       module (`python/volcanoplot.cpp`, `VOLCANO_BUILD_PYTHON`, built
-      to build/python/): Figure/Axes, plot/scatter/bar/imshow,
+      to build/python/): Figure(figsize=/width,height,dpi, .stale),
+      Axes: plot/scatter/bar/imshow/hist/errorbar/stem/step/
+      fill_between/contour/contourf/boxplot/pcolormesh,
       xlim/ylim/xscale/yscale/xlabel/ylabel/title/grid/legend/
       set_projection, suptitle/supxlabel/supylabel, savefig (all
       raster+vector formats). Keeps the API mirroring `matplotlib.pyplot`.
@@ -803,10 +810,15 @@ tri_*) are checked off in the sections above.
       datetime64/timedelta64 → days-since-epoch (date2num) with automatic
       `xaxis_date`/`yaxis_date` converter install; string x in `bar()`
       installs category ticks (mpl categorical semantics).
-- [ ] **Nix/Homebrew packaging + CI matrix** — prebuilt binaries,
-      Vulkan ICD (lavapipe) in CI for headless tests.
-- [ ] **Documentation site** — API reference (Doxygen/mkdocs), gallery
-      browser from `gallery_micro`, migration guide from matplotlib.
+- [x] **CI test workflow** — `.github/workflows/ci.yml` runs the full
+      `volcano_tests` suite headless on lavapipe
+      (`VK_ICD_FILENAMES` + `LIBGL_ALWAYS_SOFTWARE`) in a
+      Debug/Release matrix. Packaging (Nix/Homebrew) still open.
+- [~] **Documentation site** — mkdocs site (`mkdocs.yml`,
+      `docs/index.md`) with architecture/microfeatures pages and an
+      auto-generated gallery browser (`scripts/build_docs.py`
+      regenerates `docs/gallery.md` + assets from `gallery*/comparison`).
+      Doxygen API reference and mpl migration guide still open.
 - [x] **Serialization round-trip** — `Figure` ↔ JSON save/load
       (`Serialize.hpp`/`Serialize.cpp`); line plots preserve data,
       color, and line style; unknown plot types skipped; malformed
