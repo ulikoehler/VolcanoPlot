@@ -18,6 +18,7 @@
 #include <cmath>
 #include <limits>
 #include <format>
+#include <cstdlib>
 #include <string>
 
 namespace volcano::render {
@@ -105,9 +106,34 @@ bool Renderer::processInput(plot::Figure& figure) {
     return true;
 }
 
+namespace {
+/// vkPipelineCache blob path: $VOLCANO_CACHE_DIR, then
+/// $XDG_CACHE_HOME/volcanoplot, then ~/.cache/volcanoplot. Empty = disabled.
+/// Driver-specific blobs are validated by Vulkan on load, so stale or
+/// foreign caches are safely ignored. Pipeline creation on lavapipe is
+/// ~150 ms each — the cache pays for itself after the first run.
+std::filesystem::path pipelineCacheFile() {
+    std::filesystem::path dir;
+    if (const char* d = std::getenv("VOLCANO_CACHE_DIR"); d && d[0]) {
+        dir = d;
+    } else if (const char* x = std::getenv("XDG_CACHE_HOME"); x && x[0]) {
+        dir = std::filesystem::path(x) / "volcanoplot";
+    } else if (const char* h = std::getenv("HOME"); h && h[0]) {
+        dir = std::filesystem::path(h) / ".cache" / "volcanoplot";
+    } else {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return {};
+    return dir / "pipeline-cache.bin";
+}
+} // namespace
+
 Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {
     auto& ctx = backend_.context();
-    pipelineCache_ = std::make_unique<core::PipelineCache>(ctx.device.handle());
+    pipelineCache_ = std::make_unique<core::PipelineCache>(
+        ctx.device.handle(), pipelineCacheFile());
     std::vector<vk::DescriptorPoolSize> sizes = {
         { vk::DescriptorType::eUniformBuffer, 256 },
         { vk::DescriptorType::eStorageBuffer, 256 },

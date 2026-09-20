@@ -214,6 +214,12 @@ public:
         // MSDF atlas: vector-crisp glyphs at any scale (median-of-3 in
         // the fragment shader) instead of the grayscale bitmap atlas.
         msdf_enabled = true;
+        // Persist the MSDF atlas to the user cache dir — regenerating
+        // ~350 glyphs through msdfgen costs ~8 s per process, which
+        // dominates headless/test startup. The cache is keyed by font
+        // path hash and lands in $XDG_CACHE_HOME/glyb (or
+        // GLYB_ATLAS_CACHE_DIR).
+        msdf_autoload = true;
     }
 
     font_atlas* getCurrentAtlas(font_face* face) override {
@@ -585,7 +591,14 @@ void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
 
 void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     if (atlasUploaded_ || !fontFace_) return;
+    auto* atlas = fontManager_->getCurrentAtlas(fontFace_);
     prepareAtlasGlyphs();
+    // Persist freshly generated atlases so the next process skips
+    // msdfgen entirely. Atlases restored from the on-disk cache aren't
+    // re-saved (resized per-size entries share the template's bins and
+    // don't need persisting).
+    if (atlas && !atlas->loadedFromDisk)
+        atlas->save(fontManager_.get(), fontFace_);
     uploadAtlas(queue, pool);
     atlasUploaded_ = true;
     atlasGlyphCount_ = fontManager_->glyph_map.size();
