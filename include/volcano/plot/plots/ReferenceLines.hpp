@@ -81,6 +81,39 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// AxLine — infinite straight line through two data-space points (mpl axline)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// AxLine — infinite straight line through `xy1` and `xy2` in data
+/// coordinates, clipped to the axes. Equivalent to matplotlib's
+/// `ax.axline(xy1, xy2)`. A slope form is available via Axes::axline.
+class AxLine : public IPlot {
+public:
+    AxLine(Point2D xy1, Point2D xy2,
+           Color color = Color::black(), float width = 1.0f)
+        : xy1_(xy1), xy2_(xy2), color_(color), width_(width) {}
+
+    void prepare(render::Renderer& r) override;
+    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+              const Axes& axes, Rect2D rect) override;
+    void contributeToAutoscale(Viewport& v) const override;
+    [[nodiscard]] std::string label() const override { return label_; }
+    [[nodiscard]] Color legendColor() const override { return color_; }
+    [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] bool canEmitVector() const override { return true; }
+    void emitVector(render::VectorCanvas& c, const Axes& axes,
+                    Rect2D rect) override;
+
+private:
+    Point2D xy1_, xy2_;
+    Color color_;
+    float width_;
+    std::string label_;
+    bool prepared_ = false;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 // AxhSpan — horizontal filled region spanning entire axes between y1 and y2
 // ═══════════════════════════════════════════════════════════════════════════
 

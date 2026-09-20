@@ -1,11 +1,13 @@
 // volcano/plot/plots/Contour3D.cpp — 3D contour and contourf implementation
 #include "volcano/plot/Ticks.hpp"
 #include "volcano/plot/plots/Contour3D.hpp"
+#include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 
 namespace volcano::plot {
 
@@ -128,6 +130,7 @@ void Contour3D::computeLevels() {
 
 void Contour3D::marchingSquares() {
     segments_.clear();
+    segLevels_.clear();
     const auto& g = grid_;
     if (g.width < 2 || g.height < 2) return;
 
@@ -172,6 +175,7 @@ void Contour3D::marchingSquares() {
                     // Project to 3D at zLevel.
                     segments_.push_back(project3D(vp, p0.x, p0.y, zLevel));
                     segments_.push_back(project3D(vp, p1.x, p1.y, zLevel));
+                    segLevels_.push_back(level);
                 }
             }
         }
@@ -193,16 +197,46 @@ void Contour3D::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Contour3D::draw(vk::CommandBuffer cmd, render::Renderer&,
-                     const Axes& axes, Rect2D rect) {
+void Contour3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+                     const Axes&, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
-    Transform2D t;
-    t.view.x = {-1.0f, 1.0f};
-    t.view.y = {-1.0f, 1.0f};
-    t.view.z = {0, 1};
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    // mpl colors each contour level from the colormap (default
+    // image.cmap = viridis) and dashes negative levels.
+    auto toPx = [&](const Point2D& p) {
+        return Point2D{rect.x + (p.x * 0.5f + 0.5f) * float(rect.width),
+                       rect.y + (0.5f - p.y * 0.5f) * float(rect.height)};
+    };
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    vk::Extent2D res = r.backend().extent();
+    auto& spine = r.spineRenderer();
+
+    std::map<float, std::vector<size_t>> byLevel;
+    for (size_t i = 0; i + 1 < segments_.size(); i += 2)
+        byLevel[segLevels_[i / 2]].push_back(i);
+
+    float lMin = config_.levels.front(), lMax = config_.levels.back();
+    float lRange = std::max(1e-9f, lMax - lMin);
+    StrokeParams sp;
+    sp.width = config_.lineWidth;
+    for (const auto& [level, idx] : byLevel) {
+        sp.dashes.clear();
+        if (level < 0.0f)
+            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        std::vector<Point2D> tris;
+        for (size_t i : idx) {
+            Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};
+            auto mesh = strokePolyline(seg, sp);
+            tris.insert(tris.end(), mesh.verts.begin(), mesh.verts.end());
+        }
+        Color color = config_.lineColor;
+        if (config_.cmap) {
+            float t = (level - lMin) / lRange;
+            color = config_.cmap->sample(std::clamp(t, 0.0f, 1.0f));
+        }
+        if (!tris.empty())
+            spine.drawTriangles(cmd, clip, res, tris, color);
+    }
 }
 
 void Contour3D::contributeToAutoscale(Viewport& v) const {

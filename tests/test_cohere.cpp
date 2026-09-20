@@ -246,7 +246,7 @@ TEST(CohereRegression, Autoscale) {
     const auto& av = cf.axes->viewport();
     // X: 0 to ~31 (one-sided, halfN-1 bins).
     EXPECT_NEAR(av.x.min, -1.55f, 1.0f);
-    EXPECT_NEAR(av.x.max, 32.55f, 1.0f);
+    EXPECT_NEAR(av.x.max, 33.6f, 1.0f);  // mpl pads to NFFT=256
     // Y: coherence in [0, 1], with viewport padding.
     EXPECT_GE(av.y.min, -0.1f);
     EXPECT_LE(av.y.max, 1.6f);

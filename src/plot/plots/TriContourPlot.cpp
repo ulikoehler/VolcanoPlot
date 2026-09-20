@@ -1,11 +1,13 @@
 // volcano/plot/plots/TriContourPlot.cpp — tricontour and tricontourf
 #include "volcano/plot/plots/TriContourPlot.hpp"
+#include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 
 namespace volcano::plot {
@@ -80,6 +82,7 @@ void TriContourPlot::computeLevels() {
 
 void TriContourPlot::marchingTriangles() {
     segments_.clear();
+    segLevels_.clear();
 
     for (size_t li = 0; li < levels_.size(); ++li) {
         float level = levels_[li];
@@ -112,6 +115,7 @@ void TriContourPlot::marchingTriangles() {
             if (ci == 2) {
                 segments_.push_back(crossings[0]);
                 segments_.push_back(crossings[1]);
+                segLevels_.push_back(level);
             }
         }
     }
@@ -139,13 +143,47 @@ void TriContourPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
-    Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    // mpl colors each contour level from the colormap (default:
+    // image.cmap = viridis) and renders negative levels dashed.
+    auto toPx = [&](const Point2D& p) {
+        auto f = axes.dataToFraction(p);
+        return Point2D{rect.x + f.x * float(rect.width),
+                       rect.y + (1.0f - f.y) * float(rect.height)};
+    };
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    vk::Extent2D res = r.backend().extent();
+    auto& spine = r.spineRenderer();
+
+    std::map<float, std::vector<size_t>> byLevel;
+    for (size_t i = 0; i + 1 < segments_.size(); i += 2)
+        byLevel[segLevels_[i / 2]].push_back(i);
+
+    float lMin = levels_.front(), lMax = levels_.back();
+    float lRange = std::max(1e-9f, lMax - lMin);
+    StrokeParams sp;
+    sp.width = config_.lineWidth;
+    for (const auto& [level, idx] : byLevel) {
+        sp.dashes.clear();
+        if (level < 0.0f)
+            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        std::vector<Point2D> tris;
+        for (size_t i : idx) {
+            Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};
+            auto mesh = strokePolyline(seg, sp);
+            tris.insert(tris.end(), mesh.verts.begin(), mesh.verts.end());
+        }
+        Color color = config_.lineColor;
+        if (config_.cmap) {
+            float t = (level - lMin) / lRange;
+            color = config_.cmap->sample(std::clamp(t, 0.0f, 1.0f));
+        }
+        if (!tris.empty())
+            spine.drawTriangles(cmd, clip, res, tris, color);
+    }
 }
 
 void TriContourPlot::contributeToAutoscale(Viewport& v) const {

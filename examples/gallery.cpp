@@ -48,6 +48,22 @@
 #include <volcano/plot/plots/TriContourPlot.hpp>
 #include <volcano/plot/plots/SpecgramPlot.hpp>
 #include <volcano/plot/plots/ReferenceLines.hpp>
+#include <volcano/plot/plots/TripcolorPlot.hpp>
+#include <volcano/plot/plots/TriplotPlot.hpp>
+#include <volcano/plot/plots/BarbsPlot.hpp>
+#include <volcano/plot/plots/SpyPlot.hpp>
+#include <volcano/plot/plots/MatshowPlot.hpp>
+#include <volcano/plot/plots/PsdPlot.hpp>
+#include <volcano/plot/plots/CsdPlot.hpp>
+#include <volcano/plot/plots/CoherePlot.hpp>
+#include <volcano/plot/plots/XCorrPlot.hpp>
+#include <volcano/plot/plots/SpectrumPlot.hpp>
+#include <volcano/plot/plots/BarLabelPlot.hpp>
+#include <volcano/plot/plots/FigImagePlot.hpp>
+#include <volcano/plot/plots/Contour3D.hpp>
+#include <volcano/plot/plots/Quiver3D.hpp>
+#include <volcano/plot/plots/Errorbar3D.hpp>
+#include <volcano/plot/plots/VoxelsPlot.hpp>
 
 #include <cmath>
 #include <iostream>
@@ -62,8 +78,8 @@ using namespace volcano::plot;
 
 namespace {
 
-constexpr uint32_t kWidth = 800;
-constexpr uint32_t kHeight = 600;
+constexpr uint32_t kWidth = 1600;
+constexpr uint32_t kHeight = 1200;
 
 struct GalleryCtx {
     backend::BackendDesc desc;
@@ -96,7 +112,10 @@ struct GalleryCtx {
 
 FigureStyle galleryStyle() {
     // matplotlib default style: white bg, black spines, no grid.
-    return styles::defaultStyle();
+    // dpi=200 with 1600x1200 px keeps the 8x6in figure size (2x DPI).
+    auto s = styles::defaultStyle();
+    s.dpi = 200.0f;
+    return s;
 }
 
 Axes* setupAxes(Figure& fig, std::string_view title,
@@ -859,6 +878,383 @@ void plotTrisurf(GalleryCtx& ctx) {
     ctx.render(fig, "trisurf");
 }
 
+// ── Remaining mpl plot types ──────────────────────────────────────────────
+
+void plotStairs(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Stairs");
+    ax->style().xAxis.label = "Bin";
+    ax->style().yAxis.label = "Count";
+    // mpl: ax.stairs(hist_values, edges)
+    std::vector<float> values = {4, 9, 15, 22, 18, 11, 6, 3};
+    std::vector<float> edges  = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    ax->addPlot(std::make_unique<StairsPlot>(
+        std::move(values), std::move(edges),
+        Color::fromRgba8(31, 119, 180), 1.5f));
+    ctx.render(fig, "stairs");
+}
+
+void plotTripcolor(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "tripcolor", "X", "Y");
+    std::vector<float> x, y, z;
+    for (int i = 0; i < 300; ++i) {
+        float px = float(sRng().uniform()) * 6 - 3;
+        float py = float(sRng().uniform()) * 6 - 3;
+        x.push_back(px); y.push_back(py);
+        z.push_back(std::sin(px) * std::cos(py));
+    }
+    TripcolorConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    ax->addPlot(std::make_unique<TripcolorPlot>(std::move(x), std::move(y),
+                                              std::move(z), cfg));
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ax->style().colorbar.visible = true;
+    ctx.render(fig, "tripcolor");
+}
+
+void plotTriplot(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "triplot", "X", "Y");
+    std::vector<float> x, y;
+    for (int i = 0; i < 60; ++i) {
+        x.push_back(float(sRng().uniform()) * 6 - 3);
+        y.push_back(float(sRng().uniform()) * 6 - 3);
+    }
+    TriplotConfig cfg;
+    cfg.showMarkers = true;   // mpl triplot default marker='o'
+    cfg.color = Color::fromRgba8(31, 119, 180);        // mpl prop cycle C0
+    cfg.markerColor = Color::fromRgba8(31, 119, 180);
+    ax->addPlot(std::make_unique<TriplotPlot>(std::move(x), std::move(y), cfg));
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ctx.render(fig, "triplot");
+}
+
+void plotTricontour(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "tricontour", "X", "Y");
+    std::vector<float> x, y, z;
+    for (int i = 0; i < 300; ++i) {
+        float px = float(sRng().uniform()) * 6 - 3;
+        float py = float(sRng().uniform()) * 6 - 3;
+        x.push_back(px); y.push_back(py);
+        z.push_back(std::sin(px) * std::cos(py));
+    }
+    TriContourConfig cfg;
+    cfg.numLevels = 12;
+    cfg.cmap = &colormaps::viridis();  // mpl default: level-colored lines
+    ax->addPlot(std::make_unique<TriContourPlot>(std::move(x), std::move(y),
+                                               std::move(z), cfg));
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ctx.render(fig, "tricontour");
+}
+
+void plotBarbs(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "barbs", "X", "Y");
+    std::vector<float> x, y, u, v;
+    for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < 8; ++i) {
+            float px = i * 0.5f, py = j * 0.5f;
+            x.push_back(px); y.push_back(py);
+            // Smooth wind field with a range of speeds (knots).
+            u.push_back(20.0f * std::sin(px * 0.8f) + 15.0f);
+            v.push_back(20.0f * std::cos(py * 0.8f));
+        }
+    ax->addPlot(std::make_unique<BarbsPlot>(std::move(x), std::move(y),
+                                          std::move(u), std::move(v)));
+    ctx.render(fig, "barbs");
+}
+
+void plotSpy(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "spy", "", "");
+    const uint32_t n = 24;
+    std::vector<float> m(n * n, 0.0f);
+    for (uint32_t i = 0; i < n; ++i) {
+        m[i * n + i] = 1.0f;                       // diagonal
+        if (i + 3 < n) m[i * n + i + 3] = 1.0f;    // off-diagonal band
+        if (i >= 3)  m[i * n + i - 3] = 1.0f;
+    }
+    m[2 * n + 18] = 1.0f; m[20 * n + 5] = 1.0f;    // a few outliers
+    SpyConfig cfg; cfg.color = Color::black();     // mpl spy default
+    ax->addPlot(std::make_unique<SpyPlot>(std::move(m), n, n, cfg));
+    ctx.render(fig, "spy");
+}
+
+void plotMatshow(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "matshow", "", "");
+    const uint32_t n = 12;
+    std::vector<float> m(n * n);
+    for (uint32_t j = 0; j < n; ++j)
+        for (uint32_t i = 0; i < n; ++i)
+            m[j * n + i] = std::sin(float(i) * 0.5f) * std::cos(float(j) * 0.5f);
+    MatshowConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    ax->addPlot(std::make_unique<MatshowPlot>(std::move(m), n, n, cfg));
+    ctx.render(fig, "matshow");
+}
+
+/// Shared deterministic signal: sin(2π·10·t) + sin(2π·40·t) + 0.4·noise,
+/// Fs=1024, 1024 samples. Mirrored bit-for-bit on the mpl side (same LCG).
+static std::vector<float> gallerySignal() {
+    std::vector<float> s(1024);
+    for (int i = 0; i < 1024; ++i) {
+        float t = float(i) / 1024.0f;
+        s[i] = std::sin(2 * float(M_PI) * 10 * t)
+             + std::sin(2 * float(M_PI) * 40 * t)
+             + 0.4f * float(sRng().uniform() * 2 - 1);
+    }
+    return s;
+}
+
+void plotPsd(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "psd", "Frequency",
+                         "Power Spectral Density (dB/Hz)");
+    ax->style().xAxis.grid = true; ax->style().yAxis.grid = true;
+    PsdConfig cfg; cfg.sampleRate = 1024.0f; cfg.nfft = 256;
+    ax->addPlot(std::make_unique<PsdPlot>(gallerySignal(), cfg));
+    ctx.render(fig, "psd");
+}
+
+void plotCsd(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "csd", "Frequency",
+                         "Cross Spectrum Magnitude (dB)");
+    ax->style().xAxis.grid = true; ax->style().yAxis.grid = true;
+    auto s1 = gallerySignal();
+    auto s2 = gallerySignal();
+    CsdConfig cfg; cfg.sampleRate = 1024.0f; cfg.nfft = 256;
+    ax->addPlot(std::make_unique<CsdPlot>(std::move(s1), std::move(s2), cfg));
+    ctx.render(fig, "csd");
+}
+
+void plotCohere(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "cohere", "Frequency", "Coherence");
+    ax->style().xAxis.grid = true; ax->style().yAxis.grid = true;
+    auto s1 = gallerySignal();
+    auto s2 = gallerySignal();
+    CohereConfig cfg; cfg.sampleRate = 1024.0f; cfg.nfft = 256;
+    ax->addPlot(std::make_unique<CoherePlot>(std::move(s1), std::move(s2), cfg));
+    ctx.render(fig, "cohere");
+}
+
+void plotXcorr(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "xcorr", "Lag", "Correlation");
+    ax->style().xAxis.grid = true; ax->style().yAxis.grid = true;
+    auto s1 = gallerySignal();
+    auto s2 = gallerySignal();
+    XCorrConfig cfg; cfg.maxLags = 50;
+    ax->addPlot(std::make_unique<XCorrPlot>(std::move(s1), std::move(s2), cfg));
+    ctx.render(fig, "xcorr");
+}
+
+void plotSpectrum(GalleryCtx& ctx, SpectrumType type,
+                  SpectrumScale scale, std::string_view name,
+                  std::string_view ylabel) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, name, "Frequency", std::string(ylabel).c_str());
+    SpectrumConfig cfg;
+    cfg.type = type; cfg.scale = scale; cfg.sampleRate = 1024.0f;
+    ax->addPlot(std::make_unique<SpectrumPlot>(gallerySignal(), cfg));
+    ctx.render(fig, name);
+}
+
+void plotReflines(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Reference lines");
+    Series2D s;
+    s.color = Color::fromRgba8(31, 119, 180);
+    s.lineWidth = 1.5f;
+    for (float x : linspace(0, 10, 100))
+        s.points.push_back({x, std::sin(x)});
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->axhline(0.0f, Color::fromRgba8(214, 39, 40), 1.0f);     // mpl C3 red
+    ax->axvline(5.0f, Color::fromRgba8(44, 160, 44), 1.0f);     // C2 green
+    ax->axhspan(0.5f, 1.0f, Color::fromRgba8(255, 215, 0, 60));
+    ax->axvspan(7.0f, 9.0f, Color::fromRgba8(148, 103, 189, 60));
+    ax->axline({0.0f, 0.8f}, -0.15f, Color::fromRgba8(140, 86, 75), 1.0f);
+    ctx.render(fig, "reflines");
+}
+
+void plotHlinesVlines(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "hlines / vlines");
+    ax->hlines({0.5f, 1.0f, 1.5f}, 0.0f, 4.0f,
+               Color::fromRgba8(31, 119, 180), 1.5f);
+    ax->vlines({1.0f, 2.0f, 3.0f}, 0.0f, 2.0f,
+               Color::fromRgba8(255, 127, 14), 1.5f);
+    ax->setXlim(0, 4); ax->setYlim(0, 2);
+    ctx.render(fig, "hlines_vlines");
+}
+
+void plotAnnotate(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "annotate");
+    Series2D s;
+    s.color = Color::fromRgba8(31, 119, 180);
+    s.lineWidth = 1.5f;
+    for (float x : linspace(0, 10, 200))
+        s.points.push_back({x, std::sin(x)});
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    // mpl: ax.annotate('local max', xy=(pi/2, 1), xytext=(3, 1.5),
+    //                  arrowprops=dict(facecolor='black', shrink=0.05))
+    auto* a = ax->annotate(float(M_PI_2), 1.0f, 3.0f, 1.5f, "local max");
+    a->arrowColor = Color::black();
+    ax->text(6.0f, -1.0f, "local min");
+    ax->setXlim(0, 10); ax->setYlim(-1.5, 2.0f);
+    ctx.render(fig, "annotate");
+}
+
+void plotBarLabel(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "bar_label");
+    ax->style().xAxis.label = "Category";
+    ax->style().yAxis.label = "Value";
+    BarData bd;
+    bd.heights = {3, 7, 5, 8, 4};
+    bd.labels = {"A", "B", "C", "D", "E"};
+    bd.width = 0.8f;
+    std::vector<float> bx, bh;
+    for (size_t i = 0; i < bd.heights.size(); ++i) {
+        bx.push_back(float(i));
+        bh.push_back(bd.heights[i]);
+    }
+    ax->addPlot(std::make_unique<BarPlot>(std::move(bd)));
+    // mpl ax.bar_label(container): value labels at the bar edge.
+    ax->addPlot(std::make_unique<BarLabelPlot>(std::move(bx), std::move(bh),
+                                             0.0f));
+    ax->setXCategories({"A", "B", "C", "D", "E"});  // mpl tick_label
+    ctx.render(fig, "bar_label");
+}
+
+void plotFigimage(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "figimage");
+    Series2D s;
+    s.color = Color::fromRgba8(31, 119, 180);
+    for (float x : linspace(0, 10, 100))
+        s.points.push_back({x, std::sin(x)});
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    // mpl fig.figimage(X): RGBA pixel patch in figure space.
+    const uint32_t w = 64, h = 64;
+    std::vector<uint32_t> px(w * h);
+    for (uint32_t j = 0; j < h; ++j)
+        for (uint32_t i = 0; i < w; ++i) {
+            uint32_t r = 255 * i / (w - 1), g = 255 * j / (h - 1);
+            // 0xAABBGGRR: R in bits 0-7, G in 8-15, B in 16-23.
+            px[j * w + i] = (128u << 24) | (128u << 16) | (g << 8) | r;
+        }
+    // mpl figimage(xo, yo): pixels from figure bottom-left; our y is the
+    // top edge in Y-down figure pixels.
+    FigImageConfig cfg; cfg.x = 120; cfg.y = kHeight - 120 - h;
+    ax->addPlot(std::make_unique<FigImagePlot>(std::move(px), w, h, cfg));
+    ctx.render(fig, "figimage");
+}
+
+void plotContour3D(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "contour3d", "", "");
+    Grid2D grid;
+    grid.width = 40; grid.height = 40;
+    grid.xRange = {-5, 5}; grid.yRange = {-5, 5};
+    grid.values.resize(40 * 40);
+    for (uint32_t j = 0; j < 40; ++j)
+        for (uint32_t i = 0; i < 40; ++i) {
+            float x = -5 + float(i) / 39 * 10, y = -5 + float(j) / 39 * 10;
+            grid.values[j * 40 + i] = std::sin(x * 0.5f) * std::cos(y * 0.5f);
+        }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {-5, -5, -1}; cam.dataMax = {5, 5, 1};
+    addAxes3D(ax, cam);
+    Contour3DConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.zLevel = -1.0f; cfg.zOffset = false;
+    auto p = std::make_unique<Contour3D>(std::move(grid), cfg);
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+    ctx.render(fig, "contour3d");
+}
+
+void plotQuiver3D(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "quiver3d", "", "");
+    std::vector<float> x, y, z, u, v, w;
+    const int n = 5;
+    for (int k = 0; k < n; ++k)
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < n; ++i) {
+                float px = i * 0.5f - 1.0f, py = j * 0.5f - 1.0f,
+                      pz = k * 0.5f - 1.0f;
+                x.push_back(px); y.push_back(py); z.push_back(pz);
+                u.push_back(-py); v.push_back(px); w.push_back(0.4f);
+            }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {-1, -1, -1}; cam.dataMax = {1, 1, 1};
+    addAxes3D(ax, cam);
+    Quiver3DConfig cfg;
+    cfg.color = Color::fromRgba8(31, 119, 180);
+    auto p = std::make_unique<Quiver3D>(std::move(x), std::move(y), std::move(z),
+                                        std::move(u), std::move(v), std::move(w),
+                                        cfg);
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+    ctx.render(fig, "quiver3d");
+}
+
+void plotErrorbar3D(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "errorbar3d", "", "");
+    std::vector<float> x, y, z, ze;
+    for (int i = 0; i < 8; ++i) {
+        x.push_back(float(i));
+        y.push_back(std::sin(float(i)));
+        z.push_back(float(i) * 0.5f);
+        ze.push_back(0.2f + 0.1f * float(i % 3));
+    }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {0, -1.5f, 0}; cam.dataMax = {7, 1.5f, 4};
+    addAxes3D(ax, cam);
+    Errorbar3DConfig cfg;
+    cfg.zerr = ze;
+    auto p = std::make_unique<Errorbar3D>(std::move(x), std::move(y),
+                                          std::move(z), cfg);
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+    ctx.render(fig, "errorbar3d");
+}
+
+void plotVoxels(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "voxels", "", "");
+    const uint32_t n = 6;
+    std::vector<uint8_t> filled(n * n * n, 0);
+    for (uint32_t k = 0; k < n; ++k)
+        for (uint32_t j = 0; j < n; ++j)
+            for (uint32_t i = 0; i < n; ++i) {
+                // Sphere-ish solid: fill where (i-c)^2+(j-c)^2+(k-c)^2 < r^2
+                float c = (n - 1) * 0.5f;
+                float di = float(i) - c, dj = float(j) - c, dk = float(k) - c;
+                if (di * di + dj * dj + dk * dk < 7.0f)
+                    filled[k * n * n + j * n + i] = 1;
+            }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {0, 0, 0}; cam.dataMax = {float(n), float(n), float(n)};
+    addAxes3D(ax, cam);
+    auto p = std::make_unique<VoxelsPlot>(std::move(filled), n, n, n);
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+    ctx.render(fig, "voxels");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -913,6 +1309,34 @@ int main(int argc, char** argv) {
     plotSpecgram(ctx);
     plotTrisurf(ctx);
 
-    std::cout << "Done. Generated " << 39 << " plots.\n";
+    // Remaining mpl plot types
+    plotStairs(ctx);
+    plotTripcolor(ctx);
+    plotTriplot(ctx);
+    plotTricontour(ctx);
+    plotBarbs(ctx);
+    plotSpy(ctx);
+    plotMatshow(ctx);
+    plotPsd(ctx);
+    plotCsd(ctx);
+    plotCohere(ctx);
+    plotXcorr(ctx);
+    plotSpectrum(ctx, SpectrumType::Magnitude, SpectrumScale::dB,
+                 "magnitude_spectrum", "Magnitude (dB)");
+    plotSpectrum(ctx, SpectrumType::Phase, SpectrumScale::Linear,
+                 "phase_spectrum", "Phase (rad)");
+    plotSpectrum(ctx, SpectrumType::Angle, SpectrumScale::Linear,
+                 "angle_spectrum", "Angle (rad)");
+    plotReflines(ctx);
+    plotHlinesVlines(ctx);
+    plotAnnotate(ctx);
+    plotBarLabel(ctx);
+    plotFigimage(ctx);
+    plotContour3D(ctx);
+    plotQuiver3D(ctx);
+    plotErrorbar3D(ctx);
+    plotVoxels(ctx);
+
+    std::cout << "Done. Generated " << 62 << " plots.\n";
     return 0;
 }

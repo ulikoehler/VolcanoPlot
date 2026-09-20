@@ -16,6 +16,8 @@ struct CsdConfig {
     float sampleRate = 2.0f;
     /// Window function to apply before FFT.
     enum Window { Rectangular, Hann, Hamming, Blackman } window = Hann;
+    /// Samples of overlap between segments (mpl noverlap, default 0).
+    uint32_t noverlap = 0;
     /// Number of FFT points (0 = next power of 2 >= max(signal lengths)).
     uint32_t nfft = 0;
     /// Line color.

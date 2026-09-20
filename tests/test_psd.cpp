@@ -248,7 +248,7 @@ TEST(PsdRegression, Autoscale) {
     const auto& av = cf.axes->viewport();
     // X: 0 to ~31 (one-sided, halfN-1 bins).
     EXPECT_NEAR(av.x.min, -1.55f, 1.0f);
-    EXPECT_NEAR(av.x.max, 32.55f, 1.0f);
+    EXPECT_NEAR(av.x.max, 33.6f, 1.0f);  // mpl pads to NFFT=256
     // Y: dB values, should be negative (power < 1).
     EXPECT_LT(av.y.max, 10.0f);
 }

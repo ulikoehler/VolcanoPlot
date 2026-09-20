@@ -14,15 +14,19 @@ namespace volcano::plot {
 /// Configuration for VoxelsPlot.
 struct VoxelsConfig {
     /// Uniform color for all voxels (used when per-voxel colors are empty).
-    Color color = Color::fromRgba8(31, 119, 180, 200);
+    /// mpl voxels are opaque by default.
+    Color color = Color::fromRgba8(31, 119, 180, 255);
     /// Per-voxel colors (optional, overrides `color`).
     std::vector<Color> colors;
     /// Edge color for voxel outlines.
     Color edgeColor = Color::black();
     /// Edge line width.
     float edgeWidth = 0.5f;
-    /// Whether to draw voxel edge outlines.
-    bool drawEdges = true;
+    /// Whether to draw voxel edge outlines. mpl's voxels default
+    /// (`edgecolor=None`) draws edges in the (shaded) face color, so the
+    /// default here avoids stark black grids; use drawEdges=true with a
+    /// custom edgeColor for explicit outlines.
+    bool drawEdges = false;
     /// Label for legend.
     std::string label;
 };

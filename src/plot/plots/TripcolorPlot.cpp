@@ -171,6 +171,14 @@ void TripcolorPlot::contributeToAutoscale(Viewport& v) const {
         v.y.min = std::min(v.y.min, y_[i]);
         v.y.max = std::max(v.y.max, y_[i]);
     }
+    // Facecolors need the value range for the colorbar (mpl ScalarMappable).
+    if (!useFacevalues_) {
+        for (float val : z_) {
+            if (std::isnan(val)) continue;
+            v.z.min = std::min(v.z.min, val);
+            v.z.max = std::max(v.z.max, val);
+        }
+    }
 }
 
 } // namespace volcano::plot

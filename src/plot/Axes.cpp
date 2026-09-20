@@ -109,6 +109,14 @@ AxhLine& Axes::axhline(float y, Color color, float width) {
 AxvLine& Axes::axvline(float x, Color color, float width) {
     return addOwned<AxvLine>(*this, x, color, width);
 }
+AxLine& Axes::axline(Point2D xy1, Point2D xy2, Color color, float width) {
+    return addOwned<AxLine>(*this, xy1, xy2, color, width);
+}
+AxLine& Axes::axline(Point2D xy1, float slope, Color color, float width) {
+    // mpl axline(xy1, slope=s): second point at xy1 + (1, slope).
+    Point2D xy2{xy1.x + 1.0f, xy1.y + slope};
+    return addOwned<AxLine>(*this, xy1, xy2, color, width);
+}
 AxhSpan& Axes::axhspan(float y1, float y2, Color color) {
     return addOwned<AxhSpan>(*this, y1, y2, color);
 }

@@ -257,6 +257,12 @@ public:
     /// mpl `ax.axvline(x)`: vertical line across the axes.
     class AxvLine& axvline(float x, Color color = Color::black(),
                            float width = 1.0f);
+    /// mpl `ax.axline(xy1, xy2)`: infinite line through two data points.
+    class AxLine& axline(Point2D xy1, Point2D xy2,
+                         Color color = Color::black(), float width = 1.0f);
+    /// mpl `ax.axline(xy1, slope=s)`: infinite line through a point with slope.
+    class AxLine& axline(Point2D xy1, float slope,
+                         Color color = Color::black(), float width = 1.0f);
     /// mpl `ax.axhspan(ymin, ymax)`: shaded horizontal band.
     class AxhSpan& axhspan(float y1, float y2,
         Color color = Color::fromRgba8(200, 200, 200, 128));

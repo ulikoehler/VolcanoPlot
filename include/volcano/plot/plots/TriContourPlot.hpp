@@ -51,6 +51,7 @@ private:
     std::vector<float> levels_;
     render::primitives::LineSegmentRenderer renderer_;
     std::vector<Point2D> segments_;
+    std::vector<float> segLevels_;
     bool prepared_ = false;
 
     void computeLevels();

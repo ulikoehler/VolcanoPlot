@@ -103,56 +103,61 @@ void CoherePlot::computeCoherence() {
 
     if (signalX_.empty() || signalY_.empty()) return;
 
+    // mpl Welch averaging: coherence = |mean(X·conj(Y))|²/(mean|X|²·mean|Y|²)
+    // over NFFT segments with 50% overlap + Hann window. A single segment
+    // is trivially 1 — segment averaging is what makes coherence meaningful.
     uint32_t maxLen = static_cast<uint32_t>(std::max(signalX_.size(), signalY_.size()));
-    uint32_t n = config_.nfft > 0 ? config_.nfft : nextPow2(maxLen);
+    uint32_t n = config_.nfft > 0 ? config_.nfft : 256;
     if (n < 2) n = 2;
+    const uint32_t nover = std::min(config_.noverlap, n > 1 ? n - 1 : 0);
+    const uint32_t step = n - nover;
+    const uint32_t numSegs = maxLen < n ? 1 : (maxLen - n) / step + 1;
+    const uint32_t lenX = static_cast<uint32_t>(signalX_.size());
+    const uint32_t lenY = static_cast<uint32_t>(signalY_.size());
 
-    std::vector<std::complex<float>> dataX(n), dataY(n);
-    float winPowX = 0.0f, winPowY = 0.0f;
-    applyWindow(dataX, signalX_, config_.window, winPowX);
-    applyWindow(dataY, signalY_, config_.window, winPowY);
-
-    if (winPowX < 1e-30f) winPowX = 1.0f;
-    if (winPowY < 1e-30f) winPowY = 1.0f;
-
-    fft(dataX);
-    fft(dataY);
-
-    uint32_t halfN = n / 2;
-    float freqStep = config_.sampleRate / static_cast<float>(n);
-
-    // Normalization factors.
-    float normX = 1.0f / (config_.sampleRate * winPowX);
-    float normY = 1.0f / (config_.sampleRate * winPowY);
-    float normXY = 1.0f / (config_.sampleRate * std::sqrt(winPowX * winPowY));
-
-    for (uint32_t k = 0; k < halfN; ++k) {
-        float freq = k * freqStep;
-
-        // Auto-power spectral densities.
-        float pxx = std::norm(dataX[k]) * normX;  // |X|^2 * normX
-        float pyy = std::norm(dataY[k]) * normY;  // |Y|^2 * normY
-
-        // Cross-power spectral density (magnitude).
-        std::complex<float> cross = dataX[k] * std::conj(dataY[k]);
-        float pxy = std::abs(cross) * normXY;
-
-        // One-sided correction: double for non-DC, non-Nyquist.
-        if (k > 0 && k < halfN - 1) {
-            pxx *= 2.0f;
-            pyy *= 2.0f;
-            pxy *= 2.0f;
+    std::vector<float> win(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        float t = float(i) / float(n - 1);
+        switch (config_.window) {
+        case CohereConfig::Rectangular: win[i] = 1.0f; break;
+        case CohereConfig::Hann:
+            win[i] = 0.5f * (1.0f - std::cos(2.0f * float(M_PI) * t)); break;
+        case CohereConfig::Hamming:
+            win[i] = 0.54f - 0.46f * std::cos(2.0f * float(M_PI) * t); break;
+        case CohereConfig::Blackman:
+            win[i] = 0.42f - 0.5f * std::cos(2.0f * float(M_PI) * t)
+                     + 0.08f * std::cos(4.0f * float(M_PI) * t); break;
         }
+    }
 
-        // Coherence: |Pxy|^2 / (Pxx * Pyy)
-        float denom = pxx * pyy;
-        float coh = (denom < 1e-30f) ? 0.0f
-                                     : (pxy * pxy) / denom;
-        // Clamp to [0, 1].
-        coh = std::clamp(coh, 0.0f, 1.0f);
+    const uint32_t halfN = n / 2;
+    std::vector<float> pxx(halfN + 1, 0.0f), pyy(halfN + 1, 0.0f);
+    std::vector<std::complex<float>> pxy(halfN + 1);
+    std::vector<std::complex<float>> dataX(n), dataY(n);
+    for (uint32_t s = 0; s < numSegs; ++s) {
+        uint32_t off = s * step;
+        for (uint32_t i = 0; i < n; ++i) {
+            dataX[i] = std::complex<float>(
+                (off + i < lenX ? signalX_[off + i] : 0.0f) * win[i], 0.0f);
+            dataY[i] = std::complex<float>(
+                (off + i < lenY ? signalY_[off + i] : 0.0f) * win[i], 0.0f);
+        }
+        fft(dataX);
+        fft(dataY);
+        for (uint32_t k = 0; k <= halfN; ++k) {
+            pxx[k] += std::norm(dataX[k]);
+            pyy[k] += std::norm(dataY[k]);
+            pxy[k] += dataX[k] * std::conj(dataY[k]);
+        }
+    }
 
-        freqs_.push_back(freq);
-        values_.push_back(coh);
+    float freqStep = config_.sampleRate / static_cast<float>(n);
+    for (uint32_t k = 0; k <= halfN; ++k) {
+        float denom = pxx[k] * pyy[k];
+        float coh = denom < 1e-30f ? 0.0f
+                    : std::norm(pxy[k]) / denom;
+        freqs_.push_back(k * freqStep);
+        values_.push_back(std::clamp(coh, 0.0f, 1.0f));
     }
 }
 

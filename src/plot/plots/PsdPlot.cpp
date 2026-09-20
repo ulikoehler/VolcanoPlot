@@ -97,40 +97,58 @@ void PsdPlot::computePsd() {
 
     if (signal_.empty()) return;
 
-    // Determine FFT size.
-    uint32_t n = config_.nfft > 0 ? config_.nfft
-                                  : nextPow2(static_cast<uint32_t>(signal_.size()));
+    // mpl Welch averaging: NFFT-sized segments with `noverlap` overlap
+    // (mpl default 0), Hann window each, then average |FFT|^2 over
+    // segments (_spectral_helper with sides='one-sided', scale_by_freq →
+    // density in 1/Hz).
+    uint32_t n = config_.nfft > 0 ? config_.nfft : 256;
     if (n < 2) n = 2;
+    const uint32_t len = static_cast<uint32_t>(signal_.size());
+    const uint32_t nover = std::min(config_.noverlap, n > 1 ? n - 1 : 0);
+    const uint32_t step = n - nover;
+    const uint32_t numSegs = len < n ? 1 : (len - n) / step + 1;
 
+    // Hann window (mpl window_hanning default) and its power Σw².
+    std::vector<float> win(n);
+    float winPow = 0.0f;
+    for (uint32_t i = 0; i < n; ++i) {
+        float t = float(i) / float(n - 1);
+        switch (config_.window) {
+        case PsdConfig::Rectangular: win[i] = 1.0f; break;
+        case PsdConfig::Hann:
+            win[i] = 0.5f * (1.0f - std::cos(2.0f * float(M_PI) * t)); break;
+        case PsdConfig::Hamming:
+            win[i] = 0.54f - 0.46f * std::cos(2.0f * float(M_PI) * t); break;
+        case PsdConfig::Blackman:
+            win[i] = 0.42f - 0.5f * std::cos(2.0f * float(M_PI) * t)
+                     + 0.08f * std::cos(4.0f * float(M_PI) * t); break;
+        }
+        winPow += win[i] * win[i];
+    }
+    if (winPow < 1e-30f) winPow = 1.0f;
+
+    const uint32_t halfN = n / 2;
+    std::vector<float> pxx(halfN + 1, 0.0f);
     std::vector<std::complex<float>> data(n);
-    float windowPower = 0.0f;
-    applyWindow(data, windowPower);
+    for (uint32_t s = 0; s < numSegs; ++s) {
+        uint32_t off = s * step;
+        for (uint32_t i = 0; i < n; ++i) {
+            float smp = (off + i < len) ? signal_[off + i] : 0.0f;
+            data[i] = std::complex<float>(smp * win[i], 0.0f);
+        }
+        fft(data);
+        for (uint32_t k = 0; k <= halfN; ++k)
+            pxx[k] += std::norm(data[k]);
+    }
 
-    if (windowPower < 1e-30f) windowPower = 1.0f;
-
-    fft(data);
-
-    // One-sided spectrum: frequencies [0, sampleRate/2).
-    uint32_t halfN = n / 2;
     float freqStep = config_.sampleRate / static_cast<float>(n);
-
-    // Normalization: PSD = |X(k)|^2 / (sampleRate * windowPower)
-    // For one-sided spectrum, multiply by 2 (except DC and Nyquist).
-    float norm = 1.0f / (config_.sampleRate * windowPower);
-
-    for (uint32_t k = 0; k < halfN; ++k) {
-        float freq = k * freqStep;
-        float power = std::norm(data[k]) * norm;  // |X(k)|^2 * norm
-
-        // One-sided correction: double the power for non-DC, non-Nyquist bins.
-        if (k > 0 && k < halfN - 1)
-            power *= 2.0f;
-
-        // Convert to dB: 10 * log10(power).
-        float db = 10.0f * std::log10(power + 1e-30f);
-
-        freqs_.push_back(freq);
-        values_.push_back(db);
+    float norm = 1.0f / (config_.sampleRate * winPow * float(numSegs));
+    for (uint32_t k = 0; k <= halfN; ++k) {
+        float power = pxx[k] * norm;
+        // One-sided: double all bins except DC and Nyquist.
+        if (k > 0 && k < halfN) power *= 2.0f;
+        freqs_.push_back(k * freqStep);
+        values_.push_back(10.0f * std::log10(power + 1e-30f));
     }
 }
 

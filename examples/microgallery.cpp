@@ -55,8 +55,8 @@ using namespace volcano::plot;
 
 namespace {
 
-constexpr uint32_t kWidth = 400;
-constexpr uint32_t kHeight = 300;
+constexpr uint32_t kWidth = 800;
+constexpr uint32_t kHeight = 600;
 
 struct MicroCtx {
     backend::BackendDesc desc;
@@ -86,10 +86,17 @@ struct MicroCtx {
     }
 };
 
+/// matplotlib-default style at 2x DPI (800x600 px == 4x3in at 200 dpi).
+FigureStyle mfStyle() {
+    auto s = styles::defaultStyle();
+    s.dpi = 200.0f;
+    return s;
+}
+
 /// One axes with matplotlib-default-like style (white bg, no grid, ticks on).
 Axes* mfAxes(Figure& fig) {
     auto* ax = fig.addAxes();
-    ax->setStyle(styles::defaultStyle());
+    ax->setStyle(mfStyle());
     ax->style().faceColor = Color::white();
     return ax;
 }
@@ -153,7 +160,7 @@ void f006_spines_none(Figure& fig) {
 
 void f007_axes_inset_rect(Figure& fig) {
     auto* ax = fig.addAxesFraction(0.25f, 0.25f, 0.5f, 0.5f);
-    ax->setStyle(styles::defaultStyle());
+    ax->setStyle(mfStyle());
     ax->setXlim(0, 1); ax->setYlim(0, 1);
 }
 
@@ -1038,7 +1045,7 @@ void f106_subplots_2x2(Figure& fig) {
     for (uint32_t r = 0; r < 2; ++r)
         for (uint32_t c = 0; c < 2; ++c) {
             auto* ax = fig.subplot2grid({2, 2}, {r, c});
-            ax->setStyle(styles::defaultStyle());
+            ax->setStyle(mfStyle());
             Series2D s;
             auto x = linspace(0, 5, 30);
             for (float xi : x)
@@ -1050,8 +1057,8 @@ void f106_subplots_2x2(Figure& fig) {
 void f107_subplots_sharex(Figure& fig) {
     auto* a = fig.subplot2grid({2, 1}, {0, 0});
     auto* b = fig.subplot2grid({2, 1}, {1, 0});
-    a->setStyle(styles::defaultStyle());
-    b->setStyle(styles::defaultStyle());
+    a->setStyle(mfStyle());
+    b->setStyle(mfStyle());
     Series2D s1, s2;
     auto x = linspace(0, 10, 60);
     for (float xi : x) {
@@ -1083,7 +1090,7 @@ void f109_inset_axes(Figure& fig) {
     auto* ax = mfAxes(fig);
     addLine(ax, sineSeries());
     auto* inset = fig.insetAxes(*ax, 0.55f, 0.55f, 0.35f, 0.35f);
-    inset->setStyle(styles::defaultStyle());
+    inset->setStyle(mfStyle());
     Series2D s = sineSeries();
     s.color = Color::fromRgba8(214, 39, 40);
     inset->addPlot(std::make_unique<LinePlot>(std::move(s)));
@@ -1093,7 +1100,7 @@ void f109_inset_axes(Figure& fig) {
 void f110_mosaic(Figure& fig) {
     auto axes = fig.subplotMosaic({{"A", "B"}, {"C", "C"}});
     for (auto& [name, ax] : axes) {
-        ax->setStyle(styles::defaultStyle());
+        ax->setStyle(mfStyle());
         Series2D s;
         auto x = linspace(0, 5, 30);
         for (float xi : x) s.points.push_back({xi, std::sin(xi)});
@@ -1403,7 +1410,7 @@ void f139_log_clip(Figure& fig) {
 
 void f140_colorblind_cycle(Figure& fig) {
     auto* ax = mfAxes(fig);
-    auto st = styles::defaultStyle();
+    auto st = mfStyle();
     st.colorblindSafe();
     ax->setStyle(st);
     ax->style().faceColor = Color::white();

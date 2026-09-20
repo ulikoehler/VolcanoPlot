@@ -1194,7 +1194,6 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         // frame plus theta/r labels instead of rectilinear furniture.
         if (polar) drawPolarSpineAndLabels(cmd, *p.axes, rect);
         else if (!has3D) drawSpines(cmd, *p.axes, rect);
-
         // Draw text (axis labels, tick labels, title).
         if (textInited_ && textReady_) {
             drawText(cmd, *p.axes, rect);

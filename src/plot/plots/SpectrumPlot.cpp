@@ -129,19 +129,30 @@ void SpectrumPlot::computeSpectrum() {
             }
             case SpectrumType::Phase:
             case SpectrumType::Angle: {
-                // Only compute phase where magnitude is significant.
-                float mag = std::abs(c);
-                if (mag < 1e-10f * static_cast<float>(halfN)) {
-                    val = 0.0f;
-                } else {
-                    val = std::atan2(c.imag(), c.real());
-                }
+                // mpl _spectral_helper: 'angle' = raw np.angle, 'phase'
+                // = np.unwrap(angle) along the frequency axis.
+                val = std::atan2(c.imag(), c.real());
                 break;
             }
         }
 
         freqs_.push_back(freq);
         values_.push_back(val);
+    }
+
+    if (config_.type == SpectrumType::Phase) {
+        // np.unwrap: shift by 2π so consecutive phases differ by < π.
+        for (size_t i = 1; i < values_.size(); ++i) {
+            float d = values_[i] - values_[i - 1];
+            if (d > float(M_PI))
+                values_[i] -= 2.0f * float(M_PI) *
+                              std::floor((d + float(M_PI)) /
+                                         (2.0f * float(M_PI)));
+            else if (d < -float(M_PI))
+                values_[i] += 2.0f * float(M_PI) *
+                              std::floor((float(M_PI) - d) /
+                                         (2.0f * float(M_PI)));
+        }
     }
 }
 

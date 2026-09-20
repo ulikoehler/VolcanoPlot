@@ -31,8 +31,8 @@ struct SpectrumConfig {
     SpectrumScale scale = SpectrumScale::Linear;
     /// Sample rate (Hz). Determines x-axis frequency range.
     float sampleRate = 2.0f;
-    /// Window function to apply before FFT.
-    enum Window { Rectangular, Hann, Hamming, Blackman } window = Rectangular;
+    /// Window function to apply before FFT (mpl default: Hann).
+    enum Window { Rectangular, Hann, Hamming, Blackman } window = Hann;
     /// Line color.
     Color color = Color::fromRgba8(31, 119, 180, 255);
     /// Line width.

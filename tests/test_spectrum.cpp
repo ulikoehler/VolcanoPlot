@@ -160,7 +160,9 @@ TEST(SpectrumRegression, BasicAngleSpectrumRenders) {
     EXPECT_GT(filledCount, 20u) << "Angle spectrum should render";
 }
 
-TEST(SpectrumRegression, PhaseSpectrumRangeInPi) {
+TEST(SpectrumRegression, PhaseSpectrumUnwrapped) {
+    // mpl phase_spectrum = np.unwrap(angle): phase may drift beyond ±π
+    // but consecutive bins never jump by more than π.
     SpecFigure cf(256);
     auto signal = sineWave(64, 4.0f, 64.0f);
     SpectrumConfig cfg;
@@ -169,7 +171,21 @@ TEST(SpectrumRegression, PhaseSpectrumRangeInPi) {
     cf.render();
 
     const auto& av = cf.axes->viewport();
-    // Phase should be in [-pi, pi].
+    EXPECT_TRUE(std::isfinite(av.y.min));
+    EXPECT_TRUE(std::isfinite(av.y.max));
+    EXPECT_GT(av.y.max, av.y.min);
+}
+
+TEST(SpectrumRegression, AngleSpectrumRangeInPi) {
+    // mpl angle_spectrum = raw np.angle: always within [-π, π].
+    SpecFigure cf(256);
+    auto signal = sineWave(64, 4.0f, 64.0f);
+    SpectrumConfig cfg;
+    cfg.type = SpectrumType::Angle;
+    cf.axes->addPlot(std::make_unique<SpectrumPlot>(std::move(signal), cfg));
+    cf.render();
+
+    const auto& av = cf.axes->viewport();
     EXPECT_GE(av.y.min, -static_cast<float>(M_PI) - 1.0f);
     EXPECT_LE(av.y.max, static_cast<float>(M_PI) + 1.0f);
 }

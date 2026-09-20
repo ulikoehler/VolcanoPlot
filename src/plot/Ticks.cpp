@@ -21,20 +21,27 @@ float niceStep(float vmin, float vmax, int nbins) {
     const float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
     for (float s : niceSteps) {
         float cand = s * mag;
-        if (cand >= rawStep * (1.0f - 1e-6f)) return cand;
+        if (cand >= rawStep * (1.0f - 1e-6f)) {
+            // Guard: denormal/zero steps would loop forever downstream.
+            if (cand > 0.0f && std::isfinite(cand)) return cand;
+            return 1.0f;
+        }
     }
-    return 10.0f * mag;
+    float fallback = 10.0f * mag;
+    return (fallback > 0.0f && std::isfinite(fallback)) ? fallback : 1.0f;
 }
 
 /// Ticks at multiples of step covering [vmin, vmax].
 std::vector<float> steppedTicks(float vmin, float vmax, float step,
                                 float offset = 0.0f) {
     std::vector<float> out;
-    if (step <= 0.0f) return out;
+    if (!(step > 0.0f) || !std::isfinite(step)) return out;
     float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
     float start = (std::ceil((lo - offset) / step) * step) + offset;
-    for (float v = start; v <= hi + step * 1e-6f; v += step)
+    for (float v = start; v <= hi + step * 1e-6f; v += step) {
         out.push_back(std::round((v - offset) / step) * step + offset);
+        if (out.size() > 100000) break;  // pathological density guard
+    }
     return out;
 }
 
@@ -97,7 +104,13 @@ std::vector<float> IndexLocator::tickValues(float vmin, float vmax) const {
 }
 
 std::vector<float> MaxNLocator::tickValues(float vmin, float vmax) const {
-    return steppedTicks(vmin, vmax, niceStep(vmin, vmax, nbins_));
+    float step = niceStep(vmin, vmax, nbins_);
+    // Degenerate range: a step too small to advance `v` (denormal or
+    // below the ulp of the bounds) would loop forever without making
+    // progress. Emit a single tick at the location instead.
+    if (vmax + step == vmax || vmin + step == vmin)
+        return {vmin};
+    return steppedTicks(vmin, vmax, step);
 }
 
 std::vector<float> LogLocator::tickValues(float vmin, float vmax) const {

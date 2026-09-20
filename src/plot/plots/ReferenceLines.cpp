@@ -73,6 +73,50 @@ void AxvLine::contributeToAutoscale(Viewport& v) const {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// AxLine — infinite line through two points (mpl axline)
+// ═══════════════════════════════════════════════════════════════════════════
+
+void AxLine::prepare(render::Renderer& /*r*/) {
+    prepared_ = true;
+}
+
+void AxLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
+                  const Axes& axes, Rect2D rect) {
+    if (!prepared_) return;
+    // mpl axline clips to the axes patch; the line is infinite in data
+    // space. Working in pixel space keeps the math degenerate-free
+    // (vertical lines, huge slopes) — compute the two pixel points, then
+    // extend the direction far past the rect edges and let the scissor
+    // clip it.
+    auto toPx = [&](Point2D d) {
+        auto f = axes.dataToFraction(d);
+        return Point2D{rect.x + f.x * rect.width,
+                       rect.y + (1.0f - f.y) * rect.height};
+    };
+    Point2D p1 = toPx(xy1_), p2 = toPx(xy2_);
+    float dx = p2.x - p1.x, dy = p2.y - p1.y;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-6f) return;  // coincident points — no line defined
+    dx /= len; dy /= len;
+    float ext = float(rect.width + rect.height) * 2.0f + 40.0f;
+    Point2D pts[] = {
+        {p1.x - dx * ext, p1.y - dy * ext},
+        {p1.x + dx * ext, p1.y + dy * ext}
+    };
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
+                                    std::span{pts, 2}, color_, width_);
+}
+
+void AxLine::contributeToAutoscale(Viewport& v) const {
+    v.x.min = std::min(v.x.min, std::min(xy1_.x, xy2_.x));
+    v.x.max = std::max(v.x.max, std::max(xy1_.x, xy2_.x));
+    v.y.min = std::min(v.y.min, std::min(xy1_.y, xy2_.y));
+    v.y.max = std::max(v.y.max, std::max(xy1_.y, xy2_.y));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // AxhSpan
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -245,6 +289,37 @@ void AxvLine::emitVector(render::VectorCanvas& c, const Axes& axes,
     render::VectorCanvas::Pen pen;
     pen.color = color_; pen.width = width_;
     Point2D seg[2] = {{px, float(rect.y)}, {px, float(rect.y + rect.height)}};
+    c.polyline(seg, pen);
+}
+
+void AxLine::emitVector(render::VectorCanvas& c, const Axes& axes,
+                        Rect2D rect) {
+    auto toPx = [&](Point2D d) {
+        auto f = axes.dataToFraction(d);
+        return Point2D{rect.x + f.x * rect.width,
+                       rect.y + (1.0f - f.y) * rect.height};
+    };
+    Point2D p1 = toPx(xy1_), p2 = toPx(xy2_);
+    float dx = p2.x - p1.x, dy = p2.y - p1.y;
+    // Liang–Barsky clip of the segment p1->p2 against the axes rect,
+    // widened so the infinite line is bounded by the rect edges.
+    float x0 = float(rect.x), y0 = float(rect.y);
+    float x1 = float(rect.x + rect.width), y1 = float(rect.y + rect.height);
+    float t0 = -1e9f, t1 = 1e9f;
+    auto clip1 = [&](float p, float q) -> int {
+        if (p == 0.0f) return q < 0.0f ? 0 : 1;
+        float tt = q / p;
+        if (p < 0.0f) { if (tt > t1) return 0; if (tt > t0) t0 = tt; }
+        else          { if (tt < t0) return 0; if (tt < t1) t1 = tt; }
+        return 1;
+    };
+    if (!clip1(-dx, p1.x - x0) || !clip1(dx, x1 - p1.x) ||
+        !clip1(-dy, p1.y - y0) || !clip1(dy, y1 - p1.y))
+        return;
+    Point2D seg[2] = {{p1.x + t0 * dx, p1.y + t0 * dy},
+                      {p1.x + t1 * dx, p1.y + t1 * dy}};
+    render::VectorCanvas::Pen pen;
+    pen.color = color_; pen.width = width_;
     c.polyline(seg, pen);
 }
 

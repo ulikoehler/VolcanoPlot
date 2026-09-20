@@ -25,6 +25,8 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       axis-spanning lines drawn via SpineRenderer pixel-space line strips
       to avoid GPU guard-band clipping; spans use FillRenderer with
       kAxisSpan triangles that clip correctly at viewport boundaries)
+- [x] `axline` (AxLine — infinite line through two points or point+slope,
+      pixel-space Liang–Barsky clipping to the axes rect, raster + vector)
 - [x] `broken_barh` (BrokenBarHPlot — collection of horizontal rectangles
       at various y positions, per-segment colors, Gantt chart support,
       overlapping bars, negative x values, FillRenderer triangle tessellation)
@@ -123,16 +125,20 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       with normalized/unnormalized modes, configurable max lags, stem plot
       rendering via LineSegmentRenderer + PointRenderer, symmetric
       autocorrelation, zero-lag peak for identical signals)
-- [x] `psd` (PsdPlot — power spectral density via radix-2 FFT, |FFT(x)|^2
-      normalized by sampleRate * windowPower, one-sided spectrum with DC/Nyquist
-      correction, 10*log10 dB output, Hann/Hamming/Blackman/Rectangular windows,
+- [x] `psd` (PsdPlot — power spectral density via mpl `_spectral_helper`
+      semantics: Welch segment averaging over NFFT segments with `noverlap`
+      (mpl default 0), windowed radix-2 FFT, |FFT|^2 normalized by
+      sampleRate * sum(w^2), one-sided spectrum with DC/Nyquist correction,
+      10*log10 dB output, Hann/Hamming/Blackman/Rectangular windows,
       configurable nfft, LineRenderer)
-- [x] `csd` (CsdPlot — cross-spectral density via radix-2 FFT,
+- [x] `csd` (CsdPlot — cross-spectral density via Welch segment
+      averaging (NFFT segments, `noverlap`, mpl default 0),
       |FFT(x) * conj(FFT(y))| normalized by sampleRate * sqrt(windowPower_x * windowPower_y),
       one-sided spectrum with DC/Nyquist correction, 10*log10 dB output,
       Hann/Hamming/Blackman/Rectangular windows, configurable nfft, LineRenderer)
-- [x] `cohere` (CoherePlot — magnitude-squared coherence Cxy = |Pxy|^2 / (Pxx * Pyy),
-      auto/cross power spectral densities via radix-2 FFT, one-sided spectrum,
+- [x] `cohere` (CoherePlot — magnitude-squared coherence Cxy = |mean(Pxy)|^2
+      / (mean(Pxx) * mean(Pyy)) averaged over NFFT segments (mpl `noverlap`
+      default 0), one-sided spectrum,
       output clamped to [0, 1], Hann/Hamming/Blackman/Rectangular windows,
       configurable nfft, LineRenderer)
 - [x] `specgram` (SpecgramPlot — STFT spectrogram via sliding-window FFT,

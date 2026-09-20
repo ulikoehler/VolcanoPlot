@@ -26,8 +26,8 @@ import datetime
 
 np.random.seed(42)
 
-WIDTH, HEIGHT = 400, 300
-DPI = 100
+WIDTH, HEIGHT = 800, 600
+DPI = 200
 FIGSIZE = (WIDTH / DPI, HEIGHT / DPI)
 
 

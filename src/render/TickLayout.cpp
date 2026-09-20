@@ -31,6 +31,12 @@ std::vector<float> autoTicks(float vmin, float vmax, int nbins) {
             break;  // first (smallest) step that fits
         }
     }
+    // Degenerate range: rawStep can underflow to 0 (or NaN) for denormal/
+    // identical min/max — a zero step would loop forever appending ticks.
+    // A step too small to advance v is equally fatal.
+    if (!(niceStep > 0.0f) || !std::isfinite(niceStep) ||
+        vmax + niceStep == vmax)
+        return {};
 
     float start = std::ceil(vmin / niceStep) * niceStep;
     std::vector<float> ticks;
@@ -86,6 +92,7 @@ float autoTickStep(float vmin, float vmax, int nbins) {
             break;
         }
     }
+    if (!(niceStep > 0.0f) || !std::isfinite(niceStep)) return 1.0f;
     return niceStep;
 }
 

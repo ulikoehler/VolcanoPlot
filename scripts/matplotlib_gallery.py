@@ -46,8 +46,8 @@ def randn(n, scale=1.0, offset=0.0):
     return np.array([_shared.gauss() * scale + offset
                      for _ in range(n)])
 
-WIDTH, HEIGHT = 800, 600
-DPI = 100
+WIDTH, HEIGHT = 1600, 1200
+DPI = 200
 
 
 def save(fig, out_dir, name):
@@ -496,6 +496,254 @@ def gen_trisurf(out_dir):
     save(fig, out_dir, "trisurf")
 
 
+def gen_stairs(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Stairs", "Bin", "Count")
+    values = [4, 9, 15, 22, 18, 11, 6, 3]
+    edges = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    ax.stairs(values, edges, color="#1f77b4")
+    save(fig, out_dir, "stairs")
+
+
+def _tri_xyz(n):
+    # x,y interleaved per point, matching the C++ loop order.
+    u = np.array([_shared.uniform() for _ in range(2 * n)])
+    x, y = u[0::2] * 6 - 3, u[1::2] * 6 - 3
+    z = np.sin(x) * np.cos(y)
+    return x, y, z
+
+
+def gen_tripcolor(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "tripcolor")
+    x, y, z = _tri_xyz(300)
+    pc = ax.tripcolor(x, y, z, cmap="viridis", shading="flat")
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    fig.colorbar(pc, ax=ax)
+    save(fig, out_dir, "tripcolor")
+
+
+def gen_triplot(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "triplot")
+    u = np.array([_shared.uniform() for _ in range(120)])
+    x, y = u[0::2] * 6 - 3, u[1::2] * 6 - 3
+    ax.triplot(x, y, marker="o", color="#1f77b4")
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    save(fig, out_dir, "triplot")
+
+
+def gen_tricontour(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "tricontour")
+    x, y, z = _tri_xyz(300)
+    ax.tricontour(x, y, z, levels=12)
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    save(fig, out_dir, "tricontour")
+
+
+def gen_barbs(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "barbs")
+    x = np.tile(np.arange(8) * 0.5, 8)
+    y = np.repeat(np.arange(8) * 0.5, 8)
+    u = 20 * np.sin(x * 0.8) + 15
+    v = 20 * np.cos(y * 0.8)
+    ax.barbs(x, y, u, v)
+    save(fig, out_dir, "barbs")
+
+
+def gen_spy(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax.set_title("spy")
+    n = 24
+    m = np.zeros((n, n))
+    for i in range(n):
+        m[i, i] = 1
+        if i + 3 < n:
+            m[i, i + 3] = 1
+        if i >= 3:
+            m[i, i - 3] = 1
+    m[2, 18] = 1; m[20, 5] = 1
+    ax.spy(m)
+    save(fig, out_dir, "spy")
+
+
+def gen_matshow(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax.set_title("matshow")
+    n = 12
+    i, j = np.meshgrid(np.arange(n), np.arange(n))
+    m = np.sin(i * 0.5) * np.cos(j * 0.5)
+    ax.matshow(m, cmap="viridis")
+    save(fig, out_dir, "matshow")
+
+
+def _signal():
+    t = np.arange(1024) / 1024.0
+    return (np.sin(2 * np.pi * 10 * t) + np.sin(2 * np.pi * 40 * t)
+            + 0.4 * (np.array([_shared.uniform() for _ in range(1024)])
+                     * 2 - 1))
+
+
+def gen_psd(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "psd", "Frequency", "Power")
+    ax.psd(_signal(), NFFT=256, Fs=1024)
+    save(fig, out_dir, "psd")
+
+
+def gen_csd(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "csd", "Frequency", "Cross Spectrum")
+    ax.csd(_signal(), _signal(), NFFT=256, Fs=1024)
+    save(fig, out_dir, "csd")
+
+
+def gen_cohere(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "cohere", "Frequency", "Coherence")
+    ax.cohere(_signal(), _signal(), NFFT=256, Fs=1024)
+    save(fig, out_dir, "cohere")
+
+
+def gen_xcorr(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "xcorr", "Lag", "Correlation")
+    ax.xcorr(_signal(), _signal(), normed=True, maxlags=50)
+    save(fig, out_dir, "xcorr")
+
+
+def gen_magnitude_spectrum(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "magnitude_spectrum", "Frequency", "Magnitude (dB)")
+    ax.magnitude_spectrum(_signal(), Fs=1024, scale="dB")
+    save(fig, out_dir, "magnitude_spectrum")
+
+
+def gen_phase_spectrum(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "phase_spectrum", "Frequency", "Phase (rad)")
+    ax.phase_spectrum(_signal(), Fs=1024)
+    save(fig, out_dir, "phase_spectrum")
+
+
+def gen_angle_spectrum(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "angle_spectrum", "Frequency", "Angle (rad)")
+    ax.angle_spectrum(_signal(), Fs=1024)
+    save(fig, out_dir, "angle_spectrum")
+
+
+def gen_reflines(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax.set_title("Reference lines")
+    x = np.linspace(0, 10, 100)
+    ax.plot(x, np.sin(x), color="#1f77b4", linewidth=1.5)
+    ax.axhline(0, color="#d62728", linewidth=1.0)
+    ax.axvline(5, color="#2ca02c", linewidth=1.0)
+    ax.axhspan(0.5, 1.0, color=(1.0, 0.84, 0.0, 0.24))
+    ax.axvspan(7, 9, color=(0.58, 0.40, 0.74, 0.24))
+    ax.axline((0, 0.8), slope=-0.15, color="#8c564b", linewidth=1.0)
+    save(fig, out_dir, "reflines")
+
+
+def gen_hlines_vlines(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax.set_title("hlines / vlines")
+    ax.hlines([0.5, 1.0, 1.5], 0, 4, color="#1f77b4", linewidth=1.5)
+    ax.vlines([1, 2, 3], 0, 2, color="#ff7f0e", linewidth=1.5)
+    ax.set_xlim(0, 4); ax.set_ylim(0, 2)
+    save(fig, out_dir, "hlines_vlines")
+
+
+def gen_annotate(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax.set_title("annotate")
+    x = np.linspace(0, 10, 200)
+    ax.plot(x, np.sin(x), color="#1f77b4", linewidth=1.5)
+    ax.annotate("local max", xy=(np.pi / 2, 1), xytext=(3, 1.5),
+                arrowprops=dict(arrowstyle="->", facecolor="black"))
+    ax.text(6, -1, "local min")
+    ax.set_xlim(0, 10); ax.set_ylim(-1.5, 2)
+    save(fig, out_dir, "annotate")
+
+
+def gen_bar_label(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "bar_label", "Category", "Value")
+    c = ax.bar(range(5), [3, 7, 5, 8, 4], width=0.8,
+               tick_label=list("ABCDE"))
+    ax.bar_label(c)
+    save(fig, out_dir, "bar_label")
+
+
+def gen_figimage(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111)
+    ax.set_title("figimage")
+    x = np.linspace(0, 10, 100)
+    ax.plot(x, np.sin(x), color="#1f77b4")
+    w, h = 64, 64
+    X = np.zeros((h, w, 4))
+    X[:, :, 0] = np.linspace(0, 1, w)[None, :]
+    X[:, :, 1] = np.linspace(0, 1, h)[:, None]
+    X[:, :, 3] = 0.5
+    fig.figimage(X, xo=120, yo=120)
+    save(fig, out_dir, "figimage")
+
+
+def _surface_grid(n=40):
+    x = np.linspace(-5, 5, n)
+    y = np.linspace(-5, 5, n)
+    X, Y = np.meshgrid(x, y)
+    return X, Y, np.sin(X * 0.5) * np.cos(Y * 0.5)
+
+
+def gen_contour3d(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title("contour3d")
+    X, Y, Z = _surface_grid()
+    ax.contour(X, Y, Z, zdir="z", offset=-1, cmap="viridis")
+    save(fig, out_dir, "contour3d")
+
+
+def gen_quiver3d(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title("quiver3d")
+    g = np.arange(5) * 0.5 - 1.0
+    X, Y, Z = np.meshgrid(g, g, g)
+    ax.quiver(X, Y, Z, -Y, X, np.full_like(Z, 0.4), color="#1f77b4")
+    save(fig, out_dir, "quiver3d")
+
+
+def gen_errorbar3d(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title("errorbar3d")
+    x = np.arange(8.0)
+    y = np.sin(x)
+    z = x * 0.5
+    ze = 0.2 + 0.1 * (x.astype(int) % 3)
+    ax.errorbar(x, y, z, zerr=ze, fmt="o", color="#1f77b4", capsize=5)
+    save(fig, out_dir, "errorbar3d")
+
+
+def gen_voxels(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title("voxels")
+    n = 6
+    i, j, k = np.meshgrid(np.arange(n), np.arange(n), np.arange(n),
+                          indexing="ij")
+    c = (n - 1) * 0.5
+    filled = (i - c) ** 2 + (j - c) ** 2 + (k - c) ** 2 < 7.0
+    ax.voxels(filled)
+    save(fig, out_dir, "voxels")
+
+
 GENERATORS = [
     gen_scatter, gen_line, gen_bar, gen_grouped_bar, gen_hist, gen_pie,
     gen_box, gen_violin, gen_stack, gen_stem, gen_step, gen_errorbar,
@@ -506,6 +754,12 @@ GENERATORS = [
     gen_quiver, gen_streamplot, gen_imshow, gen_pcolormesh,
     gen_tricontourf, gen_polar, gen_eventplot, gen_table, gen_specgram,
     gen_trisurf,
+    gen_stairs, gen_tripcolor, gen_triplot, gen_tricontour, gen_barbs,
+    gen_spy, gen_matshow, gen_psd, gen_csd, gen_cohere, gen_xcorr,
+    gen_magnitude_spectrum, gen_phase_spectrum, gen_angle_spectrum,
+    gen_reflines, gen_hlines_vlines, gen_annotate, gen_bar_label,
+    gen_figimage, gen_contour3d, gen_quiver3d, gen_errorbar3d,
+    gen_voxels,
 ]
 
 
