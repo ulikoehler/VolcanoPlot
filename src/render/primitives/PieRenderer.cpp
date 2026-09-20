@@ -166,16 +166,25 @@ void PieRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
         float sa0 = sliceStart[idx];
         float sa1 = sa0 + 2.0f * PI * data.values[idx] / total;
         float r0 = data.innerRadius;
-        float r1 = 1.0f + data.explode * float(idx);
+        float r1 = 1.0f;
+        // mpl explode: translate the wedge center radially along its
+        // bisector by explode*radius (scalar applies to all wedges).
+        float mid = (sa0 + sa1) * 0.5f;
+        plot::Point2D off{data.explode * std::cos(mid),
+                          data.explode * std::sin(mid)};
         plot::Color c = (idx < data.colors.size()) ? data.colors[idx]
                                                     : plot::Color::fromRgba8(31, 119, 180);
         for (int s = 0; s < kSeg; ++s) {
             float ta0 = sa0 + (sa1 - sa0) * s / kSeg;
             float ta1 = sa0 + (sa1 - sa0) * (s + 1) / kSeg;
-            plot::Point2D i0{r0*std::cos(ta0), r0*std::sin(ta0)};
-            plot::Point2D i1{r0*std::cos(ta1), r0*std::sin(ta1)};
-            plot::Point2D o0{r1*std::cos(ta0), r1*std::sin(ta0)};
-            plot::Point2D o1{r1*std::cos(ta1), r1*std::sin(ta1)};
+            plot::Point2D i0{off.x + r0*std::cos(ta0),
+                             off.y + r0*std::sin(ta0)};
+            plot::Point2D i1{off.x + r0*std::cos(ta1),
+                             off.y + r0*std::sin(ta1)};
+            plot::Point2D o0{off.x + r1*std::cos(ta0),
+                             off.y + r1*std::sin(ta0)};
+            plot::Point2D o1{off.x + r1*std::cos(ta1),
+                             off.y + r1*std::sin(ta1)};
             verts.insert(verts.end(), {i0, i1, o0, i1, o1, o0});
             for (int j = 0; j < 6; ++j) colors.push_back(c);
         }

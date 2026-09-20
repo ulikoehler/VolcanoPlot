@@ -266,3 +266,89 @@ TEST(Scatter3DRegression, LargeMarkerSize) {
     size_t filledCount = countPixels(img, isNotWhite);
     EXPECT_GT(filledCount, 100u) << "Large marker should render many pixels";
 }
+
+TEST(Scatter3DRegression, DepthshadeFadesFarPoints) {
+    // depthshade (mpl default): far points lose alpha → blend toward
+    // the white background, so saturated-blue pixel count drops.
+    auto renderShade = [](bool shade) {
+        Fig3D cf(256);
+        auto s = makeSphere(12);
+        Scatter3DConfig cfg;
+        cfg.color = Color::blue();
+        cfg.size = 8.0f;
+        cfg.depthshade = shade;
+        auto p = std::make_unique<Scatter3D>(std::move(s.x), std::move(s.y),
+                                             std::move(s.z), cfg);
+        p->setCamera(Camera3D{{3, 3, 3}, {0, 0, 0}, {0, 0, 1}});
+        cf.axes->addPlot(std::move(p));
+        return cf.render();
+    };
+    auto imgOn = renderShade(true);
+    auto imgOff = renderShade(false);
+    auto saturated = [](const Pixel& p) {
+        return p.b > 200 && p.r < 80 && p.g < 80;
+    };
+    size_t on = countPixels(imgOn, saturated);
+    size_t off = countPixels(imgOff, saturated);
+    EXPECT_GT(off, 0u);
+    EXPECT_LT(on, off) << "depthshade should fade far markers";
+}
+
+TEST(Scatter3DRegression, ViewInitMatchesEyeTarget) {
+    // mpl view_init: elev=0, azim=0 → eye on +x axis; camera should equal
+    // an equivalent explicit eye/target camera.
+    auto s = makeSphere(8);
+    auto renderCam = [&](const Camera3D& cam) {
+        Fig3D cf(256);
+        auto ss = s;
+        Scatter3DConfig cfg;
+        cfg.color = Color::blue();
+        cfg.size = 8.0f;
+        cfg.depthshade = false;
+        auto plot = std::make_unique<Scatter3D>(std::move(ss.x), std::move(ss.y),
+                                                std::move(ss.z), cfg);
+        plot->setCamera(cam);
+        cf.axes->addPlot(std::move(plot));
+        return cf.render();
+    };
+    auto c1 = Camera3D::viewInit(0.0f, 0.0f, 0.0f, {0,0,0}, 5.0f);
+    Camera3D c2{{5, 0, 0}, {0, 0, 0}, {0, 0, 1}};
+    auto img1 = renderCam(c1), img2 = renderCam(c2);
+    size_t diff = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x)
+            if (!img1.get(x, y).approx(img2.get(x, y), 30)) ++diff;
+    EXPECT_LT(diff, 256u) << "viewInit(0,0) should match eye=(d,0,0)";
+
+    // Different elevation must change the image.
+    auto c3 = Camera3D::viewInit(60.0f, 0.0f, 0.0f, {0,0,0}, 5.0f);
+    auto img3 = renderCam(c3);
+    bool anyDiff = false;
+    for (uint32_t y = 0; y < 256 && !anyDiff; ++y)
+        for (uint32_t x = 0; x < 256; ++x)
+            if (!img1.get(x, y).approx(img3.get(x, y), 30)) { anyDiff = true; break; }
+    EXPECT_TRUE(anyDiff) << "elev=60 should differ from elev=0";
+}
+
+TEST(Scatter3DRegression, ViewInitRollRotates) {
+    auto s = makeSphere(8);
+    auto renderRoll = [&](float roll) {
+        Fig3D cf(256);
+        auto ss = s;
+        Scatter3DConfig cfg;
+        cfg.color = Color::blue();
+        cfg.size = 8.0f;
+        cfg.depthshade = false;
+        auto plot = std::make_unique<Scatter3D>(std::move(ss.x), std::move(ss.y),
+                                                std::move(ss.z), cfg);
+        plot->setCamera(Camera3D::viewInit(30.0f, -60.0f, roll, {0,0,0}, 6.0f));
+        cf.axes->addPlot(std::move(plot));
+        return cf.render();
+    };
+    auto img0 = renderRoll(0.0f), img90 = renderRoll(90.0f);
+    bool anyDiff = false;
+    for (uint32_t y = 0; y < 256 && !anyDiff; ++y)
+        for (uint32_t x = 0; x < 256; ++x)
+            if (!img0.get(x, y).approx(img90.get(x, y), 30)) { anyDiff = true; break; }
+    EXPECT_TRUE(anyDiff) << "roll=90 should rotate the image";
+}

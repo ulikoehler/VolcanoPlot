@@ -102,7 +102,9 @@ void applyCycleKey(CycleProps& p, std::string_view key, std::string_view val) {
         float w;
         if (parseFloat(val, w)) p.lineWidth = w;
     } else if (key == "marker") {
-        if (val.size() == 1)
+        if (val.size() >= 2 && val.front() == '$' && val.back() == '$')
+            p.markerTex = std::string(val.substr(1, val.size() - 2));
+        else if (val.size() == 1)
             if (auto m = markerFromChar(val[0])) p.marker = *m;
     }
 }

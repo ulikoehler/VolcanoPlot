@@ -34,9 +34,9 @@ struct StreamConfig {
     /// velocity so lines stay continuous.
     bool brokenStreamlines = true;
     /// Arrowhead length in pixels.
-    float arrowLength = 6.0f;
+    float arrowLength = 10.0f;
     /// Arrowhead width in pixels.
-    float arrowWidth = 4.0f;
+    float arrowWidth = 7.0f;
     std::string label;
 };
 

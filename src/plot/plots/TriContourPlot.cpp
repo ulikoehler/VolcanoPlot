@@ -32,6 +32,20 @@ std::vector<float> autoLevels(float vmin, float vmax, int n) {
     return MaxNLocator(n + 1).tickValues(vmin, vmax);
 }
 
+/// mpl _autolev for *filled* contours: the level set brackets the data
+/// range — one level below zmin and one above zmax — so the outer bands
+/// cover the whole hull (`i0 = under[-1]`, `i1 = over[0]+1`; mpl's own
+/// locator emits the exterior levels, ours doesn't, so extend by step).
+std::vector<float> autoLevelsFilled(float vmin, float vmax, int n) {
+    auto lev = autoLevels(vmin, vmax, n);
+    if (lev.size() < 2) return lev;
+    float step = lev[1] - lev[0];
+    if (step <= 0.0f) step = 1.0f;
+    if (lev.front() > vmin) lev.insert(lev.begin(), lev.front() - step);
+    if (lev.back() < vmax) lev.push_back(lev.back() + step);
+    return lev;
+}
+
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -175,7 +189,7 @@ void TriContourfPlot::computeLevels() {
         vmax = std::max(vmax, v);
     }
     if (vmin >= vmax) { vmin = 0.0f; vmax = 1.0f; }
-    levels_ = autoLevels(vmin, vmax, config_.numLevels);
+    levels_ = autoLevelsFilled(vmin, vmax, config_.numLevels);
 }
 
 void TriContourfPlot::marchingTrianglesFilled() {
@@ -311,6 +325,10 @@ void TriContourfPlot::contributeToAutoscale(Viewport& v) const {
         v.x.max = std::max(v.x.max, x_[i]);
         v.y.min = std::min(v.y.min, y_[i]);
         v.y.max = std::max(v.y.max, y_[i]);
+        if (!std::isnan(z_[i])) {
+            v.z.min = std::min(v.z.min, z_[i]);
+            v.z.max = std::max(v.z.max, z_[i]);
+        }
     }
 }
 

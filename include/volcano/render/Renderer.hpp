@@ -129,6 +129,15 @@ private:
     void drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
                   plot::Rect2D rect);
 
+    /// Polar furniture: radial "thetagrid" spokes + concentric r-grid
+    /// circles (matplotlib projection="polar"), plus the circular outer
+    /// spine, degree theta labels, and r tick labels.
+    void drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                       plot::Rect2D rect);
+    void drawPolarSpineAndLabels(vk::CommandBuffer cmd,
+                                 const plot::Axes& axes,
+                                 plot::Rect2D rect);
+
     /// Draw a legend for the axes (if enabled in style).
     void drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                     plot::Rect2D rect);

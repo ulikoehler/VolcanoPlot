@@ -128,6 +128,11 @@ void VectorRenderer::render(const plot::Figure& fig, VectorCanvas& canvas) {
         richText(canvas, t.text,
                  extent_.width * 0.5f - m.width * 0.5f, m.ascent + 2.0f,
                  t.color, scale, t.font.rotation, plot::HAlign::Center);
+        if (t.weight == "bold" || t.font.weight == "bold")
+            richText(canvas, t.text,
+                     extent_.width * 0.5f - m.width * 0.5f + 0.6f,
+                     m.ascent + 2.0f, t.color, scale, t.font.rotation,
+                     plot::HAlign::Center);
     }
 }
 
@@ -321,11 +326,17 @@ void VectorRenderer::emitLabels(const plot::Axes& axes, Rect2D rect,
     }
     if (!style.title.text.empty()) {
         auto m = measure(style.title.text, scale);
-        richText(c, style.title.text,
-                 rect.x + rect.width / 2.0f - m.width / 2.0f,
-                 y0 - style.title.pad * kPtToPx - m.height + m.ascent,
+        float tx = rect.x + rect.width / 2.0f - m.width / 2.0f;
+        float ty = y0 - style.title.pad * kPtToPx - m.height + m.ascent;
+        richText(c, style.title.text, tx, ty,
                  style.title.color, scale, style.title.font.rotation,
                  plot::HAlign::Center);
+        // Faux bold: second pass offset ~0.6px (mirrors raster).
+        if (style.title.weight == "bold" ||
+            style.title.font.weight == "bold")
+            richText(c, style.title.text, tx + 0.6f, ty,
+                     style.title.color, scale, style.title.font.rotation,
+                     plot::HAlign::Center);
     }
 
     // X tick labels.
@@ -1014,6 +1025,56 @@ void VectorRenderer::emitColorbar(const plot::Axes& axes, Rect2D rect,
     };
 
     constexpr uint32_t kSegs = 64;
+    if (cbs.orientation == "horizontal") {
+        float regionY = region.height > 0 ? float(region.y)
+            : float(rect.y) + float(rect.height) +
+                  cbs.pad * float(rect.height);
+        float regionH = region.height > 0 ? float(region.height)
+            : cbs.fraction * float(rect.height);
+        float stripW = float(rect.width) * cbs.shrink;
+        float stripX = float(rect.x) + (float(rect.width) - stripW) * 0.5f;
+        float stripH = cbs.width > 0.0f
+            ? cbs.width : std::min(regionH, stripW / cbs.aspect);
+        float stripY = cbs.padding > 0.0f
+            ? float(rect.y) + float(rect.height) + cbs.padding
+            : regionY;
+        float extW = stripH * 0.6f;
+        float bodyX0 = stripX + (extMin ? extW : 0.0f);
+        float bodyX1 = stripX + stripW - (extMax ? extW : 0.0f);
+        float bodyW = bodyX1 - bodyX0;
+
+        float segW = bodyW / kSegs;
+        for (uint32_t i = 0; i < kSegs; ++i) {
+            float t = float(i) / float(kSegs - 1);
+            fillRect(c, {int32_t(bodyX0 + i * segW - 1), int32_t(stripY),
+                         uint32_t(segW) + 2, uint32_t(stripH)},
+                     sampleAt(t));
+        }
+        if (extMin) {
+            Point2D tri[3] = {{bodyX0, stripY}, {bodyX0, stripY + stripH},
+                              {bodyX0 - extW, stripY + stripH / 2.0f}};
+            c.polygon(tri, sampleAt(0.0f));
+        }
+        if (extMax) {
+            Point2D tri[3] = {{bodyX1, stripY}, {bodyX1, stripY + stripH},
+                              {bodyX1 + extW, stripY + stripH / 2.0f}};
+            c.polygon(tri, sampleAt(1.0f));
+        }
+        strokeRect(c, {int32_t(bodyX0), int32_t(stripY),
+                       uint32_t(bodyW), uint32_t(stripH)},
+                   penOf(cbs.edgeColor, 1.0f));
+
+        auto hticks = autoTicks(valueMin, valueMax, 8);
+        float hStep = autoTickStep(valueMin, valueMax, 8);
+        for (float tick : hticks) {
+            float t = cbs.norm ? (*cbs.norm)(tick)
+                               : (tick - valueMin) / (valueMax - valueMin);
+            c.text({bodyX0 + t * bodyW - 8.0f, stripY + stripH + 18.0f},
+                   formatTick(tick, hStep), 16.0f, cbs.labelColor);
+        }
+        return;
+    }
+
     float segH = bodyH / kSegs;
     for (uint32_t i = 0; i < kSegs; ++i) {
         float t = float(i) / float(kSegs - 1);

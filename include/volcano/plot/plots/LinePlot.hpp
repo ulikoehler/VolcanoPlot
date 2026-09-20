@@ -33,6 +33,7 @@ public:
         if (p.lineStyle) series_.lineStyle = *p.lineStyle;
         if (p.lineWidth) series_.lineWidth = *p.lineWidth;
         if (p.marker) series_.marker = *p.marker;
+        if (p.markerTex) series_.markerTex = *p.markerTex;
         return consumed;
     }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }

@@ -320,6 +320,10 @@ void TricontourfPlot::contributeToAutoscale(Viewport& v) const {
         v.x.max = std::max(v.x.max, x_[i]);
         v.y.min = std::min(v.y.min, y_[i]);
         v.y.max = std::max(v.y.max, y_[i]);
+        if (!std::isnan(z_[i])) {
+            v.z.min = std::min(v.z.min, z_[i]);
+            v.z.max = std::max(v.z.max, z_[i]);
+        }
     }
 }
 

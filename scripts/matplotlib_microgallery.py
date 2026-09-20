@@ -918,6 +918,228 @@ def f121_arrow_bezier(fig, out):
                 arrowprops=dict(arrowstyle="wedge,tail_width=0.5",
                                 connectionstyle="arc3,rad=0.2"))
 
+
+# ═══ Tier 15 — extended coverage (122-145) ═══════════════════════════════
+
+def f122_colorbar_horizontal(fig, out):
+    ax = mf_axes(fig)
+    im = ax.imshow(small_grid(), cmap="viridis", origin="lower",
+                   extent=[0, 8, 0, 6], aspect="auto")
+    fig.colorbar(im, ax=ax, orientation="horizontal")
+
+
+def f123_colorbar_shrink(fig, out):
+    ax = mf_axes(fig)
+    im = ax.imshow(small_grid(), cmap="viridis", origin="lower",
+                   extent=[0, 8, 0, 6], aspect="auto")
+    fig.colorbar(im, ax=ax, shrink=0.5)
+
+
+def f124_marker_tex_beta(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(few_x(), few_y(), marker=r"$\beta$", linestyle="none")
+
+
+def f125_imshow_extent(fig, out):
+    ax = mf_axes(fig)
+    ax.imshow(small_grid(), cmap="viridis", origin="lower",
+              extent=[-2, 2, -1, 1])
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-1.5, 1.5)
+
+
+def f126_imshow_aspect_auto(fig, out):
+    ax = mf_axes(fig)
+    j, i = np.mgrid[0:16, 0:4]
+    ax.imshow((i + j).astype(float), cmap="viridis", origin="upper",
+              aspect="auto")
+
+
+def f127_inset_indicator(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ins = ax.inset_axes([0.55, 0.55, 0.38, 0.35])
+    ins.plot(sine_x(), np.sin(sine_x()))
+    ins.set_xlim(4.0, 5.0); ins.set_ylim(-1.0, 0.0)
+    ax.indicate_inset_zoom(ins)
+
+
+def f128_sizebar(fig, out):
+    from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.add_artist(AnchoredSizeBar(ax.transData, 2.0, "2 units",
+                                  "lower right"))
+
+
+def f129_anchored_text(fig, out):
+    from matplotlib.offsetbox import AnchoredText
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.add_artist(AnchoredText("upper left note", loc="upper left"))
+
+
+def _sphere_pts(n=8, r=1.0):
+    pts = []
+    for i in range(n):
+        a = i * 0.4
+        pts.append((np.cos(a) * (1 + i / 64), np.sin(a) * (1 + i / 64),
+                    i / 16 - 2.0))
+    return np.array(pts).T
+
+
+def f130_scatter3d_depthshade(fig, out):
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("white")
+    x, y, z = [], [], []
+    for i in range(64):
+        a = i * 0.4
+        x.append(np.cos(a) * (1 + i / 64))
+        y.append(np.sin(a) * (1 + i / 64))
+        z.append(i / 16 - 2.0)
+    ax.scatter(x, y, z, depthshade=True)
+    ax.set_xlim(-2, 2); ax.set_ylim(-2, 2); ax.set_zlim(-2, 2)
+
+
+def f131_scatter3d_view_init(fig, out):
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("white")
+    ax.scatter([0, 1, 0, -1, 0], [0, 0, 0, 0, 0], [0, 0, 1, 0, -1],
+               s=40, c="red", depthshade=False)
+    ax.set_xlim(-1.5, 1.5); ax.set_ylim(-1.5, 1.5); ax.set_zlim(-1.5, 1.5)
+    ax.view_init(elev=0, azim=-90)
+
+
+def _surf_data(n=30):
+    x = np.linspace(-3, 3, n)
+    y = np.linspace(-3, 3, n)
+    X, Y = np.meshgrid(x, y)
+    return X, Y, np.sin(X) * np.cos(Y)
+
+
+def f132_surface_shade(fig, out):
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("white")
+    X, Y, Z = _surf_data()
+    ax.plot_surface(X, Y, Z, cmap="viridis", shade=True)
+
+
+def f133_surface_noshade(fig, out):
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("white")
+    X, Y, Z = _surf_data()
+    ax.plot_surface(X, Y, Z, cmap="viridis", shade=False)
+
+
+def _quiver_field():
+    x, y = np.meshgrid(np.arange(8), np.arange(8))
+    return x, y, -(y - 3.5), x - 3.5
+
+
+def f134_quiver_pivot_mid(fig, out):
+    ax = mf_axes(fig)
+    x, y, u, v = _quiver_field()
+    ax.quiver(x, y, u, v, pivot="mid")
+    ax.set_xlim(-1, 8); ax.set_ylim(-1, 8)
+
+
+def f135_quiver_headwidth(fig, out):
+    ax = mf_axes(fig)
+    x, y, u, v = _quiver_field()
+    ax.quiver(x, y, u, v, width=0.005, headwidth=5, headlength=7,
+              headaxislength=6)
+    ax.set_xlim(-1, 8); ax.set_ylim(-1, 8)
+
+
+def _stream_grids(nan_hole=False, n=20):
+    i = np.linspace(0, 3, n)
+    X, Y = np.meshgrid(i, i)
+    U = -(Y - 1.5)
+    V = X - 1.5
+    if nan_hole:
+        U[:, 9:12] = np.nan
+        V[:, 9:12] = np.nan
+    return i, i, U, V
+
+
+def f136_streamplot_arrowsize(fig, out):
+    ax = mf_axes(fig)
+    x, y, U, V = _stream_grids()
+    ax.streamplot(x, y, U, V, arrowsize=2.0)
+    ax.set_xlim(0, 3); ax.set_ylim(0, 3)
+
+
+def f137_streamplot_nan_hole(fig, out):
+    ax = mf_axes(fig)
+    x, y, U, V = _stream_grids(nan_hole=True)
+    ax.streamplot(x, y, U, V)
+    ax.set_xlim(0, 3); ax.set_ylim(0, 3)
+
+
+def f138_clabel_gap(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(-3, 3, 30)
+    X, Y = np.meshgrid(x, x)
+    cs = ax.contour(X, Y, X * X + Y * Y, levels=[2.0, 5.0, 8.0])
+    ax.clabel(cs)
+
+
+def f139_log_clip(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(-2, 2, 40)
+    ax.plot(x, x)
+    ax.set_yscale("log")
+    ax.set_ylim(0.01, 3)
+
+
+def f140_colorblind_cycle(fig, out):
+    from cycler import cycler
+    # mpl's okabe_ito listed colormap order (matches Volcano's
+    # colormaps::okabe_ito stops).
+    okabe_ito = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                 "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("white")
+    ax.set_prop_cycle(cycler(color=okabe_ito))
+    for i in range(4):
+        ax.plot(sine_x(), np.sin(sine_x()) + i * 0.5)
+
+
+def f141_legend_handlelength(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()), label="sin")
+    ax.plot(sine_x(), -np.sin(sine_x()), label="-sin")
+    ax.legend(handlelength=4.0)
+
+
+def f142_legend_labelcolor(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()), label="sin")
+    ax.legend(labelcolor="red")
+
+
+def f143_pie_explode(fig, out):
+    ax = mf_axes(fig)
+    ax.pie([30, 25, 20, 15, 10], labels=["A", "B", "C", "D", "E"],
+           explode=[0.08] * 5)
+    ax.set_aspect("equal")
+
+
+def f144_secondary_x(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10)
+    sec = ax.secondary_xaxis("top", functions=(lambda x: x * 2,
+                                               lambda x: x * 0.5))
+    sec.set_xlabel("double x")
+
+
+def f145_mathtext_frac_sum(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.text(5, 0.5, r"$\frac{x}{y} + \sum_{i=0}^{n} i$")
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # Feature name → generator. Names/numbers match microgallery.cpp exactly.

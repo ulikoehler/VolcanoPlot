@@ -513,3 +513,31 @@ TEST(ErrorbarVariant, UplimsArrowhead) {
     auto above = img.countColorInRegion(Red, 40, 0, 88, 38, 60);
     EXPECT_EQ(above, 0u);
 }
+
+TEST(ColorbarExtend, HorizontalStripBelowAxes) {
+    test::PlotTestHarness h{256, 256};
+    Figure fig;
+    Axes* ax = fig.addAxes();
+    ax->setStyle(test::flatTestStyle());
+    // Axes in the top half → horizontal strip lands in the bottom half.
+    fig.subplotsAdjust(0, 0.5f, 1, 1, 0, 0);
+    fig.layout(Extent2D{256, 256});
+    ax->setViewport({{0, 1}, {0, 1}, {0, 1}});
+    ax->style().colorbar.visible = true;
+    ax->style().colorbar.orientation = "horizontal";
+    ax->style().colorbar.width = 12.0f;
+    ax->style().colorbar.padding = 10.0f;
+    ax->style().colorbar.labelColor = Color{0, 0, 0, 0};
+    auto img = h.render(fig);
+    // Strip sits below the shrunk axes rect.
+    uint32_t stripY = ax->rect.y + ax->rect.height + 10;
+    auto strip = img.countIf([stripY](uint32_t, uint32_t y, test::Pixel p) {
+        return y >= stripY + 2 && y < stripY + 10 &&
+               (p.r < 240 || p.g < 240 || p.b < 240);
+    });
+    EXPECT_GT(strip, 500u) << "horizontal strip should render below axes";
+    // Gradient goes min→max left→right (viridis: dark left, yellow right).
+    auto leftAvg = img.averageRegion(20, stripY + 2, 40, stripY + 10);
+    auto rightAvg = img.averageRegion(216, stripY + 2, 236, stripY + 10);
+    EXPECT_GT(rightAvg.r, leftAvg.r) << "viridis: yellow(max) right";
+}

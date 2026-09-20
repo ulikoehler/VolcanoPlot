@@ -344,10 +344,15 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `make_axes_locatable`
 - [x] `constrained_layout`, `tight_layout`, `subplots_adjust`
 - [x] `colorbar` (inset and standalone)
-- [x] `colorbar` (vertical color strip + tick labels, right of axes)
+- [x] `colorbar` (color strip + tick labels; `orientation` "vertical" →
+      right of axes / "horizontal" → below axes, mpl fraction/pad/shrink/
+      aspect/extend in layout + raster + vector)
 - [x] Projections: `rectilinear`, `polar`, `aitoff`, `hammer`, `lambert`, `mollweide`, `3d`
 - [x] Scales: `linear`, `log`, `symlog`, `logit`, `asinh`, `function`, `functionlog`, `mercator`
 - [x] Polar: `set_rgrids`, `set_thetagrids`, `set_theta_offset`, `set_theta_direction`
+      — plus full polar furniture: circular spine, radial thetagrid
+      spokes, concentric rgrid circles, degree theta labels, r labels at
+      22.5°, equal aspect (raster path)
 - [x] Aspect ratio, equal axis, invert axis, set limits, autoscale (autoscale: [x])
 
 ---
@@ -413,8 +418,10 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `'p'` pentagon, `'P'` plus filled
 - [x] `'h' 'H'` hexagons, `'X'`, `'|'` vline, `'_'` hline, `'8'` octagon
 - [x] TICK/CARET variants (`0`–`11`)
-- [~] TeX glyph markers (`'$...$'`) — MathText exists, but per-marker
-      text draw calls aren't wired
+- [x] TeX glyph markers (`'$...$'`) — `Series2D::setMarker("$…$")`
+      parses the mpl string spec into `markerTex`; raster
+      (drawTexMarkersPx) + vector (unicode glyph) paths wired in
+      ScatterPlot and LinePlot
 - [x] Custom `Path` markers — `Series2D::markerPath` (any `Path` flattened
       via `markerGeom`, wired into ScatterPlot/LinePlot; feature
       `063_marker_path`); `(numsides, style, angle)` polygons via
@@ -467,8 +474,8 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `frameon`, `framealpha`, `facecolor`, `edgecolor`, `shadow`, `fancybox` (fields in LegendStyle)
 - [x] `labelcolor`
 - [x] `handlelength`, `handletextpad`, `borderpad`, `columnspacing` (+`borderaxespad`, rcParams)
-- [ ] `draggable` — flag field exists; §11 event system + picking are
-      done, but pick+drag wiring for legends/annotations is still missing
+- [x] `draggable` — legend + annotation/text pick-and-drag via
+      `Figure::artistDragEvent` (dragOffset applied in raster+vector)
 - [~] `handler_map` / legend handlers — `IPlot::legendMarker()` provides per-plot handle shapes; no arbitrary handler factory
 
 ---
@@ -683,17 +690,16 @@ infrastructure, contour/contourf, widgets, GridSpec/subfigures, polar,
 tri_*) are checked off in the sections above.
 
 ### P0 — Correctness & robustness
-- [ ] **Remaining parity deltas** — residual microfeature diffs: legend
-      box sizing/spacing vs mpl in dense cases, colorbar `fraction`/
-      `aspect` semantics (mpl `aspect=20` drives strip width; `fraction`
-      drives axes shrink — `ColorbarStyle` only has pixel `width`),
-      minor tick-label suppression on crowded axes, `labelpad`/
-      `tick pad` fine tuning.
-- [~] **Vector/raster parity pass** — secondary x/y axis tick labels,
-      tick-label rotation anchoring, and native `TablePlot::emitVector`
-      (cells/borders/text, may extend outside the axes rect) emit in
-      vector now; legend shadow, faux-bold titles, and colorbar extend
-      triangles remain raster-only.
+- [~] **Remaining parity deltas** — verified: colorbar `fraction`/`pad`/
+      `aspect`/`shrink`/`extend` semantics (axes shrink by fraction+pad;
+      strip width = min(region, height/aspect) like mpl set_box_aspect),
+      minor tick-label suppression (LogFormatterSciNotation
+      minor_thresholds on crowded axes), `labelPad`/`tick pad` all in
+      place. Legend box sizing/spacing in dense cases remains.
+- [x] **Vector/raster parity pass** — secondary x/y axis tick labels,
+      tick-label rotation anchoring, native `TablePlot::emitVector`,
+      legend shadow, colorbar extend triangles, and faux-bold titles
+      (0.6px double-strike, axes title + suptitle) all emit in vector.
 - [x] **`draggable` legends/annotations** — `legend.draggable` and
       `TextAnnotation`/`Annotation.draggable` drag via `dragOffset`
       (pixel displacement, arrow follows the text end); hit-testing uses
@@ -726,9 +732,10 @@ tri_*) are checked off in the sections above.
 - [ ] **GPU-side marker/path tessellation** — marker quads currently
       use SDF; large `PathCollection`s should triangulate on GPU or use
       instanced glyph atlases.
-- [ ] **MSDF text atlas** — replace the grayscale bitmap atlas with
-      multi-channel SDF for crisp text at any DPI (glyb has an MSDF
-      renderer stub already).
+- [x] **MSDF text atlas** — real `glyph_renderer_msdf` via bundled
+      msdfgen core (FreeType outline → Shape → generateMSDF → RGBA
+      atlas), `font_manager_ft::msdf_enabled`, R8G8B8A8 atlas texture,
+      median-of-3 + fwidth fragment shader.
 - [ ] **Multi-frame animation GPU encode** — APNG/GIF encoders are CPU;
       wire the compute-shader encoder into the animation path.
 - [ ] **Partial redraw / damage tracking** — screen backend re-renders
@@ -747,11 +754,13 @@ tri_*) are checked off in the sections above.
       `AnchoredText` (`Axes::addAnchoredText` — loc names/codes,
       frameon, pad/borderpad) done, raster + native vector;
       `inset_axes`/`make_axes_locatable` done.
-- [~] **3D polish** — `plot_surface` light-source shading done
+- [~] **3D polish** — `plot_surface` light-source shading
       (`SurfacePlot::shade`, mpl LightSource azdeg=315/altdeg=45
-      lambert via screen-space normals); `view_init` interactive
-      rotation, 3D tick labels on pane edges, and `scatter` size/depth
-      cueing remain.
+      lambert via screen-space normals) and scatter `depthshade`
+      (mpl art3d._zalpha: alpha *= 1 − norm(depth)·0.7) done;
+      and `Camera3D::viewInit(elev, azim, roll)` (mpl axes3d u/v/w
+      basis, roll rotation about the view axis) done; interactive
+      mouse-drag rotation remains.
 - [x] **`quiver`/`streamplot` params** — quiver `scale`, `width`,
       `headwidth` (+ `headlength`/`headaxislength`/`pivot`); streamplot
       `arrowsize`/`broken_streamlines`.
@@ -765,7 +774,13 @@ tri_*) are checked off in the sections above.
       Vulkan ICD (lavapipe) in CI for headless tests.
 - [ ] **Documentation site** — API reference (Doxygen/mkdocs), gallery
       browser from `gallery_micro`, migration guide from matplotlib.
-- [ ] **Serialization round-trip** — save/load a `Figure` to JSON for
-      reproducible test fixtures and headless replays.
-- [ ] **Accessibility** — colorblind-safe default cycle option,
-      alt-text metadata in vector output.
+- [x] **Serialization round-trip** — `Figure` ↔ JSON save/load
+      (`Serialize.hpp`/`Serialize.cpp`); line plots preserve data,
+      color, and line style; unknown plot types skipped; malformed
+      input returns null; pixel-identical round-trip render
+      (tests/test_serialize.cpp).
+- [~] **Accessibility** — `FigureStyle::colorblindSafe()` swaps the
+      prop_cycle to Okabe-Ito (named styles seaborn-v0_8-colorblind /
+      tableau-colorblind10 already existed); SVG savefig metadata
+      "Title"/"Description" keys emit <title>/<desc> elements for
+      screen readers.

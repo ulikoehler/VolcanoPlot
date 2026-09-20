@@ -600,3 +600,51 @@ TEST(VectorSvgParity, AnchoredTextEmitsFrameAndText) {
     // Frame: a filled rect + stroked border around the text.
     EXPECT_NE(doc.find("fill-opacity=\"0.8"), std::string::npos);
 }
+
+TEST(VectorSvg, AltTextEmitsTitleAndDesc) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    encode::SaveOptions opts;
+    opts.metadata["Title"] = "Plot of things";
+    opts.metadata["Description"] = "A line going up";
+    TmpFile f("volcano_vec_alt.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path, opts));
+    auto doc = readText(f.path);
+    EXPECT_NE(doc.find("<title>Plot of things</title>"), std::string::npos);
+    EXPECT_NE(doc.find("<desc>A line going up</desc>"), std::string::npos);
+}
+
+TEST(VectorSvg, BoldTitleEmitsFauxBoldSecondPass) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->setTitle("BoldTitle");
+    ax->style().title.weight = "bold";
+    TmpFile f("volcano_vec_bold.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Faux bold = the same text emitted twice (offset ~0.6px).
+    size_t n = 0, pos = 0;
+    while ((pos = doc.find(">BoldTitle<", pos)) != std::string::npos) {
+        ++n; ++pos;
+    }
+    EXPECT_EQ(n, 2u);
+}
+
+TEST(VectorSvg, HorizontalColorbarBelowAxes) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    auto* ax = fig.addAxes();
+    ax->addPlot(makeLine());
+    ax->style().colorbar.visible = true;
+    ax->style().colorbar.orientation = "horizontal";
+    ax->style().colorbar.extend = "max";
+    TmpFile f("volcano_vec_hcb.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Extend-max triangle → a closed filled path exists in the SVG.
+    EXPECT_NE(doc.find(" Z\" fill="), std::string::npos);
+}

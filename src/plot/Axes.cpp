@@ -18,8 +18,15 @@
 
 namespace volcano::plot {
 
-Axes::Axes() : style_(rc::params()) {
-    // Seed the prop cycle from rcParams; default to tab10 like matplotlib.
+Axes::Axes() : style_(rc::params()) { reseedCycler(); }
+
+void Axes::setStyle(FigureStyle s) {
+    style_ = std::move(s);
+    reseedCycler();
+}
+
+void Axes::reseedCycler() {
+    // Seed the prop cycle from the style; default to tab10 like matplotlib.
     if (!style_.propCycle.empty())
         cycler_ = Cycler::ofEntries(style_.propCycle);
     else if (style_.colorCycle.size() > 0)
@@ -252,7 +259,9 @@ void Axes::finalizeAutoscale(Viewport& v, bool tight) const {
 }
 
 void Axes::autoscale() {
-    if (manualX_ && manualY_) return;
+    // Always iterate — the z (value) range feeds the colorbar even when
+    // both spatial axes are manually fixed (mpl contourf sets the norm
+    // independently of xlim/ylim).
     Viewport v{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
@@ -264,11 +273,21 @@ void Axes::autoscale() {
     finalizeAutoscale(v, tight);
     if (!manualX_) viewport_.x = v.x;
     if (!manualY_) viewport_.y = v.y;
-    viewport_.z = v.z;
+    if (v.z.min <= v.z.max) viewport_.z = v.z;
 }
 
 void Axes::autoscaleGpu(render::primitives::ReduceRenderer& reducer) {
-    if (manualX_ && manualY_) return;
+    if (manualX_ && manualY_) {
+        // Still collect the z range for the colorbar.
+        for (const auto& p : plots_) {
+            Viewport zv{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };
+            p->contributeToAutoscaleScaled(zv, xScale_, yScale_);
+            if (zv.z.min <= zv.z.max) viewport_.z = zv.z;
+        }
+        return;
+    }
     Viewport v{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                 std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest() };

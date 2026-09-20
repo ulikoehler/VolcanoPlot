@@ -50,11 +50,15 @@ void Scatter3D::projectPoints() {
 
     auto vp = camera_.viewProjection();
 
+    std::vector<float> depths;
+    depths.reserve(x_.size());
+
     for (size_t i = 0; i < x_.size(); ++i) {
         float px = x_[i], py = y_[i], pz = z_[i];
 
         float clipX = vp[0]*px + vp[1]*py + vp[2]*pz + vp[3];
         float clipY = vp[4]*px + vp[5]*py + vp[6]*pz + vp[7];
+        float clipZ = vp[8]*px + vp[9]*py + vp[10]*pz + vp[11];
         float clipW = vp[12]*px + vp[13]*py + vp[14]*pz + vp[15];
 
         if (std::abs(clipW) < 1e-30f) continue;
@@ -62,6 +66,7 @@ void Scatter3D::projectPoints() {
         float ndcY = -clipY / clipW;
 
         projectedPoints_.push_back({ndcX, ndcY});
+        depths.push_back(clipZ / clipW);
 
         if (!perPointColors_.empty())
             markerColors_.push_back(perPointColors_[i]);
@@ -72,6 +77,16 @@ void Scatter3D::projectPoints() {
             markerSizes_.push_back(perPointSizes_[i]);
         else
             markerSizes_.push_back(config_.size);
+    }
+
+    // mpl depthshade (art3d._zalpha): alpha *= 1 - norm(z)*0.7 over
+    // the projected (view) depth range, so far points fade.
+    if (config_.depthshade && depths.size() > 1) {
+        auto [lo, hi] = std::ranges::minmax(depths);
+        float span = hi - lo;
+        if (span > 1e-30f)
+            for (size_t i = 0; i < depths.size(); ++i)
+                markerColors_[i].a *= 1.0f - (depths[i] - lo) / span * 0.7f;
     }
 }
 

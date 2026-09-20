@@ -2,6 +2,7 @@
 // Implements all matplotlib built-in style sheets by translating the
 // rcParams from the .mplstyle files into FigureStyle structs.
 #include "volcano/plot/Style.hpp"
+#include "volcano/plot/Colormap.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -703,5 +704,11 @@ FigureStyle (*byName(const std::string& name))() {
 }
 
 } // namespace styles
+
+FigureStyle& FigureStyle::colorblindSafe() {
+    colorCycle.colors = colormaps::okabe_ito().stops;
+    for (auto& p : propCycle) p.color.reset();
+    return *this;
+}
 
 } // namespace volcano::plot

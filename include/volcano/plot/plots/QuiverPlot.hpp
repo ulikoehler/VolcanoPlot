@@ -63,6 +63,7 @@ private:
     std::vector<Point2D> shaftSegs_;     // data space line segments
     std::vector<Point2D> headFillPos_;   // pixel space triangle positions
     std::vector<Color> headFillColors_;  // per-vertex colors
+    float shaftWpx_ = 1.0f;              // effective shaft width (px)
 
     render::primitives::LineSegmentRenderer shaftRenderer_;
     render::primitives::FillRenderer headRenderer_;

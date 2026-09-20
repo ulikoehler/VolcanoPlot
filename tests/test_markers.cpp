@@ -598,3 +598,45 @@ TEST(LineStyleRegression, LineStyleNoneRendersNothing) {
             if (dark(img.get(x, y))) ++darkCount;
     EXPECT_EQ(darkCount, 0);
 }
+
+TEST(MarkerSpec, DollarSpecSelectsTexMarker) {
+    Series2D s;
+    EXPECT_TRUE(s.setMarker("$\\alpha$"));
+    EXPECT_EQ(s.markerTex, "\\alpha");
+}
+
+TEST(MarkerSpec, SingleCharSelectsStyle) {
+    Series2D s;
+    EXPECT_TRUE(s.setMarker("^"));
+    EXPECT_EQ(s.marker, MarkerStyle::Triangle);
+    EXPECT_TRUE(s.markerTex.empty());
+}
+
+TEST(MarkerSpec, NoneDisablesMarkers) {
+    Series2D s;
+    s.marker = MarkerStyle::Circle;
+    EXPECT_TRUE(s.setMarker("None"));
+    EXPECT_EQ(s.marker, MarkerStyle::None);
+    EXPECT_TRUE(s.setMarker(""));
+    EXPECT_FALSE(s.setMarker("?"));
+    EXPECT_FALSE(s.setMarker("bogus"));
+}
+
+TEST(MarkerSpec, TexMarkerRendersViaSpec) {
+    CraftedFigure cf(64);
+    Series2D s;
+    s.color = Color::black();
+    ASSERT_TRUE(s.setMarker("$\\alpha$"));
+    s.size = 28.0f;
+    s.points.push_back({0.5f, 0.5f});
+    cf.axes->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+    cf.axes->setViewport({0, 1, 0, 1});
+    auto img = cf.render();
+    int dark = 0;
+    for (uint32_t y = 16; y < 48; ++y)
+        for (uint32_t x = 16; x < 48; ++x) {
+            auto p = img.get(x, y);
+            if (p.r + p.g + p.b < 200) ++dark;
+        }
+    EXPECT_GT(dark, 10);
+}

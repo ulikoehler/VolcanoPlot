@@ -38,6 +38,7 @@ public:
             consumed = true;
         }
         if (p.marker) series_.marker = *p.marker;
+        if (p.markerTex) series_.markerTex = *p.markerTex;
         if (p.lineWidth) series_.lineWidth = *p.lineWidth;
         if (p.lineStyle) series_.lineStyle = *p.lineStyle;
         return consumed;
@@ -74,6 +75,7 @@ public:
     }
 
     Series2D& series() noexcept { return series_; }
+    [[nodiscard]] const Series2D& series() const noexcept { return series_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;

@@ -11,6 +11,24 @@ set(GLYB_SOURCES
     ${GLYB_PATH}/src/logger.cc
     ${GLYB_PATH}/src/utf8.cc
     ${VOLCANO_ROOT}/src/text/glyb_msdf_stub.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/Contour.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/EdgeHolder.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/Scanline.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/Shape.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/SignedDistance.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/Vector2.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/contour-combiners.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/edge-coloring.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/edge-segments.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/edge-selectors.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/equation-solver.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/estimate-sdf-error.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/msdfgen.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/rasterization.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/render-sdf.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/save-bmp.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/save-tiff.cpp
+    ${GLYB_PATH}/third_party/msdfgen/core/shape-description.cpp
 )
 
 add_library(glyb_static STATIC ${GLYB_SOURCES})
@@ -20,6 +38,7 @@ target_compile_features(glyb_static PRIVATE cxx_std_17)
 target_include_directories(glyb_static PUBLIC
     ${GLYB_PATH}/src
     ${GLYB_PATH}/third_party/glm
+    ${GLYB_PATH}/third_party/msdfgen
 )
 
 # System FreeType and HarfBuzz

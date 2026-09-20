@@ -45,6 +45,25 @@ struct Series2D {
     /// TeX/mathtext marker (matplotlib marker='$…$'): the laid-out
     /// glyph string is drawn centered at each point. Overrides `marker`.
     std::string markerTex;
+    /// mpl `marker=` string spec: '$…$' selects a mathtext glyph
+    /// marker, "" / "None" / "none" disables markers, a single
+    /// character selects the corresponding MarkerStyle. Returns false
+    /// for unrecognized specs (matplotlib raises ValueError).
+    bool setMarker(std::string_view spec) {
+        markerTex.clear();
+        markerPath.reset();
+        if (spec.empty() || spec == "None" || spec == "none") {
+            marker = MarkerStyle::None;
+            return true;
+        }
+        if (spec.size() >= 2 && spec.front() == '$' && spec.back() == '$') {
+            markerTex = std::string(spec.substr(1, spec.size() - 2));
+            return true;
+        }
+        if (spec.size() == 1)
+            if (auto m = markerFromChar(spec[0])) { marker = *m; return true; }
+        return false;
+    }
     LineStyle lineStyle = LineStyle::Solid;
     /// Custom dash tuple (on, off, ...) in pixels. Empty → derived from
     /// lineStyle via dashPattern().

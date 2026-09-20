@@ -106,23 +106,27 @@ void PiePlot::emitVector(render::VectorCanvas& c, const Axes&, Rect2D rect) {
         float sweep = 2.0f * PI * data_.values[i] / total;
         Color col = i < data_.colors.size() ? data_.colors[i]
                                             : Color::fromRgba8(31, 119, 180);
-        float r1 = 1.0f + data_.explode * float(i);
-        float rr = radius * r1;
+        // mpl explode: translate the wedge center radially along its
+        // bisector by explode*radius (scalar applies to all wedges).
+        float mid = angle + sweep * 0.5f;
+        float ox = cx + data_.explode * radius * std::cos(mid);
+        float oy = cy - data_.explode * radius * std::sin(mid);
+        float rr = radius;
         // Annular-sector polygon: outer arc then inner arc reversed.
         std::vector<Point2D> wedge;
-        wedge.push_back({cx, cy});
+        wedge.push_back({ox, oy});
         if (data_.innerRadius > 0.0f) wedge.clear();
         for (int s = 0; s <= kSeg; ++s) {
             float a = angle + sweep * float(s) / kSeg;
-            wedge.push_back({cx + rr * std::cos(a),
-                             cy - rr * std::sin(a)});  // Y flipped
+            wedge.push_back({ox + rr * std::cos(a),
+                             oy - rr * std::sin(a)});  // Y flipped
         }
         if (data_.innerRadius > 0.0f) {
             float ri = radius * data_.innerRadius;
             for (int s = kSeg; s >= 0; --s) {
                 float a = angle + sweep * float(s) / kSeg;
-                wedge.push_back({cx + ri * std::cos(a),
-                                 cy - ri * std::sin(a)});
+                wedge.push_back({ox + ri * std::cos(a),
+                                 oy - ri * std::sin(a)});
             }
         }
         render::VectorCanvas::Pen edge;

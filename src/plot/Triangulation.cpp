@@ -2,6 +2,7 @@
 #include "volcano/plot/Triangulation.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace volcano::plot {
@@ -9,45 +10,50 @@ namespace volcano::plot {
 namespace {
 
 struct Circle {
-    Point2D center;
-    float radiusSq;
+    double cx, cy;
+    double radiusSq;
 };
 
-/// Compute the circumcircle of a triangle.
+/// Compute the circumcircle of a triangle (double precision — float32
+/// degenerates on near-collinear triples and poisons every subsequent
+/// inCircle test).
 Circle circumcircle(Point2D a, Point2D b, Point2D c) {
-    float d = 2.0f * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
-    if (std::abs(d) < 1e-20f) {
-        // Degenerate — return a huge circle.
-        return {{(a.x + b.x + c.x) / 3.0f, (a.y + b.y + c.y) / 3.0f},
-                std::numeric_limits<float>::max()};
+    double d = 2.0 * (double(a.x) * (double(b.y) - double(c.y)) +
+                      double(b.x) * (double(c.y) - double(a.y)) +
+                      double(c.x) * (double(a.y) - double(b.y)));
+    if (std::abs(d) < 1e-18) {
+        // Degenerate (collinear) — give it a zero-radius circle so no
+        // point is ever "inside" it.
+        return {double(a.x), double(a.y), -1.0};
     }
-    float ax2 = a.x * a.x + a.y * a.y;
-    float bx2 = b.x * b.x + b.y * b.y;
-    float cx2 = c.x * c.x + c.y * c.y;
-    float ux = (ax2 * (b.y - c.y) + bx2 * (c.y - a.y) + cx2 * (a.y - b.y)) / d;
-    float uy = (ax2 * (c.x - b.x) + bx2 * (a.x - c.x) + cx2 * (b.x - a.x)) / d;
-    float dx = a.x - ux;
-    float dy = a.y - uy;
-    return {{ux, uy}, dx * dx + dy * dy};
+    double ax2 = double(a.x) * a.x + double(a.y) * a.y;
+    double bx2 = double(b.x) * b.x + double(b.y) * b.y;
+    double cx2 = double(c.x) * c.x + double(c.y) * c.y;
+    double ux = (ax2 * (double(b.y) - double(c.y)) +
+                 bx2 * (double(c.y) - double(a.y)) +
+                 cx2 * (double(a.y) - double(b.y))) / d;
+    double uy = (ax2 * (double(c.x) - double(b.x)) +
+                 bx2 * (double(a.x) - double(c.x)) +
+                 cx2 * (double(b.x) - double(a.x))) / d;
+    double dx = double(a.x) - ux;
+    double dy = double(a.y) - uy;
+    return {ux, uy, dx * dx + dy * dy};
 }
 
 /// Check if a point is inside a circumcircle.
 bool inCircle(const Circle& circ, Point2D p) {
-    float dx = p.x - circ.center.x;
-    float dy = p.y - circ.center.y;
-    return dx * dx + dy * dy < circ.radiusSq - 1e-10f;
+    if (circ.radiusSq < 0.0) return false;  // degenerate triangle
+    double dx = double(p.x) - circ.cx;
+    double dy = double(p.y) - circ.cy;
+    double d2 = dx * dx + dy * dy;
+    // Relative epsilon: strictly inside, not on the boundary.
+    return d2 < circ.radiusSq * (1.0 - 1e-9);
 }
 
 /// A triangle with its circumcircle, used during construction.
 struct TriNode {
     uint32_t a, b, c;
     Circle circ;
-};
-
-/// Edge of a triangle (directed).
-struct Edge {
-    uint32_t a, b;
-    bool operator==(const Edge& o) const { return a == o.a && b == o.b; }
 };
 
 } // namespace
@@ -90,47 +96,43 @@ std::vector<Triangle> delaunay(const std::vector<Point2D>& points) {
     for (uint32_t i = 0; i < N; ++i) {
         const Point2D& p = allPoints[i];
 
-        // Find all triangles whose circumcircle contains p.
-        std::vector<Edge> boundaryEdges;
-        for (auto it = tris.begin(); it != tris.end(); ) {
-            if (inCircle(it->circ, p)) {
-                // Add this triangle's edges to the boundary.
-                boundaryEdges.push_back({it->a, it->b});
-                boundaryEdges.push_back({it->b, it->c});
-                boundaryEdges.push_back({it->c, it->a});
-                it = tris.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        // Remove duplicated edges (edges shared by two removed triangles).
-        // An edge appears twice if it's shared; keep only unique edges.
-        std::vector<Edge> uniqueEdges;
-        for (size_t j = 0; j < boundaryEdges.size(); ++j) {
-            bool shared = false;
-            for (size_t k = j + 1; k < boundaryEdges.size(); ++k) {
-                if ((boundaryEdges[j].a == boundaryEdges[k].a &&
-                     boundaryEdges[j].b == boundaryEdges[k].b) ||
-                    (boundaryEdges[j].a == boundaryEdges[k].b &&
-                     boundaryEdges[j].b == boundaryEdges[k].a)) {
-                    shared = true;
-                    break;
+        // Find all triangles whose circumcircle contains p (the cavity).
+        // Collect boundary edges as normalized (lo, hi) pairs so shared
+        // edges can be removed with one sort instead of an O(E²) scan.
+        std::vector<uint64_t> edges;
+        std::vector<TriNode> kept;
+        kept.reserve(tris.size());
+        for (auto& t : tris) {
+            if (inCircle(t.circ, p)) {
+                uint32_t vs[3] = {t.a, t.b, t.c};
+                for (int e = 0; e < 3; ++e) {
+                    uint32_t a = vs[e], b = vs[(e + 1) % 3];
+                    uint32_t lo = std::min(a, b), hi = std::max(a, b);
+                    edges.push_back((uint64_t(lo) << 32) | hi);
                 }
+            } else {
+                kept.push_back(t);
             }
-            if (!shared)
-                uniqueEdges.push_back(boundaryEdges[j]);
         }
+        tris = std::move(kept);
 
-        // Create new triangles connecting p to each unique boundary edge.
-        for (const auto& e : uniqueEdges) {
-            TriNode t;
-            t.a = e.a;
-            t.b = e.b;
-            t.c = i;
-            t.circ = circumcircle(allPoints[e.a], allPoints[e.b], p);
-            tris.push_back(t);
+        // Sort edge keys; edges appearing exactly once are cavity
+        // boundary (shared edges cancel in pairs).
+        std::sort(edges.begin(), edges.end());
+        std::vector<TriNode> newTris;
+        for (size_t j = 0; j < edges.size();) {
+            size_t k = j;
+            while (k < edges.size() && edges[k] == edges[j]) ++k;
+            if (k - j == 1) {
+                uint32_t a = uint32_t(edges[j] >> 32);
+                uint32_t b = uint32_t(edges[j] & 0xFFFFFFFFu);
+                TriNode t{a, b, i,
+                          circumcircle(allPoints[a], allPoints[b], p)};
+                newTris.push_back(t);
+            }
+            j = k;
         }
+        for (auto& t : newTris) tris.push_back(t);
     }
 
     // Remove triangles that share a vertex with the super-triangle.

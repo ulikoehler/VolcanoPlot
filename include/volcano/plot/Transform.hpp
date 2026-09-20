@@ -248,6 +248,15 @@ struct Camera3D {
     [[nodiscard]] std::array<float, 16> projectionMatrix() const noexcept;
     /// Combined view-projection.
     [[nodiscard]] std::array<float, 16> viewProjection() const noexcept;
+
+    /// mpl Axes3D.view_init: build a camera from elevation/azimuth/roll
+    /// angles (degrees, mpl defaults 30/-60/0) orbiting `target` at
+    /// distance `dist` (mpl default 10). Roll rotates the image plane.
+    /// Degenerate |elev|==90 falls back to a horizontal up vector.
+    [[nodiscard]] static Camera3D viewInit(float elevDeg, float azimDeg,
+                                           float rollDeg = 0.0f,
+                                           Point3D target = {0, 0, 0},
+                                           float dist = 10.0f) noexcept;
 };
 
 } // namespace volcano::plot

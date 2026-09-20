@@ -6,6 +6,8 @@
 #include <volcano/plot/Annotation.hpp>
 #include <volcano/plot/Axes.hpp>
 #include <volcano/plot/Plot.hpp>
+#include <volcano/plot/Style.hpp>
+#include <volcano/plot/Colormap.hpp>
 #include "PlotTestHarness.hpp"
 
 #include <cmath>
@@ -518,4 +520,15 @@ TEST(AnchoredText, LayoutHonorsLoc) {
     // Lower-right: box right/bottom near the rect's right/bottom edges.
     EXPECT_GT(L.box.x + L.box.w, r.x + r.width * 0.8f);
     EXPECT_GT(L.box.y + L.box.h, r.y + r.height * 0.8f);
+}
+
+TEST(ColorblindCycle, OkabeItoSwap) {
+    FigureStyle s = styles::defaultStyle();
+    s.colorblindSafe();
+    ASSERT_EQ(s.colorCycle.size(), colormaps::okabe_ito().stops.size());
+    // Okabe-Ito first color: #E69F00.
+    auto c = s.colorCycle.at(0);
+    EXPECT_NEAR(c.r, 0xE6 / 255.0f, 0.01f);
+    EXPECT_NEAR(c.g, 0x9F / 255.0f, 0.01f);
+    EXPECT_NEAR(c.b, 0x00 / 255.0f, 0.01f);
 }

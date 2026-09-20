@@ -171,6 +171,9 @@ struct LegendStyle {
 struct ColorbarStyle {
     bool visible = false;
     std::string colormap = "viridis";
+    /// matplotlib colorbar `orientation`: "vertical" (strip right of the
+    /// axes, default) or "horizontal" (strip below the axes).
+    std::string orientation = "vertical";
     Color edgeColor = Color::black();
     /// Fraction of the parent axes width reserved for the colorbar
     /// region (matplotlib colorbar fraction = 0.15). Together with
@@ -261,6 +264,12 @@ struct FigureStyle {
     /// Color cycle for automatic plot coloring (axes.prop_cycle).
     /// Mirrors the 'color' key of a parsed cycler expression.
     ColorCycleStyle colorCycle;
+
+    /// Accessibility option: swap the prop_cycle to the Okabe-Ito
+    /// colorblind-safe palette (clears any parsed propCycle colors so
+    /// the cycle takes effect). Named-style equivalents already exist
+    /// ("seaborn-v0_8-colorblind", "tableau-colorblind10").
+    FigureStyle& colorblindSafe();
 
     /// Full multi-key prop_cycle entries parsed from axes.prop_cycle
     /// (e.g. cycler('color',[...]) * cycler('linestyle',[...])). When

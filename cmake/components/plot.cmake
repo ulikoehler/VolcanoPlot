@@ -13,6 +13,7 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/Normalize.cpp
     ${VOLCANO_ROOT}/src/plot/Annotation.cpp
     ${VOLCANO_ROOT}/src/plot/Rc.cpp
+    ${VOLCANO_ROOT}/src/plot/Serialize.cpp
     ${VOLCANO_ROOT}/src/plot/GridSpec.cpp
     ${VOLCANO_ROOT}/src/plot/Scale.cpp
     ${VOLCANO_ROOT}/src/plot/Projection.cpp

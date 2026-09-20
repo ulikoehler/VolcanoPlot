@@ -235,6 +235,35 @@ interpreting any data-carrying tier.
 | 120 | `boxstyle` | `sawtooth`/`roundtooth`/`round` FancyBboxPatch |
 | 121 | `arrow_bezier` | `simple`/`fancy`/`wedge` on arc3 connections |
 
+## Tier 15 — Extended coverage (122–145)
+
+| # | Name | Checks |
+|---|------|--------|
+| 122 | `colorbar_horizontal` | `orientation='horizontal'` strip below axes |
+| 123 | `colorbar_shrink` | `shrink=0.5` strip length |
+| 124 | `marker_tex_beta` | `marker='$\\beta$'` MathText glyph marker |
+| 125 | `imshow_extent` | `extent=` maps data coords |
+| 126 | `imshow_aspect_auto` | `aspect='auto'` fills axes |
+| 127 | `inset_indicator` | `indicate_inset_zoom` rect + connectors |
+| 128 | `sizebar` | `AnchoredSizeBar` lower right |
+| 129 | `anchored_text` | `AnchoredText` box |
+| 130 | `scatter3d_depthshade` | mpl `depthshade` alpha cue |
+| 131 | `scatter3d_view_init` | `view_init(elev=0, azim=-90)` XZ view |
+| 132 | `surface_shade` | `plot_surface` `shade=True` |
+| 133 | `surface_noshade` | `shade=False` |
+| 134 | `quiver_pivot_mid` | `pivot='mid'` anchoring |
+| 135 | `quiver_headwidth` | `width`/`headwidth`/`headlength`/`headaxislength` |
+| 136 | `streamplot_arrowsize` | `arrowsize=2` |
+| 137 | `streamplot_nan_hole` | NaN hole breaks streamlines |
+| 138 | `clabel_gap` | inline label gaps in contour lines |
+| 139 | `log_clip` | log y-scale drops non-positive points |
+| 140 | `colorblind_cycle` | Okabe-Ito / tableau-colorblind10 cycle |
+| 141 | `legend_handlelength` | `handlelength=4` |
+| 142 | `legend_labelcolor` | `labelcolor='red'` |
+| 143 | `pie_explode` | exploded wedges |
+| 144 | `secondary_x` | `secondary_xaxis('top')` |
+| 145 | `mathtext_frac_sum` | `\\frac` + `\\sum` limits |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.sh`

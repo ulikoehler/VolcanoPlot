@@ -55,11 +55,14 @@ inline void drawTexMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
                              float size) {
     if (!r.textReady() || tex.empty() || size <= 0.0f) return;
     const float scale = size / 16.0f;
-    auto m = r.measureRichText(tex, scale);
+    // markerTex stores the inner mathtext — wrap in $...$ so the rich
+    // text path parses it (matplotlib marker='$…$').
+    std::string wrapped = "$" + std::string(tex) + "$";
+    auto m = r.measureRichText(wrapped, scale);
     for (const auto& c0 : pxPts)
         // Center the glyph block on the point: baseline is top-left +
         // ascent; shift left by half width, up by half height.
-        r.drawRichText(cmd, clip, tex, c0.x - m.width / 2.0f,
+        r.drawRichText(cmd, clip, wrapped, c0.x - m.width / 2.0f,
                        c0.y - m.height / 2.0f + m.ascent, color, scale);
 }
 

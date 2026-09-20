@@ -376,6 +376,126 @@ def gen_chirp(out_dir):
     save(fig, out_dir, "chirp")
 
 
+
+def gen_quiver(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Quiver", "X", "Y")
+    x, y = np.meshgrid(np.linspace(-2, 2, 15), np.linspace(-2, 2, 15))
+    ax.quiver(x, y, -y, x)
+    ax.set_xlim(-2.5, 2.5); ax.set_ylim(-2.5, 2.5)
+    save(fig, out_dir, "quiver")
+
+
+def gen_streamplot(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Streamplot", "X", "Y")
+    x = np.linspace(-2, 2, 30)
+    X, Y = np.meshgrid(x, x)
+    ax.streamplot(X, Y, -Y, X)
+    ax.set_xlim(-2, 2); ax.set_ylim(-2, 2)
+    save(fig, out_dir, "streamplot")
+
+
+def gen_imshow(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "imshow", "X", "Y")
+    i = np.linspace(0, 23, 24).astype(int)
+    j = np.linspace(0, 23, 24).astype(int)
+    x = -3 + i / 23 * 6
+    y = -3 + j / 23 * 6
+    X, Y = np.meshgrid(x, y)
+    Z = np.sin(X) * np.cos(Y) + np.exp(-(X**2 + Y**2))
+    im = ax.imshow(Z, cmap="viridis", extent=[-3, 3, -3, 3],
+                   origin="upper", aspect="auto")
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    fig.colorbar(im, ax=ax)
+    save(fig, out_dir, "imshow")
+
+
+def gen_pcolormesh(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "pcolormesh", "X", "Y")
+    n = 25
+    x = np.linspace(-3, 3, n + 1)
+    y = np.linspace(-3, 3, n + 1)
+    X, Y = np.meshgrid(x, y)
+    C = np.sin((X[:-1, :-1] + X[1:, 1:]) / 2) * np.cos(
+        (Y[:-1, :-1] + Y[1:, 1:]) / 2)
+    im = ax.pcolormesh(x, y, C, cmap="viridis", shading="flat")
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    fig.colorbar(im, ax=ax)
+    save(fig, out_dir, "pcolormesh")
+
+
+def gen_tricontourf(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "tricontourf", "X", "Y")
+    # Same LCG as the C++ SharedRng — identical point set (x,y
+    # interleaved per point, matching the C++ loop order).
+    u = np.array([_shared.uniform() for _ in range(600)])
+    x, y = u[0::2] * 6 - 3, u[1::2] * 6 - 3
+    z = np.sin(x) * np.cos(y)
+    cs = ax.tricontourf(x, y, z, levels=12, cmap="viridis")
+    ax.set_xlim(-3, 3); ax.set_ylim(-3, 3)
+    fig.colorbar(cs, ax=ax)
+    save(fig, out_dir, "tricontourf")
+
+
+def gen_polar(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="polar")
+    ax.set_facecolor("white")
+    ax.set_title("Polar")
+    th = np.linspace(0, 2 * np.pi * 3, 201)
+    r = th / (2 * np.pi * 3)
+    ax.plot(th, r, linewidth=2, color="#1f77b4")
+    save(fig, out_dir, "polar")
+
+
+def gen_eventplot(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Eventplot", "Time", "Trial")
+    rows = [np.sort([_shared.uniform() * 10 for _ in range(20)])
+            for _ in range(6)]
+    ax.eventplot(rows)
+    ax.set_xlim(0, 10)
+    save(fig, out_dir, "eventplot")
+
+
+def gen_table(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Table")
+    t = np.linspace(0, 10, 60)
+    ax.plot(t, np.sin(t))
+    ax.table(cellText=[["Metric", "Mean", "Std"],
+                       ["A", "0.5", "0.1"], ["B", "1.2", "0.3"]],
+             loc="bottom")
+    save(fig, out_dir, "table")
+
+
+def gen_specgram(out_dir):
+    fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    setup_ax(ax, "Specgram", "Time", "Frequency")
+    t = np.arange(4096) / 4096
+    sig = np.sin(2 * np.pi * (10 + 40 * t) * t * 8)
+    ax.specgram(sig, Fs=2.0)
+    save(fig, out_dir, "specgram")
+
+
+def gen_trisurf(out_dir):
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_facecolor("white")
+    ax.set_title("Trisurf")
+    u = np.array([_shared.uniform() for _ in range(400)])
+    a, r = u[0::2] * 2 * np.pi, u[1::2] * 2
+    x, y = r * np.cos(a), r * np.sin(a)
+    z = np.sin(x) * np.cos(y)
+    ax.plot_trisurf(x, y, z, cmap="viridis")
+    ax.set_xlim(-2, 2); ax.set_ylim(-2, 2); ax.set_zlim(-1, 1)
+    save(fig, out_dir, "trisurf")
+
+
 GENERATORS = [
     gen_scatter, gen_line, gen_bar, gen_grouped_bar, gen_hist, gen_pie,
     gen_box, gen_violin, gen_stack, gen_stem, gen_step, gen_errorbar,
@@ -383,6 +503,9 @@ GENERATORS = [
     gen_hexbin, gen_contour, gen_contourf, gen_kde, gen_ecdf,
     gen_surface, gen_wireframe, gen_scatter3d, gen_plot3d, gen_bar3d,
     gen_mexican_hat, gen_chirp,
+    gen_quiver, gen_streamplot, gen_imshow, gen_pcolormesh,
+    gen_tricontourf, gen_polar, gen_eventplot, gen_table, gen_specgram,
+    gen_trisurf,
 ]
 
 

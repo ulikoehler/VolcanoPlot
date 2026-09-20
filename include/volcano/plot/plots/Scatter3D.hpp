@@ -17,6 +17,9 @@ struct Scatter3DConfig {
     float size = 6.0f;
     /// Marker style.
     MarkerStyle markerStyle = MarkerStyle::Circle;
+    /// mpl `depthshade` (default True): far points fade out —
+    /// alpha *= 1 - norm(view depth) * 0.7 (mpl art3d._zalpha).
+    bool depthshade = true;
     /// Label for legend.
     std::string label;
 };

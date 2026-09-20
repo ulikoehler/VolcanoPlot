@@ -32,7 +32,8 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     float cellW = float(rect.width) / float(totalCols);
     float cellH = heightFrac > 0
                       ? float(rect.height) * heightFrac / float(rows)
-                      : std::min(float(rect.height) / float(rows), 28.0f);
+                      : std::min(float(rect.height) / float(rows),
+                                 cellFontScale * 16.0f * 1.5f);
     float tableH = cellH * float(rows);
     // mpl loc='bottom' attaches the table's top edge to the bottom spine,
     // extending below the axes; 'top' extends above. Y-down pixels.
@@ -59,10 +60,11 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             spine.drawFilledRect(cmd, clip, r.backend().extent(), cr, bg);
         // Cell border.
         spine.drawRect(cmd, clip, r.backend().extent(), cr, edgeColor, 1.0f);
-        // Centered text.
+        // Centered text — draw() takes the baseline origin, so place the
+        // baseline at the cell's vertical center + (ascent - height/2).
         auto m = text.measureText(str, cellFontScale);
         float tx = float(cr.x) + (cellW - m.width) * 0.5f;
-        float ty = float(cr.y) + (cellH + m.height) * 0.5f - m.height;
+        float ty = float(cr.y) + (cellH - m.height) * 0.5f + m.ascent;
         text.draw(cmd, clip, str, tx, ty, textColor, cellFontScale);
     };
 

@@ -580,6 +580,9 @@ void ContourfPlot::contributeToAutoscale(Viewport& v) const {
     v.x.max = std::max(v.x.max, grid_.xRange.max);
     v.y.min = std::min(v.y.min, grid_.yRange.min);
     v.y.max = std::max(v.y.max, grid_.yRange.max);
+    auto [zmin, zmax] = gridValueRange(grid_);
+    v.z.min = std::min(v.z.min, zmin);
+    v.z.max = std::max(v.z.max, zmax);
 }
 
 } // namespace volcano::plot

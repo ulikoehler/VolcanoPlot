@@ -64,6 +64,7 @@ Cycler Cycler::operator*(const Cycler& o) const {
             m.lineStyle = a.lineStyle ? a.lineStyle : b.lineStyle;
             m.lineWidth = a.lineWidth ? a.lineWidth : b.lineWidth;
             m.marker = a.marker ? a.marker : b.marker;
+            m.markerTex = a.markerTex ? a.markerTex : b.markerTex;
             r.props_.push_back(m);
         }
     }

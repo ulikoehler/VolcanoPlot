@@ -4,6 +4,7 @@
 #include <volcano/plot/Types.hpp>
 
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace volcano::plot {
@@ -15,6 +16,7 @@ struct CycleProps {
     std::optional<LineStyle> lineStyle;
     std::optional<float> lineWidth;
     std::optional<MarkerStyle> marker;
+    std::optional<std::string> markerTex;  // '$...$' MathText marker spec
 };
 
 /// matplotlib-style cycler: `cycler('color', [...])` produces a sequence of

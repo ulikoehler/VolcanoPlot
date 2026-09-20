@@ -245,10 +245,16 @@ void Figure::computeTightMargins(Extent2D extent) {
         // Right: colorbar (strip + gap + tick labels, ~72px for labels).
         // fraction/pad reserve (fraction + pad) of the axes width; the
         // strip itself narrows to height/aspect, so ~72px covers labels.
-        if (st.colorbar.visible)
-            needRight = std::max(needRight,
-                st.colorbar.fraction + st.colorbar.pad +
-                    72.0f / extent.width);
+        if (st.colorbar.visible) {
+            if (st.colorbar.orientation == "horizontal")
+                needBottom = std::max(needBottom,
+                    st.colorbar.fraction + st.colorbar.pad +
+                        28.0f / extent.height);
+            else
+                needRight = std::max(needRight,
+                    st.colorbar.fraction + st.colorbar.pad +
+                        72.0f / extent.width);
+        }
         // Right-side y ticks (twinx) or a secondary axis need margin.
         if ((p.axes->yTicksRight() || p.axes->secondaryY()) &&
             st.yAxis.visible)
@@ -278,8 +284,18 @@ void Figure::applyAspect() {
         Axes& ax = *p.axes;
         if (ax.aspect() != AspectMode::Equal) continue;
         const auto& vp = ax.viewport();
-        float xs = std::fabs(vp.x.span());
-        float ys = std::fabs(vp.y.span());
+        // For non-rectilinear projections "equal" applies to the
+        // projected plane (polar circles must be round), not the raw
+        // (theta, r) data units.
+        float xs, ys;
+        if (ax.projection().kind == ProjectionKind::Rectilinear) {
+            xs = std::fabs(vp.x.span());
+            ys = std::fabs(vp.y.span());
+        } else {
+            auto b = ax.transform().view;
+            xs = std::fabs(b.x.span());
+            ys = std::fabs(b.y.span());
+        }
         if (xs <= 0.0f || ys <= 0.0f) continue;
         float w = static_cast<float>(ax.rect.width);
         float h = static_cast<float>(ax.rect.height);
@@ -367,18 +383,35 @@ void Figure::layoutInRect(Rect2D rect) {
         if (cbs.visible &&
             (p.mode == PlacementMode::Grid ||
              p.mode == PlacementMode::FigureFraction)) {
-            // mpl make_axes: the parent keeps the left
-            // (1 - fraction - pad) of its original box; the colorbar
-            // region is the right `fraction` slice.
-            float origW = float(p.axes->rect.width);
-            float reserve = origW * (cbs.fraction + cbs.pad);
-            if (reserve < origW) {
-                float cbx = p.axes->rect.x + origW * (1.0f - cbs.fraction);
-                p.axes->setColorbarRegion(Rect2D{
-                    static_cast<int32_t>(cbx), p.axes->rect.y,
-                    static_cast<uint32_t>(origW * cbs.fraction),
-                    p.axes->rect.height});
-                p.axes->rect.width -= static_cast<uint32_t>(reserve);
+            if (cbs.orientation == "horizontal") {
+                // mpl make_axes horizontal: the parent keeps the top
+                // (1 - fraction - pad) of its box; the colorbar region
+                // is the bottom `fraction` slice.
+                float origH = float(p.axes->rect.height);
+                float reserve = origH * (cbs.fraction + cbs.pad);
+                if (reserve < origH) {
+                    float cby = p.axes->rect.y +
+                                origH * (1.0f - cbs.fraction);
+                    p.axes->setColorbarRegion(Rect2D{
+                        p.axes->rect.x, static_cast<int32_t>(cby),
+                        p.axes->rect.width,
+                        static_cast<uint32_t>(origH * cbs.fraction)});
+                    p.axes->rect.height -= static_cast<uint32_t>(reserve);
+                }
+            } else {
+                // mpl make_axes: the parent keeps the left
+                // (1 - fraction - pad) of its original box; the colorbar
+                // region is the right `fraction` slice.
+                float origW = float(p.axes->rect.width);
+                float reserve = origW * (cbs.fraction + cbs.pad);
+                if (reserve < origW) {
+                    float cbx = p.axes->rect.x + origW * (1.0f - cbs.fraction);
+                    p.axes->setColorbarRegion(Rect2D{
+                        static_cast<int32_t>(cbx), p.axes->rect.y,
+                        static_cast<uint32_t>(origW * cbs.fraction),
+                        p.axes->rect.height});
+                    p.axes->rect.width -= static_cast<uint32_t>(reserve);
+                }
             }
         }
     }

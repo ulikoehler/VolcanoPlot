@@ -39,27 +39,43 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
     size_t n = x_.size();
     if (n == 0) return;
 
-    // Compute auto scale if needed.
+    // Compute auto scale if needed. matplotlib "crude auto-scaling"
+    // (quiver.py _make_verts): scale = 1.8 * amean * sn / span, where
+    // amean is the mean vector magnitude, sn = max(10, sqrt(N)), and
+    // span is the axes width in data units. Arrow data-length is then
+    // a / scale = a * span / (1.8 * amean * sn) — typical arrows end up
+    // ~1 grid-spacing long.
     float scale = cfg_.scale;
     if (scale <= 0.0f) {
-        // Auto: scale so that the longest arrow spans ~1/4 of the grid spacing.
-        float maxMag = 0.0f;
-        for (size_t i = 0; i < n; ++i) {
-            float mag = std::sqrt(u_[i] * u_[i] + v_[i] * v_[i]);
-            maxMag = std::max(maxMag, mag);
-        }
-        scale = maxMag > 0.0f ? (vp.x.span() * 0.15f / maxMag) : 1.0f;
+        double amean = 0.0;
+        for (size_t i = 0; i < n; ++i)
+            amean += std::sqrt(double(u_[i]) * u_[i] +
+                               double(v_[i]) * v_[i]);
+        amean /= double(n);
+        float sn = std::max(10.0f, std::sqrt(float(n)));
+        scale = amean > 0.0
+            ? float(vp.x.span() / (1.8 * amean * double(sn)))
+            : 1.0f;
     }
 
     // mpl `pivot`: fraction of the arrow placed before the grid point.
     float pivot = cfg_.pivot == QuiverConfig::Pivot::Tip ? 1.0f
                 : cfg_.pivot == QuiverConfig::Pivot::Middle ? 0.5f : 0.0f;
 
-    // mpl-style head dims (multiples of shaft width) take precedence over
-    // the pixel headLength/headWidth when any is set.
-    float shaftW = cfg_.width > 0.0f ? cfg_.width : cfg_.lineWidth;
+    // mpl default shaft width: 0.06 * span / clip(sqrt(N), 8, 25) in data
+    // units (quiver.py _init); here span_px = rect.width so the width is
+    // in pixels. An explicit cfg_.width/lineWidth overrides it.
+    float snW = std::clamp(std::sqrt(float(n)), 8.0f, 25.0f);
+    float shaftW = cfg_.width > 0.0f ? cfg_.width
+                 : cfg_.lineWidth != 1.0f ? cfg_.lineWidth
+                 : 0.06f * float(rect.width) / snW;
+    shaftWpx_ = shaftW;
+    // mpl's default head is the notched polygon (headwidth/headlength/
+    // headaxislength in shaft-width units). The pixel headLength/
+    // headWidth fallback only applies when the user sets them.
     bool mplHead = cfg_.headwidth > 0.0f || cfg_.headlength > 0.0f ||
-                   cfg_.headaxislength > 0.0f;
+                   cfg_.headaxislength > 0.0f ||
+                   (cfg_.headLength == 8.0f && cfg_.headWidth == 6.0f);
     float hw2 = (cfg_.headwidth > 0.0f ? cfg_.headwidth : 3.0f) * shaftW * 0.5f;
     float hl = (cfg_.headlength > 0.0f ? cfg_.headlength : 5.0f) * shaftW;
     float hal = (cfg_.headaxislength > 0.0f ? cfg_.headaxislength : 4.5f) *
@@ -150,12 +166,12 @@ void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
                      vk::Extent2D{rect.width, rect.height}};
 
-    // Upload shaft segments (mpl `width` overrides lineWidth when set).
-    float shaftW = cfg_.width > 0.0f ? cfg_.width : cfg_.lineWidth;
+    // Upload shaft segments at the width computed by buildGeometry
+    // (mpl default 0.06*span/clip(sqrt(N),8,25) unless overridden).
     if (!shaftSegs_.empty()) {
         shaftRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                               ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{shaftSegs_}, cfg_.color, shaftW);
+                              std::span{shaftSegs_}, cfg_.color, shaftWpx_);
         shaftRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
     }
 

@@ -330,4 +330,33 @@ std::array<float, 16> Camera3D::viewProjection() const noexcept {
     return out;
 }
 
+Camera3D Camera3D::viewInit(float elevDeg, float azimDeg, float rollDeg,
+                            Point3D target, float dist) noexcept {
+    constexpr float kDeg = float(M_PI) / 180.0f;
+    float e = elevDeg * kDeg, a = azimDeg * kDeg, r = rollDeg * kDeg;
+    // mpl axes3d: eye = R + dist * [cos e·cos a, cos e·sin a, sin e].
+    Point3D w{std::cos(e) * std::cos(a), std::cos(e) * std::sin(a),
+              std::sin(e)};                      // center → eye
+    // Vertical axis flips when looking from below (mpl _calc_view_axes).
+    Point3D V{0, 0, std::fabs(e) > float(M_PI_2) ? -1.0f : 1.0f};
+    Point3D u = cross(V, w);                     // screen-right
+    if (u.x*u.x + u.y*u.y + u.z*u.z < 1e-12f)
+        u = {1, 0, 0};                           // looking straight down/up
+    normalize(u);
+    Point3D v = cross(w, u);                     // screen-up
+    if (r != 0.0f) {
+        // mpl proj3d._view_axes: rotate u,v by -roll about w.
+        float cr = std::cos(r), sr = std::sin(r);
+        Point3D u2{u.x*cr - v.x*sr, u.y*cr - v.y*sr, u.z*cr - v.z*sr};
+        v = {v.x*cr + u.x*sr, v.y*cr + u.y*sr, v.z*cr + u.z*sr};
+        u = u2;
+    }
+    Camera3D cam;
+    cam.eye = {target.x + dist * w.x, target.y + dist * w.y,
+               target.z + dist * w.z};
+    cam.target = target;
+    cam.up = v;
+    return cam;
+}
+
 } // namespace volcano::plot

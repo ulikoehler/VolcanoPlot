@@ -32,6 +32,13 @@
 #include <volcano/plot/plots/FillPlot.hpp>
 #include <volcano/plot/plots/FillBetweenPlot.hpp>
 #include <volcano/plot/plots/HeatmapPlot.hpp>
+#include <volcano/plot/plots/QuiverPlot.hpp>
+#include <volcano/plot/plots/StreamPlot.hpp>
+#include <volcano/plot/plots/ContourPlot.hpp>
+#include <volcano/plot/plots/Scatter3D.hpp>
+#include <volcano/plot/plots/SurfacePlot.hpp>
+#include <volcano/plot/plots/Axes3DPlot.hpp>
+#include <volcano/plot/plots/PiePlot.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -1140,6 +1147,322 @@ void f115_table_bottom(Figure& fig) {
     ax->table({{"A", "B", "C"}, {"3", "7", "5"}}, "bottom");
 }
 
+
+// ═══ Tier 15 — extended coverage (122–145) ════════════════════════════════
+
+void f122_colorbar_horizontal(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid()));
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.orientation = "horizontal";
+}
+
+void f123_colorbar_shrink(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid()));
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.shrink = 0.5f;
+}
+
+void f124_marker_tex_beta(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto s = fewPoints();
+    s.setMarker("$\\beta$");
+    s.size = 14.0f;
+    ax->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+}
+
+void f125_imshow_extent(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D g = smallGrid();
+    g.xRange = {-2, 2};
+    g.yRange = {-1, 1};
+    ax->imshow(std::move(g), colormaps::viridis());
+    ax->setXlim(-2.5, 2.5);
+    ax->setYlim(-1.5, 1.5);
+}
+
+void f126_imshow_aspect_auto(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D g = smallGrid();
+    g.width = 4; g.height = 16;    // tall image
+    g.values.resize(4 * 16);
+    for (uint32_t j = 0; j < 16; ++j)
+        for (uint32_t i = 0; i < 4; ++i)
+            g.values[j * 4 + i] = float(i + j) / 19.0f;
+    ax->imshow(std::move(g), colormaps::viridis(), "nearest", "auto");
+}
+
+void f127_inset_indicator(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto* in = ax->insetAxes(0.55f, 0.55f, 0.38f, 0.35f);
+    in->setStyle(ax->style());
+    in->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    in->setXlim(4.0f, 5.0f); in->setYlim(-1.0f, 0.0f);
+    ax->indicateInsetZoom(*in);
+}
+
+void f128_sizebar(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    SizeBar bar;
+    bar.size = 2.0f;
+    bar.label = "2 units";
+    ax->addSizeBar(std::move(bar));
+}
+
+void f129_anchored_text(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->addAnchoredText("upper left note", "upper left");
+}
+
+void f130_scatter3d_depthshade(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, z;
+    for (int i = 0; i < 64; ++i) {
+        float a = float(i) * 0.4f;
+        x.push_back(std::cos(a) * (1.0f + float(i) / 64.0f));
+        y.push_back(std::sin(a) * (1.0f + float(i) / 64.0f));
+        z.push_back(float(i) / 16.0f - 2.0f);
+    }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    Viewport v; v.x = {-2, 2}; v.y = {-2, 2}; v.z = {-2, 2};
+    cam.dataMin = {v.x.min, v.y.min, v.z.min};
+    cam.dataMax = {v.x.max, v.y.max, v.z.max};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+    auto p = std::make_unique<Scatter3D>(std::move(x), std::move(y),
+                                         std::move(z));
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+}
+
+void f131_scatter3d_view_init(Figure& fig) {
+    // mpl ax.view_init(elev=0, azim=-90): XZ plane, z vertical.
+    auto* ax = mfAxes(fig);
+    std::vector<float> x = {0, 1, 0, -1, 0}, y = {0, 0, 0, 0, 0},
+                          z = {0, 0, 1, 0, -1};
+    auto cam = Camera3D::viewInit(0.0f, -90.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    Viewport v; v.x = {-1.5, 1.5}; v.y = {-1.5, 1.5}; v.z = {-1.5, 1.5};
+    cam.dataMin = {v.x.min, v.y.min, v.z.min};
+    cam.dataMax = {v.x.max, v.y.max, v.z.max};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+    Scatter3DConfig cfg;
+    cfg.size = 8.0f;
+    cfg.color = Color::red();
+    cfg.depthshade = false;
+    auto p = std::make_unique<Scatter3D>(std::move(x), std::move(y),
+                                         std::move(z), cfg);
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+}
+
+static Grid2D surfGrid() {
+    Grid2D g;
+    g.width = g.height = 30;
+    g.xRange = {-3, 3}; g.yRange = {-3, 3};
+    g.values.resize(30 * 30);
+    for (uint32_t j = 0; j < 30; ++j)
+        for (uint32_t i = 0; i < 30; ++i) {
+            float x = -3 + float(i) / 29 * 6;
+            float y = -3 + float(j) / 29 * 6;
+            g.values[j * 30 + i] = std::sin(x) * std::cos(y);
+        }
+    return g;
+}
+static Camera3D surfCam() {
+    auto cam = Camera3D::viewInit(30.0f, -60.0f, 0.0f, {0, 0, 0}, 8.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {-3, -3, -1}; cam.dataMax = {3, 3, 1};
+    return cam;
+}
+
+void f132_surface_shade(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto cam = surfCam();
+    Viewport v; v.x = {-3, 3}; v.y = {-3, 3}; v.z = {-1, 1};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+    ax->addPlot(std::make_unique<SurfacePlot>(surfGrid(), cam));
+}
+
+void f133_surface_noshade(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto cam = surfCam();
+    Viewport v; v.x = {-3, 3}; v.y = {-3, 3}; v.z = {-1, 1};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+    auto p = std::make_unique<SurfacePlot>(surfGrid(), cam);
+    p->shade = false;
+    ax->addPlot(std::move(p));
+}
+
+static void quiverField(std::vector<float>& x, std::vector<float>& y,
+                        std::vector<float>& u, std::vector<float>& v) {
+    for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < 8; ++i) {
+            float px = float(i), py = float(j);
+            x.push_back(px); y.push_back(py);
+            u.push_back(-(py - 3.5f)); v.push_back(px - 3.5f);
+        }
+}
+
+void f134_quiver_pivot_mid(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, u, v;
+    quiverField(x, y, u, v);
+    QuiverConfig cfg;
+    cfg.pivot = QuiverConfig::Pivot::Middle;
+    ax->addPlot(std::make_unique<QuiverPlot>(std::move(x), std::move(y),
+                                             std::move(u), std::move(v), cfg));
+    ax->setXlim(-1, 8); ax->setYlim(-1, 8);
+}
+
+void f135_quiver_headwidth(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, u, v;
+    quiverField(x, y, u, v);
+    QuiverConfig cfg;
+    cfg.width = 0.005f;
+    cfg.headwidth = 5.0f; cfg.headlength = 7.0f; cfg.headaxislength = 6.0f;
+    ax->addPlot(std::make_unique<QuiverPlot>(std::move(x), std::move(y),
+                                             std::move(u), std::move(v), cfg));
+    ax->setXlim(-1, 8); ax->setYlim(-1, 8);
+}
+
+static void streamGrid(Grid2D& gu, Grid2D& gv, bool nanHole = false) {
+    gu.width = gu.height = gv.width = gv.height = 20;
+    gu.xRange = gv.xRange = {0, 3};
+    gu.yRange = gv.yRange = {0, 3};
+    gu.values.resize(400); gv.values.resize(400);
+    for (int j = 0; j < 20; ++j)
+        for (int i = 0; i < 20; ++i) {
+            float x = float(i) / 19 * 3, y = float(j) / 19 * 3;
+            gu.values[j * 20 + i] = -(y - 1.5f);
+            gv.values[j * 20 + i] = x - 1.5f;
+            if (nanHole && i >= 9 && i <= 11) {
+                gu.values[j * 20 + i] = std::nanf("");
+                gv.values[j * 20 + i] = std::nanf("");
+            }
+        }
+}
+
+void f136_streamplot_arrowsize(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D gu, gv;
+    streamGrid(gu, gv);
+    StreamConfig cfg;
+    cfg.arrowsize = 2.0f;
+    cfg.color = Color::fromRgba8(31, 119, 180);
+    ax->addPlot(std::make_unique<StreamPlot>(std::move(gu), std::move(gv), cfg));
+    ax->setXlim(0, 3); ax->setYlim(0, 3);
+}
+
+void f137_streamplot_nan_hole(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D gu, gv;
+    streamGrid(gu, gv, /*nanHole=*/true);
+    StreamConfig cfg;
+    cfg.color = Color::fromRgba8(31, 119, 180);
+    ax->addPlot(std::make_unique<StreamPlot>(std::move(gu), std::move(gv), cfg));
+    ax->setXlim(0, 3); ax->setYlim(0, 3);
+}
+
+void f138_clabel_gap(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D g;
+    g.width = g.height = 30;
+    g.xRange = {-3, 3}; g.yRange = {-3, 3};
+    g.values.resize(30 * 30);
+    for (uint32_t j = 0; j < 30; ++j)
+        for (uint32_t i = 0; i < 30; ++i) {
+            float x = -3 + float(i) / 29 * 6;
+            float y = -3 + float(j) / 29 * 6;
+            g.values[j * 30 + i] = x * x + y * y;
+        }
+    ContourConfig cfg;
+    cfg.levels = {2.0f, 5.0f, 8.0f};
+    cfg.cmap = &colormaps::viridis();
+    cfg.clabel = true;
+    ax->addPlot(std::make_unique<ContourPlot>(std::move(g), cfg));
+}
+
+void f139_log_clip(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (float x : linspace(-2, 2, 40))
+        s.points.push_back({x, x});   // half the points are ≤ 0
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setYscale("log");
+    ax->setYlim(0.01, 3);
+}
+
+void f140_colorblind_cycle(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto st = styles::defaultStyle();
+    st.colorblindSafe();
+    ax->setStyle(st);
+    ax->style().faceColor = Color::white();
+    for (int i = 0; i < 4; ++i) {
+        auto s = sineSeries();
+        for (auto& p : s.points) p.y += float(i) * 0.5f;
+        ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    }
+}
+
+void f141_legend_handlelength(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto s1 = sineSeries(); s1.label = "sin";
+    auto s2 = sineSeries();
+    for (auto& p : s2.points) p.y = -p.y;
+    s2.label = "-sin";
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s1)));
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s2)));
+    ax->style().legend.visible = true;
+    ax->style().legend.handleLength = 4.0f;
+}
+
+void f142_legend_labelcolor(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto s1 = sineSeries(); s1.label = "sin";
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s1)));
+    ax->style().legend.visible = true;
+    ax->style().legend.labelColor = Color::red();
+}
+
+void f143_pie_explode(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    PieData d;
+    d.values = {30, 25, 20, 15, 10};
+    d.labels = {"A", "B", "C", "D", "E"};
+    d.explode = 0.08f;
+    ax->addPlot(std::make_unique<PiePlot>(std::move(d)));
+    ax->setAspect(AspectMode::Equal);
+    ax->style().xAxis.visible = false;
+    ax->style().yAxis.visible = false;
+}
+
+void f144_secondary_x(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10);
+    // mpl secondary_xaxis('top', functions=(fwd, inv)) — label on top.
+    ax->secondaryXaxis([](float x) { return x * 2.0f; },
+                      [](float x) { return x * 0.5f; }, "double x");
+}
+
+void f145_mathtext_frac_sum(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    auto* t = ax->text(5.0f, 0.5f,
+                       "$\\frac{x}{y} + \\sum_{i=0}^{n} i$");
+    (void)t;
+}
+
 // ═══ Registry ═══════════════════════════════════════════════════════════
 
 struct Feature {
@@ -1269,6 +1592,30 @@ const Feature kFeatures[] = {
     {"119_clip_path",          f119_clip_path},
     {"120_boxstyle",           f120_boxstyle},
     {"121_arrow_bezier",       f121_arrow_bezier},
+    {"122_colorbar_horizontal",f122_colorbar_horizontal},
+    {"123_colorbar_shrink",    f123_colorbar_shrink},
+    {"124_marker_tex_beta",    f124_marker_tex_beta},
+    {"125_imshow_extent",      f125_imshow_extent},
+    {"126_imshow_aspect_auto", f126_imshow_aspect_auto},
+    {"127_inset_indicator",    f127_inset_indicator},
+    {"128_sizebar",            f128_sizebar},
+    {"129_anchored_text",      f129_anchored_text},
+    {"130_scatter3d_depthshade",f130_scatter3d_depthshade},
+    {"131_scatter3d_view_init",f131_scatter3d_view_init},
+    {"132_surface_shade",      f132_surface_shade},
+    {"133_surface_noshade",    f133_surface_noshade},
+    {"134_quiver_pivot_mid",   f134_quiver_pivot_mid},
+    {"135_quiver_headwidth",   f135_quiver_headwidth},
+    {"136_streamplot_arrowsize",f136_streamplot_arrowsize},
+    {"137_streamplot_nan_hole",f137_streamplot_nan_hole},
+    {"138_clabel_gap",         f138_clabel_gap},
+    {"139_log_clip",           f139_log_clip},
+    {"140_colorblind_cycle",   f140_colorblind_cycle},
+    {"141_legend_handlelength",f141_legend_handlelength},
+    {"142_legend_labelcolor",  f142_legend_labelcolor},
+    {"143_pie_explode",        f143_pie_explode},
+    {"144_secondary_x",        f144_secondary_x},
+    {"145_mathtext_frac_sum",  f145_mathtext_frac_sum},
 };
 
 } // namespace

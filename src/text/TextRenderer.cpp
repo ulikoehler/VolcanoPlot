@@ -69,8 +69,15 @@ layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec4 v_color;
 layout(location = 0) out vec4 outColor;
 layout(binding = 0) uniform sampler2D u_atlas;
+float median(vec3 v) {
+    return max(min(v.r, v.g), min(max(v.r, v.g), v.b));
+}
 void main() {
-    float alpha = texture(u_atlas, v_uv).r;
+    // MSDF atlas: signed distance is the median of the RGB channels.
+    vec3 sd = texture(u_atlas, v_uv).rgb;
+    float dist = median(sd) - 0.5;
+    float w = fwidth(dist);
+    float alpha = smoothstep(-w, w, dist);
     outColor = vec4(v_color.rgb, v_color.a * alpha);
 }
 )";
@@ -202,7 +209,12 @@ class FontManagerShared : public font_manager_ft {
 public:
     static constexpr int kAtlasSize = 2048;  // headroom for CJK glyph sets
 
-    FontManagerShared() { defaulAtlas = nullptr; }
+    FontManagerShared() {
+        defaulAtlas = nullptr;
+        // MSDF atlas: vector-crisp glyphs at any scale (median-of-3 in
+        // the fragment shader) instead of the grayscale bitmap atlas.
+        msdf_enabled = true;
+    }
 
     font_atlas* getCurrentAtlas(font_face* face) override {
         if (!defaulAtlas) defaulAtlas = getNewAtlas(face);
@@ -625,9 +637,9 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
     atlasHeight_ = (int)atlas->height;
 
     if (!atlasUploaded_) {
-        // Create the Vulkan image (R8_UNORM for grayscale atlas).
+        // Create the Vulkan image (RGBA8_UNORM for the MSDF atlas).
         core::ImageDesc idesc{};
-        idesc.format = vk::Format::eR8Unorm;
+        idesc.format = vk::Format::eR8G8B8A8Unorm;
         idesc.extent = vk::Extent2D{uint32_t(atlasWidth_), uint32_t(atlasHeight_)};
         idesc.usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
         idesc.tiling = vk::ImageTiling::eOptimal;
@@ -637,14 +649,14 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
         vk::ImageViewCreateInfo ivci{};
         ivci.setImage(atlasImage_.handle())
             .setViewType(vk::ImageViewType::e2D)
-            .setFormat(vk::Format::eR8Unorm)
+            .setFormat(vk::Format::eR8G8B8A8Unorm)
             .setSubresourceRange(vk::ImageSubresourceRange{
                 vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
         atlasView_ = device_.createImageViewUnique(ivci);
     }
 
     // Create a staging buffer and copy atlas pixels.
-    size_t pixelBytes = size_t(atlasWidth_) * size_t(atlasHeight_);
+    size_t pixelBytes = size_t(atlasWidth_) * size_t(atlasHeight_) * 4;
     core::BufferDesc sdesc{};
     sdesc.size = pixelBytes;
     sdesc.usage = core::BufferUsage::Staging;
@@ -666,7 +678,7 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
 
     // Transition image to transfer dst (ShaderReadOnly on re-upload).
     core::Image::transitionLayout(cmd, atlasImage_.handle(),
-        vk::Format::eR8Unorm,
+        vk::Format::eR8G8B8A8Unorm,
         atlasUploaded_ ? vk::ImageLayout::eShaderReadOnlyOptimal
                        : vk::ImageLayout::eUndefined,
         vk::ImageLayout::eTransferDstOptimal);
@@ -685,7 +697,7 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
 
     // Transition image to shader read.
     core::Image::transitionLayout(cmd, atlasImage_.handle(),
-        vk::Format::eR8Unorm,
+        vk::Format::eR8G8B8A8Unorm,
         vk::ImageLayout::eTransferDstOptimal,
         vk::ImageLayout::eShaderReadOnlyOptimal);
 

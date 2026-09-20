@@ -25,7 +25,7 @@ public:
     Color labelColor{0.85f, 0.85f, 0.85f, 1.0f};      // header cell bg
     Color edgeColor{0, 0, 0, 1};
     Color textColor{0, 0, 0, 1};
-    float cellFontScale = 0.6f;
+    float cellFontScale = 0.85f;
     /// Table height as a fraction of the axes height (all rows + header).
     float heightFrac = 0.0f;                          // 0 = auto-fit rows
 

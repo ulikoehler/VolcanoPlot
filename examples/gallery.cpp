@@ -41,6 +41,13 @@
 #include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/plots/MexicanHatPlot.hpp>
 #include <volcano/plot/plots/ChirpPlot.hpp>
+#include <volcano/plot/plots/QuiverPlot.hpp>
+#include <volcano/plot/plots/StreamPlot.hpp>
+#include <volcano/plot/plots/PcolormeshPlot.hpp>
+#include <volcano/plot/plots/TrisurfPlot.hpp>
+#include <volcano/plot/plots/TriContourPlot.hpp>
+#include <volcano/plot/plots/SpecgramPlot.hpp>
+#include <volcano/plot/plots/ReferenceLines.hpp>
 
 #include <cmath>
 #include <iostream>
@@ -679,6 +686,179 @@ void plotChirp(GalleryCtx& ctx) {
     ctx.render(fig, "chirp");
 }
 
+// ── Extended coverage ─────────────────────────────────────────────────────
+
+void plotQuiver(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Quiver", "X", "Y");
+    std::vector<float> x, y, u, v;
+    for (int j = 0; j < 15; ++j)
+        for (int i = 0; i < 15; ++i) {
+            float px = -2.0f + i * (4.0f / 14), py = -2.0f + j * (4.0f / 14);
+            x.push_back(px); y.push_back(py);
+            u.push_back(-py); v.push_back(px);
+        }
+    ax->addPlot(std::make_unique<QuiverPlot>(std::move(x), std::move(y),
+                                           std::move(u), std::move(v)));
+    ax->setXlim(-2.5, 2.5); ax->setYlim(-2.5, 2.5);
+    ctx.render(fig, "quiver");
+}
+
+void plotStreamplot(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Streamplot", "X", "Y");
+    Grid2D gu, gv;
+    gu.width = gu.height = gv.width = gv.height = 30;
+    gu.xRange = gv.xRange = {-2, 2};
+    gu.yRange = gv.yRange = {-2, 2};
+    gu.values.resize(900); gv.values.resize(900);
+    for (int j = 0; j < 30; ++j)
+        for (int i = 0; i < 30; ++i) {
+            float px = -2.0f + i * (4.0f / 29), py = -2.0f + j * (4.0f / 29);
+            gu.values[j * 30 + i] = -py;
+            gv.values[j * 30 + i] = px;
+        }
+    StreamConfig sc;
+    sc.color = Color::fromRgba8(31, 119, 180);   // mpl default C0
+    ax->addPlot(std::make_unique<StreamPlot>(std::move(gu), std::move(gv),
+                                             sc));
+    ax->setXlim(-2, 2); ax->setYlim(-2, 2);
+    ctx.render(fig, "streamplot");
+}
+
+void plotImshow(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "imshow", "X", "Y");
+    Grid2D g;
+    g.width = g.height = 24;
+    g.xRange = {-3, 3}; g.yRange = {-3, 3};
+    g.values.resize(24 * 24);
+    for (uint32_t j = 0; j < 24; ++j)
+        for (uint32_t i = 0; i < 24; ++i) {
+            float x = -3 + float(i) / 23 * 6, y = -3 + float(j) / 23 * 6;
+            g.values[j * 24 + i] = std::sin(x) * std::cos(y) +
+                                   std::exp(-(x * x + y * y));
+        }
+    ax->imshow(std::move(g), colormaps::viridis(), "nearest", "auto");
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ax->style().colorbar.visible = true;
+    ctx.render(fig, "imshow");
+}
+
+void plotPcolormesh(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "pcolormesh", "X", "Y");
+    const int n = 25;
+    std::vector<float> x(n + 1), y(n + 1), C(n * n);
+    for (int i = 0; i <= n; ++i) x[i] = -3 + i * 6.0f / n;
+    for (int j = 0; j <= n; ++j) y[j] = -3 + j * 6.0f / n;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            float cx = (x[i] + x[i + 1]) * 0.5f, cy = (y[j] + y[j + 1]) * 0.5f;
+            C[j * n + i] = std::sin(cx) * std::cos(cy);
+        }
+    PcolormeshConfig cfg;
+    ax->addPlot(std::make_unique<PcolormeshPlot>(std::move(x), std::move(y),
+                                               std::move(C), n, n, cfg));
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ax->style().colorbar.visible = true;
+    ctx.render(fig, "pcolormesh");
+}
+
+void plotTricontourf(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "tricontourf", "X", "Y");
+    std::vector<float> x, y, z;
+    for (int i = 0; i < 300; ++i) {
+        float px = float(sRng().uniform()) * 6 - 3;
+        float py = float(sRng().uniform()) * 6 - 3;
+        x.push_back(px); y.push_back(py);
+        z.push_back(std::sin(px) * std::cos(py));
+    }
+    TriContourConfig cfg;
+    cfg.numLevels = 12;
+    ax->addPlot(std::make_unique<TriContourfPlot>(std::move(x), std::move(y),
+                                                std::move(z), cfg));
+    ax->setXlim(-3, 3); ax->setYlim(-3, 3);
+    ax->style().colorbar.visible = true;
+    ctx.render(fig, "tricontourf");
+}
+
+void plotPolar(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Polar");
+    ax->setProjection("polar");
+    Series2D s;
+    s.color = Color::fromRgba8(31, 119, 180);
+    s.lineWidth = 2.0f;
+    for (int i = 0; i <= 200; ++i) {
+        float th = float(i) / 200 * 2.0f * float(M_PI) * 3.0f;
+        s.points.push_back({th, th / (2.0f * float(M_PI) * 3.0f)});
+    }
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setViewport({0.0f, 6.2832f * 3.0f, 0.0f, 1.0f, 0, 1});
+    ctx.render(fig, "polar");
+}
+
+void plotEventplot(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Eventplot", "Time", "Trial");
+    std::vector<std::vector<float>> rows(6);
+    for (int r = 0; r < 6; ++r)
+        for (int i = 0; i < 20; ++i)
+            rows[r].push_back(float(sRng().uniform()) * 10.0f);
+    ax->eventplot(rows);
+    ax->setXlim(0, 10);
+    ctx.render(fig, "eventplot");
+}
+
+void plotTable(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Table");
+    Series2D s2;
+    for (float x : linspace(0, 10, 60))
+        s2.points.push_back({x, std::sin(x)});
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s2)));
+    ax->table({{"Metric", "Mean", "Std"},
+               {"A", "0.5", "0.1"}, {"B", "1.2", "0.3"}}, "bottom");
+    ctx.render(fig, "table");
+}
+
+void plotSpecgram(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Specgram", "Time", "Frequency");
+    std::vector<float> sig(4096);
+    for (int i = 0; i < 4096; ++i) {
+        float t = float(i) / 4096;
+        sig[i] = std::sin(2 * float(M_PI) * (10 + 40 * t) * t * 8);
+    }
+    SpecgramConfig cfg;
+    ax->addPlot(std::make_unique<SpecgramPlot>(std::move(sig), cfg));
+    ctx.render(fig, "specgram");
+}
+
+void plotTrisurf(GalleryCtx& ctx) {
+    Figure fig(1, 1);
+    auto* ax = setupAxes(fig, "Trisurf");
+    std::vector<float> x, y, z;
+    for (int i = 0; i < 200; ++i) {
+        float a = float(sRng().uniform()) * 2 * float(M_PI);
+        float r = float(sRng().uniform()) * 2;
+        x.push_back(r * std::cos(a)); y.push_back(r * std::sin(a));
+        z.push_back(std::sin(x.back()) * std::cos(y.back()));
+    }
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = float(kWidth) / float(kHeight);
+    cam.dataMin = {-2, -2, -1}; cam.dataMax = {2, 2, 1};
+    Viewport v; v.x = {-2, 2}; v.y = {-2, 2}; v.z = {-1, 1};
+    ax->addPlot(std::make_unique<Axes3DPlot>(cam, v));
+    auto p = std::make_unique<TrisurfPlot>(std::move(x), std::move(y),
+                                           std::move(z));
+    p->setCamera(cam);
+    ax->addPlot(std::move(p));
+    ctx.render(fig, "trisurf");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -721,6 +901,18 @@ int main(int argc, char** argv) {
     plotMexicanHat(ctx);
     plotChirp(ctx);
 
-    std::cout << "Done. Generated " << 29 << " plots.\n";
+    // Extended coverage
+    plotQuiver(ctx);
+    plotStreamplot(ctx);
+    plotImshow(ctx);
+    plotPcolormesh(ctx);
+    plotTricontourf(ctx);
+    plotPolar(ctx);
+    plotEventplot(ctx);
+    plotTable(ctx);
+    plotSpecgram(ctx);
+    plotTrisurf(ctx);
+
+    std::cout << "Done. Generated " << 39 << " plots.\n";
     return 0;
 }

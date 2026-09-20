@@ -102,8 +102,17 @@ public:
     void semilogy() { setLogX(false); setLogY(true); }
 
     // --- Projection (matplotlib projection="polar" etc.) ---
-    void setProjection(Projection p) { projection_ = p; }
-    void setProjection(std::string_view name) { projection_ = Projection::parse(name); }
+    void setProjection(Projection p) {
+        projection_ = p;
+        // matplotlib polar axes are always aspect-equal (adjustable box)
+        // and show the theta/r grid by default (rcParam polaraxes.grid).
+        if (p.kind == ProjectionKind::Polar) {
+            aspect_ = AspectMode::Equal;
+            style_.xAxis.grid = true;
+            style_.yAxis.grid = true;
+        }
+    }
+    void setProjection(std::string_view name) { setProjection(Projection::parse(name)); }
     [[nodiscard]] const Projection& projection() const noexcept { return projection_; }
 
     /// Polar helpers (matplotlib set_rgrids/set_thetagrids/...).
@@ -222,7 +231,10 @@ public:
     /// matplotlib ax.legend(): enable the legend and return its style for
     /// configuration (`axes.legend().location = "upper left";`).
     LegendStyle& legend() { style_.legend.visible = true; return style_.legend; }
-    void setStyle(FigureStyle s) { style_ = std::move(s); }
+    /// Replaces the style AND reseeds the prop cycler (matplotlib:
+    /// style()/rcParams control the cycle for subsequently added plots).
+    void setStyle(FigureStyle s);
+    void reseedCycler();
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
     [[nodiscard]] FigureStyle& style() noexcept { return style_; }
 

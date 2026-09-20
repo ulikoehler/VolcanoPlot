@@ -252,6 +252,10 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                 style.title.font.rotation, plot::HAlign::Center);
     }
 
+    // Polar axes: theta/r labels are drawn with the polar spine
+    // furniture; skip rectilinear tick/axis labels.
+    if (axes.projection().kind == plot::ProjectionKind::Polar) return;
+
     // --- Tick labels ---
     // Positioning (matching matplotlib):
     //   X labels: horizontal center at tick x, top border at tick mark bottom + spacing.
@@ -682,6 +686,168 @@ void Renderer::drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
     drawAxis(style.yAxis, axes.yscale(), vp.y.min, vp.y.max, true);
 }
 
+// ── Polar axes furniture ────────────────────────────────────────────────────
+// matplotlib projection="polar": the axes frame is a circle at rmax, the
+// grid is radial spokes at theta ticks plus concentric circles at r ticks,
+// theta tick labels sit just outside the frame (0°…315°, mpl's default
+// ThetaLocator base π/4), and r labels run along the 22.5° radial
+// (mpl rlabel_position default).
+
+namespace {
+/// Map polar data (theta, r) to canvas pixels through the axes' own
+/// transform (projection + viewport + rect).
+inline plot::Point2D polarToPx(const plot::Axes& axes, plot::Rect2D rect,
+                               float theta, float r) {
+    auto f = axes.dataToFraction({theta, r});
+    return {float(rect.x) + f.x * float(rect.width),
+            float(rect.y) + (1.0f - f.y) * float(rect.height)};
+}
+
+/// Polyline approximation of the r-circle (128 segments).
+std::vector<plot::Point2D> polarCircle(const plot::Axes& axes,
+                                       plot::Rect2D rect, float r,
+                                       int n = 128) {
+    std::vector<plot::Point2D> pts;
+    pts.reserve(n + 1);
+    constexpr float kTwoPi = 6.2831853071795865f;
+    for (int i = 0; i <= n; ++i)
+        pts.push_back(polarToPx(axes, rect, kTwoPi * float(i) / float(n), r));
+    return pts;
+}
+
+/// Stroke a pixel-space polyline into a triangle mesh and draw it.
+void strokePxPoly(vk::CommandBuffer cmd,
+                  primitives::SpineRenderer& sr,
+                  vk::Rect2D clip, vk::Extent2D ext,
+                  std::span<const plot::Point2D> pts,
+                  plot::Color color, float widthPx) {
+    plot::StrokeParams sp;
+    sp.width = std::max(widthPx, 1.0f);
+    auto mesh = plot::strokePolyline(pts, sp);
+    if (!mesh.verts.empty())
+        sr.drawTriangles(cmd, clip, ext, mesh.verts, color);
+}
+} // namespace
+
+void Renderer::drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                             plot::Rect2D rect) {
+    const auto& style = axes.style();
+    const auto& vp = axes.viewport();
+    float rmax = std::max(std::fabs(vp.y.min), std::fabs(vp.y.max));
+    if (rmax <= 0.0f) rmax = 1.0f;
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    auto ext = backend_.extent();
+    constexpr float kPi = 3.14159265358979323846f;
+
+    // Radial spokes at theta ticks (x-axis grid): mpl ThetaLocator → π/4,
+    // or explicit set_thetagrids positions (degrees).
+    if (style.xAxis.grid) {
+        std::vector<float> thetas;
+        if (!axes.thetagrids().empty())
+            for (float d : axes.thetagrids())
+                thetas.push_back(d * kPi / 180.0f);
+        else
+            for (int k = 0; k < 8; ++k) thetas.push_back(float(k) * kPi / 4.0f);
+        auto c = polarToPx(axes, rect, 0.0f, 0.0f);
+        for (float th : thetas) {
+            plot::Point2D pts[2] = {c, polarToPx(axes, rect, th, rmax)};
+            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+                         style.xAxis.gridColor,
+                         style.xAxis.gridLineWidth * kPtToPx);
+        }
+    }
+    // Concentric circles at r ticks (y-axis grid), or set_rgrids radii.
+    if (style.yAxis.grid) {
+        auto rTicks = !axes.rgrids().empty()
+            ? axes.rgrids()
+            : axisTicks(style.yAxis.ticks, axes.yscale(),
+                        vp.y.min, vp.y.max, float(rect.height),
+                        style.fontSize, style.dpi, true);
+        for (float r : rTicks) {
+            if (r <= 0.0f || r > rmax) continue;
+            auto circ = polarCircle(axes, rect, r);
+            strokePxPoly(cmd, spineRenderer_, clip, ext, circ,
+                         style.yAxis.gridColor,
+                         style.yAxis.gridLineWidth * kPtToPx);
+        }
+    }
+}
+
+void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
+                                       const plot::Axes& axes,
+                                       plot::Rect2D rect) {
+    const auto& style = axes.style();
+    const auto& vp = axes.viewport();
+    float rmax = std::max(std::fabs(vp.y.min), std::fabs(vp.y.max));
+    if (rmax <= 0.0f) rmax = 1.0f;
+    auto ext = backend_.extent();
+    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    constexpr float kPi = 3.14159265358979323846f;
+
+    // Circular outer spine at rmax.
+    auto circ = polarCircle(axes, rect, rmax);
+    strokePxPoly(cmd, spineRenderer_, fullRect, ext, circ,
+                 style.xAxis.color,
+                 std::max(style.xAxis.lineWidth * kPtToPx, 1.0f));
+
+    if (!textReady_) return;
+    float scale = style.fontSize * style.dpi / (72.0f * 16.0f);
+    auto labelColor = style.xAxis.color;
+    const auto& tc = style.xAxis.ticks;
+    float pad = tc.majorPad * kPtToPx + tc.majorSize * kPtToPx;
+
+    // Theta labels at each π/4 (or set_thetagrids degrees), centered on
+    // the frame normal.
+    std::vector<float> thetaDegs;
+    if (!axes.thetagrids().empty()) thetaDegs = axes.thetagrids();
+    else for (int k = 0; k < 8; ++k) thetaDegs.push_back(float(k * 45));
+    for (float deg : thetaDegs) {
+        float th = deg * kPi / 180.0f;
+        auto label = std::format("{}°", int(std::lround(deg)));
+        auto m = measureRichText(label, scale);
+        auto c = polarToPx(axes, rect, th, rmax);
+        auto edge = polarToPx(axes, rect, th + 0.01f, rmax);
+        // Outward direction ≈ direction of increasing r at this theta.
+        auto c0 = polarToPx(axes, rect, th, rmax * 0.9f);
+        float dx = c.x - c0.x, dy = c.y - c0.y;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1e-6f) { dx = edge.x - c.x; dy = edge.y - c.y;
+            len = std::max(std::sqrt(dx * dx + dy * dy), 1.0f); }
+        dx /= len; dy /= len;
+        float lx = c.x + dx * (pad + m.height * 0.5f);
+        float ly = c.y + dy * (pad + m.height * 0.5f);
+        drawRichText(cmd, fullRect, label, lx - m.width * 0.5f,
+                     ly + m.ascent - m.height * 0.5f,
+                     labelColor, scale, 0.0f, plot::HAlign::Center);
+    }
+
+    // r labels along the 22.5° radial (mpl rlabel_position).
+    if (style.yAxis.visible) {
+        const auto& ytc = style.yAxis.ticks;
+        auto rTicks = !axes.rgrids().empty()
+            ? axes.rgrids()
+            : axisTicks(ytc, axes.yscale(), vp.y.min, vp.y.max,
+                        float(rect.height), style.fontSize,
+                        style.dpi, true);
+        plot::ScalarFormatter fmt;
+        fmt.setLocs(rTicks);
+        float labelAng = 22.5f * kPi / 180.0f;
+        int i = 0;
+        for (float r : rTicks) {
+            if (r <= 0.0f || r > rmax) { ++i; continue; }
+            auto label = fmt.format(r, i++);
+            if (label.empty()) continue;
+            auto m = measureRichText(label, scale * 0.8f);
+            auto p = polarToPx(axes, rect, labelAng, r);
+            drawRichText(cmd, fullRect, label, p.x - m.width * 0.5f,
+                         p.y + m.ascent - m.height * 0.5f,
+                         labelColor, scale * 0.8f,
+                         0.0f, plot::HAlign::Center);
+        }
+    }
+}
+
 void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                           plot::Rect2D rect) {
     if (!spineInited_ || !textReady_) return;
@@ -994,11 +1160,16 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
             spineRenderer_.drawFilledRect(cmd, vrect, ext, rect,
                                           p.axes->style().faceColor);
 
+        const bool polar = p.axes->projection().kind ==
+                           plot::ProjectionKind::Polar;
+
         // Draw tick-aligned grid lines (per-axis enable). axisBelow
         // selects whether the grid sits under or over the plot artists.
+        // Polar axes draw radial spokes + r-circles instead.
         if (subset != DrawSubset::AnimatedOnly && gridOn &&
             p.axes->style().axisBelow)
-            drawGrid(cmd, *p.axes, rect);
+            polar ? drawPolarGrid(cmd, *p.axes, rect)
+                  : drawGrid(cmd, *p.axes, rect);
 
         // Draw plot layers in zorder, filtered by the blit subset.
         for (auto* plot : p.axes->drawOrder()) {
@@ -1009,7 +1180,8 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
 
         if (subset != DrawSubset::AnimatedOnly && gridOn &&
             !p.axes->style().axisBelow)
-            drawGrid(cmd, *p.axes, rect);
+            polar ? drawPolarGrid(cmd, *p.axes, rect)
+                  : drawGrid(cmd, *p.axes, rect);
 
         if (subset == DrawSubset::AnimatedOnly) continue;
 
@@ -1018,8 +1190,10 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         bool has3D = std::ranges::any_of(p.axes->drawOrder(),
             [](const plot::IPlot* pl) { return pl->is3D(); });
 
-        // Draw axis spines and tick marks.
-        if (!has3D) drawSpines(cmd, *p.axes, rect);
+        // Draw axis spines and tick marks. Polar axes get a circular
+        // frame plus theta/r labels instead of rectilinear furniture.
+        if (polar) drawPolarSpineAndLabels(cmd, *p.axes, rect);
+        else if (!has3D) drawSpines(cmd, *p.axes, rect);
 
         // Draw text (axis labels, tick labels, title).
         if (textInited_ && textReady_) {
@@ -1060,6 +1234,11 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                      ext.width * 0.5f - m.width * 0.5f,
                      m.ascent + 2.0f, ft.color, scale,
                      ft.font.rotation, plot::HAlign::Center);
+        if (ft.weight == "bold" || ft.font.weight == "bold")
+            drawRichText(cmd, fullRect, ft.text,
+                         ext.width * 0.5f - m.width * 0.5f + 0.6f,
+                         m.ascent + 2.0f, ft.color, scale,
+                         ft.font.rotation, plot::HAlign::Center);
     }
 
     // Interactive overlays (§11): widgets + nav zoom rubber-band.
@@ -1152,6 +1331,73 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         }
         return cmap.sample(t);
     };
+
+    if (cbs.orientation == "horizontal") {
+        // mpl make_axes horizontal: strip fills the bottom region slice;
+        // thickness = min(region height, stripW/aspect); ticks below.
+        float regionY = region.height > 0 ? float(region.y)
+            : float(rect.y) + float(rect.height) +
+                  cbs.pad * float(rect.height);
+        float regionH = region.height > 0 ? float(region.height)
+            : cbs.fraction * float(rect.height);
+        float stripW = float(rect.width) * cbs.shrink;
+        float stripX = float(rect.x) + (float(rect.width) - stripW) * 0.5f;
+        float stripH = cbs.width > 0.0f
+            ? cbs.width : std::min(regionH, stripW / cbs.aspect);
+        float stripY = cbs.padding > 0.0f
+            ? float(rect.y) + float(rect.height) + cbs.padding
+            : regionY;
+        float extW = stripH * 0.6f;
+        float bodyX0 = stripX + (extMin ? extW : 0.0f);
+        float bodyX1 = stripX + stripW - (extMax ? extW : 0.0f);
+        float bodyW = bodyX1 - bodyX0;
+
+        // Left-to-right gradient: min at left, max at right.
+        float segW = bodyW / 64.0f;
+        for (uint32_t i = 0; i < 64; ++i) {
+            float t = float(i) / 63.0f;
+            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                {int32_t(bodyX0 + i * segW), int32_t(stripY),
+                 uint32_t(segW) + 1, uint32_t(stripH)},
+                sampleAt(t));
+        }
+        vk::Extent2D res2{ext.width, ext.height};
+        if (extMin) {   // left-pointing triangle
+            plot::Point2D tri[3] = {
+                {bodyX0, stripY}, {bodyX0, stripY + stripH},
+                {bodyX0 - extW, stripY + stripH * 0.5f}};
+            spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                                         sampleAt(0.0f));
+        }
+        if (extMax) {   // right-pointing triangle
+            plot::Point2D tri[3] = {
+                {bodyX1, stripY}, {bodyX1, stripY + stripH},
+                {bodyX1 + extW, stripY + stripH * 0.5f}};
+            spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                                         sampleAt(1.0f));
+        }
+        spineRenderer_.drawRect(cmd, fullRect, ext,
+            {int32_t(bodyX0), int32_t(stripY),
+             uint32_t(bodyW), uint32_t(stripH)},
+            style.colorbar.edgeColor, 1.0f);
+
+        auto hticks = autoTicks(valueMin, valueMax, 8);
+        float hStep = autoTickStep(valueMin, valueMax, 8);
+        for (float tick : hticks) {
+            float t = cbs.norm ? (*cbs.norm)(tick)
+                               : (tick - valueMin) / (valueMax - valueMin);
+            float x = bodyX0 + t * bodyW;
+            plot::Point2D tickPts[2] = {
+                {x, stripY + stripH}, {x, stripY + stripH + 4.0f}};
+            spineRenderer_.drawLineStrip(cmd, fullRect, ext, tickPts,
+                                         style.colorbar.edgeColor, 1.0f);
+            std::string label = formatTick(tick, hStep);
+            textRenderer_.draw(cmd, fullRect, label,
+                               x - 8.0f, stripY + stripH + 14.0f,
+                               style.colorbar.labelColor);
+        }
+        return;
+    }
 
     // Draw the color strip as a series of horizontal segments.
     uint32_t segments = 64;

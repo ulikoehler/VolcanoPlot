@@ -71,6 +71,14 @@ public:
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override;
+    /// Level range (drives the colorbar; mpl normalizes to the levels).
+    [[nodiscard]] std::optional<Range> valueRange() const override {
+        if (config_.levels.size() >= 2)
+            return Range{config_.levels.front(), config_.levels.back()};
+        if (levels_.size() >= 2)
+            return Range{levels_.front(), levels_.back()};
+        return {};
+    }
 
 private:
     std::vector<float> x_, y_, z_;

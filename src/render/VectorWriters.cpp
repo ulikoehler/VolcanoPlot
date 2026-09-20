@@ -202,6 +202,15 @@ public:
             + num(w_) + " " + num(h_) + "\">\n";
         for (auto& [k, v] : opts_.metadata)
             doc += "<!-- " + k + ": " + xmlEscape(v) + " -->\n";
+        // Accessibility: SVG <title>/<desc> are exposed to screen
+        // readers (mpl emits these from the 'Title'/'Description'
+        // savefig metadata keys).
+        if (auto it = opts_.metadata.find("Title");
+            it != opts_.metadata.end())
+            doc += "<title>" + xmlEscape(it->second) + "</title>\n";
+        if (auto it = opts_.metadata.find("Description");
+            it != opts_.metadata.end())
+            doc += "<desc>" + xmlEscape(it->second) + "</desc>\n";
         if (!clipDefs_.empty()) doc += "<defs>\n" + clipDefs_ + "</defs>\n";
         if (opts_.facecolor.a > 0)
             doc += "<rect width=\"100%\" height=\"100%\" fill=\""
