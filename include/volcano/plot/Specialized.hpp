@@ -16,8 +16,8 @@ namespace volcano::plot {
 /// header labels and per-cell colors.
 class TablePlot : public IPlot {
 public:
-    /// mpl `loc`: "bottom" (default) or "top" — the table sits inside the
-    /// axes along that edge.
+    /// mpl `loc`: "bottom" (default) extends below the axes, "top" above,
+    /// "center" overlays the table centered inside the axes.
     std::string loc = "bottom";
     std::vector<std::vector<std::string>> cellText;   // rows × cols
     std::vector<std::vector<Color>> cellColors;       // optional, rows × cols
@@ -151,6 +151,8 @@ public:
 
     /// Node positions in [0,1]² after layout (for tests/inspection).
     [[nodiscard]] const std::vector<Point2D>& positions() const { return pos_; }
+    /// Mutable options (layout, colors, …). Mutating re-runs the layout.
+    [[nodiscard]] Options& options() noexcept { return opts_; }
 
 private:
     uint32_t n_;

@@ -138,6 +138,14 @@ public:
     void setThetaOffset(float radians) { projection_.thetaOffset = radians; touch(); }
     void setThetaDirection(int dir) { projection_.thetaDir = dir < 0 ? -1.0f : 1.0f; touch(); }
     void setThetaZeroLocation(std::string_view loc); ///< "N","E","S","W",...
+    /// mpl `set_rlabel_position`: degrees — the radial direction along
+    /// which r tick labels are drawn (default 22.5°).
+    void setRlabelPosition(float deg) { rlabelPosition_ = deg; touch(); }
+    [[nodiscard]] float rlabelPosition() const { return rlabelPosition_; }
+    /// mpl polar `set_rmin`/`set_rmax`/`set_rorigin`: r is the y axis.
+    void setRmin(float v) { auto yl = ylim(); setYlim(v, yl.max); }
+    void setRmax(float v) { auto yl = ylim(); setYlim(yl.min, v); }
+    void setRorigin(float v) { setRmin(v); }
     [[nodiscard]] const std::vector<float>& rgrids() const { return rgrids_; }
     [[nodiscard]] const std::vector<float>& thetagrids() const { return thetagrids_; }
 
@@ -534,6 +542,7 @@ private:
     AxisScale xScale_, yScale_;
     Projection projection_;
     std::vector<float> rgrids_, thetagrids_;
+    float rlabelPosition_ = 22.5f;  // mpl default rlabel_position
     AspectMode aspect_ = AspectMode::Auto;
     Adjustable adjustable_ = Adjustable::Box;
     std::vector<Axes*> shareXWith_, shareYWith_;

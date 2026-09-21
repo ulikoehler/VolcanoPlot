@@ -403,6 +403,13 @@ TEST(Projection, AxesSetProjectionByName) {
     EXPECT_NEAR(ax.projection().thetaDir, -1.0f, 1e-4f);
 }
 
+TEST(Projection, RlabelPositionDefaultAndSetter) {
+    Axes ax;
+    EXPECT_NEAR(ax.rlabelPosition(), 22.5f, 1e-4f);  // mpl default
+    ax.setRlabelPosition(135.0f);
+    EXPECT_NEAR(ax.rlabelPosition(), 135.0f, 1e-4f);
+}
+
 TEST(Projection, PolarTransformViewIsProjectedBounds) {
     Axes ax;
     ax.setProjection("polar");
@@ -565,6 +572,45 @@ TEST(ProjectionRegression, PolarImshowCurves) {
     Pixel below = img.get(240, 140);
     EXPECT_LT(int(above.r) + int(above.g), int(below.r) + int(below.g))
         << "theta gradient should wrap dark->bright across the +x axis";
+}
+
+TEST(ProjectionRegression, PolarRlabelPositionMoves) {
+    // One radial tick at r=0.5, cardinal theta spokes only — the label
+    // angle regions contain no spoke, so dark pixels = label text.
+    auto renderAt = [](float deg) {
+        SFig cf(256);
+        cf.axes->setProjection("polar");
+        cf.axes->setViewport({0.0f, 6.2832f, 0.0f, 1.0f, 0, 1});
+        cf.axes->setRgrids({0.5f});
+        cf.axes->setThetagrids({0.0f, 90.0f, 180.0f, 270.0f});
+        cf.axes->setRlabelPosition(deg);
+        cf.axes->style().yAxis.visible = true;  // rlabels gated on this
+        return cf.render();
+    };
+    auto a = renderAt(22.5f);
+    auto b = renderAt(135.0f);
+    // Full-bleed axes: center (128,128), radius 128px; the r=0.5 label
+    // sits ~64px along the ray (y-down pixels).
+    auto spot = [](float deg) {
+        float t = deg * 3.14159265f / 180.0f;
+        return std::pair{128.0f + 64.0f * std::cos(t),
+                         128.0f - 64.0f * std::sin(t)};
+    };
+    auto [ax_, ay_] = spot(22.5f);
+    auto [bx, by] = spot(135.0f);
+    auto darkNear = [](const Image& im, float x, float y) {
+        return im.countColorInRegion(
+            Pixel::black(), uint32_t(x - 8), uint32_t(y - 8),
+            uint32_t(x + 8), uint32_t(y + 8), 60);
+    };
+    EXPECT_GT(darkNear(a, ax_, ay_), 4u)
+        << "rlabel should sit on the 22.5° ray by default";
+    EXPECT_EQ(darkNear(a, bx, by), 0u)
+        << "no rlabel on the 135° ray by default";
+    EXPECT_EQ(darkNear(b, ax_, ay_), 0u)
+        << "rlabel should leave the 22.5° ray";
+    EXPECT_GT(darkNear(b, bx, by), 4u)
+        << "rlabel should move to the 135° ray";
 }
 
 // ─── Inset-zoom indicator (mpl Axes.indicate_inset_zoom) ───────────────────

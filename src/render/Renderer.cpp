@@ -985,7 +985,7 @@ void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
                         style.dpi, true);
         plot::ScalarFormatter fmt;
         fmt.setLocs(rTicks);
-        float labelAng = 22.5f * kPi / 180.0f;
+        float labelAng = axes.rlabelPosition() * kPi / 180.0f;
         int i = 0;
         for (float r : rTicks) {
             if (r <= 0.0f || r > rmax) { ++i; continue; }

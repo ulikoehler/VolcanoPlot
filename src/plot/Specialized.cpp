@@ -36,9 +36,12 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                                  cellFontScale * 16.0f * 1.5f);
     float tableH = cellH * float(rows);
     // mpl loc='bottom' attaches the table's top edge to the bottom spine,
-    // extending below the axes; 'top' extends above. Y-down pixels.
+    // extending below the axes; 'top' extends above; 'center' overlays
+    // the table centered in the axes. Y-down pixels.
     float y0 = (loc == "top") ? float(rect.y) - tableH
-                              : float(rect.y) + float(rect.height);
+               : (loc == "center" || loc == "centre")
+                   ? float(rect.y) + (float(rect.height) - tableH) * 0.5f
+                   : float(rect.y) + float(rect.height);
     float x0 = float(rect.x);
 
     auto& spine = r.spineRenderer();
@@ -568,7 +571,9 @@ void TablePlot::emitVector(render::VectorCanvas& c, const Axes&,
                       : std::min(float(rect.height) / float(totalRows), 28.0f);
     float tableH = cellH * float(totalRows);
     float y0 = (loc == "top") ? float(rect.y) - tableH
-                              : float(rect.y) + float(rect.height);
+               : (loc == "center" || loc == "centre")
+                   ? float(rect.y) + (float(rect.height) - tableH) * 0.5f
+                   : float(rect.y) + float(rect.height);
     float x0 = float(rect.x);
     const float sizePx = 16.0f * cellFontScale;
 

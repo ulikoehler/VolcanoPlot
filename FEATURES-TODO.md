@@ -932,3 +932,48 @@ tri_*) are checked off in the sections above.
       `subplot`, `subplot_mosaic` (string-grid or nested sequences),
       `add_subplot`/`add_axes`, `twinx`/`twiny`, `secondary_xaxis`/
       `secondary_yaxis` with `(fwd, inv)` transform functions.
+- [x] **Python Patches API** — `vp.Path` (vertices+codes, `MOVETO`/
+      `LINETO`/`CURVE3`/`CURVE4`/`CLOSEPOLY` constants, `bounds`,
+      `contains_point`), `vp.patches` submodule (`Rectangle`, `Circle`,
+      `Ellipse`, `Polygon`, `Wedge`, `FancyBboxPatch` with boxstyle,
+      `FancyArrowPatch`, `PathPatch`) with mpl kwargs (fc/ec/lw/ls/alpha/
+      hatch/fill/label), `ax.add_patch` (live handle into the axes'
+      PatchCollection), `ax.add_collection`, `vp.collections`
+      (`LineCollection`, `PolyCollection`, `PatchCollection`).
+- [x] **Python date-axis API** — `vp.dates` submodule: `date2num`/
+      `num2date`, `YearLocator`/`MonthLocator`/`WeekdayLocator`/
+      `DayLocator`/`HourLocator`/`MinuteLocator`/`SecondLocator`/
+      `MicrosecondLocator`/`AutoDateLocator`, `DateFormatter`/
+      `AutoDateFormatter`/`ConciseDateFormatter`, `ax.plot_date`,
+      `ax.xaxis_date`/`yaxis_date`, `fig.autofmt_xdate` (tick-label
+      rotation + ha via `tickFont.rotation`); `tick_params` extended
+      to full mpl kwargs (labelsize/labelrotation/colors/grid_*).
+      numpy `datetime64`/`timedelta64` arrays auto-convert.
+- [x] **Python plot types vol. 2** — `barbs`, `broken_barh`,
+      `bar_label` (accepts the `BarContainer` returned by `bar`/`barh`;
+      `bar`/`barh` now return mpl-style containers), `figimage`
+      (scalar→cmap + RGB/RGBA arrays, vmin/vmax, xo/yo), `table`
+      (rowLabels/colLabels/cellColours/rowColours/colColours; `loc`
+      gains "center" in raster+vector), `wordcloud`, `network`
+      (spring/circular/random/given layouts), `pcolorfast`,
+      `errorbar3D`/`errorbar3d` (scalar-broadcast + asymmetric
+      (2,N) errors), `text3D`, `loglog`/`semilogx`/`semilogy`.
+- [x] **Python interactive widgets** — `vp.widgets` submodule:
+      `Slider`/`RangeSlider`/`Button`/`CheckButtons`/`RadioButtons`/
+      `TextBox`/`Cursor`/`MultiCursor`/`SpanSelector`/
+      `RectangleSelector`/`EllipseSelector`/`PolygonSelector`/
+      `SubplotTool`, mpl callback signatures (`on_changed(val)`/
+      `(lo,hi)` tuple, `on_clicked(event)`/`(label)`), `set_val`/`val`,
+      `fig.canvas` proxy with `mpl_connect`/`mpl_disconnect` and
+      headless `dispatch(name, x, y, button, key, step)` for synthetic
+      event injection; `fig.show()` runs the SDL event loop when a
+      screen backend is available.
+- [x] **Python polar + spines + cycler** — `projection=` kwarg on
+      `subplots`/`subplot`/`add_subplot` (+ `subplot_kw` dict),
+      `ax.set_rgrids`/`set_thetagrids`/`set_theta_zero_location`/
+      `set_theta_direction`/`set_theta_offset`/`set_rmin`/`set_rmax`/
+      `set_rorigin`/`set_rlabel_position` (new `Axes::rlabelPosition_`,
+      default 22.5° per mpl, used by the polar renderer),
+      `ax.spines['top'].set_visible()` dict proxy, `vp.cycler()`
+      (color/c/fc, linestyle/ls, linewidth/lw, marker keys; `+` concat
+      and `*` outer product) and `ax.set_prop_cycle` (cycler or kwargs).

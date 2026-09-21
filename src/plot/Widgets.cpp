@@ -90,6 +90,13 @@ float RangeSlider::toX(float v) const {
     return rect.x + std::clamp(f, 0.0f, 1.0f) * rect.width;
 }
 
+void RangeSlider::setVal(float lo, float hi) {
+    lo_ = std::clamp(lo, valmin, valmax);
+    hi_ = std::clamp(hi, valmin, valmax);
+    if (lo_ > hi_) std::swap(lo_, hi_);
+    if (onChanged) onChanged(lo_, hi_);
+}
+
 void RangeSlider::setFromX(float px, int which) {
     float f = rect.width > 0 ? (px - rect.x) / rect.width : 0.0f;
     float v = valmin + std::clamp(f, 0.0f, 1.0f) * (valmax - valmin);

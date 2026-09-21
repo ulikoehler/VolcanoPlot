@@ -78,6 +78,9 @@ public:
     bool handleEvent(const Event& e) override;
     void draw(WidgetPainter& p) override;
     std::pair<float, float> val() const { return {lo_, hi_}; }
+    /// mpl `set_val([lo, hi])` — clamps, updates both handles, fires
+    /// onChanged once.
+    void setVal(float lo, float hi);
     std::function<void(float, float)> onChanged;
     float valmin, valmax;
     std::string label;
@@ -109,6 +112,12 @@ public:
     bool handleEvent(const Event& e) override;
     void draw(WidgetPainter& p) override;
     [[nodiscard]] const std::vector<bool>& status() const { return checked_; }
+    /// mpl `set_active(i)` — toggles button i, fires onChanged.
+    void setActive(size_t i) {
+        if (i >= checked_.size()) return;
+        checked_[i] = !checked_[i];
+        if (onChanged) onChanged(i, checked_[i]);
+    }
     std::function<void(size_t, bool)> onChanged;
     std::vector<std::string> labels;
 private:
@@ -125,8 +134,11 @@ public:
     void draw(WidgetPainter& p) override;
     /// Index of the selected option (mpl `value_selected`).
     [[nodiscard]] int activeIndex() const { return active_; }
+    /// mpl `set_active(i)` — selects option i, fires onChanged.
     void setActive(int i) {
-        if (i >= 0 && i < int(labels.size())) active_ = i;
+        if (i < 0 || i >= int(labels.size())) return;
+        active_ = i;
+        if (onChanged) onChanged(size_t(i));
     }
     std::function<void(size_t)> onChanged;
     std::vector<std::string> labels;

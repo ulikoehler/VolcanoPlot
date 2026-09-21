@@ -129,6 +129,25 @@ TEST(TablePlot, TopLoc) {
     EXPECT_PIXEL_AT(img, 64, 120, White, 60);      // bottom untouched
 }
 
+TEST(TablePlot, CenterLoc) {
+    Fx fx;
+    // loc='center' overlays the table inside the axes, vertically centered.
+    auto& tbl = fx.ax->table({{"a"}, {"b"}}, "center");
+    tbl.cellColors = {{Color::red()}, {Color::red()}};
+    tbl.edgeColor.a = 0;
+    tbl.textColor = Color{0, 0, 0, 0};
+    auto img = fx.render();
+    uint32_t cy = uint32_t(fx.ax->rect.y) + fx.ax->rect.height / 2;
+    // Cells straddle the axes' vertical midpoint.
+    EXPECT_PIXEL_AT(img, 64, int(cy) - 4, Red, 60);
+    EXPECT_PIXEL_AT(img, 64, int(cy) + 4, Red, 60);
+    // Well above/below the centered table stays background.
+    uint32_t top = uint32_t(fx.ax->rect.y);
+    uint32_t bot = uint32_t(fx.ax->rect.y) + fx.ax->rect.height;
+    EXPECT_PIXEL_AT(img, 64, int(top) + 4, White, 60);
+    EXPECT_PIXEL_AT(img, 64, int(bot) - 4, White, 60);
+}
+
 // ═══ Sankey ═══════════════════════════════════════════════════════════════
 
 TEST(Sankey, FinishAddsPatchesAndLabels) {
