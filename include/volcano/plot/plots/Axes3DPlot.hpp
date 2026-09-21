@@ -32,6 +32,11 @@ struct Axes3DConfig {
     /// Tick mark length and label offset, in NDC units (~2/axes-span).
     float tickSize = 0.018f;
     float labelPad = 0.05f;
+    /// Axis labels (matplotlib set_xlabel/set_ylabel/set_zlabel). Drawn
+    /// centered on the corresponding tick edge, offset outward past the
+    /// tick labels by axisLabelPad (NDC).
+    std::string xLabel, yLabel, zLabel;
+    float axisLabelPad = 0.10f;
 };
 
 /// Draws the matplotlib Axes3D box: three pane faces (light gray), pane
@@ -52,8 +57,27 @@ public:
     [[nodiscard]] bool is3D() const override { return true; }
     Camera3D* camera3D() noexcept override { return &camera_; }
 
+    /// The data range the box spans.
+    [[nodiscard]] const Viewport& range() const noexcept { return range_; }
+    /// matplotlib set_zlim-style update: replace the data range and
+    /// re-derive box geometry on the next prepare().
+    void setRange(const Viewport& v) { range_ = v; invalidate(); }
+    /// matplotlib set_xlabel/set_ylabel/set_zlabel.
+    void setXLabel(std::string s) { config_.xLabel = std::move(s); invalidate(); }
+    void setYLabel(std::string s) { config_.yLabel = std::move(s); invalidate(); }
+    void setZLabel(std::string s) { config_.zLabel = std::move(s); invalidate(); }
+
 private:
     struct TickLabel { float x, y; std::string text; };
+
+    /// Drop cached box geometry — the next prepare() rebuilds it.
+    void invalidate() {
+        prepared_ = false;
+        paneTris_.clear();
+        lineSegs_.clear();
+        axisSegs_.clear();
+        labels_.clear();
+    }
 
     Camera3D camera_;
     Viewport range_;

@@ -36,6 +36,8 @@ void Axes3DPlot::contributeToAutoscale(Viewport& v) const {
 }
 
 void Axes3DPlot::prepare(render::Renderer& r) {
+    // Idempotent: rebuild all cached geometry (invalidate() also clears).
+    paneTris_.clear(); lineSegs_.clear(); axisSegs_.clear(); labels_.clear();
     auto vp = camera_.viewProjection();
 
     float x0 = range_.x.min, x1 = range_.x.max;
@@ -118,7 +120,8 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     // Tick marks protrude outward perpendicular to each edge (mpl
     // tick_out); labels are centered just beyond the marks.
     auto axisEdge = [&](Point2D a, Point2D b, const std::vector<float>& ts,
-                        const std::function<Point2D(float)>& tickPt) {
+                        const std::function<Point2D(float)>& tickPt,
+                        const std::string& axisLabel) {
         axisSegs_.push_back(a); axisSegs_.push_back(b);
         float dx = b.x - a.x, dy = b.y - a.y;
         float n = std::sqrt(dx*dx + dy*dy);
@@ -141,13 +144,19 @@ void Axes3DPlot::prepare(render::Renderer& r) {
                                    p.y + perp.y * config_.labelPad,
                                    fmt.format(t, 0)});
         }
+        // Axis label centered on the edge, beyond the tick labels
+        // (matplotlib Axes3D set_xlabel/set_ylabel/set_zlabel).
+        if (!axisLabel.empty())
+            labels_.push_back({mid.x + perp.x * config_.axisLabelPad,
+                               mid.y + perp.y * config_.axisLabelPad,
+                               axisLabel});
     };
     axisEdge(P(x0, yf, z0), P(x1, yf, z0), xt,
-             [&](float t) { return P(t, yf, z0); });
+             [&](float t) { return P(t, yf, z0); }, config_.xLabel);
     axisEdge(P(xf, y0, z0), P(xf, y1, z0), yt,
-             [&](float t) { return P(xf, t, z0); });
+             [&](float t) { return P(xf, t, z0); }, config_.yLabel);
     axisEdge(P(zx, zy, z0), P(zx, zy, z1), zt,
-             [&](float t) { return P(zx, zy, t); });
+             [&](float t) { return P(zx, zy, t); }, config_.zLabel);
 
     auto& ctx = r.backend().context();
     if (!paneTris_.empty()) {

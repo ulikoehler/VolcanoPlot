@@ -84,6 +84,16 @@ public:
     void invertXAxis() { std::swap(viewport_.x.min, viewport_.x.max); manualX_ = true; touch(); }
     void invertYAxis() { std::swap(viewport_.y.min, viewport_.y.max); manualY_ = true; touch(); }
 
+    /// matplotlib ax.margins(x, y=None): autoscale padding fraction
+    /// (default 0.05). margins(x) sets both axes; y >= 0 overrides y only.
+    void margins(float x, float y = -1.0f) {
+        marginX_ = x;
+        marginY_ = (y < 0.0f ? x : y);
+        touch();
+    }
+    [[nodiscard]] float marginX() const noexcept { return marginX_; }
+    [[nodiscard]] float marginY() const noexcept { return marginY_; }
+
     // --- Scales (matplotlib set_xscale/set_yscale) ---
     void setXscale(AxisScale s) { xScale_ = std::move(s); touch(); }
     void setYscale(AxisScale s) { yScale_ = std::move(s); touch(); }
@@ -519,6 +529,8 @@ private:
 
     Viewport viewport_{0,1,0,1};
     bool manualX_ = false, manualY_ = false;
+    /// Autoscale padding fraction (matplotlib axes.xmargin/ymargin = 0.05).
+    float marginX_ = 0.05f, marginY_ = 0.05f;
     AxisScale xScale_, yScale_;
     Projection projection_;
     std::vector<float> rgrids_, thetagrids_;

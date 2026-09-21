@@ -191,6 +191,9 @@ struct ColorbarStyle {
     float padding = -1.0f;
     FontProperties labelFont;
     Color labelColor = Color::black();
+    /// matplotlib colorbar.set_label text (rotated alongside a vertical
+    /// strip, centered below a horizontal one).
+    std::string label;
     /// matplotlib `extend`: "neither" (default), "min", "max", or "both" —
     /// triangular extensions at the strip ends for out-of-range values.
     std::string extend = "neither";

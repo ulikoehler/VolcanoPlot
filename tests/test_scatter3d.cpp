@@ -2,6 +2,7 @@
 #include "PlotTestHarness.hpp"
 
 #include <volcano/plot/plots/Scatter3D.hpp>
+#include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/Transform.hpp>
 
 #include <gtest/gtest.h>
@@ -351,4 +352,53 @@ TEST(Scatter3DRegression, ViewInitRollRotates) {
         for (uint32_t x = 0; x < 256; ++x)
             if (!img0.get(x, y).approx(img90.get(x, y), 30)) { anyDiff = true; break; }
     EXPECT_TRUE(anyDiff) << "roll=90 should rotate the image";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Axes3DPlot box: axis labels + range updates (mpl set_zlabel/set_zlim)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(Axes3DPlotRegression, AxisLabelsRender) {
+    // A box with a z label draws more ink than one without.
+    auto renderBox = [&](bool withLabel) {
+        Fig3D cf(256);
+        auto cam = Camera3D::viewInit(30.0f, -60.0f);
+        cam.aspect = 1.0f;
+        Viewport v; v.x = {-1, 1}; v.y = {-1, 1}; v.z = {-1, 1};
+        cam.dataMin = {-1, -1, -1}; cam.dataMax = {1, 1, 1};
+        auto box = std::make_unique<Axes3DPlot>(cam, v);
+        if (withLabel) {
+            box->setXLabel("X");
+            box->setYLabel("Y");
+            box->setZLabel("Zed");
+        }
+        cf.axes->addPlot(std::move(box));
+        return cf.render();
+    };
+    auto plain = renderBox(false), labeled = renderBox(true);
+    size_t p = countPixels(plain, isNotWhite), l = countPixels(labeled, isNotWhite);
+    EXPECT_GT(l, p) << "axis labels add rendered pixels";
+}
+
+TEST(Axes3DPlotRegression, SetRangeRebakesGeometry) {
+    // setRange invalidates the cached box — the next render must reflect
+    // the new extent (a wider z box draws a different image).
+    Fig3D cf(256);
+    auto cam = Camera3D::viewInit(30.0f, -60.0f);
+    cam.aspect = 1.0f;
+    Viewport v; v.x = {-1, 1}; v.y = {-1, 1}; v.z = {-1, 1};
+    cam.dataMin = {-1, -1, -1}; cam.dataMax = {1, 1, 1};
+    auto* bp = static_cast<Axes3DPlot*>(
+        cf.axes->addPlot(std::make_unique<Axes3DPlot>(cam, v)));
+    auto img1 = cf.render();
+    // mpl set_zlim path: new range + camera normalization box updated.
+    bp->setRange({{-1, 1}, {-1, 1}, {-4, 4}});
+    bp->camera3D()->dataMin.z = -4.0f;
+    bp->camera3D()->dataMax.z = 4.0f;
+    auto img2 = cf.render();
+    bool anyDiff = false;
+    for (uint32_t y = 0; y < 256 && !anyDiff; ++y)
+        for (uint32_t x = 0; x < 256; ++x)
+            if (!img1.get(x, y).approx(img2.get(x, y), 30)) { anyDiff = true; break; }
+    EXPECT_TRUE(anyDiff) << "setRange must rebuild the box geometry";
 }

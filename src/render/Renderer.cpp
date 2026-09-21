@@ -1699,6 +1699,14 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                                x - 8.0f, stripY + stripH + 14.0f,
                                style.colorbar.labelColor);
         }
+        // mpl colorbar.set_label — centered under the horizontal strip.
+        if (!cbs.label.empty()) {
+            auto m = textRenderer_.measureText(cbs.label, 1.0f);
+            textRenderer_.draw(cmd, fullRect, cbs.label,
+                               bodyX0 + bodyW * 0.5f - m.width * 0.5f,
+                               stripY + stripH + 30.0f,
+                               style.colorbar.labelColor);
+        }
         return;
     }
 
@@ -1759,6 +1767,17 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         textRenderer_.draw(cmd, fullRect, label,
                            stripX + stripW + 8.0f, y + 6.0f,
                            style.colorbar.labelColor);
+    }
+
+    // mpl colorbar.set_label — rotated alongside a vertical strip,
+    // right of the tick labels.
+    if (!cbs.label.empty()) {
+        auto m = textRenderer_.measureText(cbs.label, 1.0f);
+        textRenderer_.draw(cmd, fullRect, cbs.label,
+                           stripX + stripW + 26.0f,
+                           bodyY0 + bodyH * 0.5f + m.width * 0.5f,
+                           style.colorbar.labelColor, 1.0f,
+                           -float(M_PI) / 2.0f);
     }
 }
 

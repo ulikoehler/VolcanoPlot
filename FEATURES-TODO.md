@@ -902,3 +902,33 @@ tri_*) are checked off in the sections above.
       `magnitude_spectrum`/`phase_spectrum`/`angle_spectrum`
       (Fs/NFFT/noverlap/window/scale), `ecdf`, `spy`, `matshow`,
       `fill_betweenx` (broadcast x1/x2, FillPlot polygon).
+- [x] **Python fmt-string `plot()`** — `ax.plot(y)` / `plot(y, "ro--")` /
+      `plot(x, y)` / `plot(x, y, "ro--")` with mpl marker+color+linestyle
+      spec parsing; explicit color/marker/linestyle/markersize/alpha/
+      linewidth/label kwargs override the fmt string.
+- [x] **Python tick/locator/formatter API** — `Locator`/`Formatter`
+      class hierarchies exposed (Fixed/Multiple/MaxN/Auto/Log/AutoMinor
+      locators; Fixed/Func/FormatStr/StrMethod/Scalar/Log/Eng/Percent
+      formatters); `ax.xaxis`/`ax.yaxis` proxies with
+      `set_{major,minor}_{locator,formatter}`; `set_xticks/set_yticks`
+      (+labels), `xticks`/`yticks`, `tick_params`, `minorticks_on/off`,
+      `grid(on, which, axis)`, `ticklabel_format`, `set_aspect`,
+      `invert_xaxis/yaxis`, `margins` (new `Axes::margins` — autoscale
+      padding replaces the hard-coded 5%), `axis("off"/"on"/"equal"/
+      "auto"/"tight"/[xmin,xmax,ymin,ymax])`.
+- [x] **Python 3D bindings** — `plot3D/scatter3D/plot_surface/
+      plot_wireframe/bar3d/voxels/plot_trisurf/quiver3D` (+`3d` aliases),
+      `view_init(elev, azim)`, `set_zlim/zlabel` etc. Each call manages
+      an `Axes3DPlot` box + shared `Camera3D`; `Axes3DPlot` gained
+      `setRange`/`setXLabel`/`setYLabel`/`setZLabel` (cache-invalidating,
+      projected labels along the axis edges).
+- [x] **Python text/annotation/legend/colorbar/axis helpers** —
+      `ax.text`/`ax.annotate` (arrowstyle, connectionstyle, xytext,
+      textcoords), module-level `text`/`annotate`, `fig.legend`/`ax.legend`
+      kwargs passthrough, `fig.colorbar`/`vp.colorbar` with orientation/
+      fraction/pad/shrink + rotated colorbar labels (`ColorbarStyle::label`).
+- [x] **Python subplot/axes/sharing APIs** — `subplots(nrows, ncols,
+      figsize, dpi, sharex, sharey)` ("all"/"none"/"row"/"col"/Axes),
+      `subplot`, `subplot_mosaic` (string-grid or nested sequences),
+      `add_subplot`/`add_axes`, `twinx`/`twiny`, `secondary_xaxis`/
+      `secondary_yaxis` with `(fwd, inv)` transform functions.

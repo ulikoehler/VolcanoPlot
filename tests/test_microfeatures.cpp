@@ -535,3 +535,30 @@ TEST(MicroMargins, LabelsNotClippedAtFigureEdge) {
         edgeDark += isDark(e.get(0, y)) + isDark(e.get(e.width() - 1, y));
     EXPECT_EQ(edgeDark, 0u) << "labels must not clip at the canvas edge";
 }
+
+TEST(MicroMargins, MarginsControlAutoscalePadding) {
+    // mpl ax.margins(x): autoscale pads data limits by fraction x.
+    auto padFor = [](float mx, float my) {
+        Figure fig(1, 1);
+        auto* ax = fig.addAxes(0, 0);
+        Series2D s;
+        s.points = {{0, 0}, {10, 10}};
+        ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+        ax->margins(mx, my);
+        ax->autoscale();
+        return ax->viewport();
+    };
+    auto v05 = padFor(0.05f, -1.0f);
+    auto v0 = padFor(0.0f, -1.0f);
+    auto vHalf = padFor(0.5f, 0.25f);
+    // margins(0) hugs the data exactly.
+    EXPECT_NEAR(v0.x.min, 0.0f, 1e-4f);
+    EXPECT_NEAR(v0.x.max, 10.0f, 1e-4f);
+    EXPECT_NEAR(v0.y.min, 0.0f, 1e-4f);
+    // Default 5% padding.
+    EXPECT_NEAR(v05.x.min, -0.5f, 0.05f);
+    EXPECT_NEAR(v05.x.max, 10.5f, 0.05f);
+    // Per-axis margins: x=50% → pad 5, y=25% → pad 2.5.
+    EXPECT_NEAR(vHalf.x.min, -5.0f, 0.2f);
+    EXPECT_NEAR(vHalf.y.min, -2.5f, 0.15f);
+}

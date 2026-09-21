@@ -287,24 +287,25 @@ void Axes::finalizeAutoscale(Viewport& v, bool tight) const {
     // Handle zero-span axes (e.g., single horizontal line at one y value).
     if (v.x.span() == 0) { v.x.min -= 0.5f; v.x.max += 0.5f; }
     if (v.y.span() == 0) { v.y.min -= 0.5f; v.y.max += 0.5f; }
-    // 5% padding. For non-linear scales, pad in display (transformed)
-    // space and map back — padding raw data space can push the lower
-    // bound outside the scale domain (e.g., negative values on log).
-    auto padAxis = [](Range& r, const AxisScale& s) {
-        float pad = r.span() * 0.05f;
+    // Margins (mpl axes.xmargin/ymargin, default 5%). For non-linear
+    // scales, pad in display (transformed) space and map back — padding
+    // raw data space can push the lower bound outside the scale domain
+    // (e.g., negative values on log).
+    auto padAxis = [](Range& r, const AxisScale& s, float margin) {
+        float pad = r.span() * margin;
         if (s.kind == ScaleKind::Linear) {
             r.min -= pad; r.max += pad;
             return;
         }
         float a = s.forward(r.min), b = s.forward(r.max);
         if (a > b) std::swap(a, b);
-        float tpad = (b - a) * 0.05f;
+        float tpad = (b - a) * margin;
         r.min = s.inverse(a - tpad);
         r.max = s.inverse(b + tpad);
     };
     if (!tight) {
-        padAxis(v.x, xScale_);
-        padAxis(v.y, yScale_);
+        padAxis(v.x, xScale_, marginX_);
+        padAxis(v.y, yScale_, marginY_);
     }
 }
 
