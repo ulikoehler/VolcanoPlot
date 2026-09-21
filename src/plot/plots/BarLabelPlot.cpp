@@ -62,15 +62,15 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     auto ext = r.backend().extent();
     vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
 
-    float fontSize = 16.0f * config_.fontScale;
-    float charWidth = fontSize * 0.5f;
-
     for (size_t i = 0; i < x_.size() && i < generatedLabels_.size(); ++i) {
         const std::string& label = generatedLabels_[i];
         if (label.empty()) continue;
 
-        float textWidth = label.size() * charWidth;
-        float textHeight = fontSize;
+        auto m = text.measureText(label, config_.fontScale);
+        float textWidth = m.width, textHeight = m.height;
+        // draw() takes the baseline y, not the top edge.
+        float descent = m.height - m.ascent;
+        auto centerY = [&](float cy) { return cy + m.ascent - textHeight * 0.5f; };
 
         float px, py;
         if (config_.horizontal) {
@@ -79,14 +79,14 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             auto p = dataToPixel(axes, rect, barEnd, x_[i]);
             if (config_.position == BarLabelPosition::Center) {
                 px = p.x - textWidth * 0.5f;
-                py = p.y - textHeight * 0.5f;
+                py = centerY(p.y);
             } else {
                 // Edge: outside the bar end.
                 if (heights_[i] >= 0)
                     px = p.x + config_.padding;        // right of bar
                 else
                     px = p.x - textWidth - config_.padding;  // left of bar
-                py = p.y - textHeight * 0.5f;
+                py = centerY(p.y);
             }
         } else {
             // Vertical bars: labels above/below bar top.
@@ -97,14 +97,16 @@ void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                 float barMid = baseline_ + heights_[i] * 0.5f;
                 auto pm = dataToPixel(axes, rect, x_[i], barMid);
                 px = pm.x - textWidth * 0.5f;
-                py = pm.y - textHeight * 0.5f;
+                py = centerY(pm.y);
             } else {
                 // Edge: outside the bar top.
                 px = p.x - textWidth * 0.5f;
                 if (heights_[i] >= 0)
-                    py = p.y - textHeight - config_.padding;  // above bar
+                    // text bottom at p.y - pad → baseline − descent.
+                    py = p.y - config_.padding - descent;
                 else
-                    py = p.y + config_.padding;               // below bar
+                    // text top at p.y + pad → baseline = top + ascent.
+                    py = p.y + config_.padding + m.ascent;
             }
         }
 

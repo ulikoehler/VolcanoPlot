@@ -50,7 +50,6 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
     // Draw labels (category labels outside, percentage labels inside).
     if (data_.labels.empty()) return;
 
-    float fontSize = 14.0f;
     auto labelColor = Color::black();
     auto pctColor = Color::black();  // matplotlib uses black for percentage labels
 
@@ -69,11 +68,11 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
         float labelR = radius * 1.15f;
         float lx = cx + labelR * std::cos(midAngle);
         float ly = cy - labelR * std::sin(midAngle);  // Y flipped
-        // Adjust for text width (approximate: charWidth = fontSize * 0.5)
-        float tw = float(data_.labels[i].size()) * fontSize * 0.5f;
-        // Position text so its center is at (lx, ly)
-        float drawX = lx - tw * 0.5f;
-        float drawY = ly - fontSize * 0.5f;
+        // Position text so its center is at (lx, ly). draw() takes the
+        // baseline y, so baseline = center + ascent - height/2.
+        auto lm = text.measureText(data_.labels[i], 1.0f);
+        float drawX = lx - lm.width * 0.5f;
+        float drawY = ly + lm.ascent - lm.height * 0.5f;
         text.draw(cmd, fullRect, data_.labels[i], drawX, drawY, labelColor, 1.0f);
 
         // Percentage label: inside the pie at 0.65 * radius.
@@ -82,9 +81,10 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
         float pctR = radius * 0.65f;
         float px = cx + pctR * std::cos(midAngle);
         float py = cy - pctR * std::sin(midAngle);  // Y flipped
-        float pctW = float(pctStr.size()) * fontSize * 0.5f;
+        auto pm = text.measureText(pctStr, 1.0f);
         text.draw(cmd, fullRect, pctStr,
-                  px - pctW * 0.5f, py - fontSize * 0.5f, pctColor, 1.0f);
+                  px - pm.width * 0.5f, py + pm.ascent - pm.height * 0.5f,
+                  pctColor, 1.0f);
 
         angle += sweep;
     }

@@ -385,7 +385,8 @@ void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
         std::string s = std::format("{:g}", level);
         auto m = text.measureText(s, config_.clabelFontScale);
         text.draw(cmd, clip, s, px - m.width * 0.5f,
-                  py - m.height * 0.5f, color, config_.clabelFontScale);
+                  py + m.ascent - m.height * 0.5f, color,
+                  config_.clabelFontScale);
     }
 }
 

@@ -539,7 +539,10 @@ void NetworkPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             Point2D f = axes.dataToFraction(pos_[i]);
             float px = rect.x + f.x * rect.width;
             float py = rect.y + (1.0f - f.y) * rect.height;
-            r.textRenderer().draw(cmd, vrect, opts_.labels[i], px, py,
+            auto m = r.textRenderer().measureText(opts_.labels[i],
+                                                  opts_.fontScale);
+            r.textRenderer().draw(cmd, vrect, opts_.labels[i], px,
+                                  py + m.ascent - m.height * 0.5f,
                                   Color::black(), opts_.fontScale, 0.0f,
                                   HAlign::Center);
         }

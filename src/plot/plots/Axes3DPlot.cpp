@@ -215,8 +215,11 @@ void Axes3DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             float px = rect.x + (l.x + 1.0f) * 0.5f * rect.width;
             float py = rect.y + (1.0f - (l.y + 1.0f) * 0.5f) * rect.height;
             auto m = text.measureText(l.text, 1.0f);
+            // draw() takes the baseline y: center vertically on the
+            // label point via baseline = py + ascent - height/2.
             text.draw(cmd, fullRect, l.text,
-                      px - m.width * 0.5f, py - m.height * 0.5f,
+                      px - m.width * 0.5f,
+                      py + m.ascent - m.height * 0.5f,
                       config_.labelColor, 1.0f);
         }
     }
