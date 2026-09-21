@@ -34,6 +34,14 @@ namespace volcano::text {
 /// isn't available (vector text backends, TeX markers).
 [[nodiscard]] std::string mathTextToUnicode(std::string_view text);
 
+/// mpl `mathtext.fontset` — the font face used inside `$...$` segments.
+enum class MathFontset { DejaVuSans, DejaVuSerif };
+
+/// Parse an mpl fontset name ("dejavusans", "dejavuserif", "cm", "stix",
+/// "stixsans", "custom"). Only the DejaVu faces are shipped; cm/stix/
+/// custom degrade gracefully to DejaVuSans.
+[[nodiscard]] MathFontset parseMathFontset(std::string_view name) noexcept;
+
 /// A positioned run of UTF-8 text within a laid-out block.
 /// Coordinates are pixels relative to the block origin (0, baseline).
 struct MathRun {
@@ -41,6 +49,7 @@ struct MathRun {
     float x = 0.0f;        ///< left edge, px from block left
     float baseline = 0.0f; ///< baseline y offset, px (+down)
     float scale = 1.0f;    ///< font scale relative to base
+    int face = 0;          ///< 0 = primary face, 1 = serif (dejavuserif)
 };
 
 /// A horizontal rule (fraction bar, overline, sqrt overbar).
@@ -69,9 +78,13 @@ using MeasureFn = std::function<TextMeasure(std::string_view, float)>;
 
 /// Parse and lay out `text`, which may mix plain text and `$...$` math.
 /// `baseScale` is the font scale (1.0 = the renderer's default size).
-/// Coordinates are relative to (0, baseline), y-down screen pixels.
+/// `fontset` selects the face inside math segments; `measureAlt` is the
+/// metrics callback for the serif face (falls back to `measure` when
+/// null). Coordinates are relative to (0, baseline), y-down pixels.
 [[nodiscard]] MathLayout layoutMathText(std::string_view text,
                                         float baseScale,
-                                        const MeasureFn& measure);
+                                        const MeasureFn& measure,
+                                        MathFontset fontset = MathFontset::DejaVuSans,
+                                        const MeasureFn& measureAlt = {});
 
 } // namespace volcano::text

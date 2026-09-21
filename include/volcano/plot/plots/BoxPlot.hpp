@@ -7,6 +7,7 @@
 #include "volcano/render/primitives/PointRenderer.hpp"
 #include <vector>
 #include <string>
+#include <optional>
 
 namespace volcano::plot {
 
@@ -50,6 +51,35 @@ struct BoxPlotConfig {
     std::string label;         ///< overall legend label
 };
 
+/// mpl `Axes.bxp` — precomputed statistics for one box.
+struct BxpStats {
+    float med = 0, q1 = 0, q3 = 0;    ///< required: median + quartiles
+    float whislo = 0, whishi = 0;     ///< required: whisker extents
+    std::vector<float> fliers;        ///< optional: outlier points
+    std::optional<float> mean;        ///< drawn when bxp showmeans
+    std::optional<float> cilo, cihi;  ///< notch CI (shownotches)
+    std::string label;                ///< tick label (manage_ticks)
+};
+
+/// mpl `Axes.bxp` options.
+struct BxpConfig {
+    std::vector<float> positions;   ///< box positions (default 1..N)
+    std::vector<float> widths;      ///< per-box widths (default boxWidth)
+    bool showbox = true;
+    bool showcaps = true;
+    bool showfliers = true;
+    bool showmedians = true;
+    bool showmeans = false;
+    bool meanline = false;
+    bool shownotches = false;
+    /// mpl `patch_artist` — False (default) draws unfilled line boxes.
+    bool patchArtist = false;
+    /// mpl `manage_ticks` — install a FixedLocator/FixedFormatter from
+    /// positions + stats labels (done by Axes::bxp, not the plot).
+    bool manageTicks = true;
+    BoxPlotConfig style;            ///< colors/widths/legend label
+};
+
 /// Box-and-whisker plot. Computes quartiles, whiskers, and outliers for
 /// one or more groups of data, then renders boxes, whiskers, median lines,
 /// caps, and outlier points. Equivalent to matplotlib's `boxplot(data)`.
@@ -64,6 +94,9 @@ public:
     /// Construct from multiple groups of data.
     BoxPlot(std::vector<std::vector<float>> groups, BoxPlotConfig cfg = {})
         : groups_(std::move(groups)), cfg_(std::move(cfg)) {}
+
+    /// mpl `Axes.bxp` — construct from precomputed statistics.
+    BoxPlot(std::vector<BxpStats> stats, BxpConfig cfg);
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
@@ -89,7 +122,11 @@ public:
 private:
     std::vector<std::vector<float>> groups_;
     BoxPlotConfig cfg_;
-    std::vector<Stats> stats_;  // computed in prepare()
+    std::vector<Stats> stats_;  // computed in prepare() — or preloaded (bxp)
+    std::vector<float> positions_;     ///< per-box x positions (bxp)
+    std::vector<float> widths_;        ///< per-box widths (bxp)
+    bool precomputed_ = false;         ///< stats_ came from bxp input
+    bool showBox_ = true, showCaps_ = true, showMedians_ = true;
 
     // Renderers.
     render::primitives::FillRenderer boxFillRenderer_;       // box fills

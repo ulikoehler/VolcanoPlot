@@ -3,12 +3,17 @@
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/DataSeries.hpp"
 #include "volcano/render/primitives/LineRenderer.hpp"
+#include "volcano/render/primitives/GpuLineRenderer.hpp"
 #include <algorithm>
 namespace volcano::plot {
 class LinePlot : public IPlot {
 public:
     explicit LinePlot(Series2D series) : series_(std::move(series)) {}
     void prepare(render::Renderer& r) override;
+    /// GPU pre-pass: solid (non-dashed) lines are tessellated on the GPU
+    /// into a vertex soup consumed by draw() in the same frame.
+    void preDraw(vk::CommandBuffer cmd, render::Renderer& r,
+                 const Axes& axes, Rect2D rect) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Log/logit scales drop out-of-domain points from the data limits.
@@ -71,6 +76,18 @@ public:
         return false;
     }
 
+    /// mpl Line2D::set_data / set_xdata / set_ydata — replace the point
+    /// data in place. The GPU buffer is reused (memcpy) when the new
+    /// point count fits the existing allocation, and the owning axes is
+    /// marked stale so renderIfStale picks the change up.
+    void setData(std::vector<float> x, std::vector<float> y);
+    void setXdata(std::vector<float> x);
+    void setYdata(std::vector<float> y);
+    /// GPU point buffer — stable handle lets tests verify in-place reuse.
+    [[nodiscard]] vk::Buffer pointBuffer() const noexcept {
+        return renderer_.pointBuffer();
+    }
+
     Series2D& series() noexcept { return series_; }
     [[nodiscard]] const Series2D& series() const noexcept { return series_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -82,6 +99,10 @@ private:
                              const Axes& axes, Rect2D rect);
     Series2D series_;
     render::primitives::LineRenderer renderer_;
+    /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).
+    render::primitives::GpuLineRenderer::Mesh gpuMesh_;
+    uint64_t gpuMeshSeq_ = 0;
     bool prepared_ = false;
+    bool dataDirty_ = false;
 };
 } // namespace volcano::plot

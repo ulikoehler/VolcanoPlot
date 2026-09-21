@@ -256,6 +256,11 @@ struct FigureStyle {
     /// Text color (matplotlib text.color).
     Color textColor = Color::black();
 
+    /// mpl `mathtext.fontset`: "dejavusans" (default) or "dejavuserif".
+    /// cm/stix/stixsans/custom are accepted but degrade to dejavusans —
+    /// only the DejaVu faces ship with the atlas pipeline.
+    std::string mathFontset = "dejavusans";
+
     /// Whether the grid draws below the plot artists (axes.axisbelow).
     /// true = below (matplotlib's default 'line' behavior), false =
     /// grid drawn over the artists.

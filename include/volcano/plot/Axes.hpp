@@ -285,6 +285,12 @@ public:
     /// mpl `ax.eventplot(positions)`: rows of identical event markers.
     class EventPlot& eventplot(std::vector<std::vector<float>> positions);
     class EventPlot& eventplot(std::vector<float> positions);
+    /// mpl `ax.bxp(bxpstats)`: box-and-whisker plot from precomputed
+    /// statistics. `manageTicks` (default on) installs a FixedLocator/
+    /// FixedFormatter at positions with each stat's label.
+    /// (BxpStats/BxpConfig live in <volcano/plot/plots/BoxPlot.hpp>.)
+    class BoxPlot& bxp(std::vector<struct BxpStats> stats,
+                       struct BxpConfig cfg);
     /// mpl `ax.imshow(grid)`: 2D image/heatmap display.
     /// `interpolation` mirrors mpl: "nearest" (default), "bilinear",
     /// "bicubic", "antialiased" (GPU-approximated by bilinear).
@@ -497,6 +503,11 @@ public:
 
     /// Pixel rect within the figure (set by Figure layout).
     Rect2D rect{};
+    /// Extra outward label offset in figure px — set every frame by the
+    /// renderer when Figure::alignXlabels/alignYlabels are active (mpl
+    /// shifts labelpad, we keep it as a per-frame computed offset).
+    float xLabelShiftPx = 0.0f;
+    float yLabelShiftPx = 0.0f;
 
 private:
     /// Apply 5% padding and degenerate-range fixup to a raw min/max viewport.

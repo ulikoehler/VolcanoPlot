@@ -29,6 +29,16 @@ public:
     virtual ~IPlot() = default;
     /// Called once to upload GPU resources (buffers, pipelines).
     virtual void prepare(render::Renderer& renderer) = 0;
+    /// Called every frame BEFORE the render pass begins, on a dedicated
+    /// pre-pass command buffer submitted ahead of the frame on the same
+    /// queue. Use it for compute work that feeds vertex input (e.g. GPU
+    /// line tessellation); the results must be consumed by draw() in the
+    /// same frame. Default: no pre-pass work.
+    virtual void preDraw(vk::CommandBuffer cmd,
+                         render::Renderer& renderer,
+                         const Axes& axes, Rect2D rect) {
+        (void)cmd; (void)renderer; (void)axes; (void)rect;
+    }
     /// Called every frame to record draw commands.
     virtual void draw(vk::CommandBuffer cmd, render::Renderer& renderer,
                       const Axes& axes, Rect2D rect) = 0;
@@ -104,6 +114,12 @@ public:
     /// Hit-test (matplotlib `contains` / pick): true when the data-space
     /// point hits this layer. Default: never hit.
     virtual bool contains(const Axes&, Point2D) const { return false; }
+    /// Owning axes — set by Axes::addPlot. Lets data mutators propagate
+    /// the stale flag (matplotlib `artist.axes.stale`).
+    void setOwner(Axes* ax) noexcept { owner_ = ax; }
+    [[nodiscard]] Axes* owner() const noexcept { return owner_; }
+    /// Mark the owning axes (and figure) stale — call from data mutators.
+    void touch() noexcept;
     /// Whether this layer can emit native vector primitives
     /// (see emitVector). Used by the exporter to group raster fallback
     /// runs; `rasterized=true` forces fallback even when true.
@@ -113,6 +129,9 @@ public:
     /// canEmitVector() is true and `rasterized` is false. Non-const like
     /// draw(): geometry may be built lazily.
     virtual void emitVector(render::VectorCanvas&, const Axes&, Rect2D) {}
+
+private:
+    Axes* owner_ = nullptr;
 };
 
 /// A Figure holds one or more Axes arranged in a grid.
@@ -252,6 +271,36 @@ public:
     /// mpl `fig.transFigure`: figure fraction → display pixels.
     [[nodiscard]] TransformPtr transFigure() const;
 
+    /// mpl `fig.align_xlabels/align_ylabels/align_labels` — persistent:
+    /// on every draw the renderer equalizes label depth across each
+    /// subplot row/column group (bottom xlabels share their rowspan.stop
+    /// row, top labels rowspan.start; left ylabels colspan.start, right
+    /// labels colspan.stop). Axes without a SubplotSpec are skipped.
+    void alignXlabels() noexcept { alignXLabels_ = true; markStale(); }
+    void alignYlabels() noexcept { alignYLabels_ = true; markStale(); }
+    void alignLabels() noexcept { alignXlabels(); alignYlabels(); }
+    [[nodiscard]] bool alignXLabels() const noexcept { return alignXLabels_; }
+    [[nodiscard]] bool alignYLabels() const noexcept { return alignYLabels_; }
+
+    /// matplotlib `fig.legend` — a figure-level legend collecting
+    /// handles from all axes, anchored in figure coordinates. `loc`
+    /// resolves against the canvas edge; configure via figureLegend().
+    void legend(std::string_view loc = "upper right") {
+        figLegend_.visible = true;
+        figLegend_.location = std::string(loc);
+        markStale();
+    }
+    /// Figure-level legend config (enables the legend on write access,
+    /// mirroring Axes::style().legend).
+    [[nodiscard]] LegendStyle& figureLegend() noexcept {
+        figLegend_.visible = true;
+        markStale();
+        return figLegend_;
+    }
+    [[nodiscard]] const LegendStyle& figureLegend() const noexcept {
+        return figLegend_;
+    }
+
     /// Hit-test: topmost axes containing canvas pixel (x, y), or nullptr.
     [[nodiscard]] Axes* axesAt(float x, float y);
     /// Dispatch a raw event: fills `inaxes`/`dataPos`, emits on the canvas,
@@ -278,6 +327,8 @@ private:
     bool stale_ = true;
     bool tightLayout_ = false;
     bool constrainedLayout_ = false;
+    bool alignXLabels_ = false, alignYLabels_ = false;
+    LegendStyle figLegend_;
     Rect2D figRect_{};
 
     EventCanvas canvas_;

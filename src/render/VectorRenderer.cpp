@@ -120,6 +120,9 @@ void VectorRenderer::render(const plot::Figure& fig, VectorCanvas& canvas) {
     for (const auto& sf : fig.subfigs())
         render(*sf.figure, canvas);
 
+    // Figure-level legend (mpl fig.legend) sits above all axes.
+    emitFigureLegend(fig, canvas);
+
     // Figure suptitle at top center.
     const auto& t = fig.style().title;
     if (!t.text.empty()) {
@@ -807,14 +810,17 @@ void VectorRenderer::emitAnchoredTexts(const plot::Axes& axes, Rect2D rect,
     }
 }
 
-void VectorRenderer::emitLegend(const plot::Axes& axes, Rect2D rect,
-                                VectorCanvas& c) {
-    const auto& style = axes.style();
-    const auto& lg = style.legend;
-    if (!lg.visible) return;
+/// One legend row for vector output (mirrors raster LegendEntry).
+struct VectorRenderer::LegendVecEntry {
+    std::string label;
+    plot::Color color;
+    plot::LegendMarker marker;
+};
 
-    struct Entry { std::string label; Color color; plot::LegendMarker marker; };
-    std::vector<Entry> entries;
+std::vector<VectorRenderer::LegendVecEntry>
+VectorRenderer::collectVecLegendEntries(const plot::Axes& axes) {
+    const auto& lg = axes.style().legend;
+    std::vector<LegendVecEntry> entries;
     for (auto& plot : axes.plots()) {
         if (auto it = lg.handlerMap.find(std::type_index(typeid(*plot)));
             it != lg.handlerMap.end()) {
@@ -825,8 +831,98 @@ void VectorRenderer::emitLegend(const plot::Axes& axes, Rect2D rect,
         for (auto& h : plot->legendEntries())
             entries.push_back({std::move(h.label), h.color, h.marker});
     }
+    return entries;
+}
+
+void VectorRenderer::emitLegend(const plot::Axes& axes, Rect2D rect,
+                                VectorCanvas& c) {
+    const auto& style = axes.style();
+    const auto& lg = style.legend;
+    if (!lg.visible) return;
+
+    auto entries = collectVecLegendEntries(axes);
     if (entries.empty()) return;
 
+    // loc + anchor resolution needs fontPx for borderaxespad.
+    const float fontPx = 16.0f * (lg.font.size / 12.0f);
+
+    struct LocAnchor { float fx, fy, bx, by; };
+    auto parseLoc = [](std::string_view loc) -> LocAnchor {
+        if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
+        if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
+        if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
+        if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
+        if (loc == "right" || loc == "center right" || loc == "5" ||
+            loc == "7")                        return {1, 0.5f, 1, 0.5f};
+        if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
+        if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
+        if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
+        return {1, 1, 1, 1};
+    };
+    const auto la = parseLoc(lg.location);
+    const bool hasAnchor = lg.anchorX >= 0.0f || lg.anchorY >= 0.0f;
+    float afx = hasAnchor ? lg.anchorX : la.fx;
+    float afy = hasAnchor ? lg.anchorY : la.fy;
+    float px, py;
+    if (hasAnchor && lg.anchorSpace == plot::CoordSystem::Figure) {
+        px = afx * extent_.width;
+        py = (1.0f - afy) * extent_.height;
+    } else {
+        px = rect.x + afx * rect.width;
+        py = rect.y + (1.0f - afy) * rect.height;
+    }
+    if (!hasAnchor) {
+        const float m = lg.borderAxesPad * fontPx;
+        if (la.bx > 0.5f) px -= m; else if (la.bx < 0.5f) px += m;
+        if (la.by > 0.5f) py += m; else if (la.by < 0.5f) py -= m;
+    }
+    emitLegendBox(c, entries, lg, style.textColor, {px, py},
+                  la.bx, la.by);
+}
+
+/// mpl fig.legend — figure-level legend anchored in figure space.
+void VectorRenderer::emitFigureLegend(const plot::Figure& fig,
+                                      VectorCanvas& c) {
+    const auto& lg = fig.figureLegend();
+    if (!lg.visible) return;
+
+    std::vector<LegendVecEntry> entries;
+    for (auto& p : fig.placements()) {
+        auto es = collectVecLegendEntries(*p.axes);
+        entries.insert(entries.end(),
+                       std::make_move_iterator(es.begin()),
+                       std::make_move_iterator(es.end()));
+    }
+    if (entries.empty()) return;
+
+    struct LocAnchor { float fx, fy, bx, by; };
+    auto parseLoc = [](std::string_view loc) -> LocAnchor {
+        if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
+        if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
+        if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
+        if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
+        if (loc == "right" || loc == "center right" || loc == "5" ||
+            loc == "7")                        return {1, 0.5f, 1, 0.5f};
+        if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
+        if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
+        if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
+        return {1, 1, 1, 1};
+    };
+    const auto la = parseLoc(lg.location);
+    const bool hasAnchor = lg.anchorX >= 0.0f || lg.anchorY >= 0.0f;
+    const float afx = hasAnchor ? lg.anchorX : la.fx;
+    const float afy = hasAnchor ? lg.anchorY : la.fy;
+    Point2D anchor{afx * extent_.width, (1.0f - afy) * extent_.height};
+    emitLegendBox(c, entries, lg, fig.style().textColor, anchor,
+                  la.bx, la.by);
+}
+
+/// Paint a legend box whose (bx,by) box-fraction corner sits at `anchor`
+/// (canvas px) — shared by the axes and figure legends.
+void VectorRenderer::emitLegendBox(VectorCanvas& c,
+        const std::vector<LegendVecEntry>& entries,
+        const plot::LegendStyle& lg, plot::Color textColor,
+        Point2D anchor, float bx, float by) {
     const float scale = lg.font.size / 12.0f;
     const float fontPx = 16.0f * scale;
     const float pad = lg.borderPad * fontPx + (lg.fancyBox ? 2.0f : 0.0f);
@@ -877,38 +973,8 @@ void VectorRenderer::emitLegend(const plot::Axes& axes, Rect2D rect,
     const float boxW = pad * 2 + std::max(contentW, titleW);
     const float boxH = pad * 2 + titleH + rowSep + contentH;
 
-    struct LocAnchor { float fx, fy, bx, by; };
-    auto parseLoc = [](std::string_view loc) -> LocAnchor {
-        if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
-        if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
-        if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
-        if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
-        if (loc == "right" || loc == "center right" || loc == "5" ||
-            loc == "7")                        return {1, 0.5f, 1, 0.5f};
-        if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
-        if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
-        if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
-        return {1, 1, 1, 1};
-    };
-    const auto la = parseLoc(lg.location);
-    const bool hasAnchor = lg.anchorX >= 0.0f || lg.anchorY >= 0.0f;
-    float afx = hasAnchor ? lg.anchorX : la.fx;
-    float afy = hasAnchor ? lg.anchorY : la.fy;
-    float px, py;
-    if (hasAnchor && lg.anchorSpace == plot::CoordSystem::Figure) {
-        px = afx * extent_.width;
-        py = (1.0f - afy) * extent_.height;
-    } else {
-        px = rect.x + afx * rect.width;
-        py = rect.y + (1.0f - afy) * rect.height;
-    }
-    if (!hasAnchor) {
-        const float m = lg.borderAxesPad * fontPx;
-        if (la.bx > 0.5f) px -= m; else if (la.bx < 0.5f) px += m;
-        if (la.by > 0.5f) py += m; else if (la.by < 0.5f) py -= m;
-    }
-    const float boxX = px - la.bx * boxW;
-    const float boxY = py - (1.0f - la.by) * boxH;
+    const float boxX = anchor.x - bx * boxW;
+    const float boxY = anchor.y - (1.0f - by) * boxH;
 
     if (lg.shadow) {
         const float so = fontPx * 0.25f;
@@ -930,11 +996,11 @@ void VectorRenderer::emitLegend(const plot::Axes& axes, Rect2D rect,
     if (!lg.title.empty()) {
         auto m = measure(lg.title, titleScale);
         richText(c, lg.title, boxX + boxW / 2.0f - m.width / 2.0f,
-                 contentTop + m.ascent, style.textColor, titleScale);
+                 contentTop + m.ascent, textColor, titleScale);
     }
     contentTop += titleH + rowSep;
 
-    const auto labelColor = lg.labelColor.value_or(style.textColor);
+    const auto labelColor = lg.labelColor.value_or(textColor);
     float firstAbove = 0.0f;
     for (int col = 0; col < cols; ++col)
         firstAbove = std::max(firstAbove, im[col * rows].above);

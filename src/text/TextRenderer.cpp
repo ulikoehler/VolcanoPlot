@@ -356,9 +356,11 @@ float TextRenderer::lineHeight(float scale) {
 }
 
 TextRenderer::TextMetrics
-TextRenderer::measureText(std::string_view text, float scale) {
-    if (!fontFace_ || text.empty()) return {0, 0, 0};
-    auto* ftface = static_cast<font_face_ft*>(fontFace_);
+TextRenderer::measureText(std::string_view text, float scale,
+                          font_face* face) {
+    font_face* primary = face ? face : fontFace_;
+    if (!primary || text.empty()) return {0, 0, 0};
+    auto* ftface = static_cast<font_face_ft*>(primary);
     auto* m = ftface->get_metrics(kRefFontSize);
     float ascent = m->ascender / 64.0f;
     float descent = -m->descender / 64.0f;  // descender is negative
@@ -374,7 +376,7 @@ TextRenderer::measureText(std::string_view text, float scale) {
         ++lines;
         if (!line.empty()) {
             float width = 0.0f;
-            for (const auto& r : splitFontRuns(line, fontFace_, fallbackFace_))
+            for (const auto& r : splitFontRuns(line, primary, fallbackFace_))
                 width += runAdvance(shaper_.get(), r.face,
                                     line.substr(r.start, r.len), kRefFontSize);
             maxWidth = std::max(maxWidth, width);
@@ -541,12 +543,41 @@ void TextRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
+/// Find DejaVu Serif (regular) — the dejavuserif mathtext fontset face.
+std::string findSerifFontFile() {
+    std::vector<std::filesystem::path> dirs = {
+        "/usr/share/fonts", "/usr/local/share/fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+    };
+    for (const auto& d : dirs) {
+        if (!std::filesystem::exists(d)) continue;
+        for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
+            if (!e.is_regular_file()) continue;
+            auto name = e.path().filename().string();
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower == "dejavuserif.ttf")
+                return e.path().string();
+        }
+    }
+    return {};
+}
+
 void TextRenderer::loadFont() {
     auto fontPath = findSystemFontFile();
     if (fontPath.empty()) return;
     fontManager_->scanFontPath(fontPath);
     fontFace_ = fontManager_->findFontByPath(fontPath);
     if (!fontFace_) return;
+
+    // DejaVu Serif for the dejavuserif mathtext fontset — shares the
+    // primary atlas, so its glyphs rasterize lazily like any other face.
+    std::string serifPath = findSerifFontFile();
+    if (!serifPath.empty()) {
+        fontManager_->scanFontPath(serifPath);
+        serifFace_ = fontManager_->findFontByPath(serifPath);
+    }
 
     // Broad-coverage fallback face for scripts the primary font lacks
     // (CJK, Arabic, Hebrew, …). glyb shares one atlas across faces, so
@@ -743,8 +774,9 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
 void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                         std::string_view text, float x, float y,
                         plot::Color color, float scale, float rotation,
-                        plot::HAlign lineAlign) {
-    if (!inited_ || !fontFace_ || text.empty()) return;
+                        plot::HAlign lineAlign, font_face* face) {
+    font_face* primary = face ? face : fontFace_;
+    if (!inited_ || !primary || text.empty()) return;
 
     // Glyphs are shaped at the fixed reference size (the atlas stores 16px
     // bitmaps); `scale` is applied to vertex positions below.
@@ -762,7 +794,7 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     // unscaled reference space — `scale` is applied to vertices below.
     float lineH = lineHeight(1.0f);
     float blockW = lineAlign == plot::HAlign::Left
-                       ? 0.0f : measureText(text, 1.0f).width;
+                       ? 0.0f : measureText(text, 1.0f, primary).width;
     float lineY = y;
     size_t start = 0;
     while (true) {
@@ -770,7 +802,7 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         auto line = text.substr(start, nl == std::string_view::npos
                                         ? nl : nl - start);
         if (!line.empty()) {
-            auto runs = splitFontRuns(line, fontFace_, fallbackFace_);
+            auto runs = splitFontRuns(line, primary, fallbackFace_);
             float lineX = x;
             if (lineAlign != plot::HAlign::Left) {
                 // Per-line alignment within the block width.

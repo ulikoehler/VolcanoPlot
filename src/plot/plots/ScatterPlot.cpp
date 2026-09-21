@@ -13,7 +13,31 @@
 
 namespace volcano::plot {
 
+void ScatterPlot::setData(std::vector<float> x, std::vector<float> y) {
+    const size_t n = std::min(x.size(), y.size());
+    series_.points.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        series_.points[i] = {x[i], y[i]};
+    dataDirty_ = true;
+    touch();
+}
+void ScatterPlot::setOffsets(std::vector<Point2D> points) {
+    series_.points = std::move(points);
+    dataDirty_ = true;
+    touch();
+}
+
 void ScatterPlot::prepare(render::Renderer& r) {
+    if (prepared_) {
+        // In-place update via memcpy (reallocs only on growth) — direct
+        // series() writes stay correct, no dirty flag to bypass.
+        std::vector<Color> colors(series_.points.size(), series_.resolvedColor());
+        std::vector<float> sizes(series_.points.size(), series_.size);
+        renderer_.updatePoints(std::span{series_.points},
+                               std::span{colors}, std::span{sizes});
+        dataDirty_ = false;
+        return;
+    }
     auto& ctx = r.backend().context();
     renderer_.init(ctx.device.handle(), r.backend().renderPass(),
                    r.backend().sampleCount(), r.descriptorPool(), r.pipelineCache());
@@ -24,6 +48,7 @@ void ScatterPlot::prepare(render::Renderer& r) {
                      ctx.graphicsPool.handle(), ctx.allocator.handle(),
                      std::span{series_.points}, std::span{colors}, std::span{sizes});
     prepared_ = true;
+    dataDirty_ = false;
 }
 
 void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,

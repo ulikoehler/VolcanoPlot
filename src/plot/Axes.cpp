@@ -6,6 +6,7 @@
 #include "volcano/plot/plots/ReferenceLines.hpp"
 #include "volcano/plot/plots/HeatmapPlot.hpp"
 #include "volcano/plot/plots/LinePlot.hpp"
+#include "volcano/plot/plots/BoxPlot.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Rc.hpp"
 #include "volcano/plot/Ticks.hpp"
@@ -23,6 +24,10 @@ Axes::Axes() : style_(rc::params()) { reseedCycler(); }
 void Axes::touch() noexcept {
     stale_ = true;
     if (figure_) figure_->markStale();
+}
+
+void IPlot::touch() noexcept {
+    if (owner_) owner_->touch();
 }
 
 void Axes::setStyle(FigureStyle s) {
@@ -46,6 +51,7 @@ void Axes::reseedCycler() {
 
 IPlot* Axes::addPlot(std::unique_ptr<IPlot> plot) {
     IPlot* raw = plot.get();
+    raw->setOwner(this);
     if (!cycler_.empty()) {
         const auto& props = cycler_.peek();
         if (raw->applyCycleProps(props)) cycler_.advance();
@@ -144,6 +150,25 @@ EventPlot& Axes::eventplot(std::vector<std::vector<float>> positions) {
 }
 EventPlot& Axes::eventplot(std::vector<float> positions) {
     return addOwned<EventPlot>(*this, std::move(positions));
+}
+BoxPlot& Axes::bxp(std::vector<BxpStats> stats, BxpConfig cfg) {
+    if (cfg.manageTicks) {
+        std::vector<float> locs;
+        std::vector<std::string> labs;
+        locs.reserve(stats.size());
+        labs.reserve(stats.size());
+        for (size_t i = 0; i < stats.size(); ++i) {
+            locs.push_back(i < cfg.positions.size() ? cfg.positions[i]
+                                                  : float(i + 1));
+            labs.push_back(stats[i].label);
+        }
+        style_.xAxis.ticks.locator =
+            std::make_shared<FixedLocator>(std::move(locs));
+        style_.xAxis.ticks.formatter =
+            std::make_shared<FixedFormatter>(std::move(labs));
+    }
+    auto p = std::make_unique<BoxPlot>(std::move(stats), std::move(cfg));
+    return *static_cast<BoxPlot*>(addPlot(std::move(p)));
 }
 HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap,
                           std::string_view interpolation,

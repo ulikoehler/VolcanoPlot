@@ -12,7 +12,38 @@
 #include <algorithm>
 #include <cmath>
 namespace volcano::plot {
+void LinePlot::setData(std::vector<float> x, std::vector<float> y) {
+    const size_t n = std::min(x.size(), y.size());
+    series_.points.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        series_.points[i] = {x[i], y[i]};
+    dataDirty_ = true;
+    touch();
+}
+void LinePlot::setXdata(std::vector<float> x) {
+    const size_t n = std::min(x.size(), series_.points.size());
+    series_.points.resize(n);
+    for (size_t i = 0; i < n; ++i) series_.points[i].x = x[i];
+    dataDirty_ = true;
+    touch();
+}
+void LinePlot::setYdata(std::vector<float> y) {
+    const size_t n = std::min(y.size(), series_.points.size());
+    series_.points.resize(n);
+    for (size_t i = 0; i < n; ++i) series_.points[i].y = y[i];
+    dataDirty_ = true;
+    touch();
+}
+
 void LinePlot::prepare(render::Renderer& r) {
+    if (prepared_) {
+        // In-place update: memcpy into the host-visible buffer (reallocs
+        // only on growth). Direct series() writes stay correct — there is
+        // no dirty flag to bypass, the upload is just cheap.
+        renderer_.updatePoints(std::span{series_.points});
+        dataDirty_ = false;
+        return;
+    }
     auto& ctx = r.backend().context();
     renderer_.init(ctx.device.handle(), r.backend().renderPass(),
                    r.backend().sampleCount(), r.pipelineCache());
@@ -20,7 +51,57 @@ void LinePlot::prepare(render::Renderer& r) {
                      ctx.graphicsPool.handle(), ctx.allocator.handle(),
                      std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
     prepared_ = true;
+    dataDirty_ = false;
 }
+namespace {
+
+/// Shared pixel-space polyline computation: drawStyle expansion, scale
+/// masking (NaN splits) and data→pixel transform. Used by both the GPU
+/// pre-pass (preDraw) and the CPU fallback in draw().
+std::vector<Point2D> pixelPoints(const Series2D& series, const Axes& axes,
+                                 Rect2D rect) {
+    std::vector<Point2D> masked;
+    std::span<const Point2D> src = series.points;
+    if (axes.xscale().clipsDomain() || axes.yscale().clipsDomain()) {
+        masked = maskPointsForScales(src, axes.xscale(), axes.yscale());
+        src = masked;
+    }
+    auto pts = applyDrawStyle(src, series.drawStyle);
+    std::vector<Point2D> px;
+    px.reserve(pts.size());
+    for (const auto& p : pts) {
+        auto f = axes.dataToFraction(p);
+        px.push_back({rect.x + f.x * float(rect.width),
+                      rect.y + (1.0f - f.y) * float(rect.height)});
+    }
+    return px;
+}
+
+} // namespace
+
+void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
+                       const Axes& axes, Rect2D rect) {
+    if (!prepared_ || series_.points.size() < 2 ||
+        series_.lineStyle == LineStyle::None ||
+        axes.style().sketchScale > 0.0f)
+        return;
+    // Dashed/sketch lines stay on the CPU stroker — the GPU path only
+    // handles solid strokes.
+    StrokeParams sp;
+    sp.width = series_.lineWidth;
+    sp.dashes = series_.dashes.empty()
+                    ? dashPattern(series_.lineStyle, series_.lineWidth)
+                    : series_.dashes;
+    if (!sp.dashes.empty()) return;
+    sp.join = series_.joinStyle;
+    sp.cap = series_.capStyle;
+    auto& gpu = r.gpuLineRenderer();
+    if (!gpu.inited()) return;
+    auto px = pixelPoints(series_, axes, rect);
+    gpuMesh_ = gpu.tessellate(cmd, px, sp, series_.resolvedColor());
+    gpuMeshSeq_ = r.frameSeq();
+}
+
 void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || series_.points.empty()) return;
@@ -31,23 +112,7 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return;
     }
 
-    // Expand the point sequence for step draw styles, then map data →
-    // pixels. Out-of-domain points (non-positive on log axes) become NaN
-    // sentinels that split the polyline, matching matplotlib masking.
-    std::vector<Point2D> masked;
-    std::span<const Point2D> src = series_.points;
-    if (axes.xscale().clipsDomain() || axes.yscale().clipsDomain()) {
-        masked = maskPointsForScales(src, axes.xscale(), axes.yscale());
-        src = masked;
-    }
-    auto pts = applyDrawStyle(src, series_.drawStyle);
-    std::vector<Point2D> px;
-    px.reserve(pts.size());
-    for (const auto& p : pts) {
-        auto f = axes.dataToFraction(p);
-        px.push_back({rect.x + f.x * float(rect.width),
-                      rect.y + (1.0f - f.y) * float(rect.height)});
-    }
+    auto px = pixelPoints(series_, axes, rect);
     // xkcd-style sketch wobble (path.sketch).
     if (axes.style().sketchScale > 0.0f)
         px = sketchPolyline(px, axes.style().sketchScale * 2.0f);
@@ -74,8 +139,17 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         spine.drawTriangles(cmd, clip, res, under.verts, series_.gapColor);
     }
 
-    auto mesh = strokePolyline(px, sp);
-    spine.drawTriangles(cmd, clip, res, mesh.verts, series_.resolvedColor());
+    // Solid lines were tessellated on the GPU in preDraw; dashes fall
+    // back to the CPU stroker.
+    if (gpuMeshSeq_ == r.frameSeq() && gpuMesh_.buffer) {
+        spine.drawTrianglesGpu(cmd, clip, res, gpuMesh_.buffer,
+                               gpuMesh_.firstVertex * 6 * sizeof(float),
+                               gpuMesh_.vertexCount);
+    } else {
+        auto mesh = strokePolyline(px, sp);
+        spine.drawTriangles(cmd, clip, res, mesh.verts,
+                            series_.resolvedColor());
+    }
 
     // Markers at each vertex (matplotlib plot marker=...).
     drawMarkersAtPoints(cmd, r, axes, rect);

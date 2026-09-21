@@ -305,6 +305,30 @@ void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
+void SpineRenderer::drawTrianglesGpu(vk::CommandBuffer cmd, vk::Rect2D clip,
+                                     vk::Extent2D resolution,
+                                     vk::Buffer buffer,
+                                     vk::DeviceSize byteOffset,
+                                     uint32_t vertexCount) {
+    if (!inited_ || vertexCount == 0 || !buffer) return;
+
+    cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
+
+    struct PC { float w, h, lw; } pc{
+        float(resolution.width), float(resolution.height), 1.0f};
+    cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
+                      0, sizeof(PC), &pc);
+
+    cmd.bindVertexBuffers(0, buffer, {byteOffset});
+
+    vk::Viewport viewport{0, 0, float(resolution.width),
+                          float(resolution.height), 0, 1};
+    cmd.setViewport(0, viewport);
+    cmd.setScissor(0, clip);
+
+    cmd.draw(vertexCount, 1, 0, 0);
+}
+
 void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D clip,
                               vk::Extent2D resolution,
                               plot::Rect2D rect, std::span<const float> positions,

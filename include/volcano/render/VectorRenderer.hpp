@@ -60,6 +60,17 @@ private:
                            VectorCanvas& c);
     void emitLegend(const plot::Axes& axes, plot::Rect2D rect,
                     VectorCanvas& c);
+    /// mpl fig.legend — figure-level legend anchored in figure space.
+    void emitFigureLegend(const plot::Figure& fig, VectorCanvas& c);
+    /// Paint a legend box whose (bx,by) corner sits at `anchor` px —
+    /// shared by axes and figure legends.
+    struct LegendVecEntry;
+    static std::vector<LegendVecEntry>
+    collectVecLegendEntries(const plot::Axes& axes);
+    void emitLegendBox(VectorCanvas& c,
+                       const std::vector<LegendVecEntry>& entries,
+                       const plot::LegendStyle& lg, plot::Color textColor,
+                       plot::Point2D anchor, float bx, float by);
     void emitColorbar(const plot::Axes& axes, plot::Rect2D rect,
                       VectorCanvas& c);
 

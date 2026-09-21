@@ -42,6 +42,12 @@ public:
     [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
     /// Number of uploaded points (0 until upload() is called).
     [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
+    /// In-place data update: memcpy into the host-visible point buffer
+    /// when the new count fits the existing allocation, else reallocate
+    /// all three attribute buffers.
+    void updatePoints(std::span<const plot::Point2D> points,
+                      std::span<const plot::Color> colors,
+                      std::span<const float> sizes);
 
 private:
     vk::Device device_;
@@ -54,7 +60,9 @@ private:
     core::Buffer colorBuffer_;
     core::Buffer sizeBuffer_;
     vk::UniqueDescriptorSet descSet_;
+    VmaAllocator allocator_ = nullptr;
     uint32_t count_ = 0;
+    uint32_t capacity_ = 0;
     bool inited_ = false;
 };
 

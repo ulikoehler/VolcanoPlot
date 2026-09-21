@@ -75,6 +75,14 @@ public:
                        std::span<const plot::Point2D> triVerts,
                        plot::Color color);
 
+    /// Draw a GPU-generated LineVertex triangle soup produced by
+    /// GpuLineRenderer (compute-stroked polylines). `byteOffset` selects
+    /// the first vertex inside `buffer`.
+    void drawTrianglesGpu(vk::CommandBuffer cmd, vk::Rect2D clip,
+                          vk::Extent2D resolution,
+                          vk::Buffer buffer, vk::DeviceSize byteOffset,
+                          uint32_t vertexCount);
+
 private:
     vk::Device device_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;

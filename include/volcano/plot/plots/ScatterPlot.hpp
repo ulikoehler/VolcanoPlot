@@ -74,6 +74,12 @@ public:
         return false;
     }
 
+    /// mpl PathCollection::set_offsets — replace the point data in place.
+    /// The GPU buffer is reused (memcpy) when the new point count fits
+    /// the existing allocation; the owning axes is marked stale.
+    void setData(std::vector<float> x, std::vector<float> y);
+    void setOffsets(std::vector<Point2D> points);
+
     Series2D& series() noexcept { return series_; }
     [[nodiscard]] const Series2D& series() const noexcept { return series_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -84,6 +90,7 @@ private:
     Series2D series_;
     render::primitives::PointRenderer renderer_;
     bool prepared_ = false;
+    bool dataDirty_ = false;
 };
 
 } // namespace volcano::plot

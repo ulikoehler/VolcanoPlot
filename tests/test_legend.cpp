@@ -498,3 +498,56 @@ TEST(LegendDrag, PressOutsideLegendStartsNoDrag) {
     EXPECT_FLOAT_EQ(lg.dragOffset.x, 0.0f);
     EXPECT_FLOAT_EQ(lg.dragOffset.y, 0.0f);
 }
+
+// ─── figure-level legend (mpl fig.legend) ─────────────────────────────────
+
+TEST(FigureLegend, AnchorsToCanvasEdge) {
+    LFig lf;
+    lf.addEntry("Red", Color::red());
+    lf.addEntry("Blue", Color::blue());
+    lf.figure.legend("upper right");   // figure-space anchor
+    auto img = lf.render();
+
+    // The figure legend hugs the canvas top-right corner — its black
+    // frame edge sits at the canvas edge (x≈255), unlike an axes legend
+    // which would stay inside the axes rect (x<230).
+    auto bb = img.boundingBox(kRed, 40);
+    ASSERT_TRUE(bb.found);
+    EXPECT_LT(bb.y0, 60u);    // near the top edge
+    EXPECT_GT(img.countColorInRegion(Pixel{0, 0, 0, 255},
+                                     248, 5, 256, 60, 60), 0u)
+        << "legend frame does not reach the canvas edge";
+}
+
+TEST(FigureLegend, CollectsAllAxesEntries) {
+    PlotTestHarness h(256, 256, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    fig.subplotsAdjust(0.1f, 0.1f, 0.9f, 0.9f, 0.2f, 0.2f);
+    auto* ax0 = fig.subplot2grid({1, 2}, {0, 0});
+    auto* ax1 = fig.subplot2grid({1, 2}, {0, 1});
+    for (auto* ax : {ax0, ax1}) {
+        ax->setStyle(flatTestStyle());
+        ax->setViewport({0, 1, 0, 1});
+    }
+    Series2D s0;
+    s0.label = "A"; s0.color = Color::red();
+    s0.points = {{-10, -10}};
+    ax0->addPlot(std::make_unique<ScatterPlot>(std::move(s0)));
+    Series2D s1;
+    s1.label = "B"; s1.color = Color::blue();
+    s1.points = {{-10, -10}};
+    ax1->addPlot(std::make_unique<ScatterPlot>(std::move(s1)));
+
+    fig.legend("lower center");
+    auto img = h.render(fig);
+
+    // Both entries collected into one shared figure legend near the
+    // bottom-center canvas edge.
+    auto rb = img.boundingBox(kRed, 40);
+    auto bblue = img.boundingBox(kBlue, 40);
+    ASSERT_TRUE(rb.found);
+    ASSERT_TRUE(bblue.found);
+    EXPECT_GT(rb.y0, 200u);    // bottom area
+    EXPECT_GT(bblue.y0, 200u);
+    EXPECT_NEAR((rb.x0 + rb.x1) / 2.0, (bblue.x0 + bblue.x1) / 2.0, 80.0);
+}

@@ -114,7 +114,13 @@ namespace {
 
 struct Ctx {
     const MeasureFn& measure;
+    const MeasureFn* measureAlt = nullptr;  // serif face (fontset)
+    int mathFace = 0;      // face tag for runs emitted inside $...$
     float baseScale;
+    TextMeasure measureFace(std::string_view s, float sc) const {
+        if (mathFace == 1 && measureAlt) return (*measureAlt)(s, sc);
+        return measure(s, sc);
+    }
 };
 
 struct Box {
@@ -134,9 +140,10 @@ struct RunBox : Box {
     float rel = 1.0f;  // render scale relative to baseScale
     bool bigOp = false;    // large operator (\sum, \int, ...)
     bool limits = false;   // scripts stack above/below (not \int-family)
+    int face = 0;          // fontset face (0 = primary, 1 = serif)
     void emit(MathLayout& out, float x, float baseline) const override {
         if (text.empty()) return;
-        out.runs.push_back({text, x, baseline, rel});
+        out.runs.push_back({text, x, baseline, rel, face});
     }
 };
 
@@ -193,9 +200,10 @@ struct SqrtBox : Box {
     float rel = 1.0f;
     float signW = 0;
     float thick = 1.0f;
+    int face = 0;
     void emit(MathLayout& out, float x, float baseline) const override {
         if (!sign.empty())
-            out.runs.push_back({sign, x, baseline, rel});
+            out.runs.push_back({sign, x, baseline, rel, face});
         inner->emit(out, x + signW, baseline);
         // Overline rule above the radicand.
         out.rules.push_back({x + signW * 0.6f, baseline - h, x + w, thick});
@@ -238,7 +246,8 @@ struct Parser {
         auto b = std::make_unique<RunBox>();
         b->text = std::move(text);
         b->rel = rel;
-        auto m = ctx.measure(b->text, ctx.baseScale * rel);
+        b->face = ctx.mathFace;
+        auto m = ctx.measureFace(b->text, ctx.baseScale * rel);
         b->w = m.width;
         b->h = m.ascent;
         b->d = m.height - m.ascent;
@@ -395,7 +404,7 @@ struct Parser {
     // Render scale so `glyph` spans `target` height (never shrinks).
     float sizeFor(const std::string& glyph, float rel, float target) {
         if (glyph.empty() || target <= 0.0f) return 1.0f;
-        auto m = ctx.measure(glyph, ctx.baseScale * rel);
+        auto m = ctx.measureFace(glyph, ctx.baseScale * rel);
         if (m.height <= 0.0f) return 1.0f;
         return std::max(1.0f, target / m.height);
     }
@@ -437,7 +446,8 @@ struct Parser {
             }
             auto inner = parseArg(rel);
             auto b = std::make_unique<SqrtBox>();
-            auto m = ctx.measure("√", ctx.baseScale * rel);
+            b->face = ctx.mathFace;
+            auto m = ctx.measureFace("√", ctx.baseScale * rel);
             b->sign = "√";
             b->rel = rel;
             b->signW = m.width + 0.10f * em(rel);
@@ -467,7 +477,7 @@ struct Parser {
             if (auto* rb = dynamic_cast<RunBox*>(inner.get());
                 rb && !rb->text.empty()) {
                 rb->text += it->second;
-                auto m = ctx.measure(rb->text, ctx.baseScale * rel);
+                auto m = ctx.measureFace(rb->text, ctx.baseScale * rel);
                 rb->w = m.width; rb->h = m.ascent; rb->d = m.height - m.ascent;
                 return inner;
             }
@@ -548,9 +558,10 @@ struct Parser {
                 auto b = std::make_unique<RunBox>();
                 b->text = std::string(it->second);
                 b->rel = rel * 1.25f;
+                b->face = ctx.mathFace;
                 b->bigOp = true;
                 b->limits = bo->second;
-                auto m = ctx.measure(b->text, ctx.baseScale * b->rel);
+                auto m = ctx.measureFace(b->text, ctx.baseScale * b->rel);
                 b->w = m.width; b->h = m.ascent;
                 b->d = m.height - m.ascent;
                 return b;
@@ -585,10 +596,21 @@ BoxPtr layoutSegment(std::string_view s, bool math, const Ctx& ctx) {
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
+MathFontset parseMathFontset(std::string_view name) noexcept {
+    if (name == "dejavuserif") return MathFontset::DejaVuSerif;
+    // dejavusans is the mpl default; cm/stix/stixsans/custom fall back
+    // gracefully — only the DejaVu faces ship with the atlas pipeline.
+    return MathFontset::DejaVuSans;
+}
+
 MathLayout layoutMathText(std::string_view text, float baseScale,
-                          const MeasureFn& measure) {
+                          const MeasureFn& measure,
+                          MathFontset fontset,
+                          const MeasureFn& measureAlt) {
     MathLayout out;
-    Ctx ctx{measure, baseScale};
+    Ctx ctx{measure, measureAlt ? &measureAlt : nullptr, 0, baseScale};
+    Ctx mathCtx = ctx;
+    mathCtx.mathFace = (fontset == MathFontset::DejaVuSerif) ? 1 : 0;
     auto h = std::make_unique<HBox>();
 
     // Split into plain and $...$ math segments.
@@ -613,7 +635,7 @@ MathLayout layoutMathText(std::string_view text, float baseScale,
             break;
         }
         auto seg = text.substr(dollar + 1, close - dollar - 1);
-        h->kids.push_back(layoutSegment(seg, true, ctx));
+        h->kids.push_back(layoutSegment(seg, true, mathCtx));
         pos = close + 1;
     }
 

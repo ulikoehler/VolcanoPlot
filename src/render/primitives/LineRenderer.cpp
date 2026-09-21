@@ -4,6 +4,7 @@
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -131,16 +132,37 @@ void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
 void LineRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                           VmaAllocator allocator, std::span<const plot::Point2D> points,
                           plot::Color color, float width) {
+    allocator_ = allocator;
     core::BufferDesc d;
     d.size = points.size_bytes();
     d.usage = core::BufferUsage::VertexStorage;
+    d.hostVisible = true;   // dynamic data — in-place memcpy updates
     pointBuffer_ = core::Buffer(allocator, d);
     pointBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{points.data(), points.size()}));
     color_ = color;
     width_ = width;
     count_ = static_cast<uint32_t>(points.size());
+    capacity_ = count_;
     externalBuf_ = VK_NULL_HANDLE;
+}
+
+void LineRenderer::updatePoints(std::span<const plot::Point2D> points) {
+    if (points.size() <= capacity_) {
+        std::memcpy(pointBuffer_.mappedData(), points.data(),
+                    points.size_bytes());
+        count_ = static_cast<uint32_t>(points.size());
+        return;
+    }
+    core::BufferDesc d;
+    d.size = points.size_bytes();
+    d.usage = core::BufferUsage::VertexStorage;
+    d.hostVisible = true;
+    pointBuffer_ = core::Buffer(allocator_, d);
+    std::memcpy(pointBuffer_.mappedData(), points.data(),
+                points.size_bytes());
+    count_ = static_cast<uint32_t>(points.size());
+    capacity_ = count_;
 }
 
 void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,

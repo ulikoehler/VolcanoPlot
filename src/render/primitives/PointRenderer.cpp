@@ -7,6 +7,7 @@
 #include "../shaders/TransformGlsl.hpp"
 
 #include <array>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -322,17 +323,21 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
 void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                            VmaAllocator allocator, std::span<const plot::Point2D> points,
                            std::span<const plot::Color> colors, std::span<const float> sizes) {
+    allocator_ = allocator;
     core::BufferDesc pdesc{};
     pdesc.size = points.size_bytes();
     pdesc.usage = core::BufferUsage::VertexStorage;
+    pdesc.hostVisible = true;   // dynamic data — in-place memcpy updates
     pointBuffer_ = core::Buffer(allocator, pdesc);
     pointBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{points.data(), points.size()}));
     count_ = static_cast<uint32_t>(points.size());
+    capacity_ = count_;
 
     core::BufferDesc cdesc{};
     cdesc.size = colors.size_bytes();
     cdesc.usage = core::BufferUsage::Vertex;
+    cdesc.hostVisible = true;
     colorBuffer_ = core::Buffer(allocator, cdesc);
     colorBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{colors.data(), colors.size()}));
@@ -340,9 +345,42 @@ void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool p
     core::BufferDesc sdesc{};
     sdesc.size = sizes.size_bytes();
     sdesc.usage = core::BufferUsage::Vertex;
+    sdesc.hostVisible = true;
     sizeBuffer_ = core::Buffer(allocator, sdesc);
     sizeBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{sizes.data(), sizes.size()}));
+}
+
+void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
+                                 std::span<const plot::Color> colors,
+                                 std::span<const float> sizes) {
+    if (points.size() <= capacity_) {
+        std::memcpy(pointBuffer_.mappedData(), points.data(),
+                    points.size_bytes());
+        std::memcpy(colorBuffer_.mappedData(), colors.data(),
+                    colors.size_bytes());
+        std::memcpy(sizeBuffer_.mappedData(), sizes.data(),
+                    sizes.size_bytes());
+        count_ = static_cast<uint32_t>(points.size());
+        return;
+    }
+    auto reallocUpload = [&](core::Buffer& buf, core::BufferUsage usage,
+                             std::span<const std::byte> bytes) {
+        core::BufferDesc d{};
+        d.size = bytes.size();
+        d.usage = usage;
+        d.hostVisible = true;
+        buf = core::Buffer(allocator_, d);
+        std::memcpy(buf.mappedData(), bytes.data(), bytes.size());
+    };
+    reallocUpload(pointBuffer_, core::BufferUsage::VertexStorage,
+                  std::as_bytes(points));
+    reallocUpload(colorBuffer_, core::BufferUsage::Vertex,
+                  std::as_bytes(colors));
+    reallocUpload(sizeBuffer_, core::BufferUsage::Vertex,
+                  std::as_bytes(sizes));
+    count_ = static_cast<uint32_t>(points.size());
+    capacity_ = count_;
 }
 
 void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,

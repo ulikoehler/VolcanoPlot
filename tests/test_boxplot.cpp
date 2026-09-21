@@ -292,3 +292,107 @@ TEST(BoxPlotRegression, BoxFillDisabled) {
     // (The box edges use whiskerColor=green, so no blue at all.)
     EXPECT_LT(blueFillCount, 20u) << "Should not have significant blue fill when fillBox=false";
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// bxp() — boxplot from precomputed statistics (matplotlib Axes.bxp)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST(BxpRegression, PrecomputedStatsRender) {
+    // Two boxes at mpl default positions x=1,2 with exact stats.
+    BoxFigure cf(256);
+    std::vector<BxpStats> stats(2);
+    stats[0] = {.med = 5, .q1 = 2, .q3 = 8, .whislo = 0, .whishi = 10,
+                .fliers = {-3.0f, 13.0f}, .label = "a"};
+    stats[1] = {.med = 15, .q1 = 12, .q3 = 18, .whislo = 11, .whishi = 19,
+                .label = "b"};
+
+    BxpConfig cfg;
+    cfg.patchArtist = true;
+    cfg.style.boxColor = Color::fromRgba8(31, 119, 180, 200);
+    cfg.style.whiskerColor = Color::black();
+    cfg.style.medianColor = Color::fromRgba8(255, 0, 0, 255);
+    auto& bp = cf.axes->bxp(std::move(stats), cfg);
+    auto img = cf.render();
+
+    // Autoscale spans both positions plus fliers on the y axis.
+    const auto& v = cf.axes->viewport();
+    EXPECT_LT(v.x.min, 1.0f);
+    EXPECT_GT(v.x.max, 2.0f);
+    EXPECT_LT(v.y.min, -3.0f);   // flier at -3 included
+    EXPECT_GT(v.y.max, 19.0f);
+
+    // Two box fills + median lines present.
+    size_t blue = 0, red = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x) {
+            Pixel p = img.get(x, y);
+            if (p.b > 100 && p.b > p.r + 20 && p.b > p.g + 20 && p.a > 100)
+                ++blue;
+            if (p.r > 150 && p.r > p.g + 40 && p.r > p.b + 40) ++red;
+        }
+    EXPECT_GT(blue, 50u) << "Two filled boxes expected";
+    EXPECT_GT(red, 10u) << "Two median lines expected";
+
+    // Stats were precomputed, not derived from data.
+    ASSERT_EQ(bp.stats().size(), 2u);
+    EXPECT_FLOAT_EQ(bp.stats()[0].median, 5.0f);
+    EXPECT_FLOAT_EQ(bp.stats()[1].whiskerHi, 19.0f);
+}
+
+TEST(BxpRegression, CustomPositionsAndWidths) {
+    BoxFigure cf(256);
+    std::vector<BxpStats> stats(2);
+    stats[0] = {.med = 5, .q1 = 2, .q3 = 8, .whislo = 0, .whishi = 10};
+    stats[1] = {.med = 5, .q1 = 2, .q3 = 8, .whislo = 0, .whishi = 10};
+    BxpConfig cfg;
+    cfg.positions = {1.0f, 3.0f};
+    cfg.widths = {0.4f, 1.2f};
+    cfg.manageTicks = false;
+    auto& bp = cf.axes->bxp(std::move(stats), cfg);
+    auto img = cf.render();
+    const auto& v = cf.axes->viewport();
+    // x range spans positions 1±0.2 and 3±0.6.
+    EXPECT_NEAR(v.x.min, 0.8f - 0.13f, 0.15f);
+    EXPECT_NEAR(v.x.max, 3.6f + 0.14f, 0.15f);
+    (void)img;   // geometry assertions above are the point
+    EXPECT_TRUE(bp.stats().size() == 2u);
+}
+
+TEST(BxpRegression, ShowToggles) {
+    BoxFigure cf(256);
+    std::vector<BxpStats> stats(1);
+    stats[0] = {.med = 5, .q1 = 2, .q3 = 8, .whislo = 0, .whishi = 10,
+                .fliers = {-2.0f, 12.0f}};
+    BxpConfig cfg;
+    cfg.patchArtist = true;
+    cfg.showcaps = false;
+    cfg.showfliers = false;
+    cfg.style.boxColor = Color::fromRgba8(31, 119, 180, 200);
+    cf.axes->bxp(std::move(stats), cfg);
+    auto img = cf.render();
+    const auto& v = cf.axes->viewport();
+    // Fliers hidden → excluded from autoscale.
+    EXPECT_GT(v.y.min, -1.0f);
+    EXPECT_LT(v.y.max, 11.0f);
+}
+
+TEST(BxpRegression, ShowMeansAndNotch) {
+    BoxFigure cf(256);
+    std::vector<BxpStats> stats(1);
+    stats[0] = {.med = 5, .q1 = 2, .q3 = 8, .whislo = 0, .whishi = 10,
+                .mean = 6.0f, .cilo = 4.0f, .cihi = 6.0f};
+    BxpConfig cfg;
+    cfg.showmeans = true;
+    cfg.shownotches = true;
+    cfg.style.meanColor = Color::fromRgba8(0, 200, 0, 255);
+    cfg.style.medianColor = Color::fromRgba8(255, 0, 0, 255);
+    cf.axes->bxp(std::move(stats), cfg);
+    auto img = cf.render();
+    size_t green = 0;
+    for (uint32_t y = 0; y < 256; ++y)
+        for (uint32_t x = 0; x < 256; ++x) {
+            Pixel p = img.get(x, y);
+            if (p.g > 120 && p.g > p.r + 30 && p.g > p.b + 30) ++green;
+        }
+    EXPECT_GT(green, 3u) << "Mean marker/line expected";
+}

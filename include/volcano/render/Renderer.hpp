@@ -6,8 +6,11 @@
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/InstancedPathRenderer.hpp>
+#include <volcano/render/primitives/GpuLineRenderer.hpp>
+#include <volcano/core/CommandBuffer.hpp>
 #include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
+#include <volcano/text/MathText.hpp>
 
 #include <volcano/plot/Plot.hpp>
 #include <volcano/encode/ImageEncoder.hpp>
@@ -16,6 +19,8 @@
 
 #include <filesystem>
 #include <memory>
+#include <string>
+#include <optional>
 
 namespace volcano::plot { class Animation; }
 
@@ -92,6 +97,12 @@ public:
     [[nodiscard]] primitives::InstancedPathRenderer& instancedPathRenderer() noexcept {
         return instancedPathRenderer_;
     }
+    [[nodiscard]] primitives::GpuLineRenderer& gpuLineRenderer() noexcept {
+        return gpuLineRenderer_;
+    }
+    /// Monotonically increasing draw-cycle counter — plots use it to
+    /// invalidate GPU meshes produced in a previous frame's preDraw.
+    [[nodiscard]] uint64_t frameSeq() const noexcept { return frameSeq_; }
     /// True when the text renderer pipeline + atlas are ready to draw.
     [[nodiscard]] bool textReady() const noexcept { return textInited_ && textReady_; }
     /// True when the spine renderer pipeline is ready.
@@ -114,11 +125,28 @@ private:
     enum class DrawSubset { All, StaticOnly, AnimatedOnly };
     void renderFrameSubset(plot::Figure& figure, DrawSubset subset);
 
+    /// Outward distance (px) from each axis edge to the axis label's far
+    /// edge — tick marks + tick labels + labelpad + label text.
+    struct AxisLabelDepths { float x = 0.0f, y = 0.0f; };
+    [[nodiscard]] AxisLabelDepths measureAxisLabelDepths(
+        const plot::Axes& axes, plot::Rect2D rect);
+    /// mpl Figure.align_labels: equalize axis-label depth across each
+    /// subplot row/column group by writing Axes::xLabelShiftPx/yLabelShiftPx.
+    void alignAxesLabels(plot::Figure& figure);
+
     backend::IBackend& backend_;
+    /// mpl mathtext.fontset — set from figure.style().mathFontset at the
+    /// top of every frame; consumed by drawRichText/measureRichText.
+    text::MathFontset mathFontset_ = text::MathFontset::DejaVuSans;
     std::unique_ptr<core::PipelineCache> pipelineCache_;
     std::unique_ptr<core::DescriptorPool> descriptorPool_;
     primitives::SpineRenderer spineRenderer_;
     primitives::InstancedPathRenderer instancedPathRenderer_;
+    primitives::GpuLineRenderer gpuLineRenderer_;
+    /// Pre-pass command buffer for IPlot::preDraw compute work — recorded
+    /// and submitted before beginFrame() each renderFrameSubset.
+    std::optional<core::CommandBuffer> preCmd_;
+    uint64_t frameSeq_ = 0;
     primitives::ReduceRenderer reduceRenderer_;
     text::TextRenderer textRenderer_;
     bool textInited_ = false;
@@ -154,6 +182,9 @@ private:
     /// Draw a legend for the axes (if enabled in style).
     void drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                     plot::Rect2D rect);
+    /// mpl fig.legend — figure-level legend collecting handles from all
+    /// axes, anchored in figure (canvas) coordinates.
+    void drawFigureLegend(vk::CommandBuffer cmd, const plot::Figure& fig);
 
     /// Draw a colorbar for the axes (if enabled in style).
     void drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
@@ -180,6 +211,35 @@ private:
                                      const std::filesystem::path& path,
                                      const encode::SaveOptions& options,
                                      encode::ImageFormat fmt);
+
+    // --- legend internals (shared by axes + figure legends) ---
+    /// One legend row: label + handle color/shape.
+    struct LegendEntry {
+        std::string label;
+        plot::Color color;
+        plot::LegendMarker marker;
+    };
+    /// Measured legend layout (mpl VPacker/HPacker packing).
+    struct LegendLayout {
+        float boxW = 0, boxH = 0;
+        float scale = 1, fontPx = 0, pad = 0;
+        float handleW = 0, textGap = 0, colGap = 0, rowSep = 0;
+        float hAbove = 0, hBelow = 0, hBoxH = 0;
+        float titleH = 0, titleScale = 1;
+        float firstAbove = 0;
+        int rows = 0, cols = 0;
+        std::vector<float> colW;
+        std::vector<float> itemW, itemAbove, itemBelow;
+    };
+    static std::vector<LegendEntry> collectLegendEntries(const plot::Axes& axes);
+    LegendLayout measureLegend(const std::vector<LegendEntry>& entries,
+                               const plot::LegendStyle& lg, float dpi);
+    plot::Rect2D paintLegendBox(vk::CommandBuffer cmd,
+                                const std::vector<LegendEntry>& entries,
+                                const plot::LegendStyle& lg,
+                                const LegendLayout& L,
+                                plot::Color textColor,
+                                plot::Point2D anchor, float bx, float by);
 };
 
 } // namespace volcano::render

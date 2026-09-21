@@ -648,3 +648,39 @@ TEST(VectorSvg, HorizontalColorbarBelowAxes) {
     // Extend-max triangle → a closed filled path exists in the SVG.
     EXPECT_NE(doc.find(" Z\" fill="), std::string::npos);
 }
+
+TEST(VectorSvg, FigureLegendCollectsAllAxesEntries) {
+    PlotTestHarness harness(256, 256);
+    Figure fig;
+    fig.subplotsAdjust(0.1f, 0.1f, 0.9f, 0.9f, 0.2f, 0.2f);
+    auto* ax0 = fig.subplot2grid({1, 2}, {0, 0});
+    auto* ax1 = fig.subplot2grid({1, 2}, {0, 1});
+    Series2D s0;
+    s0.label = "FigLegendA";
+    s0.color = Color::red();
+    s0.points = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+    ax0->addPlot(std::make_unique<LinePlot>(std::move(s0)));
+    Series2D s1;
+    s1.label = "FigLegendB";
+    s1.color = Color::blue();
+    s1.points = {{0.0f, 1.0f}, {1.0f, 0.0f}};
+    ax1->addPlot(std::make_unique<LinePlot>(std::move(s1)));
+
+    fig.legend("lower center");
+    TmpFile f("volcano_vec_figlegend.svg");
+    ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
+    auto doc = readText(f.path);
+    // Entries from both axes land in one shared figure-level legend.
+    EXPECT_NE(doc.find(">FigLegendA<"), std::string::npos);
+    EXPECT_NE(doc.find(">FigLegendB<"), std::string::npos);
+    // The figure legend sits below the axes row — its label baseline is
+    // lower than anything an in-axes legend would emit.
+    auto posA = doc.find(">FigLegendA<");
+    ASSERT_NE(posA, std::string::npos);
+    auto textPos = doc.rfind("<text ", posA);
+    ASSERT_NE(textPos, std::string::npos);
+    auto yPos = doc.find("y=\"", textPos);
+    ASSERT_LT(yPos, posA);
+    float y = std::stof(doc.substr(yPos + 3));
+    EXPECT_GT(y, 200.0f);
+}

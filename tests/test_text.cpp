@@ -532,3 +532,76 @@ TEST(ColorblindCycle, OkabeItoSwap) {
     EXPECT_NEAR(c.g, 0x9F / 255.0f, 0.01f);
     EXPECT_NEAR(c.b, 0x00 / 255.0f, 0.01f);
 }
+
+TEST(MathText, FontsetTagsMathRuns) {
+    // dejavusans (default): math runs keep face 0.
+    auto lay = text::layoutMathText("$x^2$", 1.0f, fakeMeasure);
+    ASSERT_FALSE(lay.runs.empty());
+    for (const auto& r : lay.runs) EXPECT_EQ(r.face, 0);
+
+    // dejavuserif: math runs tagged face 1, plain runs stay face 0.
+    lay = text::layoutMathText("v = $\\alpha x$", 1.0f, fakeMeasure,
+                               text::MathFontset::DejaVuSerif);
+    bool sawSerif = false, sawPlain = false;
+    for (const auto& r : lay.runs) {
+        if (r.face == 1) sawSerif = true; else sawPlain = true;
+    }
+    EXPECT_TRUE(sawSerif);
+    EXPECT_TRUE(sawPlain);   // "v = " outside $...$ keeps the primary face
+}
+
+TEST(MathText, FontsetAltMeasure) {
+    // The alt measurer must be used for serif-tagged runs (serif metrics
+    // differ). Give it a wider advance so the effect is observable.
+    text::MeasureFn serifMeasure = [](std::string_view s, float sc) {
+        auto m = fakeMeasure(s, sc);
+        m.width *= 2.0f;
+        return m;
+    };
+    auto sans = text::layoutMathText("$xx$", 1.0f, fakeMeasure,
+                                     text::MathFontset::DejaVuSerif);
+    auto serif = text::layoutMathText("$xx$", 1.0f, fakeMeasure,
+                                      text::MathFontset::DejaVuSerif,
+                                      serifMeasure);
+    EXPECT_NEAR(serif.width, sans.width * 2.0f, 1e-4f);
+}
+
+TEST(MathText, ParseFontsetFallback) {
+    EXPECT_EQ(text::parseMathFontset("dejavusans"),
+              text::MathFontset::DejaVuSans);
+    EXPECT_EQ(text::parseMathFontset("dejavuserif"),
+              text::MathFontset::DejaVuSerif);
+    // Unavailable mpl fontsets degrade gracefully to DejaVuSans.
+    for (const char* n : {"cm", "stix", "stixsans", "custom", "bogus"})
+        EXPECT_EQ(text::parseMathFontset(n), text::MathFontset::DejaVuSans);
+}
+
+TEST(TextRegression, MathTextSerifFontsetDiffers) {
+    // Same math annotation rendered with both fontsets — DejaVu Serif
+    // glyphs differ visibly from DejaVu Sans, so the images must differ.
+    auto renderWith = [](const char* fontset) {
+        TFig cf(256);
+        cf.figure.style().mathFontset = fontset;
+        cf.axes->setViewport({0, 1, 0, 1, 0, 1});
+        auto* t = cf.axes->text(0.25f, 0.5f, "$\\alpha x^2$",
+                                CoordSystem::Data);
+        t->color = Color::black();
+        t->fontSize = 2.0f;
+        return cf.render();
+    };
+    auto sans = renderWith("dejavusans");
+    auto serif = renderWith("dejavuserif");
+    size_t diff = 0;
+    for (uint32_t y = 0; y < sans.height(); ++y)
+        for (uint32_t x = 0; x < sans.width(); ++x)
+            if (!sans.get(x, y).approx(serif.get(x, y), 10)) ++diff;
+    EXPECT_GT(diff, 100u);   // serif glyphs → visibly different pixels
+    // Both must actually render math text (not blank).
+    auto dark = [](const Image& i) {
+        return i.countIf([](uint32_t, uint32_t, Pixel p) {
+            return p.r < 100;
+        });
+    };
+    EXPECT_GT(dark(sans), 100u);
+    EXPECT_GT(dark(serif), 100u);
+}

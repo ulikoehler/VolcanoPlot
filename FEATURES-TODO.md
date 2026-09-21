@@ -382,8 +382,11 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `FancyArrowPatch` with curved shaft, connection styles (arc, arc3, angle, bar)
 - [x] `Annotation` with `arrowprops` / `FancyArrowPatch`
 - [x] MathText (TeX-like subset): sub/sup, fractions, radicals, Greek, accents, calligraphic, etc.
-- [~] MathText fontsets: `dejavusans` (default), `dejavuserif`, `cm`, `stix`, `stixsans`
-      (single-font atlas; DejaVu Sans covers the implemented glyph set)
+- [x] MathText fontsets: `dejavusans` (default) and `dejavuserif` via
+      `style().mathFontset` — DejaVu Serif loads as a second face into the
+      shared atlas, math runs carry a per-run face tag measured/shaped
+      with the serif face. `cm`/`stix`/`stixsans`/`custom` are accepted
+      and degrade to dejavusans (only DejaVu faces ship).
 - [~] `text.usetex` full LaTeX rendering (requires external TeX — not planned;
       MathText subset covers the common cases)
 - [x] Font properties: family, weight, style, size, color (FontProperties struct)
@@ -814,6 +817,34 @@ tri_*) are checked off in the sections above.
       `volcano_tests` suite headless on lavapipe
       (`VK_ICD_FILENAMES` + `LIBGL_ALWAYS_SOFTWARE`) in a
       Debug/Release matrix. Packaging (Nix/Homebrew) still open.
+- [x] **Pyplot-style Python API** — stateful module functions in
+      `volcanoplot`: figure()/gcf()/gca()/subplots(nrows,ncols),
+      plot(y|x,y)/scatter, xlabel/ylabel/title/suptitle,
+      xlim/ylim/xscale/yscale/grid/legend, savefig, cla/clf/close, show
+      (no-op headless). `plot(y)` gets implicit x (mpl).
+- [x] **In-place `set_data` fast path** — `LinePlot::setData/setXdata/
+      setYdata` and `ScatterPlot::setData/setOffsets` update the series
+      and mark the owner axes stale via a new `IPlot::owner()` back-pointer
+      (set in `Axes::addPlot`, `IPlot::touch()` propagates). Point buffers
+      are host-visible dynamic VBOs; `prepare()` memcpy's in place and
+      only reallocs on growth — no staging round-trip per frame.
+      Python: `Line2D.set_data/set_xdata/set_ydata`,
+      `PathCollection.set_offsets`; `plot()`/`scatter()` return artist
+      handles.
+- [x] **`Figure::alignLabels/alignXlabels/alignYlabels`** — mpl label
+      alignment: the renderer measures each grid axes' label depth
+      (ticks + tick labels + labelpad + text) per frame, groups by
+      rowspan.stop/start (xlabels) and colspan.start/stop (ylabels) with
+      the tick-side as the mpl label position, and equalizes the deepest
+      label via `Axes::xLabelShiftPx/yLabelShiftPx` applied at draw time.
+      Non-SubplotSpec axes are skipped, same as mpl.
+- [x] **`Axes::bxp()`** — box-and-whisker plot from precomputed stats
+      (`BxpStats`: med/q1/q3/whislo/whishi + optional fliers/mean/
+      cilo/cihi/label), with mpl options positions, widths, showbox,
+      showcaps, showfliers, showmedians, showmeans, meanline,
+      shownotches, patch_artist and manage_ticks (FixedLocator +
+      FixedFormatter at the box positions). Python `ax.bxp(stats, ...)`
+      accepts a list of dicts.
 - [~] **Documentation site** — mkdocs site (`mkdocs.yml`,
       `docs/index.md`) with architecture/microfeatures pages and an
       auto-generated gallery browser (`scripts/build_docs.py`
@@ -829,3 +860,45 @@ tri_*) are checked off in the sections above.
       tableau-colorblind10 already existed); SVG savefig metadata
       "Title"/"Description" keys emit <title>/<desc> elements for
       screen readers.
+- [x] **GPU tessellated solid polylines** — `GpuLineRenderer` compute
+      shader expands pixel-space points into a triangle soup (segment
+      quads + miter/bevel/round joins + caps, degenerate tris for unused
+      slots) into a device-local VB drawn through SpineRenderer's fill
+      pipeline (`drawTrianglesGpu`). `IPlot::preDraw()` hook runs compute
+      on a pre-pass command buffer submitted before `beginFrame` each
+      `renderFrameSubset` (frame-seq tagged; vector raster fallback bumps
+      the seq too). CPU `strokePolyline` remains for dashed/sketch lines.
+- [x] **Figure-level legend (`fig.legend`)** — `Figure::legend(loc)` /
+      `figureLegend()` collect entries across all axes and anchor in
+      figure/canvas coordinates. Raster path reuses refactored
+      `Renderer::collectLegendEntries`/`measureLegend`/`paintLegendBox`;
+      vector path mirrors it via `VectorRenderer::collectVecLegendEntries`/
+      `emitLegendBox`/`emitFigureLegend` (SVG/PDF/EPS/PGF parity).
+      Python: `fig.legend(loc)` + `vp.figlegend(loc)`.
+- [x] **Python `FuncAnimation`** — `vp.FuncAnimation(fig, func, frames,
+      init_func, fargs, interval, blit, repeat, repeat_delay)` wraps
+      `plot::FuncAnimation` with GIL-safe callbacks; int `frames` passes
+      the index, iterables pass elements (mpl semantics), `fargs`
+      appended to every call. `anim.save(path, writer=, fps=)` writes
+      .apng/.gif/.mp4 via `Renderer::saveAnimation` (blit fast path
+      included) and .html/.htm via `toJsHtml`; `to_jshtml()`/
+      `to_html5_video()` exposed.
+- [x] **Python reference lines + layout + rc** — `axhline/axvline/
+      axline/axhspan/axvspan/hlines/vlines` on Axes and module level;
+      `fig.tight_layout/constrained_layout/subplots_adjust/align_*labels`;
+      `vp.tight_layout/subplots_adjust`; `vp.rc(group, **kwargs)`,
+      `vp.rcdefaults()`, `vp.rc_context(**overrides)`, dict-like
+      `vp.rcParams` (writes via `rc::set`, reads from a shadow map),
+      `vp.style` submodule (use/available/context).
+- [x] **Python bindings for remaining plot types** — `pie` (labels/
+      colors/explode/donut), `stackplot`, `hexbin` (gridsize/cmap/mincnt),
+      `quiver` (1D x,y + 2D u,v meshgrid expansion, scale/pivot),
+      `streamplot` (density/arrows), `violinplot` (positions/vert/
+      showmeans/showextrema), `hist2d` (bins int|[nx,ny]|auto, cmap),
+      `eventplot` (orientation/colors/offsets/lengths/widths),
+      `triplot`/`tripcolor`/`tricontour`/`tricontourf` (Delaunay or
+      explicit (i,j,k) triangles, per-vertex or per-face values),
+      `psd`/`csd`/`specgram`/`cohere`/`xcorr`/`acorr`/
+      `magnitude_spectrum`/`phase_spectrum`/`angle_spectrum`
+      (Fs/NFFT/noverlap/window/scale), `ecdf`, `spy`, `matshow`,
+      `fill_betweenx` (broadcast x1/x2, FillPlot polygon).

@@ -678,3 +678,130 @@ TEST(StaleTracking, MutatorsMarkStale) {
     ax->grid(true);
     EXPECT_TRUE(fig.stale());
 }
+
+TEST(SetDataFastPath, LinePlotInPlaceUpdate) {
+    PlotTestHarness h(128, 96, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* ax = fig.addAxes(0, 0);
+    ax->setStyle(flatTestStyle());
+    ax->setViewport({0, 1, 0, 1});
+    auto& line = ax->plot(std::vector<float>{0, 1},
+                          std::vector<float>{0.2f, 0.2f});
+    line.series().color = Color::red();
+    auto img1 = h.render(fig);
+    EXPECT_FALSE(fig.stale());
+    auto c1 = img1.centroid(Pixel::red(), 60);
+    ASSERT_GT(c1.count, 0u);
+
+    // Same-size update: buffer must be reused, axes+figure stale.
+    vk::Buffer before = line.pointBuffer();
+    line.setYdata(std::vector<float>{0.8f, 0.8f});
+    EXPECT_TRUE(ax->stale());
+    EXPECT_TRUE(fig.stale());
+    auto img2 = h.render(fig);
+    EXPECT_EQ(line.pointBuffer(), before);   // in-place memcpy, no realloc
+    auto c2 = img2.centroid(Pixel::red(), 60);
+    ASSERT_GT(c2.count, 0u);
+    // The line moved from data y=0.2 (low) to y=0.8 (high → low pixel y).
+    EXPECT_LT(c2.y, c1.y - 20.0);
+
+    // Growth beyond capacity reallocates but still renders.
+    line.setData(std::vector<float>{0, 0.5, 1},
+                 std::vector<float>{0.8f, 0.2f, 0.8f});
+    auto img3 = h.render(fig);
+    EXPECT_NE(line.pointBuffer(), before);
+    EXPECT_GT(img3.countColor(Pixel::red(), 60), 20u);
+    EXPECT_FALSE(fig.stale());
+}
+
+TEST(SetDataFastPath, ScatterPlotInPlaceUpdate) {
+    PlotTestHarness h(128, 96, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* ax = fig.addAxes(0, 0);
+    ax->setStyle(flatTestStyle());
+    ax->setViewport({0, 1, 0, 1});
+    Series2D s;
+    s.points = {{0.1f, 0.1f}};
+    s.color = Color::green();
+    s.size = 10.0f;
+    auto& sc = *static_cast<ScatterPlot*>(
+        ax->addPlot(std::make_unique<ScatterPlot>(std::move(s))));
+    auto img1 = h.render(fig);
+    // Marker at (0.1, 0.1) — near bottom-left.
+    auto c1 = img1.centroid(Pixel::green(), 60);
+    EXPECT_LT(c1.x, 45);
+    EXPECT_GT(c1.y, 70);   // y-up: low data y = bottom = high pixel y
+
+    // Move the marker to the top-right in place.
+    sc.setOffsets({{0.9f, 0.9f}});
+    EXPECT_TRUE(fig.stale());
+    auto img2 = h.render(fig);
+    auto c2 = img2.centroid(Pixel::green(), 60);
+    EXPECT_GT(c2.x, 80);
+    EXPECT_LT(c2.y, 45);
+}
+
+TEST(AlignLabels, XLabelsShareBottomRowDepth) {
+    PlotTestHarness h(400, 260, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* ax0 = fig.subplot2grid({1, 2}, {0, 0});
+    auto* ax1 = fig.subplot2grid({1, 2}, {0, 1});
+    ax0->plot(std::vector<float>{0, 1}, std::vector<float>{0, 1});
+    ax1->plot(std::vector<float>{0, 1}, std::vector<float>{0, 1});
+    ax0->style().xAxis.label = "A";
+    ax1->style().xAxis.label = "A";
+    // Rotated tick labels push ax0's xlabel much deeper.
+    ax0->style().xAxis.tickFont.rotation = 1.5707963f;
+    fig.alignXlabels();
+    auto img = h.render(fig);
+
+    EXPECT_EQ(ax0->xLabelShiftPx, 0.0f);   // deepest label — no shift
+    EXPECT_GT(ax1->xLabelShiftPx, 10.0f);  // pushed down to match
+
+    // Label bottoms (lowest dark pixel under each axes) must coincide.
+    auto labelBottom = [&](const Axes* ax) {
+        const auto& r = ax->rect;
+        uint32_t cx = r.x + r.width / 2;
+        uint32_t bottom = r.y + r.height;
+        for (uint32_t y = r.y + r.height; y < img.height(); ++y) {
+            bool dark = false;
+            for (uint32_t x = cx - 8; x <= cx + 8; ++x)
+                if (img.get(x, y).r < 100) { dark = true; break; }
+            if (dark) bottom = y;
+        }
+        return bottom;
+    };
+    EXPECT_NEAR(labelBottom(ax0), labelBottom(ax1), 2.0f);
+}
+
+TEST(AlignLabels, YLabelsShareLeftColumnDepth) {
+    PlotTestHarness h(400, 300, vk::SampleCountFlagBits::e1);
+    Figure fig;
+    auto* ax0 = fig.subplot2grid({2, 1}, {0, 0});
+    auto* ax1 = fig.subplot2grid({2, 1}, {1, 0});
+    fig.grid().left = 0.3f;   // wide margin so shifted labels stay on-canvas
+    ax0->plot(std::vector<float>{0, 1}, std::vector<float>{0, 1});
+    ax1->plot(std::vector<float>{0, 1}, std::vector<float>{0, 10000});
+    ax0->style().yAxis.label = "Y";
+    ax1->style().yAxis.label = "Y";
+    fig.alignYlabels();
+    auto img = h.render(fig);
+    img.save("/tmp/align_ylabel_test.png");
+
+    // ax1's wide tick labels (up to 10000) push its ylabel further left —
+    // ax0's label must shift left to match.
+    EXPECT_EQ(ax1->yLabelShiftPx, 0.0f);
+    EXPECT_GT(ax0->yLabelShiftPx, 10.0f);
+
+    // Leftmost dark pixel left of each axes rect must coincide.
+    auto labelLeft = [&](const Axes* ax) {
+        const auto& r = ax->rect;
+        uint32_t cy = r.y + r.height / 2;
+        uint32_t left = r.x;
+        for (uint32_t x = 0; x < uint32_t(r.x); ++x)
+            for (uint32_t y = cy - 12; y <= cy + 12; ++y)
+                if (img.get(x, y).r < 100) { left = x; goto done; }
+        done: return left;
+    };
+    EXPECT_NEAR(labelLeft(ax0), labelLeft(ax1), 2.0f);
+}

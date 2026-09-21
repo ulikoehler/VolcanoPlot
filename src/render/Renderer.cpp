@@ -168,6 +168,8 @@ void Renderer::prepare(plot::Figure& figure) {
                                     backend_.renderPass(),
                                     backend_.sampleCount(),
                                     *pipelineCache_, *descriptorPool_);
+        gpuLineRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
+                              *descriptorPool_, *pipelineCache_);
         spineInited_ = true;
     }
     // Init GPU autoscale reduce pipeline once.
@@ -197,11 +199,18 @@ text::TextRenderer::TextMetrics
 Renderer::measureRichText(std::string_view text, float scale) {
     if (!text::containsMath(text))
         return textRenderer_.measureText(text, scale);
+    font_face* serif = textRenderer_.serifFace();
+    text::MeasureFn alt;
+    if (mathFontset_ == text::MathFontset::DejaVuSerif && serif)
+        alt = [this, serif](std::string_view s, float sc) {
+            auto m = textRenderer_.measureText(s, sc, serif);
+            return text::TextMeasure{m.width, m.height, m.ascent};
+        };
     auto lay = text::layoutMathText(text, scale,
         [this](std::string_view s, float sc) {
             auto m = textRenderer_.measureText(s, sc);
             return text::TextMeasure{m.width, m.height, m.ascent};
-        });
+        }, mathFontset_, alt);
     return {lay.width, lay.ascent + lay.descent, lay.ascent};
 }
 
@@ -216,11 +225,18 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
         return;
     }
     // Layout the math segments and emit each positioned run/rule.
+    font_face* serif = textRenderer_.serifFace();
+    text::MeasureFn alt;
+    if (mathFontset_ == text::MathFontset::DejaVuSerif && serif)
+        alt = [this, serif](std::string_view s, float sc) {
+            auto m = textRenderer_.measureText(s, sc, serif);
+            return text::TextMeasure{m.width, m.height, m.ascent};
+        };
     auto lay = text::layoutMathText(text, scale,
         [this](std::string_view s, float sc) {
             auto m = textRenderer_.measureText(s, sc);
             return text::TextMeasure{m.width, m.height, m.ascent};
-        });
+        }, mathFontset_, alt);
     float cosR = std::cos(rotation), sinR = std::sin(rotation);
     auto rot = [&](float px, float py) {
         return plot::Point2D{x + px * cosR - py * sinR,
@@ -228,8 +244,10 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
     };
     for (const auto& r : lay.runs) {
         auto p = rot(r.x, r.baseline);
+        font_face* face = (r.face == 1) ? serif : nullptr;
         textRenderer_.draw(cmd, scissor, r.text, p.x, p.y,
-                           color, scale * r.scale, rotation);
+                           color, scale * r.scale, rotation,
+                           plot::HAlign::Left, face);
     }
     for (const auto& rl : lay.rules) {
         auto p0 = rot(rl.x0, rl.y0);
@@ -414,7 +432,8 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
             auto m = measureRichText(style.xAxis.label, scale);
             float cx = rect.x + rect.width / 2.0f - m.width / 2.0f;
             float cy = edge + d * (outLen + kTickSpacing + tickLabelH +
-                                   style.xAxis.labelPad * kPtToPx) +
+                                   style.xAxis.labelPad * kPtToPx +
+                                   axes.xLabelShiftPx) +
                        m.ascent - (top ? m.height : 0.0f);
             drawRichText(cmd, fullRect,
                 style.xAxis.label, cx, cy, style.xAxis.labelColor, scale,
@@ -522,7 +541,8 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                                           tickLabelW +
                                           style.yAxis.labelPad * kPtToPx +
                                           m.height * 0.5f);
-            float ox = centerPos - m.height / 2.0f + m.ascent;
+            float ox = centerPos - m.height / 2.0f + m.ascent +
+                       d * axes.yLabelShiftPx;
             constexpr float kRotMinus90 = -1.5707963267948966f; // -π/2
             drawRichText(cmd, fullRect,
                 style.yAxis.label, ox, oy, style.yAxis.labelColor, scale,
@@ -555,6 +575,108 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
             }
         }
     }
+}
+
+Renderer::AxisLabelDepths Renderer::measureAxisLabelDepths(
+        const plot::Axes& axes, plot::Rect2D rect) {
+    AxisLabelDepths d{};
+    if (!textReady_) return d;
+    const auto& style = axes.style();
+    float scale = style.fontSize * style.dpi / (72.0f * 16.0f);
+    const auto& vp = axes.viewport();
+    bool has3D = std::ranges::any_of(axes.drawOrder(),
+        [](const plot::IPlot* pl) { return pl->is3D(); });
+
+    if (!has3D && style.xAxis.visible && !style.xAxis.label.empty()) {
+        const auto& tc = style.xAxis.ticks;
+        auto xTicks = axisTicks(tc, axes.xscale(), vp.x.min, vp.x.max,
+                                float(rect.width), style.fontSize,
+                                style.dpi, false);
+        plot::ScalarFormatter defaultFmt;
+        plot::FormatStrFormatter strFmt("");
+        plot::LogFormatterMathtext logFmt;
+        plot::Formatter* fmt = axisFormatter(tc, xTicks, style, axes.xscale(),
+                                             vp.x.min, vp.x.max,
+                                             defaultFmt, strFmt, logFmt);
+        float outLen = tc.majorSize * kPtToPx * (1.0f - tickInFrac(tc));
+        float tickLabelH = 0.0f;
+        int i = 0;
+        for (float tick : xTicks) {
+            float px = rect.x + axes.dataToFraction({tick, 0.0f}).x *
+                       rect.width;
+            if (px < rect.x || px > rect.x + rect.width) { ++i; continue; }
+            auto label = tickLabel(tc, *fmt, tick, i++);
+            if (label.empty()) continue;
+            auto m = measureRichText(label, scale);
+            float rot = style.xAxis.tickFont.rotation;
+            tickLabelH = std::max(tickLabelH,
+                m.ascent + m.width * std::abs(std::sin(rot)));
+        }
+        auto m = measureRichText(style.xAxis.label, scale);
+        d.x = outLen + tc.majorPad * kPtToPx + tickLabelH +
+              style.xAxis.labelPad * kPtToPx + m.height;
+    }
+
+    if (!has3D && style.yAxis.visible && !style.yAxis.label.empty()) {
+        const auto& tc = style.yAxis.ticks;
+        auto yTicks = axisTicks(tc, axes.yscale(), vp.y.min, vp.y.max,
+                                float(rect.height), style.fontSize,
+                                style.dpi, true);
+        plot::ScalarFormatter defaultFmt;
+        plot::FormatStrFormatter strFmt("");
+        plot::LogFormatterMathtext logFmt;
+        plot::Formatter* fmt = axisFormatter(tc, yTicks, style, axes.yscale(),
+                                             vp.y.min, vp.y.max,
+                                             defaultFmt, strFmt, logFmt);
+        float outLen = tc.majorSize * kPtToPx * (1.0f - tickInFrac(tc));
+        float tickLabelW = 0.0f;
+        int i = 0;
+        for (float tick : yTicks) {
+            float py = rect.y + rect.height -
+                       axes.dataToFraction({0.0f, tick}).y * rect.height;
+            if (py < rect.y || py > rect.y + rect.height) { ++i; continue; }
+            auto label = tickLabel(tc, *fmt, tick, i++);
+            if (label.empty()) continue;
+            auto m = measureRichText(label, scale);
+            float rot = style.yAxis.tickFont.rotation;
+            tickLabelW = std::max(tickLabelW,
+                m.width * std::abs(std::cos(rot)) +
+                m.height * std::abs(std::sin(rot)));
+        }
+        auto m = measureRichText(style.yAxis.label, scale);
+        d.y = outLen + tc.majorPad * kPtToPx + tickLabelW +
+              style.yAxis.labelPad * kPtToPx + m.height;
+    }
+    return d;
+}
+
+void Renderer::alignAxesLabels(plot::Figure& figure) {
+    struct Entry { plot::Axes* ax; float depth; uint32_t key; };
+    std::vector<Entry> xs, ys;
+    for (auto& p : figure.placements()) {
+        plot::Axes* ax = p.axes.get();
+        ax->xLabelShiftPx = ax->yLabelShiftPx = 0.0f;
+        if (p.mode != plot::PlacementMode::Grid) continue;
+        auto d = measureAxisLabelDepths(*ax, ax->rect);
+        // mpl grouping: bottom xlabels share rowspan.stop, top labels
+        // rowspan.start; left ylabels share colspan.start, right labels
+        // colspan.stop.
+        if (figure.alignXLabels() && d.x > 0.0f)
+            xs.push_back({ax, d.x, ax->xTicksTop()
+                                   ? p.spec.row
+                                   : p.spec.row + p.spec.rowSpan});
+        if (figure.alignYLabels() && d.y > 0.0f)
+            ys.push_back({ax, d.y, ax->yTicksRight()
+                                   ? p.spec.col + p.spec.colSpan
+                                   : p.spec.col});
+    }
+    auto groupMax = [](const std::vector<Entry>& v, uint32_t key) {
+        float m = 0.0f;
+        for (const auto& e : v) if (e.key == key) m = std::max(m, e.depth);
+        return m;
+    };
+    for (auto& e : xs) e.ax->xLabelShiftPx = groupMax(xs, e.key) - e.depth;
+    for (auto& e : ys) e.ax->yLabelShiftPx = groupMax(ys, e.key) - e.depth;
 }
 
 void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
@@ -879,16 +1001,11 @@ void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
     }
 }
 
-void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
-                          plot::Rect2D rect) {
-    if (!spineInited_ || !textReady_) return;
-    const auto& style = axes.style();
-    const auto& lg = style.legend;
-    if (!lg.visible) { axes.setLegendBox({}); return; }
-
-    // Collect legend entries (label + color + marker) from all plot
-    // layers; a handler_map entry overrides the plot's own handle.
-    struct LegendEntry { std::string label; plot::Color color; plot::LegendMarker marker; };
+/// Collect legend entries (label + color + marker) from an axes' plot
+/// layers; a handler_map entry overrides the plot's own handle.
+std::vector<Renderer::LegendEntry>
+Renderer::collectLegendEntries(const plot::Axes& axes) {
+    const auto& lg = axes.style().legend;
     std::vector<LegendEntry> entries;
     for (auto& plot : axes.plots()) {
         if (auto it = lg.handlerMap.find(std::type_index(typeid(*plot)));
@@ -900,96 +1017,261 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
         for (auto& h : plot->legendEntries())
             entries.push_back({std::move(h.label), h.color, h.marker});
     }
-    if (entries.empty()) { axes.setLegendBox({}); return; }
+    return entries;
+}
 
-    auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+namespace {
 
+/// mpl loc name/code → (anchor fraction, box-fraction corner).
+struct LocAnchor { float fx, fy, bx, by; };
+LocAnchor parseLegendLoc(std::string_view loc) {
+    if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
+    if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
+    if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
+    if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
+    if (loc == "right" || loc == "center right" || loc == "5" ||
+        loc == "7")                        return {1, 0.5f, 1, 0.5f};
+    if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
+    if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
+    if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
+    return {1, 1, 1, 1}; // "best"/"upper right"/"0"/"1"/unknown
+}
+
+} // namespace
+
+/// Measure a legend box (mpl packing rules) — shared by drawLegend and
+/// drawFigureLegend.
+Renderer::LegendLayout
+Renderer::measureLegend(const std::vector<LegendEntry>& entries,
+                        const plot::LegendStyle& lg, float dpi) {
+    LegendLayout L;
     // Font scale: same points→pixels mapping as the rest of the text
     // pipeline (16px atlas reference at 72dpi).
-    const float scale = lg.font.size * style.dpi / (72.0f * 16.0f);
-    const float fontPx = 16.0f * scale;
-    const float pad = lg.borderPad * fontPx + (lg.fancyBox ? 2.0f : 0.0f);
-    const float handleW = lg.handleLength * fontPx;
-    const float textGap = lg.handleTextPad * fontPx;
-    const float colGap = lg.columnSpacing * fontPx;
-    const float rowSep = lg.labelSpacing * fontPx;
+    L.scale = lg.font.size * dpi / (72.0f * 16.0f);
+    L.fontPx = 16.0f * L.scale;
+    L.pad = lg.borderPad * L.fontPx + (lg.fancyBox ? 2.0f : 0.0f);
+    L.handleW = lg.handleLength * L.fontPx;
+    L.textGap = lg.handleTextPad * L.fontPx;
+    L.colGap = lg.columnSpacing * L.fontPx;
+    L.rowSep = lg.labelSpacing * L.fontPx;
 
     // mpl handle box: `height = handleheight*fontsize - descent` tall
     // above the text baseline, `descent` below it, where
     // descent = 0.35*fontsize*(handleheight - 0.7) (legend.py heuristic).
-    const float hBelow = 0.35f * fontPx * (lg.handleHeight - 0.7f);
-    const float hBoxH = lg.handleHeight * fontPx - hBelow;
-    const float hAbove = hBoxH - hBelow;
+    L.hBelow = 0.35f * L.fontPx * (lg.handleHeight - 0.7f);
+    L.hBoxH = lg.handleHeight * L.fontPx - L.hBelow;
+    L.hAbove = L.hBoxH - L.hBelow;
 
     // Column-major split into columns (matplotlib: each column is a
     // contiguous run of `rows` entries).
     const int n = static_cast<int>(entries.size());
-    const int rows = lg.nrows > 0 ? lg.nrows
-                                  : (n + std::max(1, lg.ncols) - 1) /
-                                        std::max(1, lg.ncols);
-    const int cols = (n + rows - 1) / rows;
+    L.rows = lg.nrows > 0 ? lg.nrows
+                          : (n + std::max(1, lg.ncols) - 1) /
+                                std::max(1, lg.ncols);
+    L.cols = (n + L.rows - 1) / L.rows;
 
     // Measure each label once (mpl TextArea extents drive packing).
-    struct ItemMetric { float w, ascent, above, below; };
-    std::vector<ItemMetric> im(n);
+    L.itemW.resize(n);
+    L.itemAbove.resize(n);
+    L.itemBelow.resize(n);
     for (int i = 0; i < n; ++i) {
-        auto m = measureRichText(entries[i].label, scale);
-        im[i].w = m.width;
-        im[i].ascent = m.ascent;
-        im[i].above = std::max(m.ascent, hAbove);
-        im[i].below = std::max(m.height - m.ascent, hBelow);
+        auto m = measureRichText(entries[i].label, L.scale);
+        L.itemW[i] = m.width;
+        L.itemAbove[i] = std::max(m.ascent, L.hAbove);
+        L.itemBelow[i] = std::max(m.height - m.ascent, L.hBelow);
     }
 
     // Per-column width = handle + text gap + widest label in the column.
     // Per-column height = sum of item extents + labelspacing seps (each
     // column is its own VPacker in mpl — rows need not align).
-    std::vector<float> colW(cols, 0.0f), colH(cols, 0.0f);
-    for (int c = 0; c < cols; ++c) {
+    L.colW.assign(L.cols, 0.0f);
+    std::vector<float> colH(L.cols, 0.0f);
+    for (int c = 0; c < L.cols; ++c) {
         float maxW = 0, h = 0;
-        for (int r = 0; r < rows; ++r) {
-            int idx = c * rows + r;
+        for (int r = 0; r < L.rows; ++r) {
+            int idx = c * L.rows + r;
             if (idx >= n) break;
-            maxW = std::max(maxW, im[idx].w);
-            h += im[idx].above + im[idx].below + (r ? rowSep : 0.0f);
+            maxW = std::max(maxW, L.itemW[idx]);
+            h += L.itemAbove[idx] + L.itemBelow[idx] + (r ? L.rowSep : 0.0f);
         }
-        colW[c] = handleW + textGap + maxW;
+        L.colW[c] = L.handleW + L.textGap + maxW;
         colH[c] = h;
     }
     float contentW = 0;
-    for (float w : colW) contentW += w;
-    contentW += colGap * (cols - 1);
+    for (float w : L.colW) contentW += w;
+    contentW += L.colGap * (L.cols - 1);
     const float contentH = *std::ranges::max_element(colH);
 
     // Title row (mpl packs the title TextArea + labelspacing sep above
     // the handle box; the sep applies even when the title is empty).
-    float titleW = 0.0f, titleH = 0.0f;
-    const float titleScale = lg.titleFont.size * style.dpi / (72.0f * 16.0f);
+    float titleW = 0.0f;
+    L.titleScale = lg.titleFont.size * dpi / (72.0f * 16.0f);
     if (!lg.title.empty()) {
-        auto m = measureRichText(lg.title, titleScale);
+        auto m = measureRichText(lg.title, L.titleScale);
         titleW = m.width;
-        titleH = m.height;
+        L.titleH = m.height;
     }
 
-    const float boxW = pad * 2 + std::max(contentW, titleW);
-    const float boxH = pad * 2 + titleH + rowSep + contentH;
+    L.boxW = L.pad * 2 + std::max(contentW, titleW);
+    L.boxH = L.pad * 2 + L.titleH + L.rowSep + contentH;
 
-    // Resolve loc → the axes-space anchor (fx,fy) and the box-fraction
-    // point (bx,by) placed there. (0,0)=bottom-left, (1,1)=top-right.
-    struct LocAnchor { float fx, fy, bx, by; };
-    auto parseLoc = [](std::string_view loc) -> LocAnchor {
-        if (loc == "upper left" || loc == "2")   return {0, 1, 0, 1};
-        if (loc == "lower left" || loc == "3")   return {0, 0, 0, 0};
-        if (loc == "lower right" || loc == "4")  return {1, 0, 1, 0};
-        if (loc == "center left" || loc == "6")  return {0, 0.5f, 0, 0.5f};
-        if (loc == "right" || loc == "center right" || loc == "5" ||
-            loc == "7")                        return {1, 0.5f, 1, 0.5f};
-        if (loc == "lower center" || loc == "8") return {0.5f, 0, 0.5f, 0};
-        if (loc == "upper center" || loc == "9") return {0.5f, 1, 0.5f, 1};
-        if (loc == "center" || loc == "10")      return {0.5f, 0.5f, 0.5f, 0.5f};
-        return {1, 1, 1, 1}; // "best"/"upper right"/"0"/"1"/unknown
-    };
-    LocAnchor la = parseLoc(lg.location);
+    // mpl HPacker align="baseline": the first items' baselines align
+    // across columns, so the tallest first item sets the shared line.
+    for (int c = 0; c < L.cols; ++c)
+        L.firstAbove = std::max(L.firstAbove, L.itemAbove[c * L.rows]);
+    return L;
+}
+
+/// Paint a measured legend box whose (bx,by) box-fraction corner sits at
+/// `anchor` (canvas px). Returns the box rect.
+plot::Rect2D Renderer::paintLegendBox(
+    vk::CommandBuffer cmd, const std::vector<LegendEntry>& entries,
+    const plot::LegendStyle& lg, const LegendLayout& L,
+    plot::Color textColor, plot::Point2D anchor, float bx, float by) {
+    auto ext = backend_.extent();
+    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    const int n = static_cast<int>(entries.size());
+    const float fontPx = L.fontPx;
+    const float handleW = L.handleW, textGap = L.textGap;
+    const float colGap = L.colGap, rowSep = L.rowSep;
+    const float pad = L.pad, scale = L.scale;
+
+    const float boxX = anchor.x - bx * L.boxW;
+    const float boxY = anchor.y - (1.0f - by) * L.boxH;
+    const plot::Rect2D boxRect{boxX, boxY, L.boxW, L.boxH};
+
+    // Drop shadow behind the box.
+    if (lg.shadow) {
+        const float so = fontPx * 0.25f;
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+            {boxX + so, boxY + so, L.boxW, L.boxH},
+            plot::Color::fromRgba8(0, 0, 0, 100));
+    }
+
+    if (lg.frameOn) {
+        // Semi-transparent background.
+        auto bg = lg.faceColor;
+        bg.a *= lg.frameAlpha;
+        spineRenderer_.drawFilledRect(cmd, fullRect, ext, boxRect, bg);
+        spineRenderer_.drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
+    }
+
+    // Title (centered across the box); the handle box always follows a
+    // labelspacing sep below the title area (mpl VPacker sep).
+    float contentTop = boxY + pad;
+    if (!lg.title.empty()) {
+        auto m = measureRichText(lg.title, L.titleScale);
+        drawRichText(cmd, fullRect, lg.title,
+                     boxX + L.boxW / 2.0f - m.width / 2.0f,
+                     contentTop + m.ascent, textColor, L.titleScale);
+    }
+    contentTop += L.titleH + rowSep;
+
+    const auto labelColor = lg.labelColor.value_or(textColor);
+
+    // Draw each entry: handle (line/marker) + text label. Each column
+    // packs its own items top-down with labelspacing between them.
+    for (int c = 0; c < L.cols; ++c) {
+        float colX = boxX + pad;
+        for (int j = 0; j < c; ++j) colX += L.colW[j] + colGap;
+        const float markerSize = fontPx;
+        float baseline = contentTop + L.firstAbove;
+        int prev = -1;
+        for (int r = 0; r < L.rows; ++r) {
+            const int i = c * L.rows + r;
+            if (i >= n) break;
+            if (prev >= 0)
+                baseline += L.itemBelow[prev] + rowSep + L.itemAbove[i];
+            prev = i;
+            // Handle box: hAbove above the baseline, hBelow below.
+            const float midY = baseline - L.hAbove + L.hBoxH * 0.5f;
+            const auto& e = entries[i];
+
+            if (e.marker == plot::LegendMarker::Line) {
+                plot::Point2D pts[] = {{colX, midY}, {colX + handleW, midY}};
+                spineRenderer_.drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
+            } else if (e.marker == plot::LegendMarker::Circle) {
+                // Filled disc (octagon fan) centered in the handle area.
+                const float cx = colX + handleW / 2.0f, radius = markerSize / 2.0f;
+                std::vector<plot::Point2D> fan;
+                fan.reserve(3 * 8);
+                for (int k = 0; k < 8; ++k) {
+                    const float a0 = k * 0.78539816f, a1 = (k + 1) * 0.78539816f;
+                    fan.push_back({cx, midY});
+                    fan.push_back({cx + radius * std::cos(a0),
+                                   midY + radius * std::sin(a0)});
+                    fan.push_back({cx + radius * std::cos(a1),
+                                   midY + radius * std::sin(a1)});
+                }
+                spineRenderer_.drawTriangles(cmd, fullRect, ext, fan, e.color);
+            } else {
+                // Filled square centered in the handle area.
+                const float sx = colX + (handleW - markerSize) / 2.0f;
+                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                    {int32_t(sx), int32_t(midY - markerSize / 2.0f),
+                     uint32_t(markerSize), uint32_t(markerSize)},
+                    e.color);
+            }
+
+            // Label text: baseline at the item's shared baseline.
+            drawRichText(cmd, fullRect, e.label,
+                         colX + handleW + textGap, baseline,
+                         labelColor, scale);
+        }
+    }
+    return boxRect;
+}
+
+void Renderer::drawFigureLegend(vk::CommandBuffer cmd,
+                                const plot::Figure& fig) {
+    const auto& lg = fig.figureLegend();
+    if (!spineInited_ || !textReady_ || !lg.visible) return;
+
+    std::vector<LegendEntry> entries;
+    for (auto& p : fig.placements()) {
+        auto es = collectLegendEntries(*p.axes);
+        entries.insert(entries.end(),
+                       std::make_move_iterator(es.begin()),
+                       std::make_move_iterator(es.end()));
+    }
+    if (entries.empty()) return;
+
+    auto L = measureLegend(entries, lg, fig.style().dpi);
+    auto ext = backend_.extent();
+
+    // Figure-space anchor: loc resolves against the canvas edge, flush
+    // to the corner like mpl's Figure.legend (no borderaxespad inset).
+    LocAnchor la = parseLegendLoc(lg.location);
+    const bool hasAnchor = lg.anchorX >= 0.0f || lg.anchorY >= 0.0f;
+    const float afx = hasAnchor ? lg.anchorX : la.fx;
+    const float afy = hasAnchor ? lg.anchorY : la.fy;
+    plot::Point2D anchor{afx * float(ext.width),
+                         (1.0f - afy) * float(ext.height)};
+    anchor.x += lg.dragOffset.x;
+    anchor.y += lg.dragOffset.y;
+
+    paintLegendBox(cmd, entries, lg, L, fig.style().textColor,
+                   anchor, la.bx, la.by);
+}
+
+void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
+                          plot::Rect2D rect) {
+    if (!spineInited_ || !textReady_) return;
+    const auto& style = axes.style();
+    const auto& lg = style.legend;
+    if (!lg.visible) { axes.setLegendBox({}); return; }
+
+    auto entries = collectLegendEntries(axes);
+    if (entries.empty()) { axes.setLegendBox({}); return; }
+
+    auto ext = backend_.extent();
+
+    const float scale = lg.font.size * style.dpi / (72.0f * 16.0f);
+    const float fontPx = 16.0f * scale;
+    auto L = measureLegend(entries, lg, style.dpi);
+    const float boxW = L.boxW, boxH = L.boxH;
+
+    LocAnchor la = parseLegendLoc(lg.location);
     if (lg.location == "best" || lg.location == "0") {
         // matplotlib loc='best': evaluate the inside-corner candidates
         // and pick the one where the legend box overlaps the least data.
@@ -1046,96 +1328,10 @@ void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
     px += lg.dragOffset.x;
     py += lg.dragOffset.y;
 
-    const float boxX = px - la.bx * boxW;
-    const float boxY = py - (1.0f - la.by) * boxH;
-    const plot::Rect2D boxRect{boxX, boxY, boxW, boxH};
+    const auto boxRect = paintLegendBox(cmd, entries, lg, L,
+                                        style.textColor, {px, py},
+                                        la.bx, la.by);
     axes.setLegendBox(boxRect);
-
-    // Drop shadow behind the box.
-    if (lg.shadow) {
-        const float so = fontPx * 0.25f;
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
-            {boxX + so, boxY + so, boxW, boxH},
-            plot::Color::fromRgba8(0, 0, 0, 100));
-    }
-
-    if (lg.frameOn) {
-        // Semi-transparent background.
-        auto bg = lg.faceColor;
-        bg.a *= lg.frameAlpha;
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext, boxRect, bg);
-        spineRenderer_.drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
-    }
-
-    // Title (centered across the box); the handle box always follows a
-    // labelspacing sep below the title area (mpl VPacker sep).
-    float contentTop = boxY + pad;
-    if (!lg.title.empty()) {
-        auto m = measureRichText(lg.title, titleScale);
-        drawRichText(cmd, fullRect, lg.title,
-                     boxX + boxW / 2.0f - m.width / 2.0f,
-                     contentTop + m.ascent, style.textColor, titleScale);
-    }
-    contentTop += titleH + rowSep;
-
-    const auto labelColor = lg.labelColor.value_or(style.textColor);
-
-    // mpl HPacker align="baseline": the first items' baselines align
-    // across columns, so the tallest first item sets the shared line.
-    float firstAbove = 0.0f;
-    for (int c = 0; c < cols; ++c)
-        firstAbove = std::max(firstAbove, im[c * rows].above);
-
-    // Draw each entry: handle (line/marker) + text label. Each column
-    // packs its own items top-down with labelspacing between them.
-    for (int c = 0; c < cols; ++c) {
-        float colX = boxX + pad;
-        for (int j = 0; j < c; ++j) colX += colW[j] + colGap;
-        const float markerSize = fontPx;
-        float baseline = contentTop + firstAbove;
-        int prev = -1;
-        for (int r = 0; r < rows; ++r) {
-            const int i = c * rows + r;
-            if (i >= n) break;
-            if (prev >= 0)
-                baseline += im[prev].below + rowSep + im[i].above;
-            prev = i;
-            // Handle box: hAbove above the baseline, hBelow below.
-            const float midY = baseline - hAbove + hBoxH * 0.5f;
-            const auto& e = entries[i];
-
-        if (e.marker == plot::LegendMarker::Line) {
-            plot::Point2D pts[] = {{colX, midY}, {colX + handleW, midY}};
-            spineRenderer_.drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
-        } else if (e.marker == plot::LegendMarker::Circle) {
-            // Filled disc (octagon fan) centered in the handle area.
-            const float cx = colX + handleW / 2.0f, radius = markerSize / 2.0f;
-            std::vector<plot::Point2D> fan;
-            fan.reserve(3 * 8);
-            for (int k = 0; k < 8; ++k) {
-                const float a0 = k * 0.78539816f, a1 = (k + 1) * 0.78539816f;
-                fan.push_back({cx, midY});
-                fan.push_back({cx + radius * std::cos(a0),
-                               midY + radius * std::sin(a0)});
-                fan.push_back({cx + radius * std::cos(a1),
-                               midY + radius * std::sin(a1)});
-            }
-            spineRenderer_.drawTriangles(cmd, fullRect, ext, fan, e.color);
-        } else {
-            // Filled square centered in the handle area.
-            const float sx = colX + (handleW - markerSize) / 2.0f;
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
-                {int32_t(sx), int32_t(midY - markerSize / 2.0f),
-                 uint32_t(markerSize), uint32_t(markerSize)},
-                e.color);
-        }
-
-            // Label text: baseline at the item's shared baseline.
-            drawRichText(cmd, fullRect, e.label,
-                         colX + handleW + textGap, baseline,
-                         labelColor, scale);
-        }
-    }
 }
 
 void Renderer::renderFrame(plot::Figure& figure) {
@@ -1171,8 +1367,40 @@ void Renderer::blitDrawAnimated(plot::Figure& figure) {
 }
 
 void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
+    ++frameSeq_;
     auto ext = backend_.extent();
     figure.layout(plot::Extent2D{ext.width, ext.height});
+    mathFontset_ = text::parseMathFontset(figure.style().mathFontset);
+    if (figure.alignXLabels() || figure.alignYLabels())
+        alignAxesLabels(figure);
+
+    // GPU pre-pass: IPlot::preDraw records compute work (line
+    // tessellation, ...) that must run outside the render pass. The
+    // pre-pass is submitted on the graphics queue ahead of the frame —
+    // same-queue ordering makes its writes visible to the draw
+    // submission (same mechanism as staging uploads).
+    {
+        auto& ctx = backend_.context();
+        if (!preCmd_)
+            preCmd_.emplace(ctx.device.handle(), ctx.graphicsPool.handle());
+        preCmd_->reset();
+        preCmd_->begin();
+        gpuLineRenderer_.resetScratch();
+        for (auto& p : figure.placements())
+            for (auto* plot : p.axes->drawOrder()) {
+                if (subset == DrawSubset::StaticOnly && plot->animated)
+                    continue;
+                if (subset == DrawSubset::AnimatedOnly && !plot->animated)
+                    continue;
+                const_cast<plot::IPlot*>(plot)->preDraw(
+                    preCmd_->handle(), *this, *p.axes, p.axes->rect);
+            }
+        preCmd_->end();
+        vk::SubmitInfo si{};
+        vk::CommandBuffer pcb = preCmd_->handle();
+        si.setCommandBuffers(pcb);
+        ctx.device.graphicsQueue().submit(si);
+    }
 
     auto cmd = subset == DrawSubset::AnimatedOnly
                    ? backend_.beginFrameLoad()
@@ -1264,6 +1492,10 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         // Draw colorbar (if enabled).
         drawColorbar(cmd, *p.axes, rect);
     }
+
+    // Figure-level legend (mpl fig.legend) sits above all axes.
+    if (subset != DrawSubset::AnimatedOnly)
+        drawFigureLegend(cmd, figure);
 
     // Figure suptitle at top center (mirrors VectorRenderer).
     const auto& ft = figure.style().title;
@@ -1834,6 +2066,7 @@ bool Renderer::savefigVector(plot::Figure& figure,
         [this](const plot::Axes& axes,
                std::span<const plot::IPlot* const> plots,
                std::vector<uint8_t>& rgba, uint32_t& w, uint32_t& h) {
+            ++frameSeq_;   // invalidate preDraw GPU meshes from prior frames
             backend_.setClearColor(0.0f, 0.0f, 0.0f, 0.0f);
             auto cmd = backend_.beginFrame();
             spineRenderer_.resetScratch();

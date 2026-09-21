@@ -54,11 +54,14 @@ public:
     /// The text is rotated around the (x, y) origin point.
     /// Multi-line strings (separated by '\n') are drawn with each line
     /// aligned within the block according to `lineAlign`.
+    /// `face` selects a non-default face (e.g. serif for dejavuserif
+    /// mathtext); nullptr uses the primary face.
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
               std::string_view text, float x, float y,
               plot::Color color, float scale = 1.0f,
               float rotation = 0.0f,
-              plot::HAlign lineAlign = plot::HAlign::Left);
+              plot::HAlign lineAlign = plot::HAlign::Left,
+              font_face* face = nullptr);
 
     /// Measure the bounding box of a UTF-8 string at the given scale.
     /// Returns {width, height, ascent} in pixels.
@@ -67,7 +70,12 @@ public:
     /// Multi-line strings: width = widest line, height covers all lines,
     /// ascent = first line's ascent.
     struct TextMetrics { float width; float height; float ascent; };
-    TextMetrics measureText(std::string_view text, float scale = 1.0f);
+    TextMetrics measureText(std::string_view text, float scale = 1.0f,
+                            font_face* face = nullptr);
+
+    /// Serif face for the dejavuserif mathtext fontset (nullptr when the
+    /// system has no DejaVu Serif). Shares the primary face's atlas.
+    [[nodiscard]] font_face* serifFace() const noexcept { return serifFace_; }
 
     /// Font line advance (ascent+descent+leading) in pixels at `scale`.
     float lineHeight(float scale = 1.0f);
@@ -98,6 +106,8 @@ private:
     /// Broad-coverage fallback face (CJK/RTL/…); glyphs missing from
     /// fontFace_ shape against this instead (shared atlas).
     font_face* fallbackFace_ = nullptr;
+    /// DejaVu Serif — the dejavuserif mathtext fontset face.
+    font_face* serifFace_ = nullptr;
 
     // Atlas texture (uploaded lazily, re-uploaded when it grows)
     core::Image atlasImage_;
