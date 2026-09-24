@@ -148,6 +148,37 @@ std::vector<plot::PathEffect> toPathEffects(const py::object& v) {
     return out;
 }
 
+/// mpl `patches.BoxStyle` instance — a parsed `BoxStyleSpec` usable
+/// anywhere a `boxstyle` string is accepted. Subclasses carry their
+/// own C++ type so `isinstance(x, BoxStyle.Round)` works.
+struct PyBoxStyle {
+    plot::BoxStyleSpec spec;
+};
+template<plot::BoxStyleSpec::Kind K> struct PyBoxStyleT : PyBoxStyle {
+    PyBoxStyleT() { spec.kind = K; }
+};
+
+/// mpl `patches.ArrowStyle` instance — name + params, accepted as
+/// `arrowstyle=` (resolved to the nearest native arrow geometry).
+struct PyArrowStyle {
+    std::string name;
+    py::dict params;
+};
+template<int I> struct PyArrowStyleT : PyArrowStyle {};
+
+/// mpl `patches.ConnectionStyle` instance — name + params, accepted
+/// as `connectionstyle=`.
+struct PyConnectionStyle {
+    std::string name;
+    py::dict params;
+};
+template<int I> struct PyConnectionStyleT : PyConnectionStyle {};
+
+/// mpl patches.NonIntersectingPathException.
+struct PyNonIntersectingPath : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 /// mpl `Text.set_bbox` / `bbox=dict(...)` semantics:
 ///   None → no bbox. dict → FancyBboxPatch with patch defaults
 ///   (fc='C0', ec='black', lw=1.0pt). `boxstyle` absent → 'square'
@@ -175,8 +206,14 @@ void applyTextBbox(const py::object& bbox, T& t, float dpi) {
     std::string bsStr;
     bool bsGiven = false;
     if (d.contains("boxstyle")) {
-        bsStr = d["boxstyle"].cast<std::string>();
         bsGiven = true;
+        if (py::isinstance<PyBoxStyle>(
+                py::reinterpret_borrow<py::object>(d["boxstyle"]))) {
+            // BoxStyle instance → apply directly below.
+            bsStr.clear();
+        } else {
+            bsStr = d["boxstyle"].cast<std::string>();
+        }
     } else {
         bsStr = "square";
     }
@@ -190,14 +227,23 @@ void applyTextBbox(const py::object& bbox, T& t, float dpi) {
         float fontPt = t.fontSize;
         pad = 4.0f / std::max(fontPt, 1e-3f);
     }
-    if (bsStr.find("pad") == std::string::npos)
-        bsStr += std::format(",pad={:.2f}", pad);
-    if (auto spec = plot::parseBoxStyle(bsStr)) {
-        t.boxStyle = *spec;
+    if (bsGiven && bsStr.empty()) {
+        // mpl: boxstyle may be a BoxStyle instance.
+        t.boxStyle = py::reinterpret_borrow<py::object>(d["boxstyle"])
+                         .cast<PyBoxStyle>()
+                         .spec;
+        if (t.boxStyle->pad == 0.3f && d.contains("pad"))
+            t.boxStyle->pad = pad;
     } else {
-        // Unknown boxstyle → mpl would raise; fall back to square+pad.
-        t.boxStyle = plot::BoxStyleSpec{plot::BoxStyleSpec::Kind::Square,
-                                        pad};
+        if (bsStr.find("pad") == std::string::npos)
+            bsStr += std::format(",pad={:.2f}", pad);
+        if (auto spec = plot::parseBoxStyle(bsStr)) {
+            t.boxStyle = *spec;
+        } else {
+            // Unknown boxstyle → mpl would raise; fall back to square+pad.
+            t.boxStyle = plot::BoxStyleSpec{
+                plot::BoxStyleSpec::Kind::Square, pad};
+        }
     }
 
     auto pick = [&](const char* a, const char* b) -> py::object {
@@ -1436,8 +1482,14 @@ public:
     /// plus the container-returning plot helpers).
     std::unordered_map<const plot::Axes*, py::list> containers_;
     std::unordered_map<const plot::Axes*, py::list> tables_;
-    /// mpl axes_locator callables (set_axes_locator).
-    std::unordered_map<const plot::Axes*, py::object> axesLocators_;
+    /// mpl axes_locator callables (set_axes_locator) — kept with a
+    /// weak owner so locators can be invoked from ensureLayout.
+    struct AxesLocatorEntry {
+        py::object locator;
+        std::weak_ptr<PyFigure> owner;
+    };
+    std::unordered_map<const plot::Axes*, AxesLocatorEntry>
+        axesLocators_;
     /// mpl Axes._current_image — last ScalarMappable added per axes
     /// (read by gci/colorbar when no mappable is passed).
     std::unordered_map<const plot::Axes*, py::object> currentMappable_;
@@ -1445,6 +1497,9 @@ public:
     int num_ = 0;
     /// mpl figure label (figure(num=str) / fig.set_label()).
     std::string label_;
+    /// mpl Figure._layout_engine — the installed layout engine object
+    /// (LayoutEngine subclass), or None.
+    py::object layoutEngine_ = py::none();
     /// Per-artist free-form property store backing the generic Artist
     /// API (agg_filter, urls, gid, … that have no C++ field).
     py::dict props_;
@@ -1578,6 +1633,20 @@ struct PyPatch {
     /// mpl free-form Artist properties (gid, url, picker,
     /// sketch params, …) with no dedicated C++ field.
     py::dict props_;
+    /// mpl ConnectionPatch: endpoints + coordinate systems, resolved
+    /// to data coords when added to an axes (axes/figure fraction map
+    /// through that axes' rect).
+    struct Conn {
+        plot::Point2D a, b;
+        std::string coordsA = "data", coordsB = "data";
+        float shrinkA = 0.0f, shrinkB = 0.0f;
+        float mutationScale = 10.0f;
+        float headWidth = -1.0f, headLen = -1.0f;  // <0 → default
+    };
+    std::optional<Conn> conn;
+    /// mpl Shadow: points-space (dpi/72-scaled) offset applied at add
+    /// time using the axes' current transform.
+    std::optional<std::pair<float, float>> ptOffset;
 
 };
 
@@ -3965,6 +4034,135 @@ inline plot::Path mplPath(std::vector<plot::Point2D> v,
     return plot::Path(std::move(v), std::move(c));
 }
 
+/// mpl Path.vertices → (N, 2) float array.
+inline py::array_t<float> pathVertsArray(const plot::Path& p) {
+    py::array_t<float> a({p.vertices.size(), size_t(2)});
+    auto r = a.mutable_unchecked<2>();
+    for (size_t i = 0; i < p.vertices.size(); ++i) {
+        r(i, 0) = p.vertices[i].x;
+        r(i, 1) = p.vertices[i].y;
+    }
+    return a;
+}
+
+/// mpl Path.codes → uint8 array.
+inline py::array_t<uint8_t> pathCodesArray(const plot::Path& p) {
+    py::array_t<uint8_t> a(p.codes.size());
+    auto r = a.mutable_unchecked<1>();
+    for (size_t i = 0; i < p.codes.size(); ++i)
+        r(i) = static_cast<uint8_t>(p.codes[i]);
+    return a;
+}
+
+/// mpl Path.arc — cubic approximation of a unit-circle arc between
+/// two angles (degrees), per mpl's Masionobe reference formula.
+inline plot::Path mplArcPath(double theta1, double theta2, int n,
+                             bool isWedge) {
+    constexpr double kPi = 3.14159265358979323846;
+    double eta2 = theta2 - 360.0 * std::floor((theta2 - theta1) / 360.0);
+    double eta1 = theta1;
+    if (theta2 != theta1 && eta2 <= eta1) eta2 += 360.0;
+    eta1 *= kPi / 180.0; eta2 *= kPi / 180.0;
+    if (n <= 0)
+        n = int(std::pow(2.0, std::ceil((eta2 - eta1) / (kPi * 0.5))));
+    if (n < 1) throw py::value_error("n must be >= 1 or None");
+    double deta = (eta2 - eta1) / n;
+    double t = std::tan(0.5 * deta);
+    double alpha = std::sin(deta) * (std::sqrt(4.0 + 3.0 * t * t) - 1) / 3.0;
+    std::vector<plot::Point2D> v;
+    std::vector<plot::Path::Code> c;
+    auto push = [&](double x, double y, plot::Path::Code code) {
+        v.push_back({float(x), float(y)});
+        c.push_back(code);
+    };
+    double e0 = eta1;
+    if (isWedge) {
+        push(0, 0, plot::Path::MoveTo);
+        push(std::cos(e0), std::sin(e0), plot::Path::LineTo);
+    } else {
+        push(std::cos(e0), std::sin(e0), plot::Path::MoveTo);
+    }
+    for (int i = 0; i < n; ++i) {
+        double a = eta1 + deta * i, b = a + deta;
+        double xa = std::cos(a), ya = std::sin(a);
+        double xb = std::cos(b), yb = std::sin(b);
+        push(xa - alpha * ya, ya + alpha * xa, plot::Path::Curve4);
+        push(xb + alpha * yb, yb - alpha * xb, plot::Path::Curve4);
+        push(xb, yb, plot::Path::Curve4);
+    }
+    if (isWedge) {
+        push(0, 0, plot::Path::LineTo);
+        push(0, 0, plot::Path::ClosePoly);
+    }
+    return plot::Path(std::move(v), std::move(c));
+}
+
+/// mpl Path.unit_regular_asterisk — degenerate closed polygon passing
+/// through the center between spokes (first spoke up).
+inline plot::Path mplAsteriskPath(int n) {
+    constexpr double kPi = 3.14159265358979323846;
+    plot::Path p;
+    for (int i = 0; i < n; ++i) {
+        double a = kPi * 0.5 + 2.0 * kPi * double(i) / double(n);
+        plot::Point2D v{float(std::cos(a)), float(std::sin(a))};
+        if (i == 0) { p.moveTo(v); continue; }
+        p.lineTo({0, 0});
+        p.lineTo(v);
+    }
+    p.lineTo({0, 0});
+    p.vertices.push_back(p.vertices.front());
+    p.codes.push_back(plot::Path::ClosePoly);
+    return p;
+}
+
+/// Segment–segment intersection test (inclusive).
+inline bool segsCross(plot::Point2D a, plot::Point2D b,
+                      plot::Point2D c, plot::Point2D d) {
+    auto orient = [](plot::Point2D p, plot::Point2D q, plot::Point2D r) {
+        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    };
+    float o1 = orient(a, b, c), o2 = orient(a, b, d);
+    float o3 = orient(c, d, a), o4 = orient(c, d, b);
+    if (((o1 > 0) != (o2 > 0)) && ((o3 > 0) != (o4 > 0))) return true;
+    auto onSeg = [](plot::Point2D p, plot::Point2D q, plot::Point2D r) {
+        return q.x <= std::max(p.x, r.x) && q.x >= std::min(p.x, r.x) &&
+               q.y <= std::max(p.y, r.y) && q.y >= std::min(p.y, r.y);
+    };
+    if (o1 == 0 && onSeg(a, c, b)) return true;
+    if (o2 == 0 && onSeg(a, d, b)) return true;
+    if (o3 == 0 && onSeg(c, a, d)) return true;
+    if (o4 == 0 && onSeg(c, b, d)) return true;
+    return false;
+}
+
+/// Contiguous line segments of a path (flattened).
+inline std::vector<std::pair<plot::Point2D, plot::Point2D>>
+pathSegs(const plot::Path& p) {
+    std::vector<std::pair<plot::Point2D, plot::Point2D>> out;
+    for (auto& sub : p.toPolylines()) {
+        for (size_t i = 1; i < sub.points.size(); ++i)
+            out.emplace_back(sub.points[i - 1], sub.points[i]);
+        if (sub.closed && sub.points.size() > 1)
+            out.emplace_back(sub.points.back(), sub.points.front());
+    }
+    return out;
+}
+
+/// mpl _path.path_intersects_path approximation on flattened paths:
+/// any crossing segment pair, or (filled) either path enclosed.
+inline bool pathIntersects(const plot::Path& a, const plot::Path& b,
+                           bool filled) {
+    auto sa = pathSegs(a), sb = pathSegs(b);
+    for (auto& [a1, a2] : sa)
+        for (auto& [b1, b2] : sb)
+            if (segsCross(a1, a2, b1, b2)) return true;
+    if (filled && !b.vertices.empty() &&
+        a.containsPoint(b.vertices.front())) return true;
+    if (filled && !a.vertices.empty() &&
+        b.containsPoint(a.vertices.front())) return true;
+    return false;
+}
+
 /// mpl Path.unit_regular_polygon — n verts starting at 90°.
 inline plot::Path mplPoly(int n) {
     std::vector<plot::Point2D> v;
@@ -3986,6 +4184,419 @@ inline plot::Path mplStar(int n, float inner) {
         v.push_back({r * std::cos(t), r * std::sin(t)});
     }
     return mplClosed(std::move(v));
+}
+
+// ── mpl matplotlib.hatch pattern engine ──────────────────────────
+/// Pattern kinds, in mpl `_hatch_types` order.
+enum class HatchKind {
+    Horizontal, Vertical, NorthEast, SouthEast,
+    SmallCircles, LargeCircles, SmallFilledCircles, Stars,
+    Circles, Shapes, Base
+};
+
+struct HatchSpec {
+    HatchKind kind = HatchKind::Base;
+    int numLines = 0;               // line patterns
+    int numRows = 0;                // Shapes-derived patterns
+    int numShapes = 0;
+    int numVertices = 0;
+    float size = 0.0f;              // Shapes.size
+    bool filled = false;            // Shapes.filled
+    plot::Path shape;               // unit shape (Shapes-derived)
+};
+
+inline HatchSpec hatchSpecFor(HatchKind kind, const std::string& hatch,
+                              int density) {
+    HatchSpec s; s.kind = kind;
+    auto count = [&](char c) {
+        return int(std::ranges::count(hatch, c));
+    };
+    switch (kind) {
+    case HatchKind::Horizontal:
+        s.numLines = (count('-') + count('+')) * density;
+        s.numVertices = s.numLines * 2;
+        break;
+    case HatchKind::Vertical:
+        s.numLines = (count('|') + count('+')) * density;
+        s.numVertices = s.numLines * 2;
+        break;
+    case HatchKind::NorthEast:
+        s.numLines = (count('/') + count('x') + count('X')) * density;
+        s.numVertices = s.numLines ? (s.numLines + 1) * 2 : 0;
+        break;
+    case HatchKind::SouthEast:
+        s.numLines = (count('\\') + count('x') + count('X')) * density;
+        s.numVertices = s.numLines ? (s.numLines + 1) * 2 : 0;
+        break;
+    case HatchKind::SmallCircles:
+        s.numRows = count('o') * density; s.size = 0.2f;
+        s.shape = mplCirclePath(false); break;
+    case HatchKind::LargeCircles:
+        s.numRows = count('O') * density; s.size = 0.35f;
+        s.shape = mplCirclePath(false); break;
+    case HatchKind::SmallFilledCircles:
+        s.numRows = count('.') * density; s.size = 0.1f;
+        s.filled = true; s.shape = mplCirclePath(false); break;
+    case HatchKind::Stars: {
+        s.numRows = count('*') * density;
+        s.size = 1.0f / 3.0f; s.filled = true;
+        s.shape = mplStar(5, 0.381966f);
+        // mpl overrides star codes: all LINETO except first MOVETO.
+        std::ranges::fill(s.shape.codes, plot::Path::LineTo);
+        if (!s.shape.codes.empty())
+            s.shape.codes[0] = plot::Path::MoveTo;
+        break;
+    }
+    default: break;
+    }
+    if (kind >= HatchKind::SmallCircles && kind <= HatchKind::Stars) {
+        if (s.numRows <= 0) { s.numShapes = 0; s.numVertices = 0; }
+        else {
+            s.numShapes = (s.numRows / 2 + 1) * (s.numRows + 1) +
+                          (s.numRows / 2) * s.numRows;
+            s.numVertices = s.numShapes * int(s.shape.vertices.size()) *
+                            (s.filled ? 1 : 2);
+        }
+    }
+    return s;
+}
+
+/// Fill `verts`/`codes` for one pattern (mpl set_vertices_and_codes).
+inline void hatchFill(const HatchSpec& s, plot::Point2D* verts,
+                      uint8_t* codes) {
+    using C = plot::Path::Code;
+    auto line = [&](float x0, float y0, float x1, float y1, int i) {
+        verts[2 * i]     = {x0, y0}; codes[2 * i]     = C::MoveTo;
+        verts[2 * i + 1] = {x1, y1}; codes[2 * i + 1] = C::LineTo;
+    };
+    switch (s.kind) {
+    case HatchKind::Horizontal:
+        for (int i = 0; i < s.numLines; ++i) {
+            float st = (float(i) + 0.5f) / s.numLines;
+            line(0.0f, st, 1.0f, st, i);
+        }
+        break;
+    case HatchKind::Vertical:
+        for (int i = 0; i < s.numLines; ++i) {
+            float st = (float(i) + 0.5f) / s.numLines;
+            line(st, 0.0f, st, 1.0f, i);
+        }
+        break;
+    case HatchKind::NorthEast:
+        for (int i = 0; i <= s.numLines; ++i) {
+            float st = -0.5f + float(i) / s.numLines;
+            line(st, -st, 1.0f + st, 1.0f - st, i);
+        }
+        break;
+    case HatchKind::SouthEast:
+        for (int i = 0; i <= s.numLines; ++i) {
+            float st = -0.5f + float(i) / s.numLines;
+            line(st, 1.0f + st, 1.0f + st, st, i);
+        }
+        break;
+    case HatchKind::SmallCircles: case HatchKind::LargeCircles:
+    case HatchKind::SmallFilledCircles: case HatchKind::Stars: {
+        if (s.numRows <= 0) break;
+        float offset = 1.0f / s.numRows;
+        std::vector<plot::Point2D> sv;
+        std::vector<uint8_t> sc;
+        for (size_t i = 0; i < s.shape.vertices.size(); ++i) {
+            sv.push_back({s.shape.vertices[i].x * offset * s.size,
+                          s.shape.vertices[i].y * offset * s.size});
+            sc.push_back(uint8_t(s.shape.codes[i]));
+        }
+        if (!s.filled) {  // forward then 0.9-reversed
+            size_t n = sv.size();
+            for (size_t i = 0; i < n; ++i) {
+                sv.push_back({sv[n - 1 - i].x * 0.9f,
+                              sv[n - 1 - i].y * 0.9f});
+                sc.push_back(sc[i]);
+            }
+        }
+        size_t per = sv.size(), cur = 0;
+        for (int row = 0; row <= s.numRows; ++row) {
+            int ncols = (row % 2 == 0) ? s.numRows + 1 : s.numRows;
+            float rowPos = row * offset;
+            for (int col = 0; col < ncols; ++col) {
+                // Even rows span [0, 1] with numRows+1 cols; odd rows
+                // span [offset/2, 1-offset/2] with numRows cols (mpl).
+                float colPos = (row % 2 == 0)
+                    ? float(col) / s.numRows
+                    : offset * 0.5f +
+                      (ncols > 1 ? float(col) * (1.0f - offset) /
+                                       float(ncols - 1)
+                                 : 0.0f);
+                for (size_t k = 0; k < per; ++k) {
+                    verts[cur + k] = {sv[k].x + colPos,
+                                      sv[k].y + rowPos};
+                    codes[cur + k] = sc[k];
+                }
+                cur += per;
+            }
+        }
+        break;
+    }
+    default: break;
+    }
+}
+
+/// mpl hatch.get_path — combined hatch path over all 8 mpl pattern
+/// types, in _hatch_types order.
+inline plot::Path hatchPathFor(const std::string& hatch,
+                               int density) {
+    static constexpr HatchKind kinds[] = {
+        HatchKind::Horizontal, HatchKind::Vertical,
+        HatchKind::NorthEast, HatchKind::SouthEast,
+        HatchKind::SmallCircles, HatchKind::LargeCircles,
+        HatchKind::SmallFilledCircles, HatchKind::Stars};
+    std::vector<HatchSpec> specs;
+    int total = 0;
+    for (auto k : kinds) {
+        specs.push_back(hatchSpecFor(k, hatch, density));
+        total += specs.back().numVertices;
+    }
+    plot::Path out;
+    out.vertices.resize(total);
+    out.codes.resize(total);
+    size_t cur = 0;
+    for (auto& s : specs) {
+        if (s.numVertices > 0) {
+            hatchFill(s, out.vertices.data() + cur,
+                      reinterpret_cast<uint8_t*>(out.codes.data()) + cur);
+            cur += s.numVertices;
+        }
+    }
+    return out;
+}
+
+// ── mpl hatch pattern classes (vp.hatch) ─────────────────────────
+struct PyHatchPattern {
+    std::string hatch;
+    int density = 6;
+    int numVertices = 0;
+    virtual ~PyHatchPattern() = default;
+    virtual HatchSpec spec() const {
+        return hatchSpecFor(HatchKind::Base, hatch, density);
+    }
+    /// mpl set_vertices_and_codes — fills numpy arrays in place.
+    void setVerticesAndCodes(py::array_t<double> verts,
+                             py::array_t<uint8_t> codes) {
+        auto s = spec();
+        if (s.numVertices == 0) return;
+        auto v = verts.mutable_unchecked<2>();
+        auto c = codes.mutable_unchecked<1>();
+        std::vector<plot::Point2D> tv(s.numVertices);
+        std::vector<uint8_t> tc(s.numVertices);
+        hatchFill(s, tv.data(), tc.data());
+        for (int i = 0; i < s.numVertices && i < int(tv.size()); ++i) {
+            if (i < v.shape(0)) { v(i, 0) = tv[i].x; v(i, 1) = tv[i].y; }
+            if (i < c.shape(0)) c(i) = tc[i];
+        }
+    }
+};
+
+struct PyHatchHorizontal : PyHatchPattern {
+    int numLines = 0;
+    PyHatchHorizontal(const std::string& h, int d) {
+        hatch = h; density = d;
+        auto s = spec(); numLines = s.numLines;
+        numVertices = s.numVertices;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::Horizontal, hatch, density);
+    }
+};
+struct PyHatchVertical : PyHatchPattern {
+    int numLines = 0;
+    PyHatchVertical(const std::string& h, int d) {
+        hatch = h; density = d;
+        auto s = spec(); numLines = s.numLines;
+        numVertices = s.numVertices;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::Vertical, hatch, density);
+    }
+};
+struct PyHatchNorthEast : PyHatchPattern {
+    int numLines = 0;
+    PyHatchNorthEast(const std::string& h, int d) {
+        hatch = h; density = d;
+        auto s = spec(); numLines = s.numLines;
+        numVertices = s.numVertices;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::NorthEast, hatch, density);
+    }
+};
+struct PyHatchSouthEast : PyHatchPattern {
+    int numLines = 0;
+    PyHatchSouthEast(const std::string& h, int d) {
+        hatch = h; density = d;
+        auto s = spec(); numLines = s.numLines;
+        numVertices = s.numVertices;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::SouthEast, hatch, density);
+    }
+};
+
+struct PyHatchShapes : PyHatchPattern {
+    int numRows = 0, numShapes = 0;
+    float size = 0.0f;
+    bool filled = false;
+    PyHatchShapes() = default;
+    PyHatchShapes(const std::string& h, int d) { hatch = h; density = d; }
+    void finish(HatchKind k) {
+        auto s = hatchSpecFor(k, hatch, density);
+        numRows = s.numRows; numShapes = s.numShapes;
+        numVertices = s.numVertices;
+    }
+};
+struct PyHatchCircles : PyHatchShapes {
+    PyHatchCircles(const std::string& h, int d) : PyHatchShapes(h, d) {
+        finish(HatchKind::Circles); size = 0.2f;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::Circles, hatch, density);
+    }
+};
+struct PyHatchSmallCircles : PyHatchCircles {
+    PyHatchSmallCircles(const std::string& h, int d) : PyHatchCircles(h, d) {
+        finish(HatchKind::SmallCircles); size = 0.2f;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::SmallCircles, hatch, density);
+    }
+};
+struct PyHatchLargeCircles : PyHatchCircles {
+    PyHatchLargeCircles(const std::string& h, int d) : PyHatchCircles(h, d) {
+        finish(HatchKind::LargeCircles); size = 0.35f;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::LargeCircles, hatch, density);
+    }
+};
+struct PyHatchSmallFilledCircles : PyHatchCircles {
+    PyHatchSmallFilledCircles(const std::string& h, int d)
+        : PyHatchCircles(h, d) {
+        finish(HatchKind::SmallFilledCircles);
+        size = 0.1f; filled = true;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::SmallFilledCircles, hatch, density);
+    }
+};
+struct PyHatchStars : PyHatchShapes {
+    PyHatchStars(const std::string& h, int d) : PyHatchShapes(h, d) {
+        finish(HatchKind::Stars);
+        size = 1.0f / 3.0f; filled = true;
+    }
+    HatchSpec spec() const override {
+        return hatchSpecFor(HatchKind::Stars, hatch, density);
+    }
+};
+
+// ── mpl matplotlib.layout_engine ─────────────────────────────────
+struct PyLayoutEngine {
+    py::dict params;
+    bool adjustCompatible = true;    // mpl _adjust_compatible
+    bool colorbarGridspec = true;    // mpl _colorbar_gridspec
+    virtual ~PyLayoutEngine() = default;
+    virtual std::string engineName() const { return ""; }
+    /// Apply the engine's params to the figure's native layout knobs.
+    virtual void applyTo(plot::Figure&) const {}
+};
+
+struct PyLayoutTight : PyLayoutEngine {
+    PyLayoutTight() {
+        params["pad"] = 1.08;
+        params["h_pad"] = py::none();
+        params["w_pad"] = py::none();
+        params["rect"] = py::make_tuple(0, 0, 1, 1);
+    }
+    std::string engineName() const override { return "tight"; }
+    void applyTo(plot::Figure& f) const override {
+        if (params.contains("pad") && !params["pad"].is_none())
+            f.tightPadScale =
+                params["pad"].cast<float>() / 1.08f;
+        if (params.contains("rect") && !params["rect"].is_none()) {
+            auto r = params["rect"].cast<std::vector<float>>();
+            if (r.size() == 4)
+                f.tightRect = std::array{r[0], r[1], r[2], r[3]};
+        }
+    }
+};
+
+struct PyLayoutConstrained : PyLayoutEngine {
+    PyLayoutConstrained() {
+        params["h_pad"] = 0.04167;
+        params["w_pad"] = 0.04167;
+        params["hspace"] = 0.02;
+        params["wspace"] = 0.02;
+        params["rect"] = py::make_tuple(0, 0, 1, 1);
+        params["compress"] = false;
+    }
+    std::string engineName() const override { return "constrained"; }
+    void applyTo(plot::Figure& f) const override {
+        if (params.contains("wspace") && !params["wspace"].is_none())
+            f.constrainedWSpace = params["wspace"].cast<float>();
+        if (params.contains("hspace") && !params["hspace"].is_none())
+            f.constrainedHSpace = params["hspace"].cast<float>();
+    }
+};
+
+struct PyLayoutPlaceHolder : PyLayoutEngine {};
+
+/// mpl Figure.set_layout_engine: accepts None, a name
+/// ('tight'/'constrained'/'compressed'/'none'), or a LayoutEngine
+/// instance; stores the object and applies its params natively.
+inline void installLayoutEngine(PyFigure& f, const py::object& engine,
+                                const py::kwargs& kw) {
+    if (engine.is_none() ||
+        (py::isinstance<py::str>(engine) &&
+         engine.cast<std::string>() == "none")) {
+        f.fig().setTightLayout(false);
+        f.fig().setConstrainedLayout(false);
+        f.fig().tightRect.reset();
+        f.fig().tightPadScale = 1.0f;
+        f.layoutEngine_ = py::none();
+        return;
+    }
+    py::object engObj;
+    if (py::isinstance<py::str>(engine)) {
+        std::string e = engine.cast<std::string>();
+        if (e == "tight")
+            engObj = py::cast(PyLayoutTight{});
+        else if (e == "compressed") {
+            // mpl 'compressed' = ConstrainedLayoutEngine(compress=True)
+            auto c = PyLayoutConstrained{};
+            c.params["compress"] = true;
+            engObj = py::cast(c);
+        } else if (e == "constrained")
+            engObj = py::cast(PyLayoutConstrained{});
+        else
+            throw py::value_error("unknown layout engine: " + e);
+    } else {
+        engObj = engine;
+    }
+    auto* eng = engObj.cast<PyLayoutEngine*>();
+    if (!eng)
+        throw py::type_error(
+            "layout must be None, a string, or a LayoutEngine");
+    if (kw) {
+        for (auto kv : kw) {
+            std::string k = py::str(kv.first).cast<std::string>();
+            if (!eng->params.contains(k.c_str()))
+                throw py::type_error(
+                    "unexpected keyword argument: " + k);
+            eng->params[k.c_str()] = kv.second;
+        }
+    }
+    std::string name = eng->engineName();
+    f.fig().setTightLayout(name == "tight");
+    f.fig().setConstrainedLayout(name == "constrained");
+    eng->applyTo(f.fig());
+    f.layoutEngine_ = engObj;
 }
 
 /// mpl MarkerStyle._half_fill.
@@ -4592,6 +5203,39 @@ struct PyTable {
 static void ensureLayout(PyFigure& f) {
     auto e = f.backend()->extent();
     f.fig().layout({e.width, e.height});
+    // mpl axes_locator callables — locator(axes, renderer) returns a
+    // figure-fraction Bbox the axes is moved into (Axes.apply_aspect).
+    for (auto& [axc, ent] : f.axesLocators_) {
+        auto owner = ent.owner.lock();
+        if (!owner || ent.locator.is_none()) continue;
+        auto* ax = const_cast<plot::Axes*>(axc);
+        py::object out =
+            ent.locator(py::cast(PyAxes{owner, ax}), py::none());
+        double l = 0, b = 0, w = 0, h = 0;
+        bool ok = false;
+        if (py::isinstance<PyBbox>(out)) {
+            auto bb = out.cast<PyBbox>();
+            l = bb.xMin(); b = bb.yMin();
+            w = bb.xMax() - bb.xMin(); h = bb.yMax() - bb.yMin();
+            ok = true;
+        } else {
+            try {
+                auto v = out.cast<std::vector<double>>();
+                if (v.size() == 4) {
+                    l = v[0]; b = v[1];
+                    w = v[2] - v[0]; h = v[3] - v[1];
+                    ok = true;
+                }
+            } catch (...) {
+            }
+        }
+        if (ok && w > 0 && h > 0) {
+            ax->rect.x = float(l * e.width);
+            ax->rect.width = float(w * e.width);
+            ax->rect.y = float(b * e.height);
+            ax->rect.height = float(h * e.height);
+        }
+    }
 }
 
 const plot::Colormap& cmapArg(const py::object& o) {
@@ -5356,6 +6000,78 @@ plot::Rect2D axesRectPx(PyAxes& a) {
     return a.ax->rect;
 }
 
+/// mpl ConnectionPatch / Shadow: resolve coordinate-space endpoints
+/// and points-space offsets into the spec's data-coordinate path at
+/// add_patch time (axes state is only known then).
+void resolvePatchPlacement(PyAxes& a, PyPatch& p) {
+    const float dpi = a.ax->figure() ? a.ax->figure()->dpi() : 100.0f;
+    auto rect = axesRectPx(a);
+    auto xl = a.ax->xlim(), yl = a.ax->ylim();
+    float xs = rect.width  > 0 ? (xl.max - xl.min) / rect.width  : 0.0f;
+    float ys = rect.height > 0 ? (yl.max - yl.min) / rect.height : 0.0f;
+
+    if (p.ptOffset) {
+        // mpl Shadow: ox/oy are in points, scaled by dpi/72 to pixels.
+        float dx = p.ptOffset->first  * dpi / 72.0f * xs;
+        float dy = p.ptOffset->second * dpi / 72.0f * ys;
+        for (auto& v : p.spec.path.vertices) { v.x += dx; v.y += dy; }
+        p.ptOffset.reset();
+    }
+    if (p.conn) {
+        auto& c = *p.conn;
+        auto resolve = [&](plot::Point2D q,
+                           const std::string& cs) -> plot::Point2D {
+            if (cs == "data") return q;
+            auto e = figExtentPx(a.owner);
+            float fx = 0.0f, fy = 0.0f;  // resolved axes fraction
+            if (cs == "axes fraction") {
+                fx = q.x; fy = q.y;
+            } else if (cs == "axes pixels") {
+                fx = q.x / rect.width;  fy = q.y / rect.height;
+            } else if (cs == "axes points") {
+                fx = q.x * dpi / 72.0f / rect.width;
+                fy = q.y * dpi / 72.0f / rect.height;
+            } else if (cs == "figure fraction") {
+                fx = (q.x * e.width  - rect.x) / rect.width;
+                fy = (q.y * e.height - rect.y) / rect.height;
+            } else if (cs == "figure pixels") {
+                fx = (q.x - rect.x) / rect.width;
+                fy = (q.y - rect.y) / rect.height;
+            } else if (cs == "figure points") {
+                fx = (q.x * dpi / 72.0f - rect.x) / rect.width;
+                fy = (q.y * dpi / 72.0f - rect.y) / rect.height;
+            } else {
+                // 'offset points' and unknown systems: treat as data.
+                return q;
+            }
+            return {xl.min + fx * (xl.max - xl.min),
+                    yl.min + fy * (yl.max - yl.min)};
+        };
+        plot::Point2D A = resolve(c.a, c.coordsA);
+        plot::Point2D B = resolve(c.b, c.coordsB);
+        // Points-space → data-space conversion along the connector.
+        const float pt2data =
+            dpi / 72.0f * std::hypot(xs, ys) / std::sqrt(2.0f);
+        float len = std::hypot(B.x - A.x, B.y - A.y);
+        if (len > 0) {
+            // shrinkA/shrinkB shorten the connector in points.
+            float ux = (B.x - A.x) / len, uy = (B.y - A.y) / len;
+            A.x += ux * c.shrinkA * pt2data;
+            A.y += uy * c.shrinkA * pt2data;
+            B.x -= ux * c.shrinkB * pt2data;
+            B.y -= uy * c.shrinkB * pt2data;
+        }
+        float hw = c.headWidth >= 0 ? c.headWidth
+                                  : 0.2f * c.mutationScale;
+        float hl = c.headLen   >= 0 ? c.headLen
+                                  : 0.4f * c.mutationScale;
+        p.spec = plot::patch::FancyArrowPatch(A, B,
+                                              hw * pt2data,
+                                              hl * pt2data);
+        p.conn.reset();
+    }
+}
+
 /// mpl patch kwargs: color (face+edge), facecolor/fc, edgecolor/ec,
 /// linewidth/lw, linestyle/ls, alpha, hatch, fill, label.
 void applyPatchStyle(plot::Patch& p, const py::kwargs& kw) {
@@ -5422,6 +6138,61 @@ void applyCollStyle(plot::Collection& c, const py::kwargs& kw) {
         c.hatch = v.cast<std::string>();
     if (auto v = get("label"); !v.is_none())
         c.label_ = v.cast<std::string>();
+}
+
+/// mpl `hatch=`/`edgecolor=`/`linewidth=` support for plot types that
+/// don't render through the patch pipeline (bar/hist/fill/pie): adds a
+/// hatch overlay (mpl: hatch color = resolved edgecolor — 'face' →
+/// `hatchSrc` — falling back to hatch.color only when edge is 'none';
+/// lw=0 so the edge itself doesn't stroke) plus an optional edge-stroke
+/// overlay, both as PolyCollections clipped to the regions.
+void addRegionOverlay(PyAxes& a,
+                      std::vector<std::vector<plot::Point2D>> polys,
+                      const py::kwargs& kw, plot::Color hatchSrc) {
+    if (polys.empty()) return;
+    auto get = [&](const char* k, const char* alt = nullptr)
+        -> py::object {
+        if (kw.contains(k)) return kw[k].cast<py::object>();
+        if (alt && kw.contains(alt)) return kw[alt].cast<py::object>();
+        return py::none();
+    };
+    auto hatch = get("hatch");
+    auto ec = get("edgecolor", "edgecolors");
+    auto lw = get("linewidth", "linewidths");
+    auto ls = get("linestyle", "ls");
+    if (!hatch.is_none() && !hatch.cast<std::string>().empty()) {
+        plot::Color hc = hatchSrc;
+        if (!ec.is_none()) {
+            try {
+                auto es = ec.cast<std::string>();
+                if (es == "face") hc = hatchSrc;
+                else if (es == "none") hc = plot::Color::black();
+                else hc = parseColor(ec);
+            } catch (...) {
+                hc = parseColor(ec);  // sequence color spec
+            }
+        }
+        auto c = std::make_unique<plot::PolyCollection>(polys);
+        c->faceColors = {plot::Color{0, 0, 0, 0}};
+        c->edgeColors = {hc};
+        c->lineWidths = {0.0f};
+        c->hatch = hatch.cast<std::string>();
+        a.ax->addPlot(std::move(c));
+    }
+    if (!ec.is_none() || !lw.is_none()) {
+        auto c = std::make_unique<plot::PolyCollection>(std::move(polys));
+        c->faceColors = {plot::Color{0, 0, 0, 0}};
+        c->edgeColors = {!ec.is_none() ? parseColor(ec)
+                                      : plot::Color::black()};
+        c->lineWidths = {!lw.is_none()
+                             ? lw.cast<float>() * pt2px(*a.ax)
+                             : 0.8f * pt2px(*a.ax)};
+        if (!ls.is_none()) {
+            auto l = plot::lineStyleFromString(ls.cast<std::string>());
+            if (l) c->lineStyle = *l;
+        }
+        a.ax->addPlot(std::move(c));
+    }
 }
 
 PyAxes wrapAxes(const std::shared_ptr<PyFigure>& fig, plot::Axes* ax) {
@@ -7581,9 +8352,11 @@ PYBIND11_MODULE(volcanoplot, m) {
              },
              "Figure-level legend collecting all axes' handles.")
         .def("tight_layout", [](PyFigure& f) {
-                 f.fig().setTightLayout(true); })
+                 installLayoutEngine(f, py::str("tight"),
+                                     py::kwargs()); })
         .def("constrained_layout", [](PyFigure& f) {
-                 f.fig().setConstrainedLayout(true); })
+                 installLayoutEngine(f, py::str("constrained"),
+                                     py::kwargs()); })
         .def("subplots_adjust",
              [](PyFigure& f, float left, float bottom, float right,
                 float top, float wspace, float hspace) {
@@ -7749,46 +8522,69 @@ PYBIND11_MODULE(volcanoplot, m) {
              [](const std::shared_ptr<PyFigure>& f) {
                  return PyTitle{f, nullptr, PyTitle::Which::SupY};
              })
+        // mpl set_tight_layout/set_constrained_layout route through
+        // set_layout_engine, so the engine object stays observable.
         .def("set_tight_layout",
-             [](PyFigure& f, bool on) { f.fig().setTightLayout(on); },
+             [](PyFigure& f, py::object on) {
+                 installLayoutEngine(
+                     f,
+                     on.cast<bool>() ? py::object(py::str("tight"))
+                                     : py::none(),
+                     py::kwargs());
+             },
              py::arg("tight"))
         .def("get_tight_layout",
              [](const PyFigure& f) { return f.fig().tightLayout(); })
         .def("set_constrained_layout",
-             [](PyFigure& f, bool on) {
-                 f.fig().setConstrainedLayout(on);
+             [](PyFigure& f, py::object on) {
+                 installLayoutEngine(
+                     f,
+                     on.cast<bool>()
+                         ? py::object(py::str("constrained"))
+                         : py::none(),
+                     py::kwargs());
              },
              py::arg("constrained"))
         .def("get_constrained_layout",
              [](const PyFigure& f) {
                  return f.fig().constrainedLayout();
              })
-        // mpl fig.set_layout_engine('tight'|'constrained'|'none').
+        // mpl fig.set_layout_engine — accepts None, an engine name
+        // ('tight'|'compressed'|'constrained'|'none'), or a
+        // LayoutEngine object; kwargs update the engine's params.
         .def("set_layout_engine",
-             [](PyFigure& f, const py::object& engine) {
-                 std::string e =
-                     engine.is_none() ? "none"
-                     : engine.cast<std::string>();
-                 f.fig().setTightLayout(e == "tight");
-                 f.fig().setConstrainedLayout(e == "constrained");
-                 if (e != "none" && e != "tight" && e != "constrained")
-                     throw py::value_error(
-                         "unknown layout engine: " + e);
+             [](PyFigure& f, const py::object& engine,
+                const py::kwargs& kw) {
+                 installLayoutEngine(f, engine, kw);
              },
-             py::arg("engine") = py::none())
+             py::arg("layout") = py::none())
         .def("get_layout_engine",
-             [](const PyFigure& f) -> py::object {
-                 if (f.fig().tightLayout())
-                     return py::str("tight");
-                 if (f.fig().constrainedLayout())
-                     return py::str("constrained");
-                 return py::none();
-             })
+             [](const PyFigure& f) { return f.layoutEngine_; })
         .def("get_constrained_layout_pads",
-             [](const PyFigure&) {
-                 // mpl returns (w_pad, h_pad, wspace, hspace) in inches
-                 // — our constrained layout uses fixed defaults.
-                 return py::make_tuple(0.04167, 0.04167, 0.02, 0.02);
+             [](const PyFigure& f) {
+                 // mpl returns (w_pad, h_pad, wspace, hspace) in
+                 // inches — read them off the installed engine when
+                 // present, else mpl's defaults.
+                 float wpad = 0.04167f, hpad = 0.04167f;
+                 float ws = 0.02f, hs = 0.02f;
+                 if (!f.layoutEngine_.is_none()) {
+                     if (auto* e = f.layoutEngine_
+                             .cast<PyLayoutEngine*>()) {
+                         if (e->params.contains("w_pad") &&
+                             !e->params["w_pad"].is_none())
+                             wpad = e->params["w_pad"].cast<float>();
+                         if (e->params.contains("h_pad") &&
+                             !e->params["h_pad"].is_none())
+                             hpad = e->params["h_pad"].cast<float>();
+                         if (e->params.contains("wspace") &&
+                             !e->params["wspace"].is_none())
+                             ws = e->params["wspace"].cast<float>();
+                         if (e->params.contains("hspace") &&
+                             !e->params["hspace"].is_none())
+                             hs = e->params["hspace"].cast<float>();
+                     }
+                 }
+                 return py::make_tuple(wpad, hpad, ws, hs);
              })
         // mpl Figure artist state — figures are always visible and
         // above the canvas patch.
@@ -14205,24 +15001,67 @@ class LinearSegmentedColormap:
           [] { return plot::Colormap::availableNames(); });
 
     py::class_<plot::Path>(m, "Path")
-        .def(py::init([](const std::vector<std::pair<float,float>>& verts,
-                         const py::object& codes) {
+        .def(py::init([](const py::object& verts,
+                         const py::object& codes,
+                         int interpSteps, bool closed, bool readonly) {
                  std::vector<plot::Point2D> v;
-                 v.reserve(verts.size());
-                 for (auto& [x, y] : verts) v.push_back({x, y});
-                 if (codes.is_none()) return plot::Path(std::move(v));
-                 auto c = codes.cast<std::vector<uint8_t>>();
-                 std::vector<plot::Path::Code> cs;
-                 cs.reserve(c.size());
-                 for (auto b : c)
-                     cs.push_back(static_cast<plot::Path::Code>(b));
-                 return plot::Path(std::move(v), std::move(cs));
+                 if (py::isinstance<py::array>(verts)) {
+                     auto a = py::array_t<float,
+                         py::array::forcecast | py::array::c_style>::ensure(
+                         verts);
+                     if (!a) throw py::value_error("invalid vertices array");
+                     auto r = a.unchecked<2>();
+                     v.reserve(r.shape(0));
+                     for (ssize_t i = 0; i < r.shape(0); ++i)
+                         v.push_back({r(i, 0), r(i, 1)});
+                 } else {
+                     for (auto& [x, y] :
+                          verts.cast<std::vector<std::pair<float,float>>>())
+                         v.push_back({x, y});
+                 }
+                 if (!codes.is_none() && !v.empty()) {
+                     auto c = codes.cast<std::vector<uint8_t>>();
+                     if (c.size() != v.size())
+                         throw py::value_error(
+                             "'codes' must be a 1D list or array with the "
+                             "same length of 'vertices'");
+                     if (c[0] != plot::Path::MoveTo)
+                         throw py::value_error(
+                             "The first element of 'code' must be equal to "
+                             "'MOVETO'");
+                     std::vector<plot::Path::Code> cs;
+                     cs.reserve(c.size());
+                     for (auto b : c)
+                         cs.push_back(static_cast<plot::Path::Code>(b));
+                     return plot::Path(std::move(v), std::move(cs));
+                 }
+                 if (closed && !v.empty()) {
+                     plot::Path p(std::move(v));
+                     p.codes[0] = plot::Path::MoveTo;
+                     p.codes.back() = plot::Path::ClosePoly;
+                     return p;
+                 }
+                 return plot::Path(std::move(v));
              }),
-             py::arg("vertices"), py::arg("codes") = py::none())
-        .def_static("unit_circle", &plot::Path::unitCircle)
-        .def_static("unit_rectangle", &plot::Path::unitRectangle)
+             py::arg("vertices"), py::arg("codes") = py::none(),
+             py::arg("_interpolation_steps") = 1,
+             py::arg("closed") = false, py::arg("readonly") = false)
+        .def_static("unit_circle", [] { return mplCirclePath(false); })
+        .def_static("unit_circle_righthalf",
+                    [] { return mplCirclePath(true); })
+        .def_static("unit_rectangle",
+                    [] { return plot::Path::rectangle(0.0f, 0.0f,
+                                                      1.0f, 1.0f); })
         .def_static("unit_regular_polygon",
-                    &plot::Path::unitRegularPolygon, py::arg("n"))
+                    [](int n) { return mplPoly(n); },
+                    py::arg("numVertices"))
+        // mpl Path.unit_regular_star(n, innerCircle=0.5).
+        .def_static("unit_regular_star",
+                    [](int n, float inner) { return mplStar(n, inner); },
+                    py::arg("numVertices"), py::arg("innerCircle") = 0.5f)
+        .def_static("unit_regular_asterisk",
+                    &mplAsteriskPath, py::arg("numVertices"))
+        // Native spellings kept as aliases.
         .def_static("unit_star", &plot::Path::unitStar, py::arg("n"))
         .def_static("unit_asterisk", &plot::Path::unitAsterisk,
                     py::arg("n"))
@@ -14232,24 +15071,368 @@ class LinearSegmentedColormap:
         .def_static("rectangle", &plot::Path::rectangle,
                     py::arg("x"), py::arg("y"),
                     py::arg("w"), py::arg("h"))
-        .def_static("ellipse", &plot::Path::ellipse,
-                    py::arg("center"), py::arg("rx"), py::arg("ry"),
-                    py::arg("angle") = 0.0f)
-        .def("contains_point",
-             [](const plot::Path& p, std::pair<float,float> pt) {
-                 return p.containsPoint({pt.first, pt.second});
-             },
-             py::arg("point"))
-        .def_property_readonly("vertices",
+        // mpl Path.ellipse(center, width, height, angle=0) — center
+        // is a (x, y) pair; width/height are full extents.
+        .def_static("ellipse",
+                    [](std::pair<float,float> center, float w,
+                       float h, float angle) {
+                        return plot::Path::ellipse(
+                            {center.first, center.second},
+                            w * 0.5f, h * 0.5f, angle);
+                    },
+                    py::arg("center"), py::arg("width"),
+                    py::arg("height"), py::arg("angle") = 0.0f)
+        .def_static("arc",
+                    [](double t1, double t2, const py::object& n) {
+                        return mplArcPath(t1, t2,
+                            n.is_none() ? 0 : n.cast<int>(), false);
+                    },
+                    py::arg("theta1"), py::arg("theta2"),
+                    py::arg("n") = py::none())
+        .def_static("wedge",
+                    [](double t1, double t2, const py::object& n) {
+                        return mplArcPath(t1, t2,
+                            n.is_none() ? 0 : n.cast<int>(), true);
+                    },
+                    py::arg("theta1"), py::arg("theta2"),
+                    py::arg("n") = py::none())
+        .def_static("hatch",
+                    [](const py::object& pattern, float density) {
+                        if (pattern.is_none())
+                            return plot::Path();
+                        return hatchPathFor(
+                            pattern.cast<std::string>(),
+                            int(density));
+                    },
+                    py::arg("hatchpattern"), py::arg("density") = 6.0f)
+        .def_static("make_compound_path",
+                    [](const py::args& args) {
+                        plot::Path out;
+                        for (auto a : args) {
+                            plot::Path p = a.cast<plot::Path>();
+                            for (size_t i = 0; i < p.vertices.size(); ++i) {
+                                auto code = i < p.codes.size()
+                                    ? p.codes[i] : plot::Path::LineTo;
+                                if (code == plot::Path::Stop) continue;
+                                out.vertices.push_back(p.vertices[i]);
+                                out.codes.push_back(code);
+                            }
+                        }
+                        return out;
+                    })
+        .def("copy", [](const plot::Path& p) { return p; })
+        .def("deepcopy",
+             [](const plot::Path& p, const py::object& memo) { return p; },
+             py::arg("memo") = py::none())
+        .def("__len__", [](const plot::Path& p) {
+                 return p.vertices.size(); })
+        .def("__repr__",
              [](const plot::Path& p) {
-                 // mpl Path.vertices → (N, 2) float ndarray.
-                 py::array_t<float> a({p.vertices.size(), size_t(2)});
-                 auto r = a.mutable_unchecked<2>();
-                 for (size_t i = 0; i < p.vertices.size(); ++i) {
-                     r(i, 0) = p.vertices[i].x;
-                     r(i, 1) = p.vertices[i].y;
+                 return std::format("Path(array({} vertices), "
+                                    "array({} codes))",
+                                    p.vertices.size(), p.codes.size());
+             })
+        .def("__eq__",
+             [](const plot::Path& a, const plot::Path& b) {
+                 if (a.codes != b.codes ||
+                     a.vertices.size() != b.vertices.size())
+                     return false;
+                 for (size_t i = 0; i < a.vertices.size(); ++i)
+                     if (a.vertices[i].x != b.vertices[i].x ||
+                         a.vertices[i].y != b.vertices[i].y)
+                         return false;
+                 return true;
+             })
+        .def("transformed",
+             [](const plot::Path& p,
+                const std::shared_ptr<plot::Transform>& t) {
+                 return t ? p.transformed(*t) : p;
+             },
+             py::arg("transform"))
+        .def("contains_point",
+             [](const plot::Path& p, std::pair<float,float> pt,
+                const std::shared_ptr<plot::Transform>& t, float radius) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 plot::Point2D xy{pt.first, pt.second};
+                 if (q.containsPoint(xy)) return true;
+                 if (radius > 0.0f) {
+                     for (auto& [a, b] : pathSegs(q)) {
+                         plot::Point2D ab{b.x - a.x, b.y - a.y};
+                         float len2 = ab.x * ab.x + ab.y * ab.y;
+                         float u = len2 > 0 ? std::clamp(
+                             ((xy.x - a.x) * ab.x + (xy.y - a.y) * ab.y) /
+                                 len2, 0.0f, 1.0f) : 0.0f;
+                         float dx = xy.x - (a.x + u * ab.x);
+                         float dy = xy.y - (a.y + u * ab.y);
+                         if (dx * dx + dy * dy <= radius * radius)
+                             return true;
+                     }
                  }
-                 return a;
+                 return false;
+             },
+             py::arg("point"), py::arg("transform") = py::none(),
+             py::arg("radius") = 0.0f)
+        .def("contains_points",
+             [](const plot::Path& p, const py::object& pts,
+                const std::shared_ptr<plot::Transform>& t, float radius) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 auto arr = py::array_t<float,
+                     py::array::forcecast | py::array::c_style>::ensure(pts);
+                 if (!arr) throw py::value_error("invalid points array");
+                 auto r = arr.unchecked<2>();
+                 py::array_t<bool> out(r.shape(0));
+                 auto w = out.mutable_unchecked<1>();
+                 for (ssize_t i = 0; i < r.shape(0); ++i)
+                     w(i) = q.containsPoint({r(i, 0), r(i, 1)});
+                 return out;
+             },
+             py::arg("points"), py::arg("transform") = py::none(),
+             py::arg("radius") = 0.0f)
+        .def("contains_path",
+             [](const plot::Path& p, const plot::Path& other,
+                const std::shared_ptr<plot::Transform>& t) {
+                 plot::Path q = t ? other.transformed(*t) : other;
+                 for (auto& v : q.vertices)
+                     if (!p.containsPoint(v)) return false;
+                 return !q.vertices.empty();
+             },
+             py::arg("path"), py::arg("transform") = py::none())
+        .def("intersects_path",
+             [](const plot::Path& p, const plot::Path& other, bool filled) {
+                 return pathIntersects(p, other, filled);
+             },
+             py::arg("other"), py::arg("filled") = true)
+        .def("intersects_bbox",
+             [](const plot::Path& p, const PyBbox& b, bool filled) {
+                 auto rect = plot::Path::rectangle(
+                     float(b.xMin()), float(b.yMin()),
+                     float(b.xMax() - b.xMin()),
+                     float(b.yMax() - b.yMin()));
+                 return pathIntersects(p, rect, filled);
+             },
+             py::arg("bbox"), py::arg("filled") = true)
+        .def("get_extents",
+             [](const plot::Path& p,
+                const std::shared_ptr<plot::Transform>& t,
+                const py::kwargs& kw) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 if (q.vertices.empty()) return PyBbox::null();
+                 auto [mn, mx] = q.bounds();
+                 return PyBbox{mn.x, mn.y, mx.x, mx.y};
+             },
+             py::arg("transform") = py::none())
+        .def("to_polygons",
+             [](const plot::Path& p,
+                const std::shared_ptr<plot::Transform>& t,
+                float width, float height, bool closedOnly) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 py::list out;
+                 for (auto& sub : q.toPolylines()) {
+                     if (closedOnly && !sub.closed) continue;
+                     if (sub.points.empty()) continue;
+                     std::vector<plot::Point2D> pts = sub.points;
+                     if (width > 0 && height > 0) {
+                         std::vector<plot::Point2D> clip{
+                             {0, 0}, {width, 0},
+                             {width, height}, {0, height}};
+                         auto clipped = plot::clipPolylineToPolygon(
+                             pts, clip);
+                         if (clipped.empty()) continue;
+                         for (auto& c : clipped) {
+                             plot::Path tmp(std::move(c));
+                             out.append(pathVertsArray(tmp));
+                         }
+                         continue;
+                     }
+                     if (sub.closed) pts.push_back(pts.front());
+                     out.append(pathVertsArray(
+                         plot::Path(std::move(pts))));
+                 }
+                 return out;
+             },
+             py::arg("transform") = py::none(), py::arg("width") = 0,
+             py::arg("height") = 0, py::arg("closed_only") = true)
+        .def("iter_segments",
+             [](const plot::Path& p,
+                const std::shared_ptr<plot::Transform>& t,
+                bool simplify, const py::object& sketch) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 py::list out;
+                 for (size_t i = 0; i < q.vertices.size(); ++i) {
+                     py::tuple vert(2);
+                     vert[0] = q.vertices[i].x;
+                     vert[1] = q.vertices[i].y;
+                     out.append(py::make_tuple(
+                         vert,
+                         i < q.codes.size()
+                             ? int(q.codes[i])
+                             : int(plot::Path::LineTo)));
+                 }
+                 return py::iter(out);
+             },
+             py::arg("transform") = py::none(),
+             py::arg("simplify") = true, py::arg("sketch") = py::none())
+        .def("cleaned",
+             [](const plot::Path& p,
+                const std::shared_ptr<plot::Transform>& t,
+                bool removeNans, const py::object& clip,
+                bool simplify, bool curves, float strokeWidth,
+                bool snap, const py::object& sketch) {
+                 plot::Path q = t ? p.transformed(*t) : p;
+                 if (removeNans) {
+                     plot::Path c;
+                     for (size_t i = 0; i < q.vertices.size(); ++i) {
+                         auto& v = q.vertices[i];
+                         auto code = i < q.codes.size()
+                             ? q.codes[i] : plot::Path::LineTo;
+                         if (!std::isfinite(v.x) || !std::isfinite(v.y)) {
+                             if (!c.vertices.empty() &&
+                                 code != plot::Path::MoveTo)
+                                 c.vertices.push_back({0, 0}),
+                                 c.codes.push_back(plot::Path::Stop);
+                             continue;
+                         }
+                         if (!c.vertices.empty() &&
+                             c.codes.back() == plot::Path::Stop &&
+                             code != plot::Path::MoveTo)
+                             code = plot::Path::MoveTo;
+                         c.vertices.push_back(v);
+                         c.codes.push_back(code);
+                     }
+                     q = std::move(c);
+                 }
+                 if (!curves) {
+                     // Flatten curves to line segments.
+                     plot::Path f;
+                     for (auto& sub : q.toPolylines()) {
+                         if (sub.points.empty()) continue;
+                         f.moveTo(sub.points.front());
+                         for (size_t i = 1; i < sub.points.size(); ++i)
+                             f.lineTo(sub.points[i]);
+                         if (sub.closed) {
+                             f.vertices.push_back(sub.points.front());
+                             f.codes.push_back(plot::Path::ClosePoly);
+                         }
+                     }
+                     q = std::move(f);
+                 }
+                 return q;
+             },
+             py::arg("transform") = py::none(),
+             py::arg("remove_nans") = false,
+             py::arg("clip") = py::none(), py::arg("simplify") = false,
+             py::arg("curves") = false, py::arg("stroke_width") = 1.0f,
+             py::arg("snap") = false, py::arg("sketch") = py::none())
+        .def("interpolated",
+             [](const plot::Path& p, int steps) {
+                 if (steps <= 1) return p;
+                 plot::Path out;
+                 for (size_t i = 0; i < p.vertices.size(); ++i) {
+                     auto code = i < p.codes.size()
+                         ? p.codes[i] : plot::Path::LineTo;
+                     if (code == plot::Path::LineTo && i > 0) {
+                         auto a = p.vertices[i - 1], b = p.vertices[i];
+                         for (int s = 1; s <= steps; ++s) {
+                             float u = float(s) / steps;
+                             out.lineTo({a.x + u * (b.x - a.x),
+                                         a.y + u * (b.y - a.y)});
+                         }
+                         continue;
+                     }
+                     out.vertices.push_back(p.vertices[i]);
+                     out.codes.push_back(code);
+                 }
+                 return out;
+             },
+             py::arg("steps"))
+        .def("reversed",
+             [](const plot::Path& p) {
+                 plot::Path out;
+                 auto subs = p.toPolylines();
+                 for (auto& sub : subs) {
+                     std::reverse(sub.points.begin(), sub.points.end());
+                     if (sub.points.empty()) continue;
+                     out.moveTo(sub.points.front());
+                     for (size_t i = 1; i < sub.points.size(); ++i)
+                         out.lineTo(sub.points[i]);
+                     if (sub.closed) {
+                         out.vertices.push_back(sub.points.front());
+                         out.codes.push_back(plot::Path::ClosePoly);
+                     }
+                 }
+                 return out;
+             })
+        .def("clip_to_bbox",
+             [](const plot::Path& p, const PyBbox& b, bool inside) {
+                 std::vector<plot::Point2D> clip{
+                     {float(b.xMin()), float(b.yMin())},
+                     {float(b.xMax()), float(b.yMin())},
+                     {float(b.xMax()), float(b.yMax())},
+                     {float(b.xMin()), float(b.yMax())}};
+                 plot::Path out;
+                 for (auto& sub : p.toPolylines()) {
+                     for (auto& c :
+                          plot::clipPolylineToPolygon(sub.points, clip)) {
+                         if (c.empty()) continue;
+                         out.moveTo(c.front());
+                         for (size_t i = 1; i < c.size(); ++i)
+                             out.lineTo(c[i]);
+                         if (sub.closed) {
+                             out.vertices.push_back(c.front());
+                             out.codes.push_back(plot::Path::ClosePoly);
+                         }
+                     }
+                 }
+                 return out;
+             },
+             py::arg("bbox"), py::arg("inside") = true)
+        .def_property("vertices",
+             [](const plot::Path& p) { return pathVertsArray(p); },
+             [](plot::Path& p, const py::object& v) {
+                 auto arr = py::array_t<float,
+                     py::array::forcecast | py::array::c_style>::ensure(v);
+                 if (!arr) throw py::value_error("invalid vertices");
+                 auto r = arr.unchecked<2>();
+                 p.vertices.clear();
+                 for (ssize_t i = 0; i < r.shape(0); ++i)
+                     p.vertices.push_back({r(i, 0), r(i, 1)});
+                 if (p.codes.size() != p.vertices.size()) {
+                     p.codes.assign(p.vertices.size(), plot::Path::LineTo);
+                     if (!p.codes.empty())
+                         p.codes[0] = plot::Path::MoveTo;
+                 }
+             })
+        .def_property("codes",
+             [](const plot::Path& p) { return pathCodesArray(p); },
+             [](plot::Path& p, const py::object& c) {
+                 auto v = c.cast<std::vector<uint8_t>>();
+                 if (v.size() != p.vertices.size())
+                     throw py::value_error(
+                         "'codes' must match 'vertices' length");
+                 p.codes.clear();
+                 for (auto b : v)
+                     p.codes.push_back(
+                         static_cast<plot::Path::Code>(b));
+             })
+        .def_property_readonly("simplify_threshold",
+             [] { return 1.0 / 9.0; })
+        .def_property_readonly("should_simplify",
+             [](const plot::Path& p) {
+                 return !p.codes.empty() &&
+                        std::ranges::all_of(p.codes, [](auto c) {
+                            return c <= plot::Path::LineTo;
+                        });
+             })
+        .def_property_readonly("has_nonfinite",
+             [](const plot::Path& p) {
+                 return std::ranges::any_of(p.vertices, [](auto& v) {
+                     return !std::isfinite(v.x) || !std::isfinite(v.y);
+                 });
+             })
+        .def_property_readonly("readonly", [] { return false; })
+        .def_property_readonly("dimensions",
+             [](const plot::Path& p) {
+                 return p.vertices.empty() ? 0 : 2;
              });
     // mpl Path code constants (Path.MOVETO etc.).
     {
@@ -14260,9 +15443,271 @@ class LinearSegmentedColormap:
         pc.attr("CURVE3")   = py::int_((int)plot::Path::Curve3);
         pc.attr("CURVE4")   = py::int_((int)plot::Path::Curve4);
         pc.attr("CLOSEPOLY") = py::int_((int)plot::Path::ClosePoly);
+        {
+            py::dict nvc;
+            nvc[py::int_(0)] = 1;  // STOP
+            nvc[py::int_(1)] = 1;  // MOVETO
+            nvc[py::int_(2)] = 1;  // LINETO
+            nvc[py::int_(3)] = 2;  // CURVE3
+            nvc[py::int_(4)] = 3;  // CURVE4
+            nvc[py::int_(79)] = 1; // CLOSEPOLY
+            pc.attr("NUM_VERTICES_FOR_CODE") = nvc;
+        }
+        pc.attr("simplify_threshold") = 1.0 / 9.0;
+        try {
+            pc.attr("code_type") =
+                py::module_::import("numpy").attr("uint8");
+        } catch (...) {}
+    }
+    // mpl matplotlib.path submodule.
+    {
+        auto pathMod = m.def_submodule("path");
+        pathMod.attr("Path") = m.attr("Path");
     }
     // mpl re-exports Path inside matplotlib.transforms.
     m.attr("transforms").attr("Path") = m.attr("Path");
+
+    // mpl matplotlib.hatch submodule.
+    {
+        auto hm = m.def_submodule("hatch");
+        hm.attr("Path") = m.attr("Path");
+        py::class_<PyHatchPattern>(hm, "HatchPatternBase")
+            .def(py::init<>())
+            .def_readonly("num_vertices", &PyHatchPattern::numVertices)
+            .def("set_vertices_and_codes",
+                 &PyHatchPattern::setVerticesAndCodes,
+                 py::arg("vertices"), py::arg("codes"));
+        py::class_<PyHatchHorizontal, PyHatchPattern>
+            hH(hm, "HorizontalHatch");
+        hH.def(py::init<std::string, int>(),
+               py::arg("hatch"), py::arg("density"))
+          .def_readonly("num_lines", &PyHatchHorizontal::numLines);
+        py::class_<PyHatchVertical, PyHatchPattern>
+            hV(hm, "VerticalHatch");
+        hV.def(py::init<std::string, int>(),
+               py::arg("hatch"), py::arg("density"))
+          .def_readonly("num_lines", &PyHatchVertical::numLines);
+        py::class_<PyHatchNorthEast, PyHatchPattern>
+            hNE(hm, "NorthEastHatch");
+        hNE.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .def_readonly("num_lines", &PyHatchNorthEast::numLines);
+        py::class_<PyHatchSouthEast, PyHatchPattern>
+            hSE(hm, "SouthEastHatch");
+        hSE.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .def_readonly("num_lines", &PyHatchSouthEast::numLines);
+        py::class_<PyHatchShapes, PyHatchPattern>
+            hSh(hm, "Shapes");
+        hSh.def_readonly("num_rows", &PyHatchShapes::numRows)
+           .def_readonly("num_shapes", &PyHatchShapes::numShapes)
+           .def_readonly("size", &PyHatchShapes::size)
+           .def_readonly("filled", &PyHatchShapes::filled);
+        py::class_<PyHatchCircles, PyHatchShapes>
+            hCi(hm, "Circles");
+        hCi.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"));
+        py::class_<PyHatchSmallCircles, PyHatchCircles>
+            hSC(hm, "SmallCircles");
+        hSC.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .attr("size") = 0.2f;
+        py::class_<PyHatchLargeCircles, PyHatchCircles>
+            hLC(hm, "LargeCircles");
+        hLC.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .attr("size") = 0.35f;
+        py::class_<PyHatchSmallFilledCircles, PyHatchCircles>
+            hSF(hm, "SmallFilledCircles");
+        hSF.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .attr("size") = 0.1f;
+        hSF.attr("filled") = true;
+        py::class_<PyHatchStars, PyHatchShapes>
+            hSt(hm, "Stars");
+        hSt.def(py::init<std::string, int>(),
+                py::arg("hatch"), py::arg("density"))
+           .attr("size") = 1.0f / 3.0f;
+        hSt.attr("filled") = true;
+        hm.attr("_hatch_types") = py::make_tuple(
+            hH, hV, hNE, hSE, hSC, hLC, hSF, hSt);
+        hm.def("get_path",
+               [](const std::string& pattern, int density) {
+                   return hatchPathFor(pattern, density);
+               },
+               py::arg("hatchpattern"), py::arg("density") = 6);
+    }
+
+    // mpl matplotlib.layout_engine submodule.
+    {
+        auto le = m.def_submodule("layout_engine");
+        auto kwSet = [](PyLayoutEngine& e, const py::kwargs& kw) {
+            for (auto kv : kw) {
+                if (kv.second.is_none()) continue;
+                std::string k =
+                    py::str(kv.first).cast<std::string>();
+                e.params[py::str(k)] =
+                    py::reinterpret_borrow<py::object>(kv.second);
+            }
+        };
+        py::class_<PyLayoutEngine> eng(le, "LayoutEngine");
+        eng.def(py::init([](const py::kwargs& kw) {
+                    PyLayoutEngine e;
+                    for (auto kv : kw) {
+                        std::string k =
+                            py::str(kv.first).cast<std::string>();
+                        e.params[py::str(k)] =
+                            py::reinterpret_borrow<py::object>(
+                                kv.second);
+                    }
+                    return e;
+                }))
+           .def_property("adjust_compatible",
+                [](const PyLayoutEngine& e) {
+                    return e.adjustCompatible; },
+                [](PyLayoutEngine& e, bool v) {
+                    e.adjustCompatible = v; })
+           .def_property("colorbar_gridspec",
+                [](const PyLayoutEngine& e) {
+                    return e.colorbarGridspec; },
+                [](PyLayoutEngine& e, bool v) {
+                    e.colorbarGridspec = v; })
+           .def("get",
+                [](const PyLayoutEngine& e) {
+                    return py::dict(e.params);
+                })
+           .def("set",
+                [](PyLayoutEngine&, const py::kwargs&) {
+                    throw py::type_error(
+                        "cannot set params on a plain LayoutEngine");
+                })
+           .def("execute",
+                [](PyLayoutEngine& e, PyFigure& f) {
+                    std::string n = e.engineName();
+                    f.fig().setTightLayout(n == "tight");
+                    f.fig().setConstrainedLayout(
+                        n == "constrained");
+                    e.applyTo(f.fig());
+                },
+                py::arg("fig"))
+           .def_property_readonly("_engine_type",
+                [](const PyLayoutEngine& e) { return e.engineName(); });
+        py::class_<PyLayoutTight, PyLayoutEngine>
+            te(le, "TightLayoutEngine");
+        te.def(py::init([](const py::object& pad,
+                           const py::object& hPad,
+                           const py::object& wPad,
+                           const py::object& rect,
+                           const py::kwargs& kw) {
+                   PyLayoutTight e;
+                   if (!pad.is_none()) e.params["pad"] = pad;
+                   if (!hPad.is_none()) e.params["h_pad"] = hPad;
+                   if (!wPad.is_none()) e.params["w_pad"] = wPad;
+                   if (!rect.is_none()) e.params["rect"] = rect;
+                   for (auto kv : kw) {
+                       std::string k =
+                           py::str(kv.first).cast<std::string>();
+                       e.params[py::str(k)] =
+                           py::reinterpret_borrow<py::object>(
+                               kv.second);
+                   }
+                   return e;
+               }),
+               py::arg("pad") = py::none(),
+               py::arg("h_pad") = py::none(),
+               py::arg("w_pad") = py::none(),
+               py::arg("rect") = py::none())
+          .def("set", [kwSet](PyLayoutTight& e,
+                              const py::kwargs& kw) {
+                  kwSet(e, kw);
+              });
+        py::class_<PyLayoutConstrained, PyLayoutEngine>
+            ce(le, "ConstrainedLayoutEngine");
+        ce.def(py::init([](const py::object& hPad,
+                           const py::object& wPad,
+                           const py::object& hspace,
+                           const py::object& wspace,
+                           const py::object& rect,
+                           bool compress,
+                           const py::kwargs& kw) {
+                   PyLayoutConstrained e;
+                   if (!hPad.is_none()) e.params["h_pad"] = hPad;
+                   if (!wPad.is_none()) e.params["w_pad"] = wPad;
+                   if (!hspace.is_none()) e.params["hspace"] = hspace;
+                   if (!wspace.is_none()) e.params["wspace"] = wspace;
+                   if (!rect.is_none()) e.params["rect"] = rect;
+                   e.params["compress"] = compress;
+                   for (auto kv : kw) {
+                       std::string k =
+                           py::str(kv.first).cast<std::string>();
+                       e.params[py::str(k)] =
+                           py::reinterpret_borrow<py::object>(
+                               kv.second);
+                   }
+                   return e;
+               }),
+               py::arg("h_pad") = py::none(),
+               py::arg("w_pad") = py::none(),
+               py::arg("hspace") = py::none(),
+               py::arg("wspace") = py::none(),
+               py::arg("rect") = py::none(),
+               py::arg("compress") = false)
+          .def("set", [kwSet](PyLayoutConstrained& e,
+                              const py::kwargs& kw) {
+                  kwSet(e, kw);
+              });
+        py::class_<PyLayoutPlaceHolder, PyLayoutEngine>
+            ph(le, "PlaceHolderLayoutEngine");
+        ph.def(py::init([](const py::kwargs& kw) {
+               PyLayoutPlaceHolder e;
+               for (auto kv : kw) {
+                   std::string k =
+                       py::str(kv.first).cast<std::string>();
+                   e.params[py::str(k)] =
+                       py::reinterpret_borrow<py::object>(kv.second);
+               }
+               return e;
+           }));
+        // mpl do_constrained_layout(fig) — installs the constrained
+        // engine; returns None.
+        le.def("do_constrained_layout",
+               [](PyFigure& f) {
+                   installLayoutEngine(
+                       f, py::cast(PyLayoutConstrained{}),
+                       py::kwargs());
+               },
+               py::arg("fig"));
+        // mpl get_tight_layout_figure(fig, ...) — runs the tight
+        // engine and returns the figure.
+        le.def("get_tight_layout_figure",
+               [](py::object fig, const py::kwargs& kw) {
+                   installLayoutEngine(fig.cast<PyFigure&>(),
+                                       py::cast(PyLayoutTight{}),
+                                       kw);
+                   return fig;
+               },
+               py::arg("fig"));
+        // mpl get_subplotspec_list(ax_list, grid_spec=None) — the
+        // SubplotSpec of each axes (None when not grid-placed).
+        le.def("get_subplotspec_list",
+               [](const py::object& axList,
+                  const py::object& gridSpec) {
+                   (void)gridSpec;
+                   py::list out;
+                   if (axList.is_none()) return out;
+                   for (auto item : axList) {
+                       py::object ss = py::none();
+                       try {
+                           ss = item.attr("get_subplotspec")();
+                       } catch (...) {
+                       }
+                       out.append(ss);
+                   }
+                   return out;
+               },
+               py::arg("ax_list"),
+               py::arg("grid_spec") = py::none());
+    }
 
     // ── mpl Patch ────────────────────────────────────────────────
     py::class_<PyPatch>(m, "Patch")
@@ -16808,8 +18253,14 @@ del _vp_sp_abc
                      ? f.props_["linewidth"].cast<float>() : 1.0f;
              })
         .def("set_boxstyle",
-             [](PyLegendFrame& f, const std::string& s) {
-                 f.ls().fancyBox = s != "square";
+             [](PyLegendFrame& f, const py::object& s) {
+                 // mpl accepts boxstyle strings or BoxStyle instances.
+                 std::string name;
+                 if (py::isinstance<PyBoxStyle>(s))
+                     name = "custom";
+                 else
+                     name = s.cast<std::string>();
+                 f.ls().fancyBox = name != "square";
                  f.touch();
              }, py::arg("boxstyle"))
         .def("set_figure", [](PyLegendFrame&) {})
@@ -17330,10 +18781,16 @@ del _vp_lg_types
         py::arg("theta1"), py::arg("theta2"));
     patches.def("FancyBboxPatch",
         [](std::pair<float,float> xy, float w, float h,
-           const std::string& boxstyle, float mutation_scale,
+           const py::object& boxstyle, float mutation_scale,
            const py::kwargs& kw) {
             plot::Patch p;
-            if (auto spec = plot::parseBoxStyle(boxstyle)) {
+            std::optional<plot::BoxStyleSpec> spec;
+            if (py::isinstance<PyBoxStyle>(boxstyle))
+                spec = boxstyle.cast<PyBoxStyle>().spec;
+            else if (auto s = plot::parseBoxStyle(
+                         boxstyle.cast<std::string>()))
+                spec = *s;
+            if (spec) {
                 auto s = *spec;
                 s.mutationSize *= mutation_scale;
                 p = plot::patch::FancyBboxPatch(xy.first, xy.second,
@@ -17349,17 +18806,67 @@ del _vp_lg_types
         py::arg("xy"), py::arg("width"), py::arg("height"),
         py::arg("boxstyle") = "round", py::arg("mutation_scale") = 1.0f);
     patches.def("FancyArrowPatch",
-        [](std::pair<float,float> a, std::pair<float,float> b,
-           float mutation_scale, const py::kwargs& kw) {
+        [](const py::object& posA, const py::object& posB,
+           const py::object& path, const py::object& arrowstyle,
+           const py::object& connectionstyle, const py::object& patchA,
+           const py::object& patchB, float shrinkA, float shrinkB,
+           float mutation_scale, const py::object& mutation_aspect,
+           float dpi_cor, const py::kwargs& kw) {
+            auto pt = [](const py::object& o) {
+                auto v = o.cast<std::pair<float,float>>();
+                return plot::Point2D{v.first, v.second};
+            };
+            plot::Point2D a{0, 0}, b{0, 0};
+            bool hasAB = false;
+            if (!posA.is_none() && !posB.is_none()) {
+                a = pt(posA); b = pt(posB); hasAB = true;
+            } else if (!path.is_none()) {
+                auto pathObj = path.cast<plot::Path>();
+                if (pathObj.vertices.size() >= 2) {
+                    a = pathObj.vertices.front();
+                    b = pathObj.vertices.back();
+                    hasAB = true;
+                }
+            }
+            if (!hasAB)
+                throw py::value_error(
+                    "FancyArrowPatch requires posA/posB or path");
+            // shrinkA/B are in points → data approx via mutation scale.
+            float shrink = (shrinkA + shrinkB) * 0.5f;
+            float len = std::hypot(b.x - a.x, b.y - a.y);
+            if (len > 0 && shrink != 0) {
+                float ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+                a.x += ux * shrinkA * mutation_scale * 0.02f;
+                a.y += uy * shrinkA * mutation_scale * 0.02f;
+                b.x -= ux * shrinkB * mutation_scale * 0.02f;
+                b.y -= uy * shrinkB * mutation_scale * 0.02f;
+            }
+            // arrowstyle: '-|>' (filled head), '-[' (bracket), '-'
+            // (line only), '<|-|>' etc. — bracket styles draw a thin
+            // head; ArrowStyle objects resolve to their name.
+            std::string as = "-|>";
+            if (!arrowstyle.is_none()) {
+                if (py::isinstance<PyArrowStyle>(arrowstyle))
+                    as = arrowstyle.cast<PyArrowStyle>().name;
+                else
+                    as = arrowstyle.cast<std::string>();
+            }
+            bool headless = as == "-" || as == "Curve";
             auto p = plot::patch::FancyArrowPatch(
-                {a.first, a.second}, {b.first, b.second},
-                0.2f * mutation_scale, 0.4f * mutation_scale);
+                a, b, headless ? 0.0f : 0.2f * mutation_scale,
+                headless ? 0.0f : 0.4f * mutation_scale);
             applyPatchStyle(p, kw);
             PyPatch pp; pp.spec = std::move(p);
             return pp;
         },
-        py::arg("posA"), py::arg("posB"),
-        py::arg("mutation_scale") = 1.0f);
+        py::arg("posA"), py::arg("posB"), py::arg("path") = py::none(),
+        py::arg("arrowstyle") = py::str("simple"),
+        py::arg("connectionstyle") = py::str("arc3"),
+        py::arg("patchA") = py::none(), py::arg("patchB") = py::none(),
+        py::arg("shrinkA") = 2.0f, py::arg("shrinkB") = 2.0f,
+        py::arg("mutation_scale") = 1.0f,
+        py::arg("mutation_aspect") = py::none(),
+        py::arg("dpi_cor") = 1.0f);
     patches.def("PathPatch",
         [](const plot::Path& path, const py::kwargs& kw) {
             auto p = plot::patch::PathPatch(path);
@@ -17379,6 +18886,514 @@ del _vp_lg_types
         },
         py::arg("x"), py::arg("y"), py::arg("dx"), py::arg("dy"),
         py::arg("width") = 0.1f);
+
+    // ── mpl patch classes beyond the basic shapes ──
+    patches.attr("Patch") = m.attr("Patch");
+    patches.attr("Path") = m.attr("Path");
+    patches.attr("Affine2D") = m.attr("transforms").attr("Affine2D");
+    patches.attr("transforms") = m.attr("transforms");
+    patches.def("RegularPolygon",
+        [](std::pair<float,float> xy, int n, float radius,
+           float orientation, const py::kwargs& kw) {
+            // mpl orientation is in radians from the x axis.
+            auto p = plot::patch::PathPatch(
+                plot::Path::unitRegularPolygon(n).transformed(
+                    plot::Affine2D::translate(xy.first, xy.second)
+                        .concat(plot::Affine2D::scale(radius))
+                        .concat(plot::Affine2D::rotate(orientation))));
+            applyPatchStyle(p, kw);
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("xy"), py::arg("numVertices"), py::arg("radius") = 5.0f,
+        py::arg("orientation") = 0.0f);
+    patches.def("CirclePolygon",
+        [](std::pair<float,float> xy, float radius, int resolution,
+           const py::kwargs& kw) {
+            auto p = plot::patch::PathPatch(
+                plot::Path::unitRegularPolygon(std::max(resolution, 3))
+                    .transformed(
+                        plot::Affine2D::translate(xy.first, xy.second)
+                            .concat(plot::Affine2D::scale(radius))));
+            applyPatchStyle(p, kw);
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("xy"), py::arg("radius") = 5.0f,
+        py::arg("resolution") = 20);
+    patches.def("Arc",
+        [](std::pair<float,float> xy, float w, float h, float angle,
+           float t1, float t2, const py::kwargs& kw) {
+            plot::Path path;
+            constexpr float kRad = 0.017453292519943295f;
+            float rot = angle * kRad, cr = std::cos(rot), sr = std::sin(rot);
+            int n = std::max(16, int(std::abs(t2 - t1) / 4.0f));
+            for (int i = 0; i <= n; ++i) {
+                float t = (t1 + (t2 - t1) * float(i) / n) * kRad;
+                float x = w * 0.5f * std::cos(t), y = h * 0.5f * std::sin(t);
+                plot::Point2D q{xy.first + x * cr - y * sr,
+                                xy.second + x * sr + y * cr};
+                if (i) path.lineTo(q); else path.moveTo(q);
+            }
+            auto p = plot::patch::PathPatch(std::move(path));
+            p.style.face.a = 0;  // mpl Arc is always unfilled
+            applyPatchStyle(p, kw);
+            p.style.face.a = 0;
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("xy"), py::arg("width"), py::arg("height"),
+        py::arg("angle") = 0.0f, py::arg("theta1") = 0.0f,
+        py::arg("theta2") = 360.0f);
+    patches.def("Annulus",
+        [](std::pair<float,float> xy, float r, float width,
+           float angle, const py::kwargs& kw) {
+            (void)angle;  // circular ring — rotation is invisible
+            float ro = r + width * 0.5f, ri = r - width * 0.5f;
+            if (ri < 0) ri = 0;
+            plot::Path path;
+            constexpr int N = 96;
+            constexpr float kPi = 3.14159265358979323846f;
+            for (int i = 0; i <= N; ++i) {
+                float t = 2 * kPi * float(i) / N;
+                plot::Point2D q{xy.first + ro * std::cos(t),
+                                xy.second + ro * std::sin(t)};
+                if (i) path.lineTo(q); else path.moveTo(q);
+            }
+            for (int i = N; i >= 0; --i) {
+                float t = 2 * kPi * float(i) / N;
+                path.lineTo({xy.first + ri * std::cos(t),
+                             xy.second + ri * std::sin(t)});
+            }
+            path.close();
+            auto p = plot::patch::PathPatch(std::move(path));
+            applyPatchStyle(p, kw);
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("xy"), py::arg("r"), py::arg("width"),
+        py::arg("angle") = 0.0f);
+    patches.def("StepPatch",
+        [](std::vector<float> values, std::vector<float> edges,
+           const std::string& orientation, const py::object& baseline,
+           const py::kwargs& kw) {
+            if (edges.size() != values.size() + 1)
+                throw py::value_error(std::format(
+                    "Size mismatch between \"values\" and \"edges\". "
+                    "Expected len(values) + 1 == len(edges), but "
+                    "len(values) = {} and len(edges) = {}",
+                    values.size(), edges.size()));
+            plot::Path path;
+            bool horiz = orientation == "horizontal";
+            auto vert = [&](float a, float b, bool move) {
+                if (move) path.moveTo(horiz ? plot::Point2D{b, a}
+                                            : plot::Point2D{a, b});
+                else     path.lineTo(horiz ? plot::Point2D{b, a}
+                                           : plot::Point2D{a, b});
+            };
+            const size_t n = values.size();
+            if (n) {
+                // mpl _update_path: x = repeat(edges, 2),
+                // y = repeat(values, 2) with baseline padding.
+                bool arrBase = !baseline.is_none() &&
+                               PySequence_Check(baseline.ptr());
+                std::vector<float> base;
+                if (arrBase) base = toFloats(baseline);
+                float sb = (!baseline.is_none() && !arrBase)
+                               ? baseline.cast<float>() : 0.0f;
+                bool first = true;
+                for (size_t i = 0; i < n; ++i) {
+                    if (first) {
+                        if (baseline.is_none())
+                            vert(edges[i], values[i], true);
+                        else if (arrBase)
+                            vert(edges[i], base[i], true);
+                        else
+                            vert(edges[i], sb, true);
+                        vert(edges[i], values[i], false);
+                        first = false;
+                    }
+                    vert(edges[i + 1], values[i], false);
+                    if (i + 1 < n) vert(edges[i + 1], values[i + 1], false);
+                }
+                if (baseline.is_none())
+                    vert(edges[n], values[n - 1], false);
+                else if (!arrBase)
+                    vert(edges[n], sb, false);
+                else {
+                    // baseline array: walk back along the base edge.
+                    for (size_t i = n; i-- > 0;) {
+                        vert(edges[i + 1], base[i], false);
+                        vert(edges[i], base[i], false);
+                    }
+                    path.close();
+                }
+            }
+            auto p = plot::patch::PathPatch(std::move(path));
+            applyPatchStyle(p, kw);
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("values"), py::arg("edges"),
+        py::arg("orientation") = "vertical",
+        py::arg("baseline") = py::float_(0.0));
+    patches.def("FancyArrow",
+        [](float x, float y, float dx, float dy, float width,
+           bool length_includes_head, const py::object& head_width,
+           const py::object& head_length, const std::string& shape,
+           float overhang, bool head_starts_at_zero,
+           const py::kwargs& kw) {
+            // mpl FancyArrow: shaft rect + head triangle in data coords.
+            float len = std::hypot(dx, dy);
+            plot::Path path;
+            if (len > 0) {
+                float ux = dx / len, uy = dy / len;
+                float px = -uy, py = ux;  // perpendicular
+                float hw = head_width.is_none()
+                               ? 3.0f * width : head_width.cast<float>();
+                float hl = !head_length.is_none()
+                               ? head_length.cast<float>()
+                               : 1.5f * (length_includes_head
+                                             ? hw : hw + width);
+                float sl = length_includes_head ? len : len - hl;
+                // head_starts_at_zero: head's tail sits at the origin.
+                float hx = head_starts_at_zero ? -hl : 0.0f;
+                float hwL = shape == "left"  ? hw / 2 :
+                            shape == "right" ? 0.0f    : hw / 2;
+                float hwR = shape == "right" ? hw / 2 :
+                            shape == "left"  ? 0.0f    : hw / 2;
+                auto P = [&](float s, float t) {
+                    return plot::Point2D{x + ux * s + px * t,
+                                         y + uy * s + py * t};
+                };
+                path.moveTo(P(0, -width / 2));
+                path.lineTo(P(sl, -width / 2));
+                path.lineTo(P(sl + hx - overhang * hl, -hwL));
+                path.lineTo(P(length_includes_head ? len + hx
+                                                   : len, 0));
+                path.lineTo(P(sl + hx - overhang * hl, hwR));
+                path.lineTo(P(sl, width / 2));
+                path.lineTo(P(0, width / 2));
+                path.close();
+            }
+            auto p = plot::patch::PathPatch(std::move(path));
+            applyPatchStyle(p, kw);
+            PyPatch pp; pp.spec = std::move(p);
+            return pp;
+        },
+        py::arg("x"), py::arg("y"), py::arg("dx"), py::arg("dy"),
+        py::arg("width") = 0.001f,
+        py::arg("length_includes_head") = false,
+        py::arg("head_width") = py::none(),
+        py::arg("head_length") = py::none(),
+        py::arg("shape") = "full", py::arg("overhang") = 0.0f,
+        py::arg("head_starts_at_zero") = false);
+    patches.def("Shadow",
+        [](PyPatch& src, float ox, float oy, float shade,
+           const py::kwargs& kw) {
+            if (shade < 0.0f || shade > 1.0f)
+                throw py::value_error(
+                    "shade must be between 0 and 1.");
+            PyPatch pp;
+            pp.spec = src.spec;
+            // mpl: face color darkened toward black by `shade`.
+            pp.spec.style.face.r *= 1.0f - shade;
+            pp.spec.style.face.g *= 1.0f - shade;
+            pp.spec.style.face.b *= 1.0f - shade;
+            pp.ptOffset = std::pair{ox, oy};
+            applyPatchStyle(pp.spec, kw);
+            return pp;
+        },
+        py::arg("patch"), py::arg("ox"), py::arg("oy"),
+        py::arg("shade") = 0.7f);
+    patches.def("ConnectionPatch",
+        [](std::pair<float,float> xyA, std::pair<float,float> xyB,
+           const std::string& coordsA, const py::object& coordsB,
+           const py::object& axesA, const py::object& axesB,
+           const py::object& arrowstyle, const py::object& connectionstyle,
+           const py::object& patchA, const py::object& patchB,
+           float shrinkA, float shrinkB, float mutation_scale,
+           const py::object& mutation_aspect, bool clip_on,
+           const py::kwargs& kw) {
+            PyPatch pp;
+            auto& c = pp.conn.emplace();
+            c.a = {xyA.first, xyA.second};
+            c.b = {xyB.first, xyB.second};
+            c.coordsA = coordsA;
+            c.coordsB = coordsB.is_none() ? coordsA
+                                        : coordsB.cast<std::string>();
+            c.shrinkA = shrinkA; c.shrinkB = shrinkB;
+            c.mutationScale = mutation_scale;
+            applyPatchStyle(pp.spec, kw);
+            return pp;
+        },
+        py::arg("xyA"), py::arg("xyB"), py::arg("coordsA"),
+        py::arg("coordsB") = py::none(),
+        py::arg("axesA") = py::none(), py::arg("axesB") = py::none(),
+        py::arg("arrowstyle") = py::str("-"),
+        py::arg("connectionstyle") = py::str("arc3"),
+        py::arg("patchA") = py::none(), py::arg("patchB") = py::none(),
+        py::arg("shrinkA") = 0.0f, py::arg("shrinkB") = 0.0f,
+        py::arg("mutation_scale") = 10.0f,
+        py::arg("mutation_aspect") = py::none(),
+        py::arg("clip_on") = false);
+    // mpl helper functions.
+    patches.def("get_cos_sin",
+        [](float x0, float y0, float x1, float y1) {
+            float dx = x1 - x0, dy = y1 - y0;
+            float d = std::hypot(dx, dy);
+            if (d == 0) return std::make_tuple(0.0f, 0.0f, dx, dy);
+            return std::make_tuple(dx / d, dy / d, dx, dy);
+        },
+        py::arg("x0"), py::arg("y0"), py::arg("x1"), py::arg("y1"));
+    patches.def("inside_circle",
+        [](float x, float y, float r) {
+            float cx = 0.0f, cy = 0.0f;
+            if (x * x + y * y < r * r) { cx = x; cy = y; }
+            else {
+                float d = std::hypot(x, y);
+                cx = r * x / d; cy = r * y / d;
+            }
+            return std::pair{cx, cy};
+        },
+        py::arg("x"), py::arg("y"), py::arg("r"));
+    patches.def("get_intersection",
+        [](float x1, float y1, float x2, float y2,
+           float x3, float y3, float x4, float y4) -> py::object {
+            float den = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+            if (den == 0) return py::none();
+            float nx = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / den;
+            return py::cast(std::pair{x1 + nx * (x2 - x1),
+                                      y1 + nx * (y2 - y1)});
+        },
+        py::arg("x1"), py::arg("y1"), py::arg("x2"), py::arg("y2"),
+        py::arg("x3"), py::arg("y3"), py::arg("x4"), py::arg("y4"));
+    patches.def("get_parallels",
+        [](float x0, float y0, float x1, float y1, float width) {
+            float dx = x1 - x0, dy = y1 - y0;
+            float d = std::hypot(dx, dy);
+            float nx = d ? -dy / d * width / 2 : 0.0f;
+            float ny = d ?  dx / d * width / 2 : 0.0f;
+            return std::make_tuple(x0 + nx, y0 + ny, x1 + nx, y1 + ny,
+                                   x1 - nx, y1 - ny, x0 - nx, y0 - ny);
+        },
+        py::arg("x0"), py::arg("y0"), py::arg("x1"), py::arg("y1"),
+        py::arg("width"));
+    patches.def("split_path_inout",
+        [](const plot::Path& path,
+           const std::vector<std::pair<float,float>>& polygon) {
+            // mpl splits a path into inside/outside segments against a
+            // closed polygon — return (inside_vertices, outside_vertices)
+            // as flattened polylines.
+            std::vector<plot::Point2D> ringVerts;
+            ringVerts.reserve(polygon.size());
+            for (auto& [x, y] : polygon) ringVerts.push_back({x, y});
+            plot::Path ring(std::move(ringVerts));
+            py::list in, out;
+            for (auto& sub : path.toPolylines()) {
+                std::vector<plot::Point2D> cur;
+                bool curIn = false;
+                bool started = false;
+                for (auto& q : sub.points) {
+                    bool inside = ring.containsPoint(q);
+                    if (!started) { curIn = inside; started = true; }
+                    if (inside != curIn) {
+                        (curIn ? in : out).append(py::cast(cur));
+                        cur.clear(); curIn = inside;
+                    }
+                    cur.push_back(q);
+                }
+                (curIn ? in : out).append(py::cast(cur));
+            }
+            return std::pair{in, out};
+        },
+        py::arg("path"), py::arg("polygon"));
+    patches.def("bbox_artist",
+        [](const py::object& artist, const py::object& renderer,
+           const py::kwargs& props) {
+            // mpl draws a FancyBboxPatch behind the artist's extent —
+            // headless: no-op (the artist itself renders the bbox).
+        },
+        py::arg("artist"), py::arg("renderer"));
+    patches.def("draw_bbox",
+        [](const py::object& bbox, const py::object& renderer,
+           const std::string& boxstyle, const py::kwargs& kwargs) {
+            // Debug aid in mpl — headless no-op.
+        },
+        py::arg("bbox"), py::arg("renderer"),
+        py::arg("boxstyle") = "round");
+    auto nonIntersect =
+        py::register_exception<PyNonIntersectingPath>(patches,
+                                                      "NonIntersectingPathException");
+
+    // mpl BoxStyle family — nested classes under patches.BoxStyle,
+    // each instance carrying a parsed BoxStyleSpec usable anywhere a
+    // boxstyle string is accepted.
+    {
+        using K = plot::BoxStyleSpec::Kind;
+        py::class_<PyBoxStyle> bs(patches, "BoxStyle");
+        // mpl BoxStyle('round', pad=0.3) — factory dispatching on the
+        // style name via _style_list; kwargs become ctor params.
+        bs.def(py::init([](const std::string& stylename,
+                           const py::kwargs& kw) {
+            PyBoxStyle b;
+            std::string spec = stylename;
+            if (kw) {
+                for (auto kv : kw) {
+                    std::string k =
+                        py::str(kv.first).cast<std::string>();
+                    spec += std::format(",{}={}", k,
+                        py::str(py::reinterpret_borrow<py::object>(
+                            kv.second)).cast<std::string>());
+                }
+            }
+            if (auto s = plot::parseBoxStyle(spec)) b.spec = *s;
+            else throw py::value_error(
+                "Unknown boxstyle: " + stylename);
+            return b;
+        }), py::arg("stylename"));
+        // Registered under private module names (patches.Circle is
+        // already the patch ctor) then aliased as BoxStyle attributes.
+        auto mk = [&](auto* tag, const char* name,
+                      const char* arg2, float arg2def) {
+            using T = std::remove_pointer_t<decltype(tag)>;
+            py::class_<T, PyBoxStyle> sub(
+                m, ("_BoxStyle" + std::string(name)).c_str());
+            sub.def(py::init([](float pad, float p2) {
+                    T b; b.spec.pad = pad;
+                    if (p2 >= 0) {
+                        if (b.spec.kind == K::Round ||
+                            b.spec.kind == K::Round4)
+                            b.spec.roundingSize = p2;
+                        else if (b.spec.kind == K::Sawtooth)
+                            b.spec.toothSize = p2;
+                    }
+                    return b;
+                }),
+                py::arg("pad") = 0.3f, py::arg(arg2) = arg2def);
+            return sub;
+        };
+        bs.attr("Square") = mk((PyBoxStyleT<K::Square>*)nullptr, "Square",
+                               "pad", 0.3f);
+        bs.attr("Circle") = mk((PyBoxStyleT<K::Circle>*)nullptr, "Circle",
+                               "pad", 0.3f);
+        bs.attr("Ellipse") = mk((PyBoxStyleT<K::Ellipse>*)nullptr, "Ellipse",
+                                "pad", 0.3f);
+        bs.attr("LArrow") = mk((PyBoxStyleT<K::LArrow>*)nullptr, "LArrow",
+                               "pad", 0.3f);
+        bs.attr("RArrow") = mk((PyBoxStyleT<K::RArrow>*)nullptr, "RArrow",
+                               "pad", 0.3f);
+        bs.attr("DArrow") = mk((PyBoxStyleT<K::DArrow>*)nullptr, "DArrow",
+                               "pad", 0.3f);
+        bs.attr("Round") = mk((PyBoxStyleT<K::Round>*)nullptr, "Round",
+                              "rounding_size", -1.0f);
+        bs.attr("Round4") = mk((PyBoxStyleT<K::Round4>*)nullptr, "Round4",
+                               "rounding_size", -1.0f);
+        bs.attr("Sawtooth") = mk((PyBoxStyleT<K::Sawtooth>*)nullptr,
+                                 "Sawtooth", "tooth_size", -1.0f);
+        bs.attr("Roundtooth") = mk((PyBoxStyleT<K::Roundtooth>*)nullptr,
+                                   "Roundtooth", "tooth_size", -1.0f);
+        // mpl: BoxStyle objects render via mutate_size/mutation_aspect
+        // — expose the parsed spec for introspection.
+        bs.def_property_readonly("pad",
+                                 [](const PyBoxStyle& b) {
+                                     return b.spec.pad;
+                                 });
+    }
+    // mpl ArrowStyle — nested classes; instances carry the style name
+    // + params accepted as arrowstyle=.
+    {
+        py::class_<PyArrowStyle> as(patches, "ArrowStyle");
+        // mpl ArrowStyle('-|>', head_length=...) — factory on the
+        // stylename via _style_list.
+        as.def(py::init([](const std::string& stylename,
+                           const py::kwargs& kw) {
+            static const std::set<std::string> valid = {
+                "-", "<-", "->", "<->", "<|-", "-|>", "<|-|>",
+                "]-", "-[", "]-[", "|-|", "]->", "<-[",
+                "simple", "fancy", "wedge"};
+            if (!valid.contains(stylename))
+                throw py::value_error(
+                    "Unknown arrowstyle: " + stylename);
+            PyArrowStyle s; s.name = stylename;
+            if (kw) s.params = kw;
+            return s;
+        }), py::arg("stylename"));
+        static constexpr const char* names[] = {
+            "Curve", "CurveA", "CurveB", "CurveAB", "CurveFilledA",
+            "CurveFilledB", "CurveFilledAB", "BracketA", "BracketB",
+            "BracketAB", "BarAB", "BracketCurve", "CurveBracket",
+            "Simple", "Fancy", "Wedge"};
+        auto mk = [&](auto* tag, const char* name) {
+            using T = std::remove_pointer_t<decltype(tag)>;
+            py::class_<T, PyArrowStyle> sub(
+                m, ("_ArrowStyle" + std::string(name)).c_str());
+            sub.def(py::init([name](const py::kwargs& kw) {
+                    T s; s.name = name;
+                    if (kw) s.params = kw;
+                    return s;
+                }));
+            return sub;
+        };
+        as.attr("Curve")   = mk((PyArrowStyleT<0>*)nullptr, names[0]);
+        as.attr("CurveA")  = mk((PyArrowStyleT<1>*)nullptr, names[1]);
+        as.attr("CurveB")  = mk((PyArrowStyleT<2>*)nullptr, names[2]);
+        as.attr("CurveAB") = mk((PyArrowStyleT<3>*)nullptr, names[3]);
+        as.attr("CurveFilledA")  = mk((PyArrowStyleT<4>*)nullptr, names[4]);
+        as.attr("CurveFilledB")  = mk((PyArrowStyleT<5>*)nullptr, names[5]);
+        as.attr("CurveFilledAB") = mk((PyArrowStyleT<6>*)nullptr, names[6]);
+        as.attr("BracketA")  = mk((PyArrowStyleT<7>*)nullptr, names[7]);
+        as.attr("BracketB")  = mk((PyArrowStyleT<8>*)nullptr, names[8]);
+        as.attr("BracketAB") = mk((PyArrowStyleT<9>*)nullptr, names[9]);
+        as.attr("BarAB") = mk((PyArrowStyleT<10>*)nullptr, names[10]);
+        as.attr("BracketCurve") = mk((PyArrowStyleT<11>*)nullptr, names[11]);
+        as.attr("CurveBracket") = mk((PyArrowStyleT<12>*)nullptr, names[12]);
+        as.attr("Simple") = mk((PyArrowStyleT<13>*)nullptr, names[13]);
+        as.attr("Fancy")  = mk((PyArrowStyleT<14>*)nullptr, names[14]);
+        as.attr("Wedge")  = mk((PyArrowStyleT<15>*)nullptr, names[15]);
+    }
+    // mpl ConnectionStyle — Arc3/Angle3/Angle/Arc/Bar.
+    {
+        py::class_<PyConnectionStyle> cs(patches, "ConnectionStyle");
+        // mpl ConnectionStyle('arc3', rad=...) — factory on the
+        // stylename via _style_list.
+        cs.def(py::init([](const std::string& stylename,
+                           const py::kwargs& kw) {
+            static const std::set<std::string> valid = {
+                "arc3", "angle3", "angle", "arc", "bar"};
+            if (!valid.contains(stylename))
+                throw py::value_error(
+                    "Unknown connectionstyle: " + stylename);
+            PyConnectionStyle s; s.name = stylename;
+            if (kw) s.params = kw;
+            return s;
+        }), py::arg("stylename"));
+        auto mk = [&](auto* tag, const char* name) {
+            using T = std::remove_pointer_t<decltype(tag)>;
+            py::class_<T, PyConnectionStyle> sub(
+                m, ("_ConnectionStyle" + std::string(name)).c_str());
+            sub.def(py::init([name](const py::kwargs& kw) {
+                    T s; s.name = name;
+                    if (kw) s.params = kw;
+                    return s;
+                }));
+            return sub;
+        };
+        cs.attr("Arc3")   = mk((PyConnectionStyleT<0>*)nullptr, "Arc3");
+        cs.attr("Angle3") = mk((PyConnectionStyleT<1>*)nullptr, "Angle3");
+        cs.attr("Angle")  = mk((PyConnectionStyleT<2>*)nullptr, "Angle");
+        cs.attr("Arc")    = mk((PyConnectionStyleT<3>*)nullptr, "Arc");
+        cs.attr("Bar")    = mk((PyConnectionStyleT<4>*)nullptr, "Bar");
+    }
+    // mpl CapStyle/JoinStyle enums.
+    py::enum_<plot::CapStyle>(patches, "CapStyle")
+        .value("butt", plot::CapStyle::Butt)
+        .value("projecting", plot::CapStyle::Projecting)
+        .value("round", plot::CapStyle::Round);
+    py::enum_<plot::JoinStyle>(patches, "JoinStyle")
+        .value("miter", plot::JoinStyle::Miter)
+        .value("round", plot::JoinStyle::Round)
+        .value("bevel", plot::JoinStyle::Bevel);
 
     // mpl matplotlib.collections submodule.
     auto colls = m.def_submodule("collections");
@@ -19297,7 +21312,8 @@ del _vp_lg_types
         .def("bar",
              [](PyAxes& a, const py::object& x,
                 const py::object& h, const py::object& color,
-                float width, const std::string& label) {
+                float width, const std::string& label,
+                const py::kwargs& kw) {
                  auto hv = toFloatsUnits(h, a, false);
                  plot::BarData b;
                  b.heights = hv;
@@ -19315,9 +21331,26 @@ del _vp_lg_types
                  b.width = width;
                  if (auto c = parseColor(color); c.a > 0)
                      b.colors.assign(hv.size(), c);
+                 // mpl patch kwargs (hatch/edgecolor/linewidth) render
+                 // via a collection overlay clipped to the bar rects —
+                 // added after the bars so the hatch lines draw on top.
+                 std::vector<std::vector<plot::Point2D>> rects;
+                 if (kw) {
+                     for (size_t i = 0; i < hv.size(); ++i) {
+                         float x0 = float(i) - width * 0.5f;
+                         float x1 = float(i) + width * 0.5f;
+                         rects.push_back({{x0, 0.0f}, {x1, 0.0f},
+                                          {x1, hv[i]}, {x0, hv[i]}});
+                     }
+                 }
                  PyBarContainer bc;
                  bc.plot = a.ax->addPlot(
                      std::make_unique<plot::BarPlot>(std::move(b)));
+                 // mpl: bar edgecolor='none' → hatch = hatch.color
+                 // (black); explicit edgecolor sets both hatch+stroke.
+                 if (!rects.empty())
+                     addRegionOverlay(a, std::move(rects), kw,
+                                      plot::Color::black());
                  bc.owner = a.owner; bc.ax = a.ax; bc.heights = hv;
                  bc.x.resize(hv.size());
                  std::iota(bc.x.begin(), bc.x.end(), 0.0f);
@@ -19329,7 +21362,8 @@ del _vp_lg_types
         .def("barh",
              [](PyAxes& a, const py::object& y,
                 const py::object& w, const py::object& color,
-                float height, const std::string& label) {
+                float height, const std::string& label,
+                const py::kwargs& kw) {
                  auto wv = toFloatsUnits(w, a, true);
                  plot::BarData b;
                  b.heights = wv;
@@ -19347,9 +21381,21 @@ del _vp_lg_types
                  b.width = height;
                  if (auto c = parseColor(color); c.a > 0)
                      b.colors.assign(wv.size(), c);
+                 std::vector<std::vector<plot::Point2D>> rects;
+                 if (kw) {
+                     for (size_t i = 0; i < wv.size(); ++i) {
+                         float y0 = float(i) - height * 0.5f;
+                         float y1 = float(i) + height * 0.5f;
+                         rects.push_back({{0.0f, y0}, {wv[i], y0},
+                                          {wv[i], y1}, {0.0f, y1}});
+                     }
+                 }
                  PyBarContainer bc;
                  bc.plot = a.ax->addPlot(
                      std::make_unique<plot::BarPlot>(std::move(b)));
+                 if (!rects.empty())
+                     addRegionOverlay(a, std::move(rects), kw,
+                                      plot::Color::black());
                  bc.owner = a.owner; bc.ax = a.ax; bc.heights = wv;
                  bc.horizontal = true;
                  bc.x.resize(wv.size());
@@ -19425,7 +21471,8 @@ del _vp_lg_types
              py::arg("url") = py::none())
         .def("hist",
              [](PyAxes& a, const py::object& samples, int bins,
-                const py::object& color, const std::string& label) {
+                const py::object& color, const std::string& label,
+                const py::kwargs& kw) {
                  plot::HistConfig cfg;
                  cfg.bins = plot::HistBinMethod::Fixed;
                  cfg.binCount = bins;
@@ -19449,6 +21496,19 @@ del _vp_lg_types
                  }
                  // mpl returns (n, bins, patches) — eagerly computed.
                  hp->ensureComputed();
+                 if (kw) {
+                     const auto& edges = hp->binEdges();
+                     std::vector<std::vector<plot::Point2D>> rects;
+                     for (auto& hs : hp->binHeightsAll())
+                         for (size_t i = 0; i + 1 < edges.size() &&
+                                        i < hs.size(); ++i)
+                             rects.push_back({{edges[i], 0.0f},
+                                              {edges[i + 1], 0.0f},
+                                              {edges[i + 1], hs[i]},
+                                              {edges[i], hs[i]}});
+                     addRegionOverlay(a, std::move(rects), kw,
+                                      plot::Color::black());
+                 }
                  PyBarContainer bc;
                  bc.owner = a.owner;
                  bc.ax = a.ax;
@@ -19585,26 +21645,60 @@ del _vp_lg_types
         .def("fill_between",
              [](PyAxes& a, const py::object& x, const py::object& y1,
                 const py::object& y2, const py::object& where,
-                bool interpolate, const py::object& color) {
+                bool interpolate, const py::object& color,
+                const py::kwargs& kw) {
                  auto c = parseColor(color);
                  if (c.a == 0) c = plot::Color::fromRgba8(31, 119, 180, 128);
                  auto xv = toFloatsUnits(x, a, true);
                  auto y1v = toFloatList(y1);
                  if (y1v.size() == 1) y1v.assign(xv.size(), y1v[0]);
+                 std::vector<float> y2v(xv.size(), 0.0f);
+                 if (!y2.is_none()) {
+                     y2v = toFloatList(y2);  // mpl broadcasts scalars
+                     if (y2v.size() == 1) y2v.assign(xv.size(), y2v[0]);
+                 }
+                 // mpl collection kwargs: hatch/edge/lw overlay on the
+                 // filled polygon (split into `where` runs like mpl).
+                 std::vector<std::vector<plot::Point2D>> overlay;
+                 if (kw) {
+                     size_t n = xv.size();
+                     auto polyFor = [&](size_t i0, size_t i1) {
+                         std::vector<plot::Point2D> poly;
+                         for (size_t i = i0; i <= i1 && i < n; ++i)
+                             poly.push_back({xv[i], y1v[i]});
+                         for (size_t i = i1 + 1; i > i0 + 1; --i)
+                             poly.push_back({xv[i - 1], y2v[i - 1]});
+                         return poly;
+                     };
+                     std::vector<bool> wv;
+                     if (!where.is_none())
+                         wv = where.cast<std::vector<bool>>();
+                     if (wv.empty()) {
+                         if (n >= 2) overlay.push_back(polyFor(0, n - 1));
+                     } else {
+                         size_t i = 0;
+                         while (i < n && i < wv.size()) {
+                             while (i < n && i < wv.size() && !wv[i]) ++i;
+                             size_t s = i;
+                             while (i < n && i < wv.size() && wv[i]) ++i;
+                             if (i - s >= 2)
+                                 overlay.push_back(polyFor(s, i - 1));
+                         }
+                     }
+                 }
                  std::unique_ptr<plot::FillBetweenPlot> p;
                  if (y2.is_none())
                      p = std::make_unique<plot::FillBetweenPlot>(
                          std::move(xv), std::move(y1v), c);
-                 else {
-                     auto y2v = toFloatList(y2);  // mpl broadcasts scalars
-                     if (y2v.size() == 1) y2v.assign(xv.size(), y2v[0]);
+                 else
                      p = std::make_unique<plot::FillBetweenPlot>(
                          std::move(xv), std::move(y1v), std::move(y2v), c);
-                 }
                  if (!where.is_none())
                      p->setWhere(where.cast<std::vector<bool>>(),
                                  interpolate);
                  auto* raw = a.ax->addPlot(std::move(p));
+                 if (!overlay.empty())
+                     addRegionOverlay(a, std::move(overlay), kw, c);
                  return wrapArtist(a.owner, a.ax, raw);
              },
              py::arg("x"), py::arg("y1"), py::arg("y2") = py::none(),
@@ -19630,7 +21724,8 @@ del _vp_lg_types
              py::arg("cmap") = "viridis", py::arg("clabel") = false)
         .def("contourf",
              [](PyAxes& a, const py::object& values,
-                const py::object& levels, const std::string& cmapName)
+                const py::object& levels, const std::string& cmapName,
+                const py::object& hatches)
                  -> PyContourSet {
                  plot::ContourConfig cfg;
                  cfg.cmap = &cmapByName(cmapName);
@@ -19638,13 +21733,22 @@ del _vp_lg_types
                      cfg.numLevels = levels.cast<int>();
                  else if (!levels.is_none())
                      cfg.levels = toFloats(levels);
+                 if (!hatches.is_none()) {
+                     // mpl: hatches is a sequence cycled over level
+                     // bands; a bare string applies to all bands.
+                     if (py::isinstance<py::str>(hatches))
+                         cfg.hatches = {hatches.cast<std::string>()};
+                     else
+                         cfg.hatches =
+                             hatches.cast<std::vector<std::string>>();
+                 }
                  auto* p = a.ax->addPlot(
                      std::make_shared<plot::ContourfPlot>(
                          toGrid2D(values), std::move(cfg)));
                  return {a.owner, a.ax, p, {}};
              },
              py::arg("values"), py::arg("levels") = py::none(),
-             py::arg("cmap") = "viridis")
+             py::arg("cmap") = "viridis", py::arg("hatches") = py::none())
         // mpl ax.clabel(CS, levels=None, fontsize=None, colors=None):
         // turn on level labels for a ContourSet.
         .def("clabel",
@@ -19670,8 +21774,9 @@ del _vp_lg_types
         // mpl ax.fill(*args): x,y[,fmt] groups → closed polygons.
         .def("fill",
              [](PyAxes& a, const py::args& args,
-                const py::object& color) {
+                const py::object& color, const py::kwargs& kw) {
                  py::list out;
+                 std::vector<std::vector<plot::Point2D>> polys;
                  size_t i = 0;
                  while (i + 1 < args.size()) {
                      plot::Series2D s;
@@ -19691,10 +21796,14 @@ del _vp_lg_types
                          i++;
                      }
                      if (!color.is_none()) s.color = parseColor(color);
+                     polys.push_back(s.points);
                      auto* p = a.ax->addPlot(
                          std::make_shared<plot::FillPlot>(std::move(s)));
                      out.append(py::cast(PyArtist{a.owner, a.ax, p, {}}));
                  }
+                 if (kw)
+                     addRegionOverlay(a, std::move(polys), kw,
+                                      plot::Color::black());
                  return out;
              },
              py::arg("color") = py::none(),
@@ -20692,14 +22801,15 @@ del _vp_lg_types
                  auto it = a.owner->axesLocators_.find(a.ax);
                  if (it == a.owner->axesLocators_.end())
                      return py::none();
-                 return it->second;
+                 return it->second.locator;
              })
         .def("set_axes_locator",
              [](PyAxes& a, const py::object& locator) {
                  if (locator.is_none())
                      a.owner->axesLocators_.erase(a.ax);
                  else
-                     a.owner->axesLocators_[a.ax] = locator;
+                     a.owner->axesLocators_[a.ax] =
+                         {locator, a.owner};
              },
              py::arg("locator"))
         // ── mpl transforms convenience ──
@@ -20807,6 +22917,17 @@ del _vp_lg_types
                      raw = c.scatter; owned = &c.owned;
                  } else if (py::isinstance<PyColl>(coll)) {
                      auto& c = coll.cast<PyColl&>();
+                     if (!c.live && c.owned) {
+                         // Fresh collection never added: move the
+                         // unique_ptr into the axes and track it live.
+                         std::shared_ptr<plot::IPlot> sp(
+                             std::move(c.owned));
+                         c.live = static_cast<plot::Collection*>(
+                             a.ax->addPlot(sp));
+                         c.ax = a.ax;
+                         c.owner = a.owner;
+                         return coll;
+                     }
                      raw = c.live; owned = &c.ownedPlot;
                  } else if (py::isinstance<PyImage>(coll)) {
                      auto& i = coll.cast<PyImage&>();
@@ -21654,7 +23775,8 @@ del _vp_lg_types
                 const py::object& labeldistance, float startangle,
                 float radius, bool counterclock, const py::object& center,
                 bool normalize, bool rotatelabels, bool frame,
-                bool donut, float innerRadius) {
+                bool donut, float innerRadius,
+                const py::kwargs& kw) {
                  plot::PieData d;
                  d.values = toFloats(x);
                  if (!labels.is_none())
@@ -21691,7 +23813,51 @@ del _vp_lg_types
                  d.frame = frame;
                  d.donut = donut;
                  d.innerRadius = innerRadius;
+                 // mpl wedge geometry for the hatch/edge overlay
+                 // (theta in circle fractions; explode offsets along
+                 // the bisector).
+                 std::vector<std::vector<plot::Point2D>> wedgePolys;
+                 if (kw) {
+                     float total = 0;
+                     for (float v : d.values) total += v;
+                     float denom = normalize ? total : 1.0f;
+                     float dir = counterclock ? 1.0f : -1.0f;
+                     float theta1 = startangle / 360.0f;
+                     for (size_t i = 0; i < d.values.size(); ++i) {
+                         float frac = denom != 0 ? d.values[i] / denom
+                                                 : 0.0f;
+                         float theta2 = theta1 + dir * frac;
+                         float thetam =
+                             3.14159265f * (theta1 + theta2);
+                         float expl = 0.0f;
+                         if (!d.explode.empty())
+                             expl = d.explode.size() == 1
+                                 ? d.explode[0]
+                                 : (i < d.explode.size()
+                                        ? d.explode[i] : 0.0f);
+                         plot::Point2D c{
+                             d.center.x + expl * std::cos(thetam),
+                             d.center.y + expl * std::sin(thetam)};
+                         std::vector<plot::Point2D> poly{c};
+                         int steps = std::max(
+                             4, int(std::abs(frac) * 64));
+                         float a0 = theta1 * 2.0f * 3.14159265f;
+                         float a1 = theta2 * 2.0f * 3.14159265f;
+                         for (int s = 0; s <= steps; ++s) {
+                             float ang = a0 + (a1 - a0) * s / steps;
+                             poly.push_back({
+                                 c.x + radius * std::cos(ang),
+                                 c.y + radius * std::sin(ang)});
+                         }
+                         poly.push_back(c);
+                         wedgePolys.push_back(std::move(poly));
+                         theta1 = theta2;
+                     }
+                 }
                  auto& p = a.ax->pie(std::move(d));
+                 if (!wedgePolys.empty())
+                     addRegionOverlay(a, std::move(wedgePolys), kw,
+                                      plot::Color::black());
                  // mpl returns (wedges, texts [, autotexts]).
                  py::list wedges, texts;
                  wedges.append(wrapArtist(a.owner, a.ax, &p));
@@ -22726,6 +24892,9 @@ del _vp_lg_types
         // PatchCollection and returns a live handle.
         .def("add_patch",
              [](PyAxes& a, PyPatch& p) -> py::object {
+                 // mpl ConnectionPatch/Shadow resolve their coordinate
+                 // spaces when the patch joins an axes.
+                 resolvePatchPlacement(a, p);
                  auto coll = std::make_unique<plot::PatchCollection>(
                      std::vector<plot::Patch>{p.spec});
                  auto* raw = coll.get();
@@ -23783,13 +25952,8 @@ del _vp_lg_types
                       parseColor(edgecolor);
               }
               f->fig().style().frameOn = frameon;
-              if (!layout.is_none()) {
-                  auto l = layout.cast<std::string>();
-                  if (l == "constrained")
-                      (void)f->fig().constrainedLayout();
-                  else if (l == "tight")
-                      (void)f->fig().tightLayout();
-              }
+              if (!layout.is_none())
+                  installLayoutEngine(*f, layout, py::kwargs());
               registerFigure(f, numI, label);
               return f;
           },
@@ -24481,8 +26645,22 @@ del _vp_lg_types
              },
              py::arg("x"), py::arg("ymin"), py::arg("ymax"),
              py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
-        .def("tight_layout", [] {
-                 gcf()->fig().setTightLayout(true); })
+        // mpl plt.tight_layout(pad, h_pad, w_pad, rect) — installs the
+        // tight engine on the current figure.
+        .def("tight_layout",
+             [](const py::object& pad, const py::object& hPad,
+                const py::object& wPad, const py::object& rect) {
+                 PyLayoutTight eng;
+                 if (!pad.is_none()) eng.params["pad"] = pad;
+                 if (!hPad.is_none()) eng.params["h_pad"] = hPad;
+                 if (!wPad.is_none()) eng.params["w_pad"] = wPad;
+                 if (!rect.is_none()) eng.params["rect"] = rect;
+                 installLayoutEngine(*gcf(), py::cast(eng),
+                                     py::kwargs());
+             },
+             py::arg("pad") = py::none(), py::arg("h_pad") = py::none(),
+             py::arg("w_pad") = py::none(),
+             py::arg("rect") = py::none())
         .def("subplots_adjust",
              [](float left, float bottom, float right, float top,
                 float wspace, float hspace) {
@@ -25459,4 +27637,83 @@ del _vp_lg_types
                       PyGridSpec{s.owner, std::move(nested), s.gs});
               },
               py::arg("subplot_spec"), py::arg("nrows"), py::arg("ncols"));
+
+    // ═══ vp.pyplot — canonical `import volcanoplot.pyplot as plt` ════
+    // mpl's pyplot module re-exports the whole pyplot function surface
+    // plus a number of artist/module imports. Mirror every public
+    // attribute of `volcanoplot` into the submodule, then fill in the
+    // pyplot-only names mpl additionally exposes.
+    {
+        py::module_ plt = m.def_submodule("pyplot");
+        py::dict md = m.attr("__dict__").cast<py::dict>();
+        for (auto kv : md) {
+            std::string name = py::str(kv.first).cast<std::string>();
+            if (name.starts_with('_') || name == "pyplot") continue;
+            plt.attr(name.c_str()) = kv.second;
+        }
+        // Class aliases mpl exposes through pyplot.
+        plt.attr("FigureBase") = m.attr("Figure");
+        plt.attr("Subplot") = m.attr("Axes");
+        plt.attr("PolarAxes") = m.attr("projections").attr("polar").attr("PolarAxes");
+        plt.attr("FigureCanvasBase") = m.attr("Canvas");
+        for (const char* n : {"Rectangle", "Circle", "Polygon", "Arrow"})
+            plt.attr(n) = m.attr("patches").attr(n);
+        plt.attr("Normalize") = m.attr("colors").attr("Normalize");
+        plt.attr("Colormap") = m.attr("colors").attr("Colormap");
+        plt.attr("rcParamsDefault") = m.attr("rcParams");
+        plt.attr("rcParamsOrig") = m.attr("rcParams");
+        // mpl pyplot.get is matplotlib.artist.get (our getp).
+        plt.attr("get") = m.attr("getp");
+        plt.attr("set") = m.attr("setp");
+        plt.attr("interactive") = m.attr("isinteractive");
+        plt.attr("new_figure_manager") = m.attr("get_current_fig_manager");
+        // Backends this build can render: headless raster + vector.
+        plt.attr("available_backends") =
+            py::make_tuple("agg", "png", "webp", "svg", "pdf", "eps", "pgf");
+        plt.def("ginput",
+                [](int, const py::object&, bool, const py::object&) {
+                    // Headless: no pointer device — return no clicks
+                    // (mpl blocks until n clicks or timeout).
+                    return py::list();
+                },
+                py::arg("n") = 1, py::arg("timeout") = py::float_(30.0),
+                py::arg("show_clicks") = true,
+                py::arg("mouse_add") = py::none());
+        plt.def("subplot_tool",
+                [plt](const py::object& fig) -> py::object {
+                    // mpl: no target → operate on gcf().
+                    py::object f = fig.is_none()
+                        ? py::cast(gcf()) : fig;
+                    // plt.widgets is the copied vp.widgets submodule.
+                    return plt.attr("widgets").attr("SubplotTool")(f);
+                },
+                py::arg("targetfig") = py::none());
+        plt.def("get_plot_commands",
+                [plt] {
+                    // mpl inspects its module and returns the pyplot
+                    // command names — filter our own dir() the same way.
+                    py::list out;
+                    py::object isbuiltin = py::module_::import("inspect")
+                                               .attr("isbuiltin");
+                    for (py::handle n : plt.attr("__dir__")()) {
+                        if (py::cast<std::string>(n).starts_with('_'))
+                            continue;
+                        if (isbuiltin(py::getattr(plt, n)).cast<bool>())
+                            out.append(n);
+                    }
+                    return out;
+                });
+        plt.def("set_loglevel",
+                [](const std::string&) {
+                    // mpl selects the logging verbosity; VolcanoPlot has
+                    // a single log level — accept and ignore.
+                },
+                py::arg("level"));
+        // mpl exposes `matplotlib.pyplot.np` (numpy re-export) when
+        // numpy is importable.
+        try {
+            plt.attr("np") = py::module_::import("numpy");
+        } catch (...) {
+        }
+    }
 }

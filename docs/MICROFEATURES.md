@@ -364,6 +364,16 @@ interpreting any data-carrying tier.
 | 199 | `legend_numpoints` | `legend(numpoints=2, scatterpoints=3)` — handle marker counts |
 | 200 | `marker_styles` | marker grid: `'o'/'s'/'^'/'*'/'x'/'P'` + `(5,0)` tuple + fillstyle halves |
 
+## Tier 25 — Parity batch 19 (201–205)
+
+| # | Name | Checks |
+|---|------|--------|
+| 201 | `hatch_bars` | `ax.bar(hatch='//')` — hatch overlay clipped to bars, hatch.color black |
+| 202 | `hatch_fill` | `fill_between(hatch='x')` — hatch color = edgecolor ('face' → fill color) |
+| 203 | `hatch_pie` | per-wedge `set_hatch` — '//','x','-','|','+' patterns over wedges |
+| 204 | `patches_boxstyle` | `FancyBboxPatch(boxstyle='round,pad=0.3')` + `Wedge` + `FancyArrowPatch(-\|>)` |
+| 205 | `tight_layout` | `fig.tight_layout()` — suptitle/title/label margins + inter-axes spacing |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.py`

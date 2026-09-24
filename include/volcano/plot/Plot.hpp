@@ -9,8 +9,10 @@
 
 #include <vulkan/vulkan.hpp>
 
+#include <array>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -289,6 +291,14 @@ public:
     [[nodiscard]] bool constrainedLayout() const noexcept {
         return constrainedLayout_;
     }
+    /// mpl layout-engine parameters (matplotlib.layout_engine):
+    /// tight `rect` (l, b, r, t figure fractions the subplots fit
+    /// into), `pad` scale relative to the mpl default 1.08, and
+    /// constrained inter-axes spacing (figure fractions).
+    std::optional<std::array<float, 4>> tightRect;
+    float tightPadScale = 1.0f;
+    float constrainedWSpace = 0.15f;
+    float constrainedHSpace = 0.15f;
 
     [[nodiscard]] const std::vector<AxesPlacement>& placements() const noexcept { return placements_; }
     /// mpl draw order: placements sorted by axes zorder (stable).

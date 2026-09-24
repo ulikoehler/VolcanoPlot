@@ -2403,6 +2403,130 @@ void f200_marker_styles(Figure& fig) {
     ax->setYlim(-0.5f, 3.5f);
 }
 
+void f201_hatch_bars(Figure& fig) {
+    // mpl: ax.bar([0,1,2], [3,7,5], hatch='//') — hatch overlay clipped
+    // to the bar rects (mpl hatch.color=black default).
+    auto* ax = mfAxes(fig);
+    BarData d;
+    d.heights = {3, 7, 5};
+    d.colors = {Color::fromRgba8(31, 119, 180),
+                Color::fromRgba8(31, 119, 180),
+                Color::fromRgba8(31, 119, 180)};
+    ax->addPlot(std::make_unique<BarPlot>(d));
+    std::vector<std::vector<Point2D>> polys;
+    for (size_t i = 0; i < d.heights.size(); ++i) {
+        float x0 = float(i) - 0.4f, x1 = float(i) + 0.4f;
+        polys.push_back({{x0, 0.0f}, {x1, 0.0f},
+                         {x1, d.heights[i]}, {x0, d.heights[i]}});
+    }
+    auto coll = std::make_unique<PolyCollection>(std::move(polys));
+    coll->faceColors = {Color::transparent()};
+    // mpl: bar edgecolor='none' → hatch.color (black), lw=0 →
+    // no edge stroke.
+    coll->edgeColors = {Color::black()};
+    coll->lineWidths = {0.0f};
+    coll->hatch = "//";
+    ax->addPlot(std::move(coll));
+}
+
+void f202_hatch_fill(Figure& fig) {
+    // mpl: ax.fill_between(x, 0, y, hatch='x')
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 60);
+    std::vector<float> y;
+    for (float xi : x) y.push_back(std::sin(xi));
+    ax->addPlot(std::make_unique<FillBetweenPlot>(
+        x, y, std::vector<float>(x.size(), 0.0f),
+        Color::fromRgba8(31, 119, 180, 128)));
+    std::vector<Point2D> poly;
+    poly.push_back({x.front(), 0.0f});
+    for (size_t i = 0; i < x.size(); ++i)
+        poly.push_back({x[i], y[i]});
+    poly.push_back({x.back(), 0.0f});
+    auto coll = std::make_unique<PolyCollection>(
+        std::vector<std::vector<Point2D>>{std::move(poly)});
+    coll->faceColors = {Color::transparent()};
+    // mpl: hatch = edgecolor ('face' → the fill color incl. alpha).
+    coll->edgeColors = {Color::fromRgba8(31, 119, 180, 128)};
+    coll->lineWidths = {0.0f};
+    coll->hatch = "x";
+    ax->addPlot(std::move(coll));
+    ax->setXlim(0, 10); ax->setYlim(-1.2f, 1.2f);
+}
+
+void f203_hatch_pie(Figure& fig) {
+    // mpl: ax.pie([30,25,20,15,10], hatch=['//','x','-','|','+'])
+    auto* ax = mfAxes(fig);
+    PieData d;
+    d.values = {30, 25, 20, 15, 10};
+    ax->pie(d);
+    // Per-wedge hatch overlays (mpl wedgeprops hatch patterns).
+    static const char* hatches[] = {"//", "x", "-", "|", "+"};
+    float total = 0.0f;
+    for (float v : d.values) total += v;
+    float theta = d.startAngle / 360.0f;  // turns
+    for (size_t i = 0; i < d.values.size(); ++i) {
+        float t0 = theta, t1 = theta + d.values[i] / total;
+        theta = t1;
+        std::vector<Point2D> w{d.center};
+        for (int s = 0; s <= 60; ++s) {
+            float a = 2.0f * float(M_PI) *
+                      (t0 + (t1 - t0) * float(s) / 60.0f);
+            w.push_back({d.center.x + d.radius * std::cos(a),
+                         d.center.y + d.radius * std::sin(a)});
+        }
+        auto coll = std::make_unique<PolyCollection>(
+            std::vector<std::vector<Point2D>>{std::move(w)});
+        coll->faceColors = {Color::transparent()};
+        // mpl: wedge edgecolor='none' → hatch.color (black).
+        coll->edgeColors = {Color::black()};
+        coll->lineWidths = {0.0f};
+        coll->hatch = hatches[i];
+        ax->addPlot(std::move(coll));
+    }
+}
+
+void f204_patches_boxstyle(Figure& fig) {
+    // mpl: FancyBboxPatch(boxstyle='round'), Wedge, FancyArrowPatch.
+    auto* ax = mfAxes(fig);
+    BoxStyleSpec bs;
+    bs.kind = BoxStyleSpec::Kind::Round;
+    bs.pad = 0.3f;
+    auto& p1 = ax->addPatch(patch::FancyBboxPatch(1, 1, 4, 3, bs));
+    p1.style.face = Color::fromRgba8(31, 119, 180);
+    p1.style.edge = Color::black();
+    auto& p2 = ax->addPatch(patch::Wedge({7.5f, 2.0f}, 1.4f, 30.0f, 300.0f));
+    p2.style.face = Color::fromRgba8(255, 127, 14);
+    p2.style.edge = Color::black();
+    auto& p3 = ax->addPatch(
+        patch::FancyArrowPatch({2.0f, 5.0f}, {8.0f, 6.5f}, 0.35f, 0.7f));
+    p3.style.face = Color::fromRgba8(44, 160, 44);
+    p3.style.edge = Color::black();
+    ax->setXlim(0, 10); ax->setYlim(0, 8);
+}
+
+void f205_tight_layout(Figure& fig) {
+    // mpl: two stacked subplots + suptitle + fig.tight_layout().
+    auto* a = fig.subplot2grid({2, 1}, {0, 0});
+    auto* b = fig.subplot2grid({2, 1}, {1, 0});
+    a->setStyle(mfStyle());
+    b->setStyle(mfStyle());
+    Series2D s1, s2;
+    auto x = linspace(0, 10, 60);
+    for (float xi : x) {
+        s1.points.push_back({xi, std::sin(xi)});
+        s2.points.push_back({xi, std::cos(xi)});
+    }
+    a->addPlot(std::make_unique<LinePlot>(std::move(s1)));
+    b->addPlot(std::make_unique<LinePlot>(std::move(s2)));
+    a->setXlim(0, 10); b->setXlim(0, 10);
+    a->setTitle("Top");
+    b->setTitle("Bottom");
+    b->style().xAxis.label = "x";
+    fig.setTitle("Figure suptitle");
+    fig.setTightLayout(true);
+}
+
 // ═══ Registry ═══════════════════════════════════════════════════════════
 
 struct Feature {
@@ -2611,6 +2735,11 @@ const Feature kFeatures[] = {
     {"198_spine_positions",    f198_spine_positions},
     {"199_legend_numpoints",   f199_legend_numpoints},
     {"200_marker_styles",      f200_marker_styles},
+    {"201_hatch_bars",         f201_hatch_bars},
+    {"202_hatch_fill",         f202_hatch_fill},
+    {"203_hatch_pie",          f203_hatch_pie},
+    {"204_patches_boxstyle",   f204_patches_boxstyle},
+    {"205_tight_layout",       f205_tight_layout},
 };
 
 } // namespace

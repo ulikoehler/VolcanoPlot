@@ -1503,3 +1503,61 @@ tri_*) are checked off in the sections above.
       transform/path scale separation (`scale(0.5)` lives in the
       transform), and 75 half-fill combos (alt paths rotated
       0/90/180/270° for right/top/left/bottom).
+- [x] **`vp.pyplot` submodule** — canonical `import volcanoplot.pyplot
+      as plt`; mirrors the full top-level command surface (290 names),
+      `get_plot_commands` introspection, `switch_backend`, `ion`/`ioff`
+      state, `figure()`/`gcf()`/`gca()`/`savefig()`/`show()`/all
+      plotting commands.
+- [x] **`vp.patches` depth + style classes** — `BoxStyle`/
+      `ArrowStyle`/`ConnectionStyle` style objects with mpl factory
+      ctors (`BoxStyle("round", pad=0.3)`, `ArrowStyle("-|>")`,
+      `ConnectionStyle("arc3", rad=..)`) accepted wherever style
+      strings are (text `bbox=`, `FancyBboxPatch`, `FancyArrowPatch`);
+      nested style aliases (`BoxStyle.Round`, `ArrowStyle.Fancy`, ...)
+      under private pybind names to avoid patch-ctor collisions.
+      `FancyArrowPatch` kwargs (`arrowstyle`/`connectionstyle`/
+      `shrinkA`/`shrinkB`/`path`), `Shadow` offsets, `Annulus`,
+      `RegularPolygon`, `StepPatch`, `ConnectionPatch`,
+      `Patch.set_patch_transform`-style transform composition.
+- [x] **`vp.hatch` module + `hatch=` kwargs** — `vp.hatch` submodule
+      with mpl pattern classes (`HorizontalHatch`, `VerticalHatch`,
+      `NorthEastHatch`, `SouthEastHatch`, `Circles`, `SmallCircles`,
+      `LargeCircles`, `SmallFilledCircles`, `Stars`) and
+      `hatch.get_path(pattern, density)`; `hatch=` on `bar`/`barh`/
+      `hist`/`fill`/`fill_between`/`pie` via clipped `PolyCollection`
+      overlays and `hatches=` on `contourf` natively (shared anchor
+      sweep across fragments). mpl hatch color rules honored:
+      edgecolor → hatch color, 'face' → fill color (`fill_between`),
+      'none' → `hatch.color` (black) — bar/hist/fill/pie get black
+      hatches by default; hatches draw even on transparent fills;
+      explicit collection colors are no longer overwritten by the
+      prop cycler (`Collection::applyCycleProps` fills only empty
+      color lists); fresh `PolyCollection`s passed to
+      `ax.add_collection` are adopted into axes ownership.
+- [x] **`vp.path` module** — `vp.path` submodule + full `Path` API:
+      code constants/mappings (`code_type`, `NUM_VERTICES_FOR_CODE`),
+      `unit_circle`/`unit_circle_righthalf` (mpl's 26-vertex CURVE4
+      circle), `unit_rectangle`, `unit_regular_polygon`,
+      `unit_regular_star` (inner=0.5), `unit_regular_asterisk`,
+      `arc`/`wedge`/`ellipse` (Masionobe control splines, mpl
+      width/height convention), `hatch`, `make_compound_path`,
+      `interpolated`/`transformed`, `get_extents`/`contains_point`/
+      `contains_points`/`intersects_path`, `to_polygons`,
+      `cleaned`/`clip_to_bbox`, `__eq__`/`__repr__`/`__len__`/
+      `__deepcopy__`; `transforms.Path` re-export. Vertex/codes
+      verified exactly against mpl for all factories.
+- [x] **`vp.layout_engine` module** — `LayoutEngine`,
+      `TightLayoutEngine`, `ConstrainedLayoutEngine`,
+      `PlaceHolderLayoutEngine`; `figure(layout=)` accepts
+      `"tight"`/`"constrained"`/`"compressed"`/`"none"` or engine
+      objects; `set_layout_engine`/`get_layout_engine`,
+      `set_tight_layout`/`set_constrained_layout` (mpl bool/dict
+      semantics), `tight_layout(pad, h_pad, w_pad, rect)`,
+      `get_constrained_layout_pads`, `do_constrained_layout`,
+      `get_tight_layout_figure`, `get_subplotspec_list`,
+      `set_axes_locator`. Native `Figure` state (`tightRect`,
+      `tightPadScale`, `constrainedWSpace`/`HSpace`, `compress`)
+      drives `computeTightMargins`: decoration-aware margins use the
+      real title/suptitle font sizes, `rect` bounds, and mpl-style
+      inter-axes spacing (row gap for titles/xlabels, column gap for
+      ylabels).

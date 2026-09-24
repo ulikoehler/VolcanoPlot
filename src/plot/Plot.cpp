@@ -256,9 +256,11 @@ void Figure::computeTightMargins(Extent2D extent) {
         if (st.xAxis.visible && !st.xAxis.label.empty())
             bottom += (fontPx + 8.0f) / extent.height;
         needBottom = std::max(needBottom, bottom);
-        // Top: axes title.
+        // Top: axes title (its own font size, mpl titlesize='large').
         if (!st.title.text.empty())
-            needTop = std::max(needTop, (fontPx + 10.0f) / extent.height);
+            needTop = std::max(needTop,
+                (st.title.font.size * st.dpi / 72.0f + st.title.pad +
+                 6.0f) / extent.height);
         // Right: colorbar (strip + gap + tick labels, ~72px for labels).
         // fraction/pad reserve (fraction + pad) of the axes width; the
         // strip itself narrows to height/aspect, so ~72px covers labels.
@@ -288,19 +290,73 @@ void Figure::computeTightMargins(Extent2D extent) {
         if (p.axes->xFurniture().labelFar && !st.xAxis.label.empty())
             needTop += (fontPx + 8.0f) / extent.height;
     }
-    // Figure title.
+    // Figure suptitle (figure.titlesize='large', drawn at the top edge).
     if (!style_.title.text.empty())
-        needTop += (style_.fontSize * style_.dpi / 72.0f + 10.0f) / extent.height;
+        needTop += (style_.title.font.size * style_.dpi / 72.0f +
+                    style_.title.pad + 4.0f) / extent.height;
 
+    // mpl TightLayoutEngine `pad` scales all decoration margins.
+    needLeft *= tightPadScale; needRight *= tightPadScale;
+    needBottom *= tightPadScale; needTop *= tightPadScale;
     grid_->left = needLeft;
     grid_->right = 1.0f - needRight;
     grid_->bottom = needBottom;
     grid_->top = 1.0f - needTop;
+    // mpl TightLayoutEngine `rect`: the subplot region must fit inside
+    // the given (left, bottom, right, top) figure-fraction bounds.
+    if (tightRect) {
+        grid_->left = std::max(grid_->left, (*tightRect)[0]);
+        grid_->bottom = std::max(grid_->bottom, (*tightRect)[1]);
+        grid_->right = std::min(grid_->right, (*tightRect)[2]);
+        grid_->top = std::min(grid_->top, (*tightRect)[3]);
+    }
+    if (tightLayout_) {
+        // mpl TightLayoutEngine also expands inter-axes spacing so
+        // titles/labels between subplots fit: reserve a row gap covering
+        // the lower axes' title + the upper axes' x decorations, and a
+        // column gap for y decorations between columns.
+        float rowGapPx = 0.0f, colGapPx = 0.0f;
+        uint32_t nrows = 1, ncols = 1;
+        for (const auto& p : placements_) {
+            if (p.mode != PlacementMode::Grid || !p.spec.grid) continue;
+            nrows = std::max(nrows, p.spec.grid->rows());
+            ncols = std::max(ncols, p.spec.grid->cols());
+            const auto& st = p.axes->style();
+            float fontPx = st.fontSize * st.dpi / 72.0f;
+            float v = 12.0f + 24.0f;  // pad + x tick labels
+            if (st.xAxis.visible && !st.xAxis.label.empty())
+                v += fontPx + 8.0f;
+            if (!st.title.text.empty())
+                v += st.title.font.size * st.dpi / 72.0f +
+                     st.title.pad + 6.0f;
+            rowGapPx = std::max(rowGapPx, v);
+            float h = 8.0f;
+            if (st.yAxis.visible && !st.yAxis.label.empty())
+                h += fontPx + 6.0f;
+            colGapPx = std::max(colGapPx, h);
+        }
+        if (nrows > 1) {
+            float axesHPx =
+                (grid_->top - grid_->bottom) / float(nrows) *
+                extent.height;
+            if (axesHPx > 0.0f)
+                grid_->hspace = std::max(grid_->hspace,
+                                         rowGapPx / axesHPx);
+        }
+        if (ncols > 1) {
+            float axesWPx =
+                (grid_->right - grid_->left) / float(ncols) *
+                extent.width;
+            if (axesWPx > 0.0f)
+                grid_->wspace = std::max(grid_->wspace,
+                                         colGapPx / axesWPx);
+        }
+    }
     if (constrainedLayout_) {
         // Constrained layout additionally enforces inter-axes padding for
         // decorations between subplots.
-        grid_->wspace = std::max(grid_->wspace, 0.15f);
-        grid_->hspace = std::max(grid_->hspace, 0.15f);
+        grid_->wspace = std::max(grid_->wspace, constrainedWSpace);
+        grid_->hspace = std::max(grid_->hspace, constrainedHSpace);
     }
 }
 

@@ -35,6 +35,11 @@ struct ContourConfig {
     Color clabelColor = Color{0, 0, 0, 0};   // alpha 0 → use lineColor
     /// Which levels get labels (empty → all levels).
     std::vector<float> clabelLevels;
+    /// mpl contourf `hatches`: one hatch pattern per level band
+    /// (cycled); empty = no hatching.
+    std::vector<std::string> hatches;
+    /// Hatch line spacing in px (matches the collection default).
+    float hatchSpacing = 24.0f;
 };
 
 /// Contour plot — isolines of a 2D scalar field.
@@ -114,6 +119,8 @@ private:
     render::primitives::FillRenderer renderer_;
     std::vector<Point2D> positions_;  // triangle vertices
     std::vector<Color> colors_;       // per-vertex colors
+    /// Data-space cell rings per level band (only when hatches set).
+    std::vector<std::vector<std::vector<Point2D>>> bandRings_;
     bool prepared_ = false;
 
     void computeLevels();

@@ -91,8 +91,14 @@ public:
                : !edgeColors.empty() ? edgeColors[0] : Color::black();
     }
     bool applyCycleProps(const CycleProps& p) override {
-        if (p.color) { faceColors = {*p.color}; edgeColors = {*p.color}; }
-        if (p.lineWidth) lineWidths = {*p.lineWidth};
+        // mpl: the prop cycle only supplies colors the collection
+        // didn't set explicitly (empty lists = "use the cycle").
+        if (p.color) {
+            if (faceColors.empty()) faceColors = {*p.color};
+            if (edgeColors.empty()) edgeColors = {*p.color};
+        }
+        if (p.lineWidth && lineWidths.empty())
+            lineWidths = {*p.lineWidth};
         if (p.lineStyle) lineStyle = *p.lineStyle;
         return p.color || p.lineWidth || p.lineStyle;
     }
@@ -277,8 +283,12 @@ public:
 
 /// Generate hatch line segments (thin quads) clipped to a pixel-space
 /// polygon. Pattern chars: / \ | - + x ; repeats increase density.
+/// `anchor` fixes the sweep origin (used to keep line phases aligned
+/// across disjoint regions of the same hatch band, e.g. contourf).
 [[nodiscard]] std::vector<Point2D>
 hatchTriangles(std::span<const Point2D> poly, std::string_view pattern,
-               float spacing);
+               float spacing,
+               std::optional<Point2D> anchor = std::nullopt,
+               std::optional<Point2D> extent = std::nullopt);
 
 } // namespace volcano::plot

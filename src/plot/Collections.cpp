@@ -408,8 +408,9 @@ void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
         if (!tris.empty())
             spine.drawTriangles(cmd, clip, res, tris, face);
     }
-    // Hatch lines clipped to the filled region.
-    if (!hatchStr.empty() && face.a > 0.0f) {
+    // Hatch lines clipped to the region (mpl draws hatch regardless of
+    // face alpha — the pattern color comes from hatch.color/edge).
+    if (!hatchStr.empty()) {
         std::vector<Point2D> ht;
         for (const auto& sp : subs) {
             if (!sp.closed || sp.points.size() < 3) continue;
@@ -442,7 +443,9 @@ void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
 
 std::vector<Point2D>
 hatchTriangles(std::span<const Point2D> poly, std::string_view pattern,
-               float spacing) {
+               float spacing,
+               std::optional<Point2D> anchor,
+               std::optional<Point2D> extent) {
     if (poly.size() < 3 || pattern.empty()) return {};
     // Density: each repeated char halves spacing (mpl semantics).
     std::map<char, int> counts;
@@ -452,6 +455,17 @@ hatchTriangles(std::span<const Point2D> poly, std::string_view pattern,
         lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y);
         hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y);
     }
+    // anchor+extent: the sweep region is anchored (shared phase across
+    // fragments). anchor alone still pins the phase origin to the
+    // anchor while keeping the polygon's own bounds as the extent.
+    Point2D phaseC{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f};
+    if (anchor && extent) {
+        lo = {anchor->x - extent->x, anchor->y - extent->y};
+        hi = {anchor->x + extent->x, anchor->y + extent->y};
+        phaseC = *anchor;
+    } else if (anchor) {
+        phaseC = *anchor;
+    }
     float diag = std::hypot(hi.x - lo.x, hi.y - lo.y);
     if (diag < 1e-6f) return {};
 
@@ -459,7 +473,7 @@ hatchTriangles(std::span<const Point2D> poly, std::string_view pattern,
     auto hatchLines = [&](float dirX, float dirY, float step, float lw) {
         // Perpendicular family: line dir d, sweep along normal n.
         Point2D n{-dirY, dirX};
-        Point2D c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f};
+        Point2D c = phaseC;
         int half = int(diag / step) + 2;
         for (int i = -half; i <= half; ++i) {
             Point2D base{c.x + n.x * step * i, c.y + n.y * step * i};
@@ -838,21 +852,22 @@ void Collection::emitSubpaths(render::VectorCanvas& c,
                 }
             }
         }
-        if (!hatchStr.empty()) {
-            render::VectorCanvas::Pen pen;
-            pen.color = edge.a > 0 ? edge : Color::black();
-            pen.width = std::max(0.6f, hatchSpacing * 0.1f);
-            for (const auto& sp : subs) {
-                if (!sp.closed || sp.points.size() < 3) continue;
-                auto tris = hatchTriangles(sp.points, hatchStr, hatchSpacing);
-                if (!clipRing.empty())
-                    tris = clipTrianglesToPolygon(tris, clipRing);
-                // hatchTriangles returns a triangle soup; emit as quads→
-                // polygons per triangle.
-                for (size_t i = 0; i + 2 < tris.size(); i += 3) {
-                    Point2D t[3] = {tris[i], tris[i+1], tris[i+2]};
-                    c.polygon(t, pen.color);
-                }
+    }
+    // mpl draws hatch regardless of face alpha (hatch.color/edge).
+    if (!hatchStr.empty()) {
+        render::VectorCanvas::Pen pen;
+        pen.color = edge.a > 0 ? edge : Color::black();
+        pen.width = std::max(0.6f, hatchSpacing * 0.1f);
+        for (const auto& sp : subs) {
+            if (!sp.closed || sp.points.size() < 3) continue;
+            auto tris = hatchTriangles(sp.points, hatchStr, hatchSpacing);
+            if (!clipRing.empty())
+                tris = clipTrianglesToPolygon(tris, clipRing);
+            // hatchTriangles returns a triangle soup; emit as quads→
+            // polygons per triangle.
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                Point2D t[3] = {tris[i], tris[i+1], tris[i+2]};
+                c.polygon(t, pen.color);
             }
         }
     }

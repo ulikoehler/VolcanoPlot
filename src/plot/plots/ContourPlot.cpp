@@ -1,5 +1,6 @@
 // volcano/plot/plots/ContourPlot.cpp — contour and contourf implementation
 #include "volcano/plot/Ticks.hpp"
+#include "volcano/plot/Collections.hpp"
 #include "volcano/plot/plots/ContourPlot.hpp"
 #include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
@@ -469,6 +470,7 @@ void ContourfPlot::computeLevels() {
 void ContourfPlot::marchingSquaresFilled() {
     positions_.clear();
     colors_.clear();
+    bandRings_.clear();
     const auto& g = grid_;
     if (g.width < 2 || g.height < 2) return;
 
@@ -483,6 +485,8 @@ void ContourfPlot::marchingSquaresFilled() {
     // Plus below-min and above-max bands.
     const auto& L = config_.levels;
     int numBands = static_cast<int>(L.size()) - 1;
+    if (!config_.hatches.empty())
+        bandRings_.resize(size_t(numBands) + 1);
 
     for (uint32_t j = 0; j < g.height - 1; ++j) {
         for (uint32_t i = 0; i < g.width - 1; ++i) {
@@ -516,6 +520,13 @@ void ContourfPlot::marchingSquaresFilled() {
                 auto poly = clipAbove(cell, lo);
                 poly = clipBelow(poly, hi);
                 if (poly.size() < 3) continue;
+
+                // Record the band ring for hatch overlay (draw()).
+                if (!bandRings_.empty()) {
+                    auto& ring = bandRings_[b].emplace_back();
+                    ring.reserve(poly.size());
+                    for (auto& cv : poly) ring.push_back(cv.pos);
+                }
 
                 // Compute band color.
                 float mid = (lo + hi) * 0.5f;
@@ -555,10 +566,49 @@ void ContourfPlot::prepare(render::Renderer& r) {
 
 void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
-    if (!prepared_ || positions_.empty()) return;
-    Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    if (!prepared_) return;
+    if (!positions_.empty()) {
+        Transform2D t = axes.transform();
+        vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+        renderer_.draw(cmd, vrect, t);
+    }
+    // mpl contourf `hatches`: per-band hatch patterns (cycled), drawn
+    // in pixel space like collection hatches.
+    if (config_.hatches.empty() || bandRings_.empty()) return;
+    auto toPx = pxMapper(axes, rect);
+    auto clip = clipRectVk(rect, r.backend().extent());
+    auto res = r.backend().extent();
+    for (size_t b = 0; b < bandRings_.size(); ++b) {
+        const auto& pat =
+            config_.hatches[b % config_.hatches.size()];
+        if (pat.empty()) continue;
+        auto& rings = bandRings_[b];
+        // Shared anchor: the band's union bbox center keeps the hatch
+        // sweep phase-aligned across disjoint cells.
+        Point2D lo{1e30f, 1e30f}, hi{-1e30f, -1e30f};
+        for (auto& ring : rings)
+            for (auto& p : ring) {
+                lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y);
+                hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y);
+            }
+        if (!(lo.x <= hi.x) || !(lo.y <= hi.y)) continue;
+        Point2D cLo = toPx(lo), cHi = toPx(hi);
+        Point2D anchor{(cLo.x + cHi.x) * 0.5f, (cLo.y + cHi.y) * 0.5f};
+        Point2D extent{std::abs(cHi.x - cLo.x) * 0.5f,
+                       std::abs(cHi.y - cLo.y) * 0.5f};
+        std::vector<Point2D> tris;
+        for (auto& ring : rings) {
+            std::vector<Point2D> px;
+            px.reserve(ring.size());
+            for (auto& p : ring) px.push_back(toPx(p));
+            auto h = hatchTriangles(px, pat, config_.hatchSpacing,
+                                    anchor, extent);
+            tris.insert(tris.end(), h.begin(), h.end());
+        }
+        if (!tris.empty())
+            r.spineRenderer().drawTriangles(cmd, clip, res, tris,
+                                            Color::black());
+    }
 }
 
 void ContourfPlot::emitVector(render::VectorCanvas& c, const Axes& axes,

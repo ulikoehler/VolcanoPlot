@@ -1671,6 +1671,57 @@ def f200_marker_styles(fig, out):
     ax.set_xlim(-0.5, 2.5); ax.set_ylim(-0.5, 3.5)
 
 
+def f201_hatch_bars(fig, out):
+    ax = mf_axes(fig)
+    ax.bar([0, 1, 2], [3, 7, 5], color=(31 / 255, 119 / 255, 180 / 255),
+           hatch="//")
+
+
+def f202_hatch_fill(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(0, 10, 60)
+    ax.fill_between(x, 0, np.sin(x), color=(31 / 255, 119 / 255, 180 / 255,
+                                          0.5),
+                    hatch="x")
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f203_hatch_pie(fig, out):
+    ax = mf_axes(fig)
+    wedges, _ = ax.pie([30, 25, 20, 15, 10])
+    for w, h in zip(wedges, ["//", "x", "-", "|", "+"]):
+        w.set_hatch(h)
+
+
+def f204_patches_boxstyle(fig, out):
+    from matplotlib.patches import FancyBboxPatch, Wedge, FancyArrowPatch
+    ax = mf_axes(fig)
+    ax.add_patch(FancyBboxPatch((1, 1), 4, 3,
+                              boxstyle="round,pad=0.3",
+                              facecolor=(31 / 255, 119 / 255, 180 / 255),
+                              edgecolor="black"))
+    ax.add_patch(Wedge((7.5, 2.0), 1.4, 30, 300,
+                       facecolor=(255 / 255, 127 / 255, 14 / 255),
+                       edgecolor="black"))
+    ax.add_patch(FancyArrowPatch((2.0, 5.0), (8.0, 6.5),
+                                 facecolor=(44 / 255, 160 / 255, 44 / 255),
+                                 edgecolor="black",
+                                 arrowstyle="-|>",
+                                 mutation_scale=30))
+    ax.set_xlim(0, 10); ax.set_ylim(0, 8)
+
+
+def f205_tight_layout(fig, out):
+    a = fig.add_subplot(211)
+    b = fig.add_subplot(212)
+    x = np.linspace(0, 10, 60)
+    a.plot(x, np.sin(x)); a.set_xlim(0, 10); a.set_title("Top")
+    b.plot(x, np.cos(x)); b.set_xlim(0, 10); b.set_title("Bottom")
+    b.set_xlabel("x")
+    fig.suptitle("Figure suptitle")
+    fig.tight_layout()
+
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # ═══ Registry ═══════════════════════════════════════════════════════════
