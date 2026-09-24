@@ -14,6 +14,7 @@
 
 #include <volcano/backend/Backend.hpp>
 #include <volcano/encode/ImageDecoder.hpp>
+#include <volcano/encode/MovieWriter.hpp>
 #include <volcano/text/TextRenderer.hpp>
 #include <volcano/render/Renderer.hpp>
 #include <volcano/plot/Animation.hpp>
@@ -371,7 +372,8 @@ const char* scaleKindName(plot::ScaleKind k) {
     case SK::Logit:    return "logit";
     case SK::Asinh:    return "asinh";
     case SK::Mercator: return "mercator";
-    case SK::Function: case SK::FunctionLog: return "function";
+    case SK::Function:    return "function";
+    case SK::FunctionLog: return "functionlog";
     }
     return "linear";
 }
@@ -2105,6 +2107,1211 @@ struct PyAnchoredSizeBar {
     }
 };
 
+// ═══ vp.scale — ScaleBase hierarchy (matplotlib scale.py) ═════════════
+
+/// mpl FuncTransform — a Transform backed by two Python callables.
+class PyFuncTransform : public plot::Transform {
+public:
+    PyFuncTransform(py::object fwd, py::object inv)
+        : fwd_(std::move(fwd)), inv_(std::move(inv)) {}
+    [[nodiscard]] plot::Point2D apply(plot::Point2D p) const override {
+        py::gil_scoped_acquire gil;
+        return {fwd_(p.x).cast<float>(), fwd_(p.y).cast<float>()};
+    }
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PyFuncTransform>(inv_, fwd_);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyFuncTransform>(fwd_, inv_);
+    }
+    py::object fwd_, inv_;
+};
+
+/// Pointwise scalar transform — applies one scalar function to each
+/// coordinate (the mpl scale transforms are 1D separable).
+class PyScalarTransform : public plot::Transform {
+public:
+    PyScalarTransform(std::function<float(float)> f,
+                      std::function<float(float)> g)
+        : f_(std::move(f)), g_(std::move(g)) {}
+    [[nodiscard]] plot::Point2D apply(plot::Point2D p) const override {
+        return {f_(p.x), f_(p.y)};
+    }
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PyScalarTransform>(g_, f_);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyScalarTransform>(f_, g_);
+    }
+    std::function<float(float)> f_, g_;
+};
+
+namespace {
+inline std::function<float(float)> logBaseFwd(float b) {
+    float lb = std::log(b);
+    return [lb](float v) { return std::log(std::max(v, 1e-30f)) / lb; };
+}
+inline std::function<float(float)> logBaseInv(float b) {
+    return [b](float v) { return std::pow(b, v); };
+}
+// mpl SymmetricalLogTransform / InvertedSymmetricalLogTransform.
+inline std::function<float(float)> symLogFwd(float lt, float ls, float b) {
+    return [lt, ls, b](float v) {
+        float adj = ls / (1.0f - std::pow(b, -1.0f));
+        float a = std::fabs(v);
+        if (a <= lt) return adj * v;
+        return std::copysign(lt * (adj + std::log(a / lt) / std::log(b)), v);
+    };
+}
+inline std::function<float(float)> symLogInv(float lt, float ls, float b) {
+    return [lt, ls, b](float v) {
+        float adj = ls / (1.0f - std::pow(b, -1.0f));
+        float a = std::fabs(v);
+        if (a <= lt * adj) return v / adj;
+        return std::copysign(lt * std::pow(b, a / lt - adj), v);
+    };
+}
+inline std::function<float(float)> asinhFwdF(float w) {
+    return [w](float v) { return w * std::asinh(v / std::max(w, 1e-30f)); };
+}
+inline std::function<float(float)> asinhInvF(float w) {
+    return [w](float v) { return w * std::sinh(v / std::max(w, 1e-30f)); };
+}
+inline std::function<float(float)> logitFwdF() {
+    // mpl LogitTransform is base-10.
+    return [](float v) {
+        float p = std::clamp(v, 1e-7f, 1.0f - 1e-7f);
+        return std::log10(p / (1.0f - p));
+    };
+}
+inline std::function<float(float)> logitInvF() {
+    return [](float v) { return 1.0f / (1.0f + std::pow(10.0f, -v)); };
+}
+} // namespace
+
+struct PyInvLogTransform;
+/// mpl scale.LogTransform (base-b log, 1D separable).
+struct PyLogTransform : PyScalarTransform {
+    PyLogTransform(float base, std::string nonpositive)
+        : PyScalarTransform(logBaseFwd(base), logBaseInv(base)),
+          base(base), nonpositive(std::move(nonpositive)) {
+        if (base <= 0.0f || base == 1.0f)
+            throw py::value_error("The log base cannot be <= 0 or == 1");
+    }
+    float base;
+    std::string nonpositive;
+    [[nodiscard]] plot::TransformPtr inverted() const override;
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyLogTransform>(base, nonpositive);
+    }
+};
+/// mpl scale.InvertedLogTransform.
+struct PyInvLogTransform : PyScalarTransform {
+    PyInvLogTransform(float base, std::string nonpositive)
+        : PyScalarTransform(logBaseInv(base), logBaseFwd(base)),
+          base(base), nonpositive(std::move(nonpositive)) {
+        if (base <= 0.0f || base == 1.0f)
+            throw py::value_error("The log base cannot be <= 0 or == 1");
+    }
+    float base;
+    std::string nonpositive;
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PyLogTransform>(base, nonpositive);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyInvLogTransform>(base, nonpositive);
+    }
+};
+inline plot::TransformPtr PyLogTransform::inverted() const {
+    return std::make_shared<PyInvLogTransform>(base, nonpositive);
+}
+/// mpl Log2Transform / Log10Transform / NaturalLogTransform.
+struct PyLog2Transform : PyLogTransform {
+    explicit PyLog2Transform(std::string np)
+        : PyLogTransform(2.0f, std::move(np)) {}
+};
+struct PyLog10Transform : PyLogTransform {
+    explicit PyLog10Transform(std::string np)
+        : PyLogTransform(10.0f, std::move(np)) {}
+};
+struct PyNaturalLogTransform : PyLogTransform {
+    explicit PyNaturalLogTransform(std::string np)
+        : PyLogTransform(2.71828182845904523536f, std::move(np)) {}
+};
+
+struct PyInvSymLogTransform;
+/// mpl scale.SymmetricalLogTransform.
+struct PySymLogTransform : PyScalarTransform {
+    PySymLogTransform(float base, float linthresh, float linscale)
+        : PyScalarTransform(symLogFwd(linthresh, linscale, base),
+                            symLogInv(linthresh, linscale, base)),
+          base(base), linthresh(linthresh), linscale(linscale) {
+        if (base <= 1.0f)
+            throw py::value_error("'base' must be larger than 1");
+        if (linthresh <= 0.0f)
+            throw py::value_error("'linthresh' must be positive");
+        if (linscale <= 0.0f)
+            throw py::value_error("'linscale' must be positive");
+    }
+    float base, linthresh, linscale;
+    [[nodiscard]] plot::TransformPtr inverted() const override;
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PySymLogTransform>(base, linthresh,
+                                                   linscale);
+    }
+};
+/// mpl scale.InvertedSymmetricalLogTransform.
+struct PyInvSymLogTransform : PyScalarTransform {
+    PyInvSymLogTransform(float base, float linthresh, float linscale)
+        : PyScalarTransform(symLogInv(linthresh, linscale, base),
+                            symLogFwd(linthresh, linscale, base)),
+          base(base), linthresh(linthresh), linscale(linscale) {}
+    float base, linthresh, linscale;
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PySymLogTransform>(base, linthresh,
+                                                   linscale);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyInvSymLogTransform>(base, linthresh,
+                                                      linscale);
+    }
+};
+inline plot::TransformPtr PySymLogTransform::inverted() const {
+    return std::make_shared<PyInvSymLogTransform>(base, linthresh,
+                                                  linscale);
+}
+
+struct PyInvAsinhTransform;
+/// mpl scale.AsinhTransform.
+struct PyAsinhTransform : PyScalarTransform {
+    explicit PyAsinhTransform(float linearWidth)
+        : PyScalarTransform(asinhFwdF(linearWidth), asinhInvF(linearWidth)),
+          linear_width(linearWidth) {
+        if (linearWidth <= 0.0f)
+            throw py::value_error(
+                "Scale parameter 'linear_width' must be strictly positive");
+    }
+    float linear_width;
+    [[nodiscard]] plot::TransformPtr inverted() const override;
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyAsinhTransform>(linear_width);
+    }
+};
+/// mpl scale.InvertedAsinhTransform.
+struct PyInvAsinhTransform : PyScalarTransform {
+    explicit PyInvAsinhTransform(float linearWidth)
+        : PyScalarTransform(asinhInvF(linearWidth), asinhFwdF(linearWidth)),
+          linear_width(linearWidth) {}
+    float linear_width;
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PyAsinhTransform>(linear_width);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyInvAsinhTransform>(linear_width);
+    }
+};
+inline plot::TransformPtr PyAsinhTransform::inverted() const {
+    return std::make_shared<PyInvAsinhTransform>(linear_width);
+}
+
+struct PyLogisticTransform;
+/// mpl scale.LogitTransform.
+struct PyLogitTransform : PyScalarTransform {
+    explicit PyLogitTransform(std::string nonpositive)
+        : PyScalarTransform(logitFwdF(), logitInvF()),
+          nonpositive(std::move(nonpositive)) {
+        if (this->nonpositive != "mask" && this->nonpositive != "clip")
+            throw py::value_error(
+                "'nonpositive' must be 'mask' or 'clip'");
+    }
+    std::string nonpositive;
+    [[nodiscard]] plot::TransformPtr inverted() const override;
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyLogitTransform>(nonpositive);
+    }
+};
+/// mpl scale.LogisticTransform.
+struct PyLogisticTransform : PyScalarTransform {
+    explicit PyLogisticTransform(std::string nonpositive)
+        : PyScalarTransform(logitInvF(), logitFwdF()),
+          nonpositive(std::move(nonpositive)) {}
+    std::string nonpositive;
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        return std::make_shared<PyLogitTransform>(nonpositive);
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyLogisticTransform>(nonpositive);
+    }
+};
+inline plot::TransformPtr PyLogitTransform::inverted() const {
+    return std::make_shared<PyLogisticTransform>(nonpositive);
+}
+
+/// Wrap a Python callable as a scalar function (holds the GIL).
+inline std::function<float(float)> pyFnToScalar(py::object f) {
+    return [f = std::move(f)](float v) -> float {
+        py::gil_scoped_acquire gil;
+        return f(v).cast<float>();
+    };
+}
+
+/// mpl scale.ScaleBase — a named axis-scale recipe. Subclasses produce
+/// the native AxisScale plus the mpl Transform object.
+struct PyScale {
+    std::string name = "scale";
+    py::object axis;
+    virtual ~PyScale() = default;
+    [[nodiscard]] virtual plot::AxisScale axisScale() const {
+        return plot::AxisScale::linear();
+    }
+    [[nodiscard]] virtual plot::TransformPtr transform() const {
+        return std::make_shared<plot::IdentityTransform>();
+    }
+    [[nodiscard]] virtual std::pair<double, double>
+    limitRange(double vmin, double vmax, double) const {
+        return {vmin, vmax};
+    }
+    /// mpl set_default_locators_and_formatters(axis).
+    virtual void setDefaults(const py::object& axis) const {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::AutoLocator>());
+        axis.attr("set_major_formatter")(
+            std::make_shared<plot::ScalarFormatter>());
+        axis.attr("set_minor_formatter")(
+            std::make_shared<plot::NullFormatter>());
+    }
+};
+
+struct PyLinearScale : PyScale {
+    explicit PyLinearScale(py::object ax) {
+        name = "linear";
+        axis = std::move(ax);
+    }
+};
+
+struct PyLogScale : PyScale {
+    PyLogScale(py::object ax, float base, py::object subs,
+               std::string nonpositive)
+        : base(base), subs(std::move(subs)),
+          nonpositive(std::move(nonpositive)) {
+        name = "log";
+        axis = std::move(ax);
+        if (base <= 0.0f || base == 1.0f)
+            throw py::value_error("The log base cannot be <= 0 or == 1");
+        if (this->nonpositive != "mask" && this->nonpositive != "clip")
+            throw py::value_error(
+                "'nonpositive' must be 'mask' or 'clip'");
+    }
+    float base;
+    py::object subs;
+    std::string nonpositive;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::log(base, nonpositive == "mask");
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        return std::make_shared<PyLogTransform>(base, nonpositive);
+    }
+    [[nodiscard]] std::pair<double, double>
+    limitRange(double vmin, double vmax, double minpos) const override {
+        if (!std::isfinite(minpos)) minpos = 1e-300;
+        return {vmin <= 0 ? minpos : vmin, vmax <= 0 ? minpos : vmax};
+    }
+    void setDefaults(const py::object& axis) const override {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::LogLocator>(base));
+        axis.attr("set_major_formatter")(
+            std::make_shared<plot::LogFormatterSciNotation>(base));
+        std::vector<float> s;
+        if (!subs.is_none())
+            s = subs.cast<std::vector<float>>();
+        axis.attr("set_minor_locator")(
+            std::make_shared<plot::LogLocator>(base));
+        // mpl: LogFormatterSciNotation(labelOnlyBase=subs is not None).
+        auto mf = std::make_shared<plot::LogFormatterSciNotation>(base);
+        mf->labelOnlyBase = !subs.is_none();
+        axis.attr("set_minor_formatter")(mf);
+    }
+};
+
+struct PyFuncScale : PyScale {
+    PyFuncScale(py::object ax, py::object functions) {
+        name = "function";
+        axis = std::move(ax);
+        auto seq = py::cast<py::sequence>(functions);
+        if (seq.size() != 2)
+            throw py::value_error(
+                "'functions' must be a (forward, inverse) pair");
+        fwd = py::reinterpret_borrow<py::object>(seq[0]);
+        inv = py::reinterpret_borrow<py::object>(seq[1]);
+        if (!py::hasattr(fwd, "__call__") || !py::hasattr(inv, "__call__"))
+            throw py::value_error(
+                "arguments to FuncTransform must be functions");
+    }
+    py::object fwd, inv;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::function(pyFnToScalar(fwd),
+                                         pyFnToScalar(inv));
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        return std::make_shared<PyFuncTransform>(fwd, inv);
+    }
+};
+
+struct PyFuncScaleLog : PyScale {
+    PyFuncScaleLog(py::object ax, py::object functions, float base)
+        : base(base) {
+        name = "functionlog";
+        axis = std::move(ax);
+        auto seq = py::cast<py::sequence>(functions);
+        if (seq.size() != 2)
+            throw py::value_error(
+                "'functions' must be a (forward, inverse) pair");
+        fwd = py::reinterpret_borrow<py::object>(seq[0]);
+        inv = py::reinterpret_borrow<py::object>(seq[1]);
+        if (base <= 0.0f || base == 1.0f)
+            throw py::value_error("The log base cannot be <= 0 or == 1");
+    }
+    py::object fwd, inv;
+    float base;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::functionlog(pyFnToScalar(fwd),
+                                            pyFnToScalar(inv), base);
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        // mpl: FuncTransform + LogTransform(base).
+        return std::make_shared<PyFuncTransform>(fwd, inv)
+            ->then(std::make_shared<PyLogTransform>(base, "clip"));
+    }
+    [[nodiscard]] std::pair<double, double>
+    limitRange(double vmin, double vmax, double minpos) const override {
+        if (!std::isfinite(minpos)) minpos = 1e-300;
+        return {vmin <= 0 ? minpos : vmin, vmax <= 0 ? minpos : vmax};
+    }
+    void setDefaults(const py::object& axis) const override {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::LogLocator>(base));
+        axis.attr("set_major_formatter")(
+            std::make_shared<plot::LogFormatterSciNotation>(base));
+    }
+};
+
+struct PySymLogScale : PyScale {
+    PySymLogScale(py::object ax, float base, float linthresh,
+                  py::object subs, float linscale)
+        : base(base), linthresh(linthresh), subs(std::move(subs)),
+          linscale(linscale) {
+        name = "symlog";
+        axis = std::move(ax);
+        if (base <= 1.0f)
+            throw py::value_error("'base' must be larger than 1");
+        if (linthresh <= 0.0f)
+            throw py::value_error("'linthresh' must be positive");
+        if (linscale <= 0.0f)
+            throw py::value_error("'linscale' must be positive");
+    }
+    float base, linthresh;
+    py::object subs;
+    float linscale;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::symlog(linthresh, linscale, base);
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        return std::make_shared<PySymLogTransform>(base, linthresh,
+                                                   linscale);
+    }
+    void setDefaults(const py::object& axis) const override {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::SymmetricalLogLocator>(linthresh,
+                                                          base));
+        axis.attr("set_major_formatter")(
+            std::make_shared<plot::LogFormatterSciNotation>(base));
+        axis.attr("set_minor_formatter")(
+            std::make_shared<plot::NullFormatter>());
+    }
+};
+
+struct PyAsinhScale : PyScale {
+    PyAsinhScale(py::object ax, float linearWidth, float base,
+                 py::object subs)
+        : linear_width(linearWidth), base(base), subs(std::move(subs)) {
+        name = "asinh";
+        axis = std::move(ax);
+        if (linearWidth <= 0.0f)
+            throw py::value_error(
+                "Scale parameter 'linear_width' must be strictly positive");
+    }
+    float linear_width, base;
+    py::object subs;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::asinh(linear_width);
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        return std::make_shared<PyAsinhTransform>(linear_width);
+    }
+    void setDefaults(const py::object& axis) const override {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::AsinhLocator>(linear_width));
+        if (base > 1.0f)
+            axis.attr("set_major_formatter")(
+                std::make_shared<plot::LogFormatterSciNotation>(base));
+        axis.attr("set_minor_formatter")(
+            std::make_shared<plot::NullFormatter>());
+    }
+};
+
+struct PyLogitScale : PyScale {
+    PyLogitScale(py::object ax, std::string nonpositive,
+                 std::string oneHalf, bool useOverline)
+        : nonpositive(std::move(nonpositive)),
+          one_half(std::move(oneHalf)), use_overline(useOverline) {
+        name = "logit";
+        axis = std::move(ax);
+        if (this->nonpositive != "mask" && this->nonpositive != "clip")
+            throw py::value_error(
+                "'nonpositive' must be 'mask' or 'clip'");
+    }
+    std::string nonpositive, one_half;
+    bool use_overline;
+    [[nodiscard]] plot::AxisScale axisScale() const override {
+        return plot::AxisScale::logit();
+    }
+    [[nodiscard]] plot::TransformPtr transform() const override {
+        return std::make_shared<PyLogitTransform>(nonpositive);
+    }
+    [[nodiscard]] std::pair<double, double>
+    limitRange(double vmin, double vmax, double minpos) const override {
+        if (!std::isfinite(minpos)) minpos = 1e-7;
+        return {vmin <= 0 ? minpos : vmin,
+                vmax >= 1 ? 1 - minpos : vmax};
+    }
+    void setDefaults(const py::object& axis) const override {
+        axis.attr("set_major_locator")(
+            std::make_shared<plot::LogitLocator>());
+        axis.attr("set_major_formatter")(
+            std::make_shared<plot::LogitFormatter>());
+        axis.attr("set_minor_formatter")(
+            std::make_shared<plot::LogitFormatter>());
+    }
+};
+
+/// mpl scale._scale_mapping — name → scale class.
+inline std::unordered_map<std::string, py::object>& scaleRegistry() {
+    static auto* reg = new std::unordered_map<std::string, py::object>();
+    return *reg;
+}
+
+/// Resolve a scale name + kwargs (mpl Axis._set_scale value semantics):
+/// returns the native AxisScale for builtins, or instantiates a
+/// registered ScaleBase subclass.
+plot::AxisScale scaleFromNameAndKwargs(const std::string& name,
+                                       const py::object& axisObj,
+                                       const py::kwargs& kw) {
+    auto kwf = [&](const char* k, float d) {
+        return kw && kw.contains(k) ? kw[k].cast<float>() : d;
+    };
+    auto kwstr = [&](const char* k, const char* d) {
+        return kw && kw.contains(k) ? kw[k].cast<std::string>() : d;
+    };
+    if (name == "linear") return plot::AxisScale::linear();
+    if (name == "log")
+        return plot::AxisScale::log(kwf("base", 10.f),
+                                    kwstr("nonpositive", "clip") == "mask");
+    if (name == "symlog")
+        return plot::AxisScale::symlog(kwf("linthresh", 2.f),
+                                       kwf("linscale", 1.f),
+                                       kwf("base", 10.f));
+    if (name == "logit") return plot::AxisScale::logit();
+    if (name == "asinh")
+        return plot::AxisScale::asinh(kwf("linear_width", 1.f));
+    if (name == "mercator") return plot::AxisScale::mercator();
+    if (name == "function" || name == "functionlog") {
+        if (!kw || !kw.contains("functions"))
+            throw py::value_error(std::format(
+                "scale '{}' requires a 'functions' (forward, inverse) "
+                "pair", name));
+        auto seq = py::cast<py::sequence>(kw["functions"]);
+        py::object f = py::reinterpret_borrow<py::object>(seq[0]);
+        py::object g = py::reinterpret_borrow<py::object>(seq[1]);
+        if (name == "function")
+            return plot::AxisScale::function(pyFnToScalar(f),
+                                             pyFnToScalar(g));
+        return plot::AxisScale::functionlog(
+            pyFnToScalar(f), pyFnToScalar(g), kwf("base", 10.f));
+    }
+    // Custom registered scale class.
+    auto it = scaleRegistry().find(name);
+    if (it == scaleRegistry().end())
+        throw py::value_error(
+            std::format("Unknown scale type '{}'", name));
+    py::object inst =
+        kw && kw.size() ? it->second(axisObj, **kw) : it->second(axisObj);
+    return inst.cast<PyScale&>().axisScale();
+}
+
+/// mpl Axes.set_xscale/set_yscale: value is a str or ScaleBase.
+void setAxisScale(PyAxes& a, bool isX, const py::object& value,
+                  const py::kwargs& kw) {
+    auto set = [&](const plot::AxisScale& s) {
+        if (isX) a.ax->setXscale(s);
+        else a.ax->setYscale(s);
+    };
+    if (py::isinstance<PyScale>(value)) {
+        set(value.cast<PyScale&>().axisScale());
+        return;
+    }
+    if (!py::isinstance<py::str>(value))
+        throw py::type_error("'value' must be a str or ScaleBase");
+    py::object axisObj = isX
+        ? py::cast(PyAxis{a.owner, a.ax, true})
+        : py::cast(PyAxis{a.owner, a.ax, false});
+    set(scaleFromNameAndKwargs(value.cast<std::string>(), axisObj, kw));
+}
+
+// ═══ vp.units / vp.category ══════════════════════════════════════════
+
+/// mpl category._mapping — an ordered str→int map, either a live view
+/// of an axis's category list or a standalone owned list (UnitData).
+struct PyCategoryMap {
+    plot::Axes* ax = nullptr;
+    bool isX = true;
+    std::shared_ptr<PyFigure> keepalive;
+    std::shared_ptr<std::vector<std::string>> owned;
+    [[nodiscard]] std::vector<std::string>& list() const {
+        if (owned) return *owned;
+        if (ax)
+            return isX ? ax->xCategoriesMut() : ax->yCategoriesMut();
+        static std::vector<std::string> empty;
+        return empty;
+    }
+    [[nodiscard]] int indexOf(std::string_view s) const {
+        const auto& l = list();
+        for (size_t i = 0; i < l.size(); ++i)
+            if (l[i] == s) return int(i);
+        return -1;
+    }
+};
+
+/// mpl category.UnitData — str/bytes → int-id mapping. Attached mode
+/// (ax != nullptr) views the axis's category list; standalone mode owns
+/// the list shared with its _mapping object.
+struct PyUnitData {
+    mutable std::shared_ptr<std::vector<std::string>> owned;
+    plot::Axes* ax = nullptr;
+    bool isX = true;
+    std::shared_ptr<PyFigure> keepalive;
+    [[nodiscard]] std::vector<std::string>& list() const {
+        if (ax)
+            return isX ? ax->xCategoriesMut() : ax->yCategoriesMut();
+        if (!owned)
+            owned = std::make_shared<std::vector<std::string>>();
+        return *owned;
+    }
+    [[nodiscard]] PyCategoryMap mapping() const {
+        return {ax, isX, keepalive, owned};
+    }
+    /// mpl UnitData.update: unique values in order, str/bytes only.
+    void update(const py::object& data);
+};
+
+/// Per-axis units storage (mpl axis.units): [x, y] unit objects.
+/// Heap-allocated and never freed — destructing py::object entries
+/// after interpreter teardown would segfault.
+inline std::unordered_map<plot::Axes*, std::array<py::object, 2>>&
+axisUnitsMap() {
+    static auto* m =
+        new std::unordered_map<plot::Axes*, std::array<py::object, 2>>();
+    return *m;
+}
+inline py::object axisUnits(plot::Axes* ax, bool isX) {
+    auto it = axisUnitsMap().find(ax);
+    return it == axisUnitsMap().end() ? py::none()
+                                      : it->second[isX ? 0 : 1];
+}
+inline void setAxisUnits(plot::Axes* ax, bool isX, py::object u) {
+    axisUnitsMap()[ax][isX ? 0 : 1] = std::move(u);
+}
+
+/// mpl category.StrCategoryLocator — a Locator emitting every mapped
+/// index, live-read from the UnitData mapping.
+struct PyCategoryLocator : plot::Locator {
+    PyCategoryMap map;
+    [[nodiscard]] std::vector<float> tickValues(float lo,
+                                                float hi) const override {
+        std::vector<float> out;
+        size_t n = map.list().size();
+        out.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            float v = float(i);
+            if (v >= lo - 1e-6f && v <= hi + 1e-6f) out.push_back(v);
+        }
+        return out;
+    }
+};
+
+/// mpl category.StrCategoryFormatter — index → category text.
+struct PyCategoryFormatter : plot::Formatter {
+    PyCategoryMap map;
+    [[nodiscard]] std::string format(float v, int) const override {
+        const auto& l = map.list();
+        long i = std::lround(v);
+        return i >= 0 && size_t(i) < l.size() ? l[size_t(i)] : "";
+    }
+};
+
+/// mpl units.AxisInfo — bundles axis defaults a converter supplies.
+struct PyAxisInfo {
+    py::object majloc = py::none(), minloc = py::none();
+    py::object majfmt = py::none(), minfmt = py::none();
+    py::object label = py::none();
+    py::object default_limits = py::none();
+};
+
+/// mpl units.ConversionError — a TypeError raised by converters.
+struct PyConversionErrorExc : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+/// mpl units.ConversionInterface base — subclassed by the bound
+/// converters (methods are statics in mpl).
+struct PyConversionInterface {
+    virtual ~PyConversionInterface() = default;
+};
+/// mpl units.DecimalConverter.
+struct PyDecimalConverter : PyConversionInterface {};
+/// mpl category.StrCategoryConverter.
+struct PyStrCategoryConverter : PyConversionInterface {};
+
+/// mpl DecimalConverter.convert: float() on scalars/sequences.
+inline py::object pyDecimalConvert(const py::object& v) {
+    if (py::isinstance<py::sequence>(v) ||
+        py::isinstance<py::array>(v)) {
+        py::list out;
+        for (auto e : v)
+            out.append(py::float_(e.cast<double>()));
+        return out;
+    }
+    return py::float_(v.cast<double>());
+}
+
+/// mpl StrCategoryConverter.convert — map str/bytes through the
+/// UnitData mapping to float indices.
+inline py::object strCategoryConvert(const py::object& value,
+                                     const py::object& unit) {
+    if (unit.is_none())
+        throw py::value_error(
+            "Missing category information for StrCategoryConverter; "
+            "this might be caused by unintendedly mixing categorical "
+            "and numeric data");
+    if (!py::isinstance<PyUnitData>(unit))
+        throw py::value_error(
+            "Provided unit is not valid for a categorical converter, "
+            "as it does not have a _mapping attribute.");
+    auto& u = unit.cast<PyUnitData&>();
+    bool scalar = py::isinstance<py::str>(value) ||
+                  py::isinstance<py::bytes>(value);
+    u.update(value);
+    auto& l = u.list();
+    std::unordered_map<std::string_view, int> idx;
+    for (size_t i = 0; i < l.size(); ++i) idx[l[i]] = int(i);
+    auto mapOne = [&](const py::object& v) -> float {
+        std::string s = v.cast<std::string>();
+        auto it = idx.find(s);
+        return it == idx.end()
+                   ? std::numeric_limits<float>::quiet_NaN()
+                   : float(it->second);
+    };
+    if (scalar) return py::float_(mapOne(value));
+    py::list out;
+    py::sequence seq = py::isinstance<py::array>(value)
+        ? value.cast<py::array>().attr("ravel")().cast<py::sequence>()
+        : value.cast<py::sequence>();
+    for (auto v : seq)
+        out.append(py::float_(mapOne(
+            py::reinterpret_borrow<py::object>(v))));
+    return out;
+}
+
+/// mpl units.Registry — dict of type → ConversionInterface instance.
+struct PyUnitsRegistry {
+    py::dict d;
+};
+inline PyUnitsRegistry& unitsReg() {
+    static auto* r = new PyUnitsRegistry{py::dict()};
+    return *r;
+}
+
+/// mpl Registry.get_converter: walk type(x).__mro__ for a registered
+/// class; for arrays/iterables inspect the first element's type.
+py::object unitsGetConverter(py::object x) {
+    auto& d = unitsReg().d;
+    auto lookup = [&d](const py::object& obj) -> py::object {
+        for (auto cls : obj.attr("__class__").attr("__mro__"))
+            if (d.contains(cls))
+                return py::reinterpret_borrow<py::object>(d[cls]);
+        return py::none();
+    };
+    if (py::isinstance<py::array>(x)) {
+        auto a = x.cast<py::array>();
+        if (a.size() == 0) {
+            // Empty array: infer from dtype.type's mro.
+            for (auto cls : a.dtype().attr("type").attr("__mro__"))
+                if (d.contains(cls))
+                    return py::reinterpret_borrow<py::object>(d[cls]);
+            return py::none();
+        }
+        return unitsGetConverter(
+            py::reinterpret_borrow<py::object>(
+                a.attr("ravel")()[py::int_(0)]));
+    }
+    py::object c = lookup(x);
+    if (!c.is_none()) return c;
+    if (!py::isinstance<py::str>(x) && !py::isinstance<py::bytes>(x) &&
+        py::hasattr(x, "__iter__") && !py::isinstance<py::dict>(x)) {
+        try {
+            for (auto e : x) {
+                py::object eo = py::reinterpret_borrow<py::object>(e);
+                if (!eo.get_type().is(x.get_type()))
+                    return unitsGetConverter(eo);
+            }
+        } catch (...) {
+        }
+    }
+    return py::none();
+}
+
+void PyUnitData::update(const py::object& data) {
+    py::sequence seq;
+    if (py::isinstance<py::str>(data) || py::isinstance<py::bytes>(data))
+        seq = py::make_tuple(data);
+    else if (py::isinstance<py::array>(data))
+        seq = data.cast<py::array>().attr("ravel")().cast<py::sequence>();
+    else
+        seq = data.cast<py::sequence>();
+    for (auto item : seq) {
+        py::object v = py::reinterpret_borrow<py::object>(item);
+        std::string s;
+        if (py::isinstance<py::bytes>(v))
+            s = v.cast<std::string>();
+        else if (py::isinstance<py::str>(v))
+            s = v.cast<std::string>();
+        else
+            throw py::type_error(std::format(
+                "'value' must be an instance of (str, bytes), not {}",
+                std::string(py::str(v.get_type()))));
+        if (ax) {
+            // Attached mode: mpl axis.units.update → lookup-or-append,
+            // which refreshes the FixedLocator/FixedFormatter.
+            if (isX) (void)ax->xCategoryIndex(s);
+            else (void)ax->yCategoryIndex(s);
+        } else {
+            auto& l = list();
+            if (std::ranges::find(l, s) == l.end()) l.push_back(s);
+        }
+    }
+}
+
+/// mpl axis.convert_xunits/convert_yunits: run the registered unit
+/// converter (if any) on *obj* before numeric conversion.
+std::vector<float> toFloatsUnits(const py::object& obj, PyAxes& a,
+                                 bool isX, bool* isDate = nullptr);
+
+/// mpl AxisInfo application: install locators/formatters/label/limits.
+void applyAxisInfo(plot::Axes* ax, bool isX, const py::object& info) {
+    auto setLoc = [&](const char* attr, bool minor) {
+        py::object o = info.attr(attr);
+        if (o.is_none()) return;
+        try {
+            auto loc = py::cast<std::shared_ptr<plot::Locator>>(o);
+            if (isX) {
+                if (minor) ax->setXMinorLocator(loc);
+                else ax->setXLocator(loc);
+            } else {
+                if (minor) ax->setYMinorLocator(loc);
+                else ax->setYLocator(loc);
+            }
+        } catch (const py::cast_error&) {
+        }
+    };
+    auto setFmt = [&](const char* attr, bool minor) {
+        py::object o = info.attr(attr);
+        if (o.is_none()) return;
+        try {
+            auto fmt = py::cast<std::shared_ptr<plot::Formatter>>(o);
+            if (isX) {
+                if (minor) ax->setXMinorFormatter(fmt);
+                else ax->setXFormatter(fmt);
+            } else {
+                if (minor) ax->setYMinorFormatter(fmt);
+                else ax->setYFormatter(fmt);
+            }
+        } catch (const py::cast_error&) {
+        }
+    };
+    setLoc("majloc", false);
+    setLoc("minloc", true);
+    setFmt("majfmt", false);
+    setFmt("minfmt", true);
+    py::object label = info.attr("label");
+    if (!label.is_none()) {
+        if (isX) ax->style().xAxis.label = label.cast<std::string>();
+        else ax->style().yAxis.label = label.cast<std::string>();
+    }
+    py::object lim = info.attr("default_limits");
+    if (!lim.is_none() && ax->plots().empty()) {
+        auto [lo, hi] = lim.cast<std::pair<float, float>>();
+        if (isX) ax->setXlim(lo, hi);
+        else ax->setYlim(lo, hi);
+    }
+    ax->touch();
+}
+
+std::vector<float> toFloatsUnits(const py::object& obj, PyAxes& a,
+                                 bool isX, bool* isDate) {
+    py::object conv = unitsGetConverter(obj);
+    if (conv.is_none()) return toFloats(obj, isDate);
+    py::object axisObj = py::cast(PyAxis{a.owner, a.ax, isX});
+    py::object units = axisUnits(a.ax, isX);
+    // mpl Axis.update_units: default_units creates the unit when the
+    // axis has none, else updates the existing unit.
+    py::object newUnits = conv.attr("default_units")(obj, axisObj);
+    if (units.is_none() && !newUnits.is_none()) {
+        units = newUnits;
+        setAxisUnits(a.ax, isX, units);
+    } else if (!units.is_none()) {
+        // default_units already updated the existing unit in place.
+    }
+    py::object info = conv.attr("axisinfo")(units, axisObj);
+    if (!info.is_none()) applyAxisInfo(a.ax, isX, info);
+    py::object res = conv.attr("convert")(obj, units, axisObj);
+    return toFloats(res);
+}
+
+// ── mpl matplotlib.animation ─────────────────────────────────────
+/// mpl Animation — Python-side state; the frame loop is driven by
+/// the render helpers below (no event loop in the headless backend).
+/// mappableFrom (defined below) resolves handle → native IPlot.
+static plot::IPlot* mappableFrom(const py::object& o);
+/// mpl matplotlib.sankey.Sankey — diagrams over `plot::Sankey`.
+struct PySankey {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    py::object axObj = py::none();
+    std::unique_ptr<plot::Sankey> sk;
+    float scaleKw = 1.0f;
+    std::string unit, format;
+    float radius = 0.1f, shoulder = 0.03f, offset = 0.15f;
+    float head_angle = 100.0f, margin = 0.4f;
+    py::dict extra;
+    struct AddKw {
+        py::dict kwargs;
+        float trunklength;
+        float rotation;
+        int prior;
+        std::pair<int, int> connect;
+    };
+    std::vector<AddKw> kwlist;
+};
+
+struct PyAnimation {
+    std::shared_ptr<PyFigure> fig;
+    py::object frame_seq;
+    py::object event_source = py::none();
+    py::object props_ = py::dict();
+    bool blit = false;
+    /// mpl _interval (TimedAnimation), ms between frames.
+    int interval = 200;
+    int repeat_delay = 0;
+    bool repeat = true;
+    /// mpl _draw_was_started / bookkeeping.
+    bool draw_started = false;
+    bool paused = false;
+    virtual ~PyAnimation() = default;
+};
+
+struct PyTimedAnimation : PyAnimation {};
+struct PyArtistAnimation : PyTimedAnimation {
+    py::object framedata;      // mpl _framedata: list of artist lists
+    py::list drawn_artists;    // mpl _drawn_artists
+};
+struct PyFuncAnimation : PyTimedAnimation {
+    py::object func, init_func = py::none();
+    py::tuple args;
+    py::object iter_gen;       // mpl _iter_gen
+    py::object save_count = py::none();  // mpl _save_count
+    py::list save_seq;         // mpl _save_seq
+    bool cache_frame_data = true;
+};
+
+/// mpl set_visible/set_animated write-through to the native artist
+/// (handles resolve via mappableFrom; non-plot artists only touch
+/// their props dict).
+inline void animSetVisible(const py::object& artist, bool v) {
+    if (auto* p = mappableFrom(artist)) { p->visible = v; p->touch(); }
+    artist.attr("set_visible")(v);
+}
+inline void animSetAnimated(const py::object& artist, bool b) {
+    if (auto* p = mappableFrom(artist)) p->animated = b;
+    artist.attr("set_animated")(b);
+}
+
+/// mpl Animation._init_draw for ArtistAnimation — hide every artist
+/// participating in any frame.
+inline void artistAnimInitDraw(PyArtistAnimation& s) {
+    for (auto frame : s.framedata) {
+        for (auto a : py::reinterpret_borrow<py::sequence>(frame)) {
+            py::object ao = py::reinterpret_borrow<py::object>(a);
+            animSetVisible(ao, false);
+            animSetAnimated(ao, s.blit);
+        }
+    }
+    s.drawn_artists = py::list();
+}
+
+/// mpl ArtistAnimation._pre_draw — hide last frame's artists.
+inline void artistAnimPreDraw(PyArtistAnimation& s, bool blit) {
+    if (blit) return;  // blit restores the snapshot instead
+    for (auto a : s.drawn_artists)
+        animSetVisible(py::reinterpret_borrow<py::object>(a), false);
+}
+
+/// mpl ArtistAnimation._draw_frame — show this frame's artists.
+inline void artistAnimDrawFrame(PyArtistAnimation& s,
+                                const py::object& framedata) {
+    s.drawn_artists = py::list(framedata);
+    for (auto a : s.drawn_artists)
+        animSetVisible(py::reinterpret_borrow<py::object>(a), true);
+}
+
+/// mpl AbstractMovieWriter — Python-side wrapper around the native
+/// encode::MovieWriter (or pure-Python for HTMLWriter).
+struct PyMovieWriter {
+    std::shared_ptr<PyFigure> fig;
+    std::unique_ptr<encode::MovieWriter> w;
+    std::string outfile;
+    std::string nativeName;      // "", "gif", "ffmpeg", "imagemagick"
+    double fps = 5;
+    double dpi = 0;
+    py::dict metadata;
+    py::object codec = py::none(), bitrate = py::none();
+    py::object extra_args = py::none();
+    py::object frame_format = py::str("rgba");
+    /// HTMLWriter: PNG frames accumulate here until finish().
+    std::vector<std::vector<uint8_t>> htmlFrames;
+    bool isHtml = false;
+    uint32_t extW = 0, extH = 0;
+    virtual ~PyMovieWriter() = default;
+};
+
+/// mpl writer class variants — pybind needs a distinct C++ type per
+/// bound class; behavior differs only in ctor/nativeName/isAvailable.
+struct PyMovieWriterPipe : PyMovieWriter {};       // MovieWriter
+struct PyFileMovieWriter : PyMovieWriterPipe {};   // FileMovieWriter
+struct PyPillowWriter : PyMovieWriter {};          // PillowWriter
+struct PyFFMpegWriter : PyMovieWriterPipe {};      // FFMpegWriter
+struct PyFFMpegFileWriter : PyFileMovieWriter {};  // FFMpegFileWriter
+struct PyImageMagickWriter : PyMovieWriterPipe {}; // ImageMagickWriter
+struct PyImageMagickFileWriter : PyFileMovieWriter {}; // ImageMagickFileWriter
+struct PyHTMLWriter : PyFileMovieWriter {          // HTMLWriter
+    /// mpl HTMLWriter.embed_limit (MB) — frames always embed here.
+    double embed_limit = 0.0;
+};
+
+/// mpl AbstractMovieWriter.saving context manager.
+struct PySavingCtx {
+    std::shared_ptr<PyMovieWriter> w;
+    py::object fig; std::string outfile; py::object dpi;
+};
+
+/// mpl MovieWriter.setup — resolve the figure, create the native
+/// writer, and open the output.
+inline void movieWriterSetup(PyMovieWriter& s, const py::object& fig,
+                           const std::string& outfile,
+                           const py::object& dpi) {
+    s.fig = fig.cast<std::shared_ptr<PyFigure>>();
+    s.outfile = outfile;
+    s.dpi = dpi.is_none() ? s.fig->fig().dpi() : dpi.cast<double>();
+    auto ext = s.fig->extent();
+    s.extW = ext.width; s.extH = ext.height;
+    if (s.isHtml) { s.htmlFrames.clear(); return; }
+    s.w = encode::createMovieWriter(s.nativeName, outfile);
+    if (!s.w)
+        throw std::runtime_error(
+            std::format("MovieWriter {} unavailable", s.nativeName));
+    std::map<std::string, std::string> meta;
+    for (auto [k, v] : s.metadata)
+        meta[py::str(k).cast<std::string>()] =
+            py::str(v).cast<std::string>();
+    if (!s.w->open(outfile, ext.width, ext.height, s.fps, meta))
+        throw std::runtime_error(
+            s.w->error().empty()
+                ? std::format("MovieWriter {} failed to open {}",
+                              s.nativeName, outfile)
+                : s.w->error());
+}
+
+/// mpl AbstractMovieWriter.grab_frame — render the figure and append
+/// one frame to the output.
+inline void movieWriterGrabFrame(PyMovieWriter& s, const py::dict&) {
+    if (!s.fig) throw std::runtime_error("MovieWriter is not set up");
+    auto* r = s.fig->renderer();
+    r->prepare(s.fig->fig());
+    r->renderFrame(s.fig->fig());
+    auto px = s.fig->backend()->readbackRgba8();
+    if (px.empty())
+        throw std::runtime_error("MovieWriter: frame readback failed");
+    if (s.isHtml) {
+        auto enc = encode::createCpuEncoder(encode::ImageFormat::Png);
+        auto res = enc->encode(px, s.extW, s.extH);
+        if (!res.success)
+            throw std::runtime_error("MovieWriter: PNG encode failed");
+        s.htmlFrames.push_back(std::move(res.bytes));
+        return;
+    }
+    if (!s.w->writeFrame(px))
+        throw std::runtime_error(
+            s.w->error().empty() ? "MovieWriter: writeFrame failed"
+                                 : s.w->error());
+}
+
+inline void movieWriterFinish(PyMovieWriter& s) {
+    if (s.isHtml) {
+        double fps = s.fps > 0 ? s.fps : 10;
+        auto html = encode::jsHtmlFromPngFrames(s.htmlFrames, fps,
+                                                s.extW, s.extH);
+        std::ofstream out(s.outfile, std::ios::binary);
+        out << html;
+        return;
+    }
+    if (s.w && !s.w->finish())
+        throw std::runtime_error(
+            s.w->error().empty() ? "MovieWriter: finish failed"
+                                 : s.w->error());
+}
+
+/// mpl MovieWriterRegistry — name → writer class dict with
+/// availability filtering.
+struct PyWriterRegistry {
+    py::dict registered;
+};
+
+/// mpl animation.writers singleton storage.
+inline PyWriterRegistry& writerReg() {
+    static auto* r = new PyWriterRegistry{py::dict()};
+    return *r;
+}
+
+/// mpl writer.is_available — class has a binary/builtin present.
+inline bool writerClassAvailable(const py::object& cls) {
+    return cls.attr("isAvailable")().cast<bool>();
+}
+
+/// mpl Animation.save's writer resolution: name → class → instance.
+inline py::object resolveMovieWriter(const py::object& writer,
+                                     const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata,
+                                     const py::module_& animMod) {
+    if (!py::isinstance<py::str>(writer)) {
+        // A MovieWriter instance: fps/codec/etc must all be None.
+        if (!fps.is_none() || !codec.is_none() || !bitrate.is_none() ||
+            !extra_args.is_none() || !metadata.is_none())
+            throw std::runtime_error(
+                "Passing in values for arguments fps, codec, bitrate, "
+                "extra_args, or metadata is not supported when writer "
+                "is an existing MovieWriter instance. These should "
+                "instead be passed as arguments when creating the "
+                "MovieWriter instance.");
+        return writer;
+    }
+    std::string name = writer.cast<std::string>();
+    auto& reg = writerReg().registered;
+    py::object cls;
+    if (reg.contains(py::str(name)) &&
+        writerClassAvailable(reg[py::str(name)])) {
+        cls = py::reinterpret_borrow<py::object>(reg[py::str(name)]);
+    } else {
+        py::module_::import("warnings").attr("warn")(py::str(
+            std::format("MovieWriter {} unavailable; using Pillow "
+                        "instead.", name)));
+        cls = animMod.attr("PillowWriter");
+    }
+    py::dict kw;
+    if (!codec.is_none()) kw["codec"] = codec;
+    if (!bitrate.is_none()) kw["bitrate"] = bitrate;
+    if (!extra_args.is_none()) kw["extra_args"] = extra_args;
+    if (!metadata.is_none()) kw["metadata"] = metadata;
+    return cls(fps, **kw);
+}
+
+/// mpl Animation.save's frame loop — iterate every anim's
+/// new_saved_frame_seq() in lockstep, drawing and grabbing frames
+/// through the writer's Python grab_frame (supports subclasses).
+/// Returns the number of frames written.
+inline size_t animSaveLoop(const std::vector<py::object>& allAnim,
+                           const py::object& wobj,
+                           const py::object& pcb,
+                           const py::dict& savefigKw) {
+    for (auto& a : allAnim) a.attr("_init_draw")();
+    // mpl: total_frames = sum(_save_count) or None.
+    py::object total = py::none();
+    {
+        size_t sum = 0; bool anyNone = false;
+        for (auto& a : allAnim) {
+            py::object sc =
+                py::getattr(a, "_save_count", py::none());
+            if (sc.is_none()) { anyNone = true; break; }
+            sum += sc.cast<size_t>();
+        }
+        if (!anyNone) total = py::cast(sum);
+    }
+    std::vector<py::object> its;
+    for (auto& a : allAnim)
+        its.push_back(a.attr("new_saved_frame_seq")());
+    size_t frame = 0;
+    while (true) {
+        std::vector<py::object> datas;
+        datas.reserve(its.size());
+        bool done = false;
+        for (auto& it : its) {
+            try {
+                datas.push_back(it.attr("__next__")());
+            } catch (const py::error_already_set& e) {
+                if (!e.matches(PyExc_StopIteration)) throw;
+                done = true;
+                break;
+            }
+        }
+        if (done) break;
+        for (size_t i = 0; i < allAnim.size(); ++i) {
+            allAnim[i].attr("_draw_next_frame")(datas[i], false);
+            if (!pcb.is_none()) pcb(py::cast(frame), total);
+            ++frame;
+        }
+        wobj.attr("grab_frame")(**savefigKw);
+    }
+    return frame;
+}
+
+/// mpl Animation frame-sequence iteration shared by save/jshtml:
+/// collect all framedata of `anim` (bounded by _save_count when set).
+inline std::vector<py::object> collectAnimFrames(const py::object& a) {
+    std::vector<py::object> out;
+    py::object it = a.attr("new_saved_frame_seq")();
+    py::object sc = py::getattr(a, "_save_count", py::none());
+    size_t cap = sc.is_none() ? 100000 : sc.cast<size_t>();
+    while (out.size() < cap) {
+        try {
+            out.push_back(it.attr("__next__")());
+        } catch (const py::error_already_set& e) {
+            if (!e.matches(PyExc_StopIteration)) throw;
+            break;
+        }
+    }
+    return out;
+}
+
 /// Resolve the rendered AnchoredText slot of an AnchoredOffsetbox
 /// (index into axes.anchoredTexts()). nullptr when not yet added.
 inline plot::AnchoredText*
@@ -3260,7 +4467,8 @@ PyLine2D axesPlot(PyAxes& a, const py::object& x, const py::object& y,
     // converters. `fmt` is the mpl format string ("ro--"); explicit
     // kwargs (color, marker, linestyle, ...) override it.
     bool xDate = false, yDate = false;
-    auto xv = toFloats(x, &xDate), yv = toFloats(y, &yDate);
+    auto xv = toFloatsUnits(x, a, true, &xDate);
+    auto yv = toFloatsUnits(y, a, false, &yDate);
     if (xDate) a.ax->xaxis_date();
     if (yDate) a.ax->yaxis_date();
     auto s = makeSeries(xv, yv);
@@ -3352,7 +4560,8 @@ PyCollection axesScatter(PyAxes& a, const py::object& x,
                          const py::object& transform,
                          const py::object& pathEffects) {
     bool xDate = false, yDate = false;
-    auto xv = toFloats(x, &xDate), yv = toFloats(y, &yDate);
+    auto xv = toFloatsUnits(x, a, true, &xDate);
+    auto yv = toFloatsUnits(y, a, false, &yDate);
     if (xDate) a.ax->xaxis_date();
     if (yDate) a.ax->yaxis_date();
     auto ser = makeSeries(xv, yv);
@@ -3648,94 +4857,6 @@ py::object implicitX(const py::object& y) {
     return py::cast(xv);
 }
 
-/// mpl FuncAnimation — wraps plot::FuncAnimation with Python callables.
-/// `frames` follows mpl semantics: an int calls func(0..n-1); an
-/// iterable calls func(element) per element. Extra `fargs` are appended
-/// to every func call.
-class PyAnimation {
-public:
-    PyAnimation(std::shared_ptr<PyFigure> fig, py::object func,
-                const py::object& frames, const py::object& initFunc,
-                const py::object& fargs, int interval, bool blit,
-                bool repeat, int repeatDelay)
-        : owner_(std::move(fig)), func_(std::move(func)) {
-        size_t count = 0;
-        if (frames.is_none())
-            throw std::invalid_argument(
-                "frames=None is an infinite generator — pass an int "
-                "frame count or an iterable");
-        if (py::isinstance<py::int_>(frames)) {
-            count = frames.cast<size_t>();
-        } else {
-            for (auto a : frames)
-                frameArgs_.push_back(
-                    py::reinterpret_borrow<py::object>(a));
-            count = frameArgs_.size();
-        }
-        if (count == 0)
-            throw std::invalid_argument("frames must produce >0 frames");
-
-        if (!fargs.is_none())
-            for (auto a : fargs)
-                extraArgs_.push_back(py::reinterpret_borrow<py::object>(a));
-
-        std::function<void(size_t)> fn = [this](size_t i) {
-            py::gil_scoped_acquire gil;
-            py::tuple t(1 + extraArgs_.size());
-            t[0] = frameArgs_.empty() ? py::cast(i) : frameArgs_[i];
-            for (size_t k = 0; k < extraArgs_.size(); ++k)
-                t[k + 1] = extraArgs_[k];
-            func_(*t);
-        };
-        std::function<void()> init;
-        if (!initFunc.is_none()) {
-            initFn_ = initFunc;
-            init = [this] {
-                py::gil_scoped_acquire gil;
-                initFn_();
-            };
-        }
-        anim_ = std::make_unique<plot::FuncAnimation>(
-            owner_->fig(), std::move(fn), count, std::move(init),
-            interval, blit, repeat);
-        anim_->repeatDelay = repeatDelay;
-    }
-
-    /// mpl anim.save(path, writer=..., fps=...). fps<=0 → 1000/interval.
-    /// ".html"/".htm" writes the standalone JS-player page
-    /// (to_jshtml output).
-    bool save(const std::string& path, const std::string& writer,
-              double fps) {
-        if (fps <= 0) fps = 1000.0 / anim_->interval;
-        auto ext = std::filesystem::path(path).extension().string();
-        if (ext == ".html" || ext == ".htm") {
-            auto html = owner_->renderer()->toJsHtml(*anim_, fps);
-            if (html.empty()) return false;
-            std::ofstream(path, std::ios::binary) << html;
-            return true;
-        }
-        return owner_->renderer()->saveAnimation(*anim_, path, fps, writer);
-    }
-
-    std::string toJsHtml(double fps) {
-        if (fps <= 0) fps = 1000.0 / anim_->interval;
-        return owner_->renderer()->toJsHtml(*anim_, fps);
-    }
-    std::string toHtml5Video(double fps) {
-        if (fps <= 0) fps = 1000.0 / anim_->interval;
-        return owner_->renderer()->toHtml5Video(*anim_, fps);
-    }
-
-private:
-    // anim_ references owner_->fig() — declared after so it dies first.
-    std::shared_ptr<PyFigure> owner_;
-    py::object func_;
-    py::object initFn_;
-    std::vector<py::object> frameArgs_;
-    std::vector<py::object> extraArgs_;
-    std::unique_ptr<plot::FuncAnimation> anim_;
-};
-
 /// Python value → rcParam value string (booleans lowercased for the
 /// .mplstyle parser, sequences comma-joined).
 std::string rcValueStr(const py::object& v) {
@@ -4011,6 +5132,7 @@ void defArtistAPI(const py::object& cls) {
     });
     def("set_animated", [](T& t, bool b) {
         t.props_["animated"] = py::bool_(b);
+        if (auto* p = artistPlot(t)) p->animated = b;
     }, py::arg("b"));
     def("get_alpha", [](T& t) {
         return aProp(t.props_, "alpha", py::none());
@@ -4024,7 +5146,8 @@ void defArtistAPI(const py::object& cls) {
     });
     def("set_visible", [](T& t, bool b) {
         t.props_["visible"] = py::bool_(b);
-        artistTouch(t);
+        if (auto* p = artistPlot(t)) { p->visible = b; p->touch(); }
+        else artistTouch(t);
     }, py::arg("b"));
     def("get_zorder", [](T& t) {
         return aProp(t.props_, "zorder",
@@ -5210,14 +6333,29 @@ PYBIND11_MODULE(volcanoplot, m) {
              "mpl fig.subplot_mosaic — returns {label: Axes}.")
         .def("colorbar",
              [](const std::shared_ptr<PyFigure>& f,
-                const py::object& mappable, const py::object& axObj,
-                const std::string& orientation,
+                const py::object& mappable, const py::object& cax,
+                const py::object& axObj,
+                const py::object& location, const py::object& orientation,
                 float fraction, float pad, float shrink, float aspect,
                 const std::string& label, const std::string& extend,
-                const py::object& ticks) {
+                const py::object& extendfrac, bool extendrect,
+                const py::object& spacing, bool drawedges,
+                const py::object& ticks, const py::object& format,
+                const std::string& ticklocation,
+                const py::object& alpha, const py::object& cmap,
+                const py::object& norm, bool useGridspec,
+                const py::kwargs& kw) {
+                 // mpl: cax wins over ax for the colorbar axes.
+                 const py::object& axSel =
+                     !cax.is_none() ? cax : axObj;
                  plot::Axes* target = nullptr;
-                 if (!axObj.is_none())
-                     target = axObj.cast<PyAxes>().ax;
+                 if (!axSel.is_none()) {
+                     target = axSel.cast<PyAxes>().ax;
+                     // mpl colorbar.make_axes cax: the strip fills the
+                     // cax box; the axes draws no spines/ticks.
+                     if (!cax.is_none())
+                         target->style().colorbar.caxMode = true;
+                 }
                  else if (auto all = f->fig().allAxes(); !all.empty())
                      target = all.back();
                  if (!target)
@@ -5225,24 +6363,89 @@ PYBIND11_MODULE(volcanoplot, m) {
                          "colorbar: no axes to attach to");
                  auto& cb = target->style().colorbar;
                  cb.visible = true;
-                 cb.orientation = orientation;
+                 // mpl _normalize_location_orientation: location
+                 // implies orientation when orientation is unset.
+                 std::string ori;
+                 if (!location.is_none()) {
+                     std::string loc = location.cast<std::string>();
+                     cb.location = loc;
+                     if (orientation.is_none()) {
+                         if (loc == "right" || loc == "left")
+                             ori = "vertical";
+                         else if (loc == "bottom" || loc == "top")
+                             ori = "horizontal";
+                         else
+                             throw py::value_error(std::format(
+                                 "'{}' is not a valid location", loc));
+                     }
+                 }
+                 if (!orientation.is_none())
+                     ori = orientation.cast<std::string>();
+                 if (!ori.empty()) cb.orientation = ori;
                  cb.fraction = fraction;
                  cb.pad = pad;
                  cb.shrink = shrink;
                  if (aspect > 0.0f) cb.aspect = aspect;
                  if (!label.empty()) cb.label = label;
                  cb.extend = extend;
+                 if (!extendfrac.is_none()) {
+                     if (py::isinstance<py::str>(extendfrac)) {
+                         if (extendfrac.cast<std::string>() != "auto")
+                             throw py::value_error(
+                                 "invalid value for extendfrac");
+                     } else {
+                         cb.extendfrac = extendfrac.cast<float>();
+                     }
+                 }
+                 cb.extendrect = extendrect;
+                 if (!spacing.is_none())
+                     cb.spacing = spacing.cast<std::string>();
+                 cb.drawedges = drawedges;
+                 cb.ticklocation = ticklocation;
+                 (void)useGridspec;
+                 if (!format.is_none()) {
+                     // mpl accepts a format string or a Formatter.
+                     if (py::isinstance<py::str>(format))
+                         cb.format = format.cast<std::string>();
+                 }
+                 if (!alpha.is_none())
+                     cb.alpha = alpha.cast<float>();
+                 if (!cmap.is_none()) {
+                     if (py::isinstance<py::str>(cmap))
+                         cb.cmapPtr =
+                             &plot::Colormap::byName(
+                                 cmap.cast<std::string>());
+                     else if (py::isinstance<PyColormap>(cmap))
+                         cb.cmapPtr = cmap.cast<PyColormap>().cm;
+                 }
+                 if (!norm.is_none())
+                     cb.norm = norm.cast<
+                         std::shared_ptr<plot::Normalize>>();
                  if (!mappable.is_none()) {
-                     plot::IPlot* mp = mappableFrom(mappable);
-                     if (!mp)
-                         throw std::invalid_argument(
-                             "colorbar: mappable must be an artist "
-                             "handle (image, collection, ...)");
-                     cb.mappable = mp;
+                     if (py::isinstance<PyScalarMappable>(mappable)) {
+                         // mpl cm.ScalarMappable standalone handle.
+                         auto& sm =
+                             mappable.cast<PyScalarMappable&>();
+                         cb.cmapPtr = sm.cm;
+                         cb.norm = sm.norm;
+                         if (!sm.arr.empty()) {
+                             auto [mn, mx] = std::ranges::minmax(sm.arr);
+                             cb.explicitRange = plot::Range{mn, mx};
+                         }
+                     } else {
+                         plot::IPlot* mp = mappableFrom(mappable);
+                         if (!mp)
+                             throw std::invalid_argument(
+                                 "colorbar: mappable must be an artist "
+                                 "handle (image, collection, ...)");
+                         cb.mappable = mp;
+                     }
                  }
                  if (!ticks.is_none()) cb.ticks = toFloats(ticks);
                  target->touch();
-                 auto cbh = py::cast(PyColorbar{f, target, mappable});
+                 PyColorbar h{f, target, mappable};
+                 if (kw) h.props_ = py::dict(kw);
+                 auto cbh = py::cast(h);
                  // mpl: mappable.colorbar is the Colorbar created by
                  // fig.colorbar(mappable).
                  if (!mappable.is_none() &&
@@ -5251,12 +6454,24 @@ PYBIND11_MODULE(volcanoplot, m) {
                  return cbh;
              },
              py::arg("mappable") = py::none(),
+             py::arg("cax") = py::none(),
              py::arg("ax") = py::none(),
-             py::arg("orientation") = "vertical",
+             py::arg("location") = py::none(),
+             py::arg("orientation") = py::none(),
              py::arg("fraction") = 0.15f, py::arg("pad") = 0.05f,
              py::arg("shrink") = 1.0f, py::arg("aspect") = -1.0f,
              py::arg("label") = "", py::arg("extend") = "neither",
+             py::arg("extendfrac") = py::none(),
+             py::arg("extendrect") = false,
+             py::arg("spacing") = py::none(),
+             py::arg("drawedges") = false,
              py::arg("ticks") = py::none(),
+             py::arg("format") = py::none(),
+             py::arg("ticklocation") = "auto",
+             py::arg("alpha") = py::none(),
+             py::arg("cmap") = py::none(),
+             py::arg("norm") = py::none(),
+             py::arg("use_gridspec") = false,
              "mpl fig.colorbar(mappable, ax=...) — returns a Colorbar.")
         .def("suptitle",
              [](const std::shared_ptr<PyFigure>& f, std::string t,
@@ -7753,6 +8968,54 @@ PYBIND11_MODULE(volcanoplot, m) {
 
     // mpl ax.xaxis / ax.yaxis proxy.
     py::class_<PyAxis>(m, "Axis")
+        // mpl Axis.units — the unit object of the last unit-typed
+        // data (e.g. category.UnitData for categorical axes), or None.
+        .def_property("units",
+                      [](const PyAxis& s) {
+                          return axisUnits(s.ax, s.isX);
+                      },
+                      [](PyAxis& s, const py::object& u) {
+                          setAxisUnits(s.ax, s.isX, u);
+                      })
+        .def("set_units",
+             [](PyAxis& s, const py::object& u) {
+                 setAxisUnits(s.ax, s.isX, u);
+             },
+             py::arg("u"))
+        .def("get_units",
+             [](const PyAxis& s) { return axisUnits(s.ax, s.isX); })
+        // mpl Axis.update_units → bool: look up a converter for x,
+        // create/update the axis units, and apply its AxisInfo.
+        .def("update_units",
+             [](PyAxis& s, const py::object& x) {
+                 py::object conv = unitsGetConverter(x);
+                 if (conv.is_none()) return false;
+                 py::object axisObj = py::cast(s);
+                 py::object units = axisUnits(s.ax, s.isX);
+                 py::object nu =
+                     conv.attr("default_units")(x, axisObj);
+                 if (units.is_none() && !nu.is_none())
+                     setAxisUnits(s.ax, s.isX, nu);
+                 units = axisUnits(s.ax, s.isX);
+                 py::object info =
+                     conv.attr("axisinfo")(units, axisObj);
+                 if (!info.is_none())
+                     applyAxisInfo(s.ax, s.isX, info);
+                 return true;
+             },
+             py::arg("x"))
+        // mpl Axis.convert_units — convert via the axis's unit
+        // converter (no-op when the axis has no units).
+        .def("convert_units",
+             [](PyAxis& s, const py::object& x) -> py::object {
+                 py::object units = axisUnits(s.ax, s.isX);
+                 if (units.is_none()) return x;
+                 py::object conv = unitsGetConverter(x);
+                 if (conv.is_none()) return x;
+                 py::object axisObj = py::cast(s);
+                 return conv.attr("convert")(x, units, axisObj);
+             },
+             py::arg("x"))
         .def("set_major_locator",
              [](PyAxis& s, std::shared_ptr<plot::Locator> l) {
                  if (s.isX) s.ax->setXLocator(std::move(l));
@@ -9120,6 +10383,1742 @@ PYBIND11_MODULE(volcanoplot, m) {
                          return py::cast(affineOf(*tp.transform));
                      return py::cast(plot::Affine2D::identity());
                  });
+    }
+
+    // ── mpl matplotlib.scale ─────────────────────────────────────────
+    // ScaleBase hierarchy + transform classes + the _scale_mapping
+    // registry (scale_factory / register_scale / get_scale_names).
+    {
+        auto sm = m.def_submodule("scale");
+        py::class_<PyScale, std::shared_ptr<PyScale>> scls(sm, "ScaleBase");
+        scls.def_readonly("name", &PyScale::name)
+            .def_readonly("axis", &PyScale::axis)
+            .def("get_transform",
+                 [](const PyScale& s) { return s.transform(); })
+            .def("limit_range_for_scale",
+                 [](const PyScale& s, double vmin, double vmax,
+                    double minpos) {
+                     return s.limitRange(vmin, vmax, minpos);
+                 },
+                 py::arg("vmin"), py::arg("vmax"), py::arg("minpos"))
+            .def("set_default_locators_and_formatters",
+                 [](const PyScale& s, const py::object& axis) {
+                     s.setDefaults(axis);
+                 },
+                 py::arg("axis"));
+        auto bindScale = [&]<typename T>(const char* cls, auto ctor) {
+            py::class_<T, PyScale, std::shared_ptr<T>>(sm, cls)
+                .def(py::init(ctor));
+        };
+        bindScale.template operator()<PyLinearScale>(
+            "LinearScale", [](py::object axis) {
+                return std::make_shared<PyLinearScale>(std::move(axis));
+            });
+        auto logScaleCls = py::class_<PyLogScale, PyScale,
+                                      std::shared_ptr<PyLogScale>>(
+            sm, "LogScale")
+            .def(py::init([](py::object axis, float base,
+                             py::object subs,
+                             const std::string& nonpositive) {
+                     return std::make_shared<PyLogScale>(
+                         std::move(axis), base, std::move(subs),
+                         nonpositive);
+                 }),
+                 py::arg("axis"), py::kw_only(),
+                 py::arg("base") = 10.0f,
+                 py::arg("subs") = py::none(),
+                 py::arg("nonpositive") = "clip")
+            .def_readonly("base", &PyLogScale::base)
+            .def_readonly("subs", &PyLogScale::subs)
+            .def_readonly("nonpositive", &PyLogScale::nonpositive);
+        // mpl: name is a class-level string attribute.
+        logScaleCls.attr("name") = "log";
+        py::class_<PySymLogScale, PyScale,
+                   std::shared_ptr<PySymLogScale>>(
+            sm, "SymmetricalLogScale")
+            .def(py::init([](py::object axis, float base,
+                             float linthresh, py::object subs,
+                             float linscale) {
+                     return std::make_shared<PySymLogScale>(
+                         std::move(axis), base, linthresh,
+                         std::move(subs), linscale);
+                 }),
+                 py::arg("axis"), py::kw_only(),
+                 py::arg("base") = 10.0f,
+                 py::arg("linthresh") = 2.0f,
+                 py::arg("subs") = py::none(),
+                 py::arg("linscale") = 1.0f)
+            .def_readonly("base", &PySymLogScale::base)
+            .def_readonly("linthresh", &PySymLogScale::linthresh)
+            .def_readonly("subs", &PySymLogScale::subs)
+            .def_readonly("linscale", &PySymLogScale::linscale)
+            .attr("name") = "symlog";
+        py::class_<PyAsinhScale, PyScale,
+                   std::shared_ptr<PyAsinhScale>>(sm, "AsinhScale")
+            .def(py::init([](py::object axis, float linearWidth,
+                             float base, py::object subs) {
+                     return std::make_shared<PyAsinhScale>(
+                         std::move(axis), linearWidth, base,
+                         std::move(subs));
+                 }),
+                 py::arg("axis"), py::kw_only(),
+                 py::arg("linear_width") = 1.0f,
+                 py::arg("base") = 10.0f,
+                 py::arg("subs") = py::none())
+            .def_readonly("linear_width", &PyAsinhScale::linear_width)
+            .attr("name") = "asinh";
+        py::class_<PyLogitScale, PyScale,
+                   std::shared_ptr<PyLogitScale>>(sm, "LogitScale")
+            .def(py::init([](py::object axis,
+                             const std::string& nonpositive,
+                             const std::string& oneHalf,
+                             bool useOverline) {
+                     return std::make_shared<PyLogitScale>(
+                         std::move(axis), nonpositive, oneHalf,
+                         useOverline);
+                 }),
+                 py::arg("axis"), py::arg("nonpositive") = "mask",
+                 py::kw_only(),
+                 py::arg("one_half") = "\\frac{1}{2}",
+                 py::arg("use_overline") = false)
+            .def_readonly("nonpositive", &PyLogitScale::nonpositive)
+            .attr("name") = "logit";
+        py::class_<PyFuncScale, PyScale,
+                   std::shared_ptr<PyFuncScale>>(sm, "FuncScale")
+            .def(py::init([](py::object axis, py::object functions) {
+                     return std::make_shared<PyFuncScale>(
+                         std::move(axis), std::move(functions));
+                 }),
+                 py::arg("axis"), py::arg("functions"))
+            .attr("name") = "function";
+        py::class_<PyFuncScaleLog, PyScale,
+                   std::shared_ptr<PyFuncScaleLog>>(sm, "FuncScaleLog")
+            .def(py::init([](py::object axis, py::object functions,
+                             float base) {
+                     return std::make_shared<PyFuncScaleLog>(
+                         std::move(axis), std::move(functions), base);
+                 }),
+                 py::arg("axis"), py::arg("functions"),
+                 py::arg("base") = 10.0f)
+            .def_readonly("base", &PyFuncScaleLog::base)
+            .attr("name") = "functionlog";
+        sm.attr("LinearScale").attr("name") = "linear";
+        sm.attr("ScaleBase").attr("name") = py::none();
+
+        // ── mpl scale transform classes ──────────────────────────────
+        auto bindSTransform = [&]<typename T>(
+                py::object scope, const char* cls, auto init,
+                auto&&... args) {
+            py::class_<T, plot::Transform, std::shared_ptr<T>> c(
+                scope, cls);
+            c.def(py::init(init), args...);
+            c.def_property_readonly("input_dims",
+                                    [](const T&) { return 1; })
+             .def_property_readonly("output_dims",
+                                    [](const T&) { return 1; })
+             .def_property_readonly("is_separable",
+                                    [](const T&) { return true; });
+            return c;
+        };
+        // FuncTransform lives in mpl.scale (1D separable).
+        py::class_<PyFuncTransform, plot::Transform,
+                   std::shared_ptr<PyFuncTransform>>(sm, "FuncTransform")
+            .def(py::init([](py::object fwd, py::object inv) {
+                     if (!py::hasattr(fwd, "__call__") ||
+                         !py::hasattr(inv, "__call__"))
+                         throw py::value_error(
+                             "arguments to FuncTransform must be "
+                             "functions");
+                     return std::make_shared<PyFuncTransform>(
+                         std::move(fwd), std::move(inv));
+                 }),
+                 py::arg("forward"), py::arg("inverse"))
+            .def_property_readonly("input_dims",
+                                   [](const PyFuncTransform&) {
+                                       return 1;
+                                   })
+            .def_property_readonly("output_dims",
+                                   [](const PyFuncTransform&) {
+                                       return 1;
+                                   })
+            .def_property_readonly("is_separable",
+                                   [](const PyFuncTransform&) {
+                                       return true;
+                                   });
+        bindSTransform.template operator()<PyLogTransform>(
+            sm, "LogTransform",
+            [](float base, const std::string& np) {
+                return std::make_shared<PyLogTransform>(base, np);
+            },
+            py::arg("base"), py::arg("nonpositive") = "clip")
+            .def_readonly("base", &PyLogTransform::base)
+            .def_readonly("nonpositive", &PyLogTransform::nonpositive);
+        bindSTransform.template operator()<PyInvLogTransform>(
+            sm, "InvertedLogTransform",
+            [](float base) {
+                return std::make_shared<PyInvLogTransform>(base,
+                                                           "clip");
+            },
+            py::arg("base"))
+            .def_readonly("base", &PyInvLogTransform::base);
+        bindSTransform.template operator()<PyLog2Transform>(
+            sm, "Log2Transform",
+            [](const std::string& np) {
+                return std::make_shared<PyLog2Transform>(np);
+            },
+            py::arg("nonpositive") = "clip");
+        bindSTransform.template operator()<PyLog10Transform>(
+            sm, "Log10Transform",
+            [](const std::string& np) {
+                return std::make_shared<PyLog10Transform>(np);
+            },
+            py::arg("nonpositive") = "clip");
+        bindSTransform.template operator()<PyNaturalLogTransform>(
+            sm, "NaturalLogTransform",
+            [](const std::string& np) {
+                return std::make_shared<PyNaturalLogTransform>(np);
+            },
+            py::arg("nonpositive") = "clip");
+        bindSTransform.template operator()<PySymLogTransform>(
+            sm, "SymmetricalLogTransform",
+            [](float base, float lt, float ls) {
+                return std::make_shared<PySymLogTransform>(base, lt,
+                                                           ls);
+            },
+            py::arg("base"), py::arg("linthresh"), py::arg("linscale"))
+            .def_readonly("base", &PySymLogTransform::base)
+            .def_readonly("linthresh", &PySymLogTransform::linthresh)
+            .def_readonly("linscale", &PySymLogTransform::linscale);
+        bindSTransform.template operator()<PyInvSymLogTransform>(
+            sm, "InvertedSymmetricalLogTransform",
+            [](float base, float lt, float ls) {
+                return std::make_shared<PyInvSymLogTransform>(base, lt,
+                                                              ls);
+            },
+            py::arg("base"), py::arg("linthresh"), py::arg("linscale"))
+            .def_readonly("base", &PyInvSymLogTransform::base)
+            .def_readonly("linthresh",
+                          &PyInvSymLogTransform::linthresh)
+            .def_readonly("linscale",
+                          &PyInvSymLogTransform::linscale);
+        bindSTransform.template operator()<PyAsinhTransform>(
+            sm, "AsinhTransform",
+            [](float w) { return std::make_shared<PyAsinhTransform>(w); },
+            py::arg("linear_width"))
+            .def_readonly("linear_width",
+                          &PyAsinhTransform::linear_width);
+        bindSTransform.template operator()<PyInvAsinhTransform>(
+            sm, "InvertedAsinhTransform",
+            [](float w) {
+                return std::make_shared<PyInvAsinhTransform>(w);
+            },
+            py::arg("linear_width"))
+            .def_readonly("linear_width",
+                          &PyInvAsinhTransform::linear_width);
+        bindSTransform.template operator()<PyLogitTransform>(
+            sm, "LogitTransform",
+            [](const std::string& np) {
+                return std::make_shared<PyLogitTransform>(np);
+            },
+            py::arg("nonpositive") = "mask")
+            .def_readonly("nonpositive",
+                          &PyLogitTransform::nonpositive);
+        bindSTransform.template operator()<PyLogisticTransform>(
+            sm, "LogisticTransform",
+            [](const std::string& np) {
+                return std::make_shared<PyLogisticTransform>(np);
+            },
+            py::arg("nonpositive") = "mask")
+            .def_readonly("nonpositive",
+                          &PyLogisticTransform::nonpositive);
+
+        // ── Registry (mpl _scale_mapping / scale_factory /
+        //    register_scale / get_scale_names) ────────────────────────
+        for (const char* n : {"linear", "log", "symlog", "asinh",
+                              "logit", "function", "functionlog"}) {
+            std::string clsName =
+                std::string(n) == "linear"   ? "LinearScale"
+                : std::string(n) == "log"    ? "LogScale"
+                : std::string(n) == "symlog" ? "SymmetricalLogScale"
+                : std::string(n) == "asinh"  ? "AsinhScale"
+                : std::string(n) == "logit"  ? "LogitScale"
+                : std::string(n) == "function" ? "FuncScale"
+                                             : "FuncScaleLog";
+            scaleRegistry()[n] = sm.attr(clsName.c_str());
+        }
+        sm.def("get_scale_names", [] {
+            std::vector<std::string> names;
+            for (auto& [n, c] : scaleRegistry()) names.push_back(n);
+            std::ranges::sort(names);
+            return names;
+        });
+        sm.def("scale_factory",
+               [](const std::string& scale, const py::object& axis,
+                  const py::kwargs& kw) {
+                   auto it = scaleRegistry().find(scale);
+                   if (it == scaleRegistry().end())
+                       throw py::key_error(std::format(
+                           "Unknown scale type '{}'", scale));
+                   return kw && kw.size()
+                              ? it->second(axis, **kw)
+                              : it->second(axis);
+               },
+               py::arg("scale"), py::arg("axis"));
+        sm.def("register_scale", [](const py::object& scaleClass) {
+            scaleRegistry()[
+                scaleClass.attr("name").cast<std::string>()] =
+                scaleClass;
+            return scaleClass;
+        }, py::arg("scale_class"));
+        sm.attr("_scale_mapping") = py::dict(py::cast(scaleRegistry()));
+    }
+
+    // ── mpl matplotlib.units + matplotlib.category ───────────────────
+    {
+        auto um = m.def_submodule("units");
+        py::register_exception<PyConversionErrorExc>(
+            um, "ConversionError", PyExc_TypeError);
+        // mpl units.AxisInfo — locator/formatter/label/limits bundle.
+        py::class_<PyAxisInfo>(um, "AxisInfo")
+            .def(py::init([](py::object majloc, py::object minloc,
+                             py::object majfmt, py::object minfmt,
+                             py::object label, py::object deflim) {
+                     return PyAxisInfo{std::move(majloc),
+                                       std::move(minloc),
+                                       std::move(majfmt),
+                                       std::move(minfmt),
+                                       std::move(label),
+                                       std::move(deflim)};
+                 }),
+                 py::arg("majloc") = py::none(),
+                 py::arg("minloc") = py::none(),
+                 py::arg("majfmt") = py::none(),
+                 py::arg("minfmt") = py::none(),
+                 py::arg("label") = py::none(),
+                 py::arg("default_limits") = py::none())
+            .def_readwrite("majloc", &PyAxisInfo::majloc)
+            .def_readwrite("minloc", &PyAxisInfo::minloc)
+            .def_readwrite("majfmt", &PyAxisInfo::majfmt)
+            .def_readwrite("minfmt", &PyAxisInfo::minfmt)
+            .def_readwrite("label", &PyAxisInfo::label)
+            .def_readwrite("default_limits",
+                           &PyAxisInfo::default_limits);
+        py::class_<PyConversionInterface,
+                   std::shared_ptr<PyConversionInterface>> cif(
+            um, "ConversionInterface");
+        cif.def(py::init<>())
+            .def_static("axisinfo",
+                        [](py::object, py::object) {
+                            return py::none();
+                        },
+                        py::arg("unit"), py::arg("axis"))
+            .def_static("default_units",
+                        [](py::object, py::object) {
+                            return py::none();
+                        },
+                        py::arg("x"), py::arg("axis"))
+            .def_static("convert",
+                        [](py::object obj, py::object, py::object) {
+                            return obj;
+                        },
+                        py::arg("obj"), py::arg("unit"),
+                        py::arg("axis"));
+        // mpl units.DecimalConverter.
+        py::class_<PyDecimalConverter, PyConversionInterface,
+                   std::shared_ptr<PyDecimalConverter>>(
+            um, "DecimalConverter")
+            .def(py::init<>())
+            .def_static("convert",
+                        [](const py::object& v, py::object, py::object) {
+                            return pyDecimalConvert(v);
+                        },
+                        py::arg("value"), py::arg("unit"),
+                        py::arg("axis"));
+        // mpl units.Registry — dict subclass with get_converter.
+        py::class_<PyUnitsRegistry, std::shared_ptr<PyUnitsRegistry>>(
+            um, "Registry")
+            .def(py::init<>())
+            .def("__getitem__",
+                 [](PyUnitsRegistry& r, const py::object& k) {
+                     return py::reinterpret_borrow<py::object>(
+                         r.d[k]);
+                 })
+            .def("__setitem__",
+                 [](PyUnitsRegistry& r, const py::object& k,
+                    const py::object& v) { r.d[k] = v; })
+            .def("__contains__",
+                 [](PyUnitsRegistry& r, const py::object& k) {
+                     return r.d.contains(k);
+                 })
+            .def("__len__", [](PyUnitsRegistry& r) { return r.d.size(); })
+            .def("__iter__",
+                 [](PyUnitsRegistry& r) { return py::iter(r.d); },
+                 py::keep_alive<0, 1>())
+            .def("get",
+                 [](PyUnitsRegistry& r, const py::object& k,
+                    const py::object& d) { return r.d.attr("get")(k, d); },
+                 py::arg("key"), py::arg("default") = py::none())
+            .def("keys", [](PyUnitsRegistry& r) { return r.d.attr("keys")(); })
+            .def("values",
+                 [](PyUnitsRegistry& r) { return r.d.attr("values")(); })
+            .def("items",
+                 [](PyUnitsRegistry& r) { return r.d.attr("items")(); })
+            .def("get_converter",
+                 [](PyUnitsRegistry&, const py::object& x) {
+                     return unitsGetConverter(x);
+                 },
+                 py::arg("x"));
+        um.attr("registry") =
+            py::cast(std::shared_ptr<PyUnitsRegistry>(
+                &unitsReg(), [](PyUnitsRegistry*) {}));
+
+        // mpl matplotlib.category.
+        auto cat = m.def_submodule("category");
+        py::class_<PyCategoryMap>(cat, "_CategoryMap")
+            .def("__getitem__",
+                 [](PyCategoryMap& c, const py::object& k) {
+                     std::string s;
+                     if (py::isinstance<py::bytes>(k))
+                         s = k.cast<std::string>();
+                     else s = k.cast<std::string>();
+                     int i = c.indexOf(s);
+                     if (i < 0) throw py::key_error(s);
+                     return i;
+                 })
+            .def("__setitem__",
+                 [](PyCategoryMap& c, const py::object& k, int v) {
+                     std::string s = k.cast<std::string>();
+                     auto& l = c.list();
+                     if (c.indexOf(s) >= 0) return;
+                     if (v != int(l.size()))
+                         throw py::value_error(
+                             "categorical indices must be dense");
+                     if (c.ax) {
+                         if (c.isX) (void)c.ax->xCategoryIndex(s);
+                         else (void)c.ax->yCategoryIndex(s);
+                     } else l.push_back(s);
+                 })
+            .def("__contains__",
+                 [](PyCategoryMap& c, const py::object& k) {
+                     return c.indexOf(k.cast<std::string>()) >= 0;
+                 })
+            .def("__len__",
+                 [](PyCategoryMap& c) { return c.list().size(); })
+            .def("__iter__",
+                 [](PyCategoryMap& c) {
+                     py::list keys;
+                     for (auto& s : c.list()) keys.append(py::str(s));
+                     return py::iter(keys);
+                 })
+            .def("keys",
+                 [](PyCategoryMap& c) {
+                     py::list keys;
+                     for (auto& s : c.list()) keys.append(py::str(s));
+                     return keys;
+                 })
+            .def("values",
+                 [](PyCategoryMap& c) {
+                     py::list vals;
+                     for (size_t i = 0; i < c.list().size(); ++i)
+                         vals.append(py::int_(i));
+                     return vals;
+                 })
+            .def("items",
+                 [](PyCategoryMap& c) {
+                     py::list items;
+                     size_t i = 0;
+                     for (auto& s : c.list())
+                         items.append(
+                             py::make_tuple(py::str(s), py::int_(i++)));
+                     return items;
+                 })
+            .def("get",
+                 [](PyCategoryMap& c, const py::object& k,
+                    const py::object& d) -> py::object {
+                     int i = c.indexOf(k.cast<std::string>());
+                     return i >= 0 ? py::cast(i) : d;
+                 },
+                 py::arg("key"), py::arg("default") = py::none());
+        py::class_<PyUnitData, std::shared_ptr<PyUnitData>>(
+            cat, "UnitData")
+            .def(py::init([](py::object data) {
+                     auto u = std::make_shared<PyUnitData>();
+                     if (!data.is_none()) u->update(data);
+                     return u;
+                 }),
+                 py::arg("data") = py::none())
+            .def_property_readonly(
+                "_mapping",
+                [](PyUnitData& u) { return u.mapping(); })
+            .def("update", &PyUnitData::update, py::arg("data"));
+        // mpl StrCategoryLocator/StrCategoryFormatter take the shared
+        // mapping dict (PyCategoryMap, UnitData, or plain dict).
+        auto catMapOf = [](const py::object& m) -> PyCategoryMap {
+            if (py::isinstance<PyCategoryMap>(m))
+                return m.cast<PyCategoryMap>();
+            if (py::isinstance<PyUnitData>(m))
+                return m.cast<PyUnitData&>().mapping();
+            if (py::isinstance<py::dict>(m)) {
+                auto owned = std::make_shared<std::vector<std::string>>();
+                for (auto [k, v] : m.cast<py::dict>()) {
+                    int idx = v.cast<int>();
+                    if (idx >= int(owned->size()))
+                        owned->resize(size_t(idx) + 1);
+                    (*owned)[size_t(idx)] = k.cast<std::string>();
+                }
+                return PyCategoryMap{nullptr, true, nullptr, owned};
+            }
+            throw py::type_error(
+                "expected a units mapping, UnitData, or dict");
+        };
+        py::class_<PyCategoryLocator, plot::Locator,
+                   std::shared_ptr<PyCategoryLocator>>(
+            cat, "StrCategoryLocator")
+            .def(py::init([catMapOf](const py::object& m) {
+                     auto loc = std::make_shared<PyCategoryLocator>();
+                     loc->map = catMapOf(m);
+                     return loc;
+                 }),
+                 py::arg("units_mapping"))
+            .def("__call__",
+                 [](PyCategoryLocator& l) {
+                     return l.tickValues(-1e30f, 1e30f);
+                 })
+            .def("tick_values",
+                 [](PyCategoryLocator& l, float lo, float hi) {
+                     return l.tickValues(lo, hi);
+                 },
+                 py::arg("vmin"), py::arg("vmax"));
+        py::class_<PyCategoryFormatter, plot::Formatter,
+                   std::shared_ptr<PyCategoryFormatter>>(
+            cat, "StrCategoryFormatter")
+            .def(py::init([catMapOf](const py::object& m) {
+                     auto fmt = std::make_shared<PyCategoryFormatter>();
+                     fmt->map = catMapOf(m);
+                     return fmt;
+                 }),
+                 py::arg("units_mapping"))
+            .def("__call__",
+                 [](PyCategoryFormatter& f, float x, int pos) {
+                     return f.format(x, pos);
+                 },
+                 py::arg("x"), py::arg("pos") = 0)
+            .def("format_ticks",
+                 [](PyCategoryFormatter& f,
+                    const std::vector<float>& vals) {
+                     std::vector<std::string> out;
+                     out.reserve(vals.size());
+                     for (float v : vals) out.push_back(f.format(v, 0));
+                     return out;
+                 },
+                 py::arg("values"));
+        py::class_<PyStrCategoryConverter, PyConversionInterface,
+                   std::shared_ptr<PyStrCategoryConverter>>(
+            cat, "StrCategoryConverter")
+            .def(py::init<>())
+            .def_static("convert",
+                        [](const py::object& value,
+                           const py::object& unit, py::object) {
+                            return strCategoryConvert(value, unit);
+                        },
+                        py::arg("value"), py::arg("unit"),
+                        py::arg("axis"))
+            .def_static("axisinfo",
+                        [](const py::object& unit, py::object) {
+                            if (!py::isinstance<PyUnitData>(unit))
+                                throw py::value_error(
+                                    "Provided unit is not valid for a "
+                                    "categorical converter, as it does "
+                                    "not have a _mapping attribute.");
+                            auto& u = unit.cast<PyUnitData&>();
+                            auto loc =
+                                std::make_shared<PyCategoryLocator>();
+                            loc->map = u.mapping();
+                            auto fmt =
+                                std::make_shared<PyCategoryFormatter>();
+                            fmt->map = u.mapping();
+                            return PyAxisInfo{py::cast(loc), py::none(),
+                                              py::cast(fmt), py::none(),
+                                              py::none(), py::none()};
+                        },
+                        py::arg("unit"), py::arg("axis"))
+            .def_static("default_units",
+                        [](const py::object& data,
+                           const py::object& axisObj) -> py::object {
+                            PyAxis& a = axisObj.cast<PyAxis&>();
+                            py::object units =
+                                axisUnits(a.ax, a.isX);
+                            if (units.is_none()) {
+                                auto u =
+                                    std::make_shared<PyUnitData>();
+                                u->ax = a.ax;
+                                u->isX = a.isX;
+                                u->keepalive = a.owner;
+                                u->update(data);
+                                units = py::cast(u);
+                                setAxisUnits(a.ax, a.isX, units);
+                            } else {
+                                units.attr("update")(data);
+                            }
+                            return units;
+                        },
+                        py::arg("data"), py::arg("axis"));
+        // mpl: registry[str] = registry[np.str_] = registry[bytes] =
+        // registry[np.bytes_] = StrCategoryConverter().
+        {
+            auto conv = cat.attr("StrCategoryConverter")();
+            auto& reg = unitsReg().d;
+            reg[py::str().get_type()] = conv;
+            reg[py::bytes().get_type()] = conv;
+            try {
+                py::module_ np = py::module_::import("numpy");
+                reg[np.attr("str_")] = conv;
+                reg[np.attr("bytes_")] = conv;
+            } catch (...) {
+            }
+            try {
+                py::module_ dec = py::module_::import("decimal");
+                reg[dec.attr("Decimal")] =
+                    um.attr("DecimalConverter")();
+            } catch (...) {
+            }
+        }
+    }
+
+    // ── mpl matplotlib.animation ──────────────────────────────────
+    {
+        auto am = m.def_submodule("animation");
+
+        // mpl animation.adjusted_figsize — snap a size so w·dpi and
+        // h·dpi are multiples of n (h264 needs even dims).
+        am.def("adjusted_figsize",
+               [](double w, double h, double dpi, int n) {
+                   auto snap = [dpi, n](double inches) {
+                       int px = int(std::round(inches * dpi));
+                       int rem = px % n;
+                       if (rem) px += n - rem;
+                       return px / dpi;
+                   };
+                   return py::make_tuple(snap(w), snap(h));
+               },
+               py::arg("w"), py::arg("h"), py::arg("dpi"), py::arg("n"));
+
+        // ── mpl Animation ─────────────────────────────────────────
+        auto animCls =
+            py::class_<PyAnimation, std::shared_ptr<PyAnimation>>(
+                am, "Animation");
+        animCls
+            .def(py::init([](const py::object& fig,
+                             const py::object& event_source, bool blit) {
+                     auto a = std::make_shared<PyAnimation>();
+                     a->fig = fig.cast<std::shared_ptr<PyFigure>>();
+                     a->blit = blit;
+                     a->event_source = event_source;
+                     a->frame_seq =
+                         py::cast(a).attr("new_frame_seq")();
+                     return a;
+                 }),
+                 py::arg("fig"), py::arg("event_source") = py::none(),
+                 py::arg("blit") = false)
+            .def_readwrite("frame_seq", &PyAnimation::frame_seq)
+            .def_readwrite("event_source", &PyAnimation::event_source)
+            .def_readwrite("blit", &PyAnimation::blit)
+            .def_readwrite("_draw_was_started",
+                           &PyAnimation::draw_started)
+            .def_readwrite("_fig", &PyAnimation::fig)
+            .def_property("_blit",
+                          [](const PyAnimation& s) { return s.blit; },
+                          [](PyAnimation& s, bool b) { s.blit = b; })
+            // mpl Animation.new_frame_seq → iter(self._framedata)
+            // (AttributeError when no framedata, matching mpl).
+            .def("new_frame_seq",
+                 [](PyAnimation& s) {
+                     py::object self = py::cast(&s);
+                     return py::iter(self.attr("_framedata"));
+                 })
+            .def("new_saved_frame_seq",
+                 [](PyAnimation& s) {
+                     return py::cast(&s).attr("new_frame_seq")();
+                 })
+            .def("_init_draw",
+                 [](PyAnimation& s) { s.draw_started = true; })
+            .def("_pre_draw",
+                 [](PyAnimation&, const py::object&, bool) {})
+            .def("_post_draw",
+                 [](PyAnimation& s, const py::object&, bool) {
+                     s.fig->fig().markStale();
+                 })
+            // Base _draw_frame is intentionally unbound — accessing it
+            // on a bare Animation raises AttributeError like mpl.
+            .def("_draw_next_frame",
+                 [](PyAnimation& s, const py::object& framedata,
+                    bool blit) {
+                     py::object self = py::cast(&s);
+                     self.attr("_pre_draw")(framedata, blit);
+                     self.attr("_draw_frame")(framedata);
+                     self.attr("_post_draw")(framedata, blit);
+                 },
+                 py::arg("framedata"), py::arg("blit"))
+            .def("_step",
+                 [](PyAnimation& s) {
+                     try {
+                         py::object fd = s.frame_seq.attr("__next__")();
+                         py::cast(&s).attr("_draw_next_frame")(fd,
+                                                             s.blit);
+                         return true;
+                     } catch (const py::error_already_set& e) {
+                         if (e.matches(PyExc_StopIteration))
+                             return false;
+                         throw;
+                     }
+                 })
+            .def("_start", [](PyAnimation& s) {
+                py::cast(&s).attr("_init_draw")();
+            })
+            .def("_stop", [](PyAnimation& s) {
+                s.event_source = py::none();
+            })
+            .def("pause",
+                 [](PyAnimation& s) { s.paused = true; })
+            .def("resume",
+                 [](PyAnimation& s) { s.paused = false; })
+            .def("_draw_was_started_check", [](PyAnimation&) {})
+            .def("save",
+                 [am](PyAnimation& s, const std::string& filename,
+                      const py::object& writer, const py::object& fps,
+                      const py::object& dpi, const py::object& codec,
+                      const py::object& bitrate,
+                      const py::object& extra_args,
+                      const py::object& metadata,
+                      const py::object& extra_anim,
+                      const py::object& savefig_kwargs,
+                      const py::object& progress_callback) {
+                     std::vector<py::object> allAnim{py::cast(&s)};
+                     if (!extra_anim.is_none())
+                         for (auto e : extra_anim) {
+                             py::object eo =
+                                 py::reinterpret_borrow<py::object>(e);
+                             if (eo.attr("_fig").cast<std::shared_ptr<
+                                         PyFigure>>() == s.fig)
+                                 allAnim.push_back(eo);
+                         }
+                     for (auto& a : allAnim)
+                         a.attr("_draw_was_started") = true;
+                     // mpl: writer-instance + fps/codec/etc args is a
+                     // RuntimeError (checked on the raw args).
+                     if (!writer.is_none() &&
+                         !py::isinstance<py::str>(writer) &&
+                         (!fps.is_none() || !codec.is_none() ||
+                          !bitrate.is_none() || !extra_args.is_none() ||
+                          !metadata.is_none()))
+                         throw std::runtime_error(
+                             "Passing in values for arguments fps, "
+                             "codec, bitrate, extra_args, or metadata "
+                             "is not supported when writer is an "
+                             "existing MovieWriter instance. These "
+                             "should instead be passed as arguments "
+                             "when creating the MovieWriter "
+                             "instance.");
+                     py::object wr =
+                         writer.is_none()
+                             ? py::str("ffmpeg")
+                             : writer;
+                     py::object fpsR = fps;
+                     if (fpsR.is_none() &&
+                         py::hasattr(py::cast(&s), "_interval"))
+                         fpsR = py::float_(1000.0 / s.interval);
+                     py::object dpiR =
+                         dpi.is_none()
+                             ? py::float_(s.fig->fig().dpi())
+                             : dpi;
+                     py::object wobj = resolveMovieWriter(
+                         wr, fpsR, codec, bitrate, extra_args,
+                         metadata, am);
+                     py::dict skw =
+                         savefig_kwargs.is_none()
+                             ? py::dict()
+                             : py::dict(savefig_kwargs);
+                     if (skw.contains("bbox_inches")) {
+                         py::module_::import("warnings").attr("warn")(
+                             py::str("Warning: discarding the "
+                                     "'bbox_inches' argument in "
+                                     "'savefig_kwargs' as it may cause "
+                                     "frame size to vary, which is "
+                                     "inappropriate for animation."));
+                         skw.attr("pop")("bbox_inches");
+                     }
+                     // mpl writer.saving(fig, outfile, dpi): setup →
+                     // grab_frame loop → finish.
+                     wobj.attr("setup")(py::cast(s.fig), filename,
+                                        dpiR);
+                     try {
+                         animSaveLoop(allAnim, wobj,
+                                      progress_callback, skw);
+                     } catch (...) {
+                         wobj.attr("finish")();
+                         throw;
+                     }
+                     wobj.attr("finish")();
+                 },
+                 py::arg("filename"), py::arg("writer") = py::none(),
+                 py::arg("fps") = py::none(),
+                 py::arg("dpi") = py::none(),
+                 py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none(),
+                 py::arg("extra_anim") = py::none(),
+                 py::arg("savefig_kwargs") = py::none(),
+                 py::arg("progress_callback") = py::none())
+            .def("to_jshtml",
+                 [](PyAnimation& s, const py::object& fps,
+                    const py::object& embed_limit) {
+                     double f = fps.is_none()
+                                    ? 1000.0 / s.interval
+                                    : fps.cast<double>();
+                     (void)embed_limit;  // jshtml always embeds
+                     auto self = py::cast(&s);
+                     self.attr("_init_draw")();
+                     auto frames = collectAnimFrames(self);
+                     auto enc = encode::createCpuEncoder(
+                         encode::ImageFormat::Png);
+                     std::vector<std::vector<uint8_t>> pngs;
+                     for (auto& d : frames) {
+                         self.attr("_draw_next_frame")(d, false);
+                         auto* r = s.fig->renderer();
+                         r->prepare(s.fig->fig());
+                         r->renderFrame(s.fig->fig());
+                         auto px =
+                             s.fig->backend()->readbackRgba8();
+                         auto ext = s.fig->extent();
+                         auto res = enc->encode(px, ext.width,
+                                                ext.height);
+                         if (!res.success)
+                             throw std::runtime_error(
+                                 "to_jshtml: PNG encode failed");
+                         pngs.push_back(std::move(res.bytes));
+                     }
+                     auto ext = s.fig->extent();
+                     return encode::jsHtmlFromPngFrames(
+                         pngs, f, ext.width, ext.height);
+                 },
+                 py::arg("fps") = py::none(),
+                 py::arg("embed_limit") = py::none())
+            .def("to_html5_video",
+                 [](PyAnimation& s, const py::object& embed_limit) {
+                     (void)embed_limit;
+                     double f = 1000.0 / s.interval;
+                     if (encode::FFMpegWriter::available()) {
+                         auto tmp =
+                             std::filesystem::temp_directory_path() /
+                             "volcano_anim_py.mp4";
+                         PyMovieWriter w;
+                         w.nativeName = "ffmpeg";
+                         w.fps = f;
+                         movieWriterSetup(w, py::cast(s.fig),
+                                          tmp.string(), py::none());
+                         auto self = py::cast(&s);
+                         self.attr("_init_draw")();
+                         for (auto& d : collectAnimFrames(self)) {
+                             self.attr("_draw_next_frame")(d, false);
+                             movieWriterGrabFrame(w, py::dict());
+                         }
+                         movieWriterFinish(w);
+                         std::ifstream in(tmp, std::ios::binary);
+                         std::vector<uint8_t> bytes(
+                             (std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+                         std::filesystem::remove(tmp);
+                         return encode::html5VideoFromMovie(bytes);
+                     }
+                     return py::cast(&s).attr("to_jshtml")(
+                                py::cast(f))
+                         .cast<std::string>();
+                 },
+                 py::arg("embed_limit") = py::none());
+
+        // ── mpl TimedAnimation ────────────────────────────────────
+        py::class_<PyTimedAnimation, PyAnimation,
+                   std::shared_ptr<PyTimedAnimation>>(am,
+                                                      "TimedAnimation")
+            .def(py::init([](const py::object& fig, int interval,
+                             int repeat_delay, bool repeat,
+                             const py::object& event_source,
+                             bool blit) {
+                     auto a = std::make_shared<PyTimedAnimation>();
+                     a->fig = fig.cast<std::shared_ptr<PyFigure>>();
+                     a->interval = interval;
+                     a->repeat_delay = repeat_delay;
+                     a->repeat = repeat;
+                     a->blit = blit;
+                     a->event_source = event_source;
+                     a->frame_seq =
+                         py::cast(a).attr("new_frame_seq")();
+                     return a;
+                 }),
+                 py::arg("fig"), py::arg("interval") = 200,
+                 py::arg("repeat_delay") = 0, py::arg("repeat") = true,
+                 py::arg("event_source") = py::none(),
+                 py::arg("blit") = false)
+            .def_property("_interval",
+                          [](const PyTimedAnimation& s) {
+                              return s.interval;
+                          },
+                          [](PyTimedAnimation& s, int v) {
+                              s.interval = v;
+                          })
+            .def_property("_repeat_delay",
+                          [](const PyTimedAnimation& s) {
+                              return s.repeat_delay;
+                          },
+                          [](PyTimedAnimation& s, int v) {
+                              s.repeat_delay = v;
+                          })
+            .def_property("_repeat",
+                          [](const PyTimedAnimation& s) {
+                              return s.repeat;
+                          },
+                          [](PyTimedAnimation& s, bool v) {
+                              s.repeat = v;
+                          });
+
+        // ── mpl ArtistAnimation ───────────────────────────────────
+        py::class_<PyArtistAnimation, PyTimedAnimation,
+                   std::shared_ptr<PyArtistAnimation>>(
+            am, "ArtistAnimation")
+            .def(py::init([](const py::object& fig,
+                             const py::object& artists, int interval,
+                             int repeat_delay, bool repeat,
+                             const py::object& event_source,
+                             bool blit) {
+                     auto a = std::make_shared<PyArtistAnimation>();
+                     a->fig = fig.cast<std::shared_ptr<PyFigure>>();
+                     a->interval = interval;
+                     a->repeat_delay = repeat_delay;
+                     a->repeat = repeat;
+                     a->blit = blit;
+                     a->event_source = event_source;
+                     a->framedata = artists;
+                     a->frame_seq =
+                         py::cast(a).attr("new_frame_seq")();
+                     return a;
+                 }),
+                 py::arg("fig"), py::arg("artists"),
+                 py::arg("interval") = 200,
+                 py::arg("repeat_delay") = 0, py::arg("repeat") = true,
+                 py::arg("event_source") = py::none(),
+                 py::arg("blit") = false)
+            .def_readwrite("_framedata", &PyArtistAnimation::framedata)
+            .def_readwrite("_drawn_artists",
+                           &PyArtistAnimation::drawn_artists)
+            .def("_init_draw",
+                 [](PyArtistAnimation& s) {
+                     s.draw_started = true;
+                     artistAnimInitDraw(s);
+                 })
+            .def("_pre_draw",
+                 [](PyArtistAnimation& s, const py::object&, bool b) {
+                     artistAnimPreDraw(s, b);
+                 })
+            .def("_draw_frame",
+                 [](PyArtistAnimation& s, const py::object& fd) {
+                     artistAnimDrawFrame(s, fd);
+                 });
+
+        // ── mpl FuncAnimation ─────────────────────────────────────
+        py::class_<PyFuncAnimation, PyTimedAnimation,
+                   std::shared_ptr<PyFuncAnimation>>(am, "FuncAnimation")
+            .def(py::init([](const py::object& fig,
+                             const py::object& func,
+                             const py::object& frames,
+                             const py::object& init_func,
+                             const py::object& fargs,
+                             const py::object& save_count,
+                             bool cache_frame_data,
+                             int interval, int repeat_delay,
+                             bool repeat,
+                             const py::object& event_source,
+                             bool blit) {
+                     auto a = std::make_shared<PyFuncAnimation>();
+                     a->fig = fig.cast<std::shared_ptr<PyFigure>>();
+                     a->func = func;
+                     a->init_func = init_func;
+                     a->args = fargs.is_none()
+                                   ? py::tuple()
+                                   : py::tuple(fargs);
+                     a->interval = interval;
+                     a->repeat_delay = repeat_delay;
+                     a->repeat = repeat;
+                     a->blit = blit;
+                     a->event_source = event_source;
+                     a->cache_frame_data = cache_frame_data;
+                     a->save_count = save_count;
+                     // mpl frames resolution → _iter_gen.
+                     if (frames.is_none()) {
+                         a->iter_gen = py::module_::import("itertools")
+                                           .attr("count");
+                     } else if (py::hasattr(frames, "__call__")) {
+                         a->iter_gen = frames;
+                     } else if (py::hasattr(frames, "__iter__")) {
+                         if (py::hasattr(frames, "__len__"))
+                             a->save_count =
+                                 py::cast(py::len(frames));
+                         // mpl tees repeat-mode iterables so repeat
+                         // draws get fresh iterators.
+                         a->iter_gen = py::cpp_function(
+                             [frames]() { return py::iter(frames); });
+                     } else {
+                         size_t n = frames.cast<size_t>();
+                         a->save_count = py::cast(n);
+                         a->iter_gen = py::cpp_function([n] {
+                             return py::iter(
+                                 py::module_::import("builtins")
+                                     .attr("range")(n));
+                         });
+                     }
+                     a->frame_seq =
+                         py::cast(a).attr("new_frame_seq")();
+                     return a;
+                 }),
+                 py::arg("fig"), py::arg("func"),
+                 py::arg("frames") = py::none(),
+                 py::arg("init_func") = py::none(),
+                 py::arg("fargs") = py::none(),
+                 py::arg("save_count") = py::none(),
+                 py::arg("cache_frame_data") = true,
+                 py::arg("interval") = 200,
+                 py::arg("repeat_delay") = 0, py::arg("repeat") = true,
+                 py::arg("event_source") = py::none(),
+                 py::arg("blit") = false)
+            .def_readwrite("_func", &PyFuncAnimation::func)
+            .def_readwrite("_init_func", &PyFuncAnimation::init_func)
+            .def_readwrite("_args", &PyFuncAnimation::args)
+            .def_readwrite("_iter_gen", &PyFuncAnimation::iter_gen)
+            .def_readwrite("_save_count",
+                           &PyFuncAnimation::save_count)
+            .def_readwrite("_save_seq", &PyFuncAnimation::save_seq)
+            .def_readwrite("_cache_frame_data",
+                           &PyFuncAnimation::cache_frame_data)
+            .def("new_frame_seq",
+                 [](PyFuncAnimation& s) { return s.iter_gen(); })
+            .def("new_saved_frame_seq",
+                 [](PyFuncAnimation& s) -> py::object {
+                     if (py::len(s.save_seq))
+                         return py::iter(py::list(s.save_seq));
+                     py::object it = s.iter_gen();
+                     if (s.save_count.is_none()) return it;
+                     // islice(seq, save_count)
+                     return py::module_::import("itertools")
+                         .attr("islice")(it, s.save_count);
+                 })
+            .def("_init_draw",
+                 [](PyFuncAnimation& s) {
+                     s.draw_started = true;
+                     if (s.init_func.is_none()) {
+                         try {
+                             py::object fd =
+                                 s.iter_gen().attr("__next__")();
+                             py::cast(&s).attr("_draw_frame")(fd);
+                         } catch (const py::error_already_set& e) {
+                             if (!e.matches(PyExc_StopIteration))
+                                 throw;
+                             py::module_::import("warnings")
+                                 .attr("warn")(py::str(
+                                     "Can not start iterating the "
+                                     "frames for the initial draw. "
+                                     "This can be caused by passing "
+                                     "in a 0 length sequence for "
+                                     "*frames*."));
+                         }
+                     } else {
+                         py::object drawn = s.init_func();
+                         if (s.blit) {
+                             if (drawn.is_none())
+                                 throw std::runtime_error(
+                                     "The init_func must return a "
+                                     "sequence of Artist objects.");
+                             for (auto a : drawn)
+                                 animSetAnimated(
+                                     py::reinterpret_borrow<py::object>(
+                                         a),
+                                     true);
+                         }
+                     }
+                     s.save_seq = py::list();
+                 })
+            .def("_draw_frame",
+                 [](PyFuncAnimation& s, const py::object& framedata) {
+                     if (s.cache_frame_data) {
+                         s.save_seq.append(framedata);
+                         if (!s.save_count.is_none()) {
+                             // mpl trims to the last save_count items.
+                             size_t cap = s.save_count.cast<size_t>();
+                             while (py::len(s.save_seq) > cap)
+                                 s.save_seq.attr("pop")(0);
+                         }
+                     }
+                     py::object drawn =
+                         s.func(framedata, *s.args);
+                     if (s.blit && !drawn.is_none())
+                         for (auto a : drawn)
+                             animSetAnimated(
+                                 py::reinterpret_borrow<py::object>(a),
+                                 true);
+                 });
+        // FuncAnimation needs _save_count visible on the class for
+        // getattr probes in the save loop (bound as readwrite above).
+
+        // ── mpl writer hierarchy ──────────────────────────────────
+        auto writerInit =
+            [](const py::object& fps, const py::object& codec,
+               const py::object& bitrate, const py::object& extra_args,
+               const py::object& metadata,
+               const std::string& nativeName, bool isHtml,
+               const char* frameFormat) {
+                auto w = std::make_shared<PyMovieWriter>();
+                w->fps = fps.is_none() ? 5.0 : fps.cast<double>();
+                w->codec = codec;
+                w->bitrate = bitrate;
+                w->extra_args = extra_args;
+                w->metadata =
+                    metadata.is_none() ? py::dict()
+                                       : py::dict(metadata);
+                w->nativeName = nativeName;
+                w->isHtml = isHtml;
+                w->frame_format = py::str(frameFormat);
+                return w;
+            };
+        auto amw =
+            py::class_<PyMovieWriter, std::shared_ptr<PyMovieWriter>>(
+                am, "AbstractMovieWriter");
+        amw.def_readwrite("fps", &PyMovieWriter::fps)
+            .def_readwrite("codec", &PyMovieWriter::codec)
+            .def_readwrite("bitrate", &PyMovieWriter::bitrate)
+            .def_readwrite("metadata", &PyMovieWriter::metadata)
+            .def_readwrite("extra_args", &PyMovieWriter::extra_args)
+            .def_readwrite("frame_format",
+                           &PyMovieWriter::frame_format)
+            .def_readwrite("outfile", &PyMovieWriter::outfile)
+            .def_readwrite("dpi", &PyMovieWriter::dpi)
+            .def_readwrite("fig", &PyMovieWriter::fig)
+            .def("setup", &movieWriterSetup, py::arg("fig"),
+                 py::arg("outfile"), py::arg("dpi") = py::none())
+            .def("grab_frame",
+                 [](PyMovieWriter& s, const py::kwargs& kw) {
+                     movieWriterGrabFrame(s, py::dict(kw));
+                 })
+            .def("finish", &movieWriterFinish)
+            .def("_supports_transparency",
+                 [](const PyMovieWriter&) { return false; })
+            .def_property_readonly("frame_size",
+                                   [](const PyMovieWriter& s) {
+                                       if (!s.fig)
+                                           return py::make_tuple(0, 0);
+                                       auto e = s.fig->extent();
+                                       double dpi0 = s.dpi > 0
+                                                         ? s.dpi
+                                                         : s.fig->fig()
+                                                               .dpi();
+                                       double win =
+                                           e.width / s.fig->fig().dpi();
+                                       double hin =
+                                           e.height / s.fig->fig().dpi();
+                                       return py::make_tuple(
+                                           int(win * dpi0),
+                                           int(hin * dpi0));
+                                   })
+            .def("saving",
+                 [](std::shared_ptr<PyMovieWriter> s,
+                    const py::object& fig, const std::string& outfile,
+                    const py::object& dpi) {
+                     PySavingCtx c{std::move(s), fig, outfile, dpi};
+                     return py::cast(c);
+                 },
+                 py::arg("fig"), py::arg("outfile"),
+                 py::arg("dpi") = py::none());
+        py::class_<PySavingCtx>(am, "_WriterSavingCtx")
+            .def("__enter__",
+                 [](PySavingCtx& c) {
+                     movieWriterSetup(*c.w, c.fig, c.outfile, c.dpi);
+                     return py::cast(c.w);
+                 })
+            .def("__exit__",
+                 [](PySavingCtx& c, const py::args&) {
+                     movieWriterFinish(*c.w);
+                     return false;
+                 });
+
+        // mpl MovieWriter — abstract pipe base; direct instantiation
+        // raises (subclasses bind their own ctor).
+        auto mkWriter = [](const py::object& fps,
+                           const py::object& codec,
+                           const py::object& bitrate,
+                           const py::object& extra_args,
+                           const py::object& metadata,
+                           const std::string& nativeName, bool isHtml,
+                           const char* frameFormat, auto factory) {
+            auto w = factory();
+            w->fps = fps.is_none() ? 5.0 : fps.cast<double>();
+            w->codec = codec;
+            w->bitrate = bitrate;
+            w->extra_args = extra_args;
+            w->metadata = metadata.is_none() ? py::dict()
+                                             : py::dict(metadata);
+            w->nativeName = nativeName;
+            w->isHtml = isHtml;
+            w->frame_format = py::str(frameFormat);
+            return w;
+        };
+        py::class_<PyMovieWriterPipe, PyMovieWriter,
+                   std::shared_ptr<PyMovieWriterPipe>>(am, "MovieWriter")
+            .def(py::init([](const py::args&,
+                             const py::kwargs&)
+                -> std::shared_ptr<PyMovieWriterPipe> {
+                throw py::type_error(
+                    "MovieWriter cannot be instantiated directly. "
+                    "Please use one of its subclasses.");
+            }));
+        py::class_<PyFileMovieWriter, PyMovieWriterPipe,
+                   std::shared_ptr<PyFileMovieWriter>>(am,
+                                                      "FileMovieWriter")
+            .def(py::init([](const py::args&,
+                             const py::kwargs&)
+                -> std::shared_ptr<PyFileMovieWriter> {
+                throw py::type_error(
+                    "FileMovieWriter cannot be instantiated "
+                    "directly. Please use one of its subclasses.");
+            }));
+        py::class_<PyPillowWriter, PyMovieWriter,
+                   std::shared_ptr<PyPillowWriter>>(am, "PillowWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "gif", false, "rgba",
+                                     [] {
+                                         return std::make_shared<
+                                             PyPillowWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static("isAvailable", [] { return true; });
+        py::class_<PyFFMpegWriter, PyMovieWriterPipe,
+                   std::shared_ptr<PyFFMpegWriter>>(am, "FFMpegWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "ffmpeg", false, "rgba",
+                                     [] {
+                                         return std::make_shared<
+                                             PyFFMpegWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static("isAvailable",
+                        [] { return encode::FFMpegWriter::available(); })
+            .def_static("bin_path", [] { return std::string("ffmpeg"); });
+        py::class_<PyFFMpegFileWriter, PyFileMovieWriter,
+                   std::shared_ptr<PyFFMpegFileWriter>>(
+            am, "FFMpegFileWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "ffmpeg", false, "png",
+                                     [] {
+                                         return std::make_shared<
+                                             PyFFMpegFileWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static("isAvailable",
+                        [] { return encode::FFMpegWriter::available(); })
+            .def_static("bin_path", [] { return std::string("ffmpeg"); });
+        py::class_<PyImageMagickWriter, PyMovieWriterPipe,
+                   std::shared_ptr<PyImageMagickWriter>>(
+            am, "ImageMagickWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "imagemagick", false,
+                                     "rgba",
+                                     [] {
+                                         return std::make_shared<
+                                             PyImageMagickWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static(
+                "isAvailable",
+                [] { return encode::ImageMagickWriter::available(); })
+            .def_static("bin_path",
+                        [] { return std::string("magick"); });
+        py::class_<PyImageMagickFileWriter, PyFileMovieWriter,
+                   std::shared_ptr<PyImageMagickFileWriter>>(
+            am, "ImageMagickFileWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "imagemagick", false,
+                                     "png",
+                                     [] {
+                                         return std::make_shared<
+                                             PyImageMagickFileWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static(
+                "isAvailable",
+                [] { return encode::ImageMagickWriter::available(); })
+            .def_static("bin_path",
+                        [] { return std::string("magick"); });
+        py::class_<PyHTMLWriter, PyFileMovieWriter,
+                   std::shared_ptr<PyHTMLWriter>>(am, "HTMLWriter")
+            .def(py::init([mkWriter](const py::object& fps,
+                                     const py::object& codec,
+                                     const py::object& bitrate,
+                                     const py::object& extra_args,
+                                     const py::object& metadata) {
+                     return mkWriter(fps, codec, bitrate, extra_args,
+                                     metadata, "", true, "png",
+                                     [] {
+                                         return std::make_shared<
+                                             PyHTMLWriter>();
+                                     });
+                 }),
+                 py::arg("fps") = 5, py::arg("codec") = py::none(),
+                 py::arg("bitrate") = py::none(),
+                 py::arg("extra_args") = py::none(),
+                 py::arg("metadata") = py::none())
+            .def_static("isAvailable", [] { return true; })
+            .def_readwrite("embed_limit",
+                           &PyHTMLWriter::embed_limit);
+
+        // mpl animation.writers — MovieWriterRegistry singleton.
+        py::class_<PyWriterRegistry,
+                   std::shared_ptr<PyWriterRegistry>>(
+            am, "MovieWriterRegistry")
+            .def(py::init<>())
+            .def("register",
+                 [](PyWriterRegistry& r, const std::string& name) {
+                     // mpl: decorator — returns wrapper(cls).
+                     return py::cpp_function(
+                         [&r, name](const py::object& cls) {
+                             r.registered[py::str(name)] = cls;
+                             return cls;
+                         });
+                 },
+                 py::arg("name"))
+            .def("is_available",
+                 [](PyWriterRegistry& r, const std::string& name) {
+                     if (!r.registered.contains(py::str(name)))
+                         return false;
+                     return writerClassAvailable(
+                         r.registered[py::str(name)]);
+                 },
+                 py::arg("name"))
+            .def("__iter__",
+                 [](PyWriterRegistry& r) {
+                     py::list avail;
+                     for (auto [k, v] : r.registered)
+                         if (writerClassAvailable(
+                                 py::reinterpret_borrow<py::object>(v)))
+                             avail.append(k);
+                     return py::iter(avail);
+                 })
+            .def("list",
+                 [](PyWriterRegistry& r) {
+                     py::list avail;
+                     for (auto [k, v] : r.registered)
+                         if (writerClassAvailable(
+                                 py::reinterpret_borrow<py::object>(v)))
+                             avail.append(k);
+                     return avail;
+                 })
+            .def("__getitem__",
+                 [](PyWriterRegistry& r, const std::string& name) {
+                     if (!r.registered.contains(py::str(name)) ||
+                         !writerClassAvailable(
+                             r.registered[py::str(name)]))
+                         throw std::runtime_error(std::format(
+                             "Requested MovieWriter ({}) not available",
+                             name));
+                     return py::reinterpret_borrow<py::object>(
+                         r.registered[py::str(name)]);
+                 },
+                 py::arg("name"))
+            .def("ensure_not_dirty", [](PyWriterRegistry&) {});
+        {
+            auto reg = std::shared_ptr<PyWriterRegistry>(
+                &writerReg(), [](PyWriterRegistry*) {});
+            auto& d = writerReg().registered;
+            d[py::str("pillow")] = am.attr("PillowWriter");
+            d[py::str("ffmpeg")] = am.attr("FFMpegWriter");
+            d[py::str("ffmpeg_file")] = am.attr("FFMpegFileWriter");
+            d[py::str("imagemagick")] =
+                am.attr("ImageMagickWriter");
+            d[py::str("imagemagick_file")] =
+                am.attr("ImageMagickFileWriter");
+            d[py::str("html")] = am.attr("HTMLWriter");
+            am.attr("writers") = py::cast(reg);
+        }
+    }
+
+    // ── mpl matplotlib.sankey ────────────────────────────────────────
+    {
+        auto sk = m.def_submodule("sankey");
+        sk.attr("RIGHT") = 0;
+        sk.attr("UP") = 1;
+        sk.attr("LEFT") = 2;
+        sk.attr("DOWN") = 3;
+        py::class_<PySankey, std::shared_ptr<PySankey>>(sk, "Sankey")
+            .def(py::init([](const py::object& ax, float scale,
+                             const std::string& unit,
+                             const std::string& format, float gap,
+                             float radius, float shoulder,
+                             float offset, float head_angle,
+                             float margin, float tolerance,
+                             const py::kwargs& kw) {
+                     auto s = std::make_shared<PySankey>();
+                     s->unit = unit;
+                     s->format = format;
+                     s->radius = radius;
+                     s->shoulder = shoulder;
+                     s->offset = offset;
+                     s->head_angle = head_angle;
+                     s->margin = margin;
+                     s->extra = py::dict(kw);
+                     PyAxes a;
+                     if (ax.is_none()) {
+                         // mpl: ax=None → plt.gca().
+                         auto gca = py::module_::import("volcanoplot")
+                                        .attr("gca");
+                         a = gca().cast<PyAxes>();
+                     } else {
+                         a = ax.cast<PyAxes>();
+                     }
+                     s->owner = a.owner;
+                     s->ax = a.ax;
+                     s->axObj = py::cast(a);
+                     s->sk = std::make_unique<plot::Sankey>(*a.ax);
+                     s->sk->scale = scale;
+                     s->scaleKw = scale;
+                     // mpl gap is in data units relative to trunk; our
+                     // native gap is absolute — keep the kwarg value.
+                     s->sk->tolerance = tolerance;
+                     (void)gap;
+                     return s;
+                 }),
+                 py::arg("ax") = py::none(), py::arg("scale") = 1.0,
+                 py::arg("unit") = "", py::arg("format") = "%G",
+                 py::arg("gap") = 0.25, py::arg("radius") = 0.1,
+                 py::arg("shoulder") = 0.03, py::arg("offset") = 0.15,
+                 py::arg("head_angle") = 100, py::arg("margin") = 0.4,
+                 py::arg("tolerance") = 1e-6)
+            .def_readwrite("scale", &PySankey::scaleKw)
+            .def_readwrite("unit", &PySankey::unit)
+            .def_readwrite("format", &PySankey::format)
+            .def_readwrite("margin", &PySankey::margin)
+            .def_readwrite("radius", &PySankey::radius)
+            .def_readwrite("shoulder", &PySankey::shoulder)
+            .def_readwrite("offset", &PySankey::offset)
+            .def_readwrite("head_angle", &PySankey::head_angle)
+            .def_readwrite("ax", &PySankey::axObj)
+            .def("add",
+                 [](PySankey& s, const std::string& patchlabel,
+                    const py::object& flows, const py::object& orients,
+                    const py::object& labels, float trunklength,
+                    const py::object& pathlengths,
+                    const py::object& prior, const py::object& connect,
+                    float rotation, const py::kwargs& kw) -> PySankey& {
+                     // mpl defaults: flows=None → [1.0, -1.0].
+                     std::vector<float> fl;
+                     if (flows.is_none()) fl = {1.0f, -1.0f};
+                     else fl = toFloats(flows);
+                     std::vector<int> ors;
+                     if (orients.is_none())
+                         ors.assign(fl.size(), 0);
+                     else if (py::isinstance<py::int_>(orients))
+                         ors.assign(fl.size(), orients.cast<int>());
+                     else ors = orients.cast<std::vector<int>>();
+                     std::vector<std::string> lbs;
+                     if (py::isinstance<py::str>(labels)) {
+                         // mpl labels='' → no labels.
+                     } else if (!labels.is_none()) {
+                         for (auto l : labels)
+                             lbs.push_back(
+                                 l.is_none()
+                                     ? std::string()
+                                     : py::str(l).cast<std::string>());
+                     }
+                     // mpl: orientations/labels broadcast or match.
+                     if (!ors.empty() && ors.size() != fl.size())
+                         throw py::value_error(
+                             "orientations and flows must have "
+                             "lengths that are consistent");
+                     if (!lbs.empty() && lbs.size() != fl.size())
+                         throw py::value_error(
+                             "labels and flows must have lengths "
+                             "that are consistent");
+                     plot::Color col{0.121f, 0.466f, 0.705f, 0.7f};
+                     if (kw.contains("facecolor")) {
+                         if (auto c = parseColor(kw["facecolor"]);
+                             c.a > 0)
+                             col = c;
+                     } else if (kw.contains("fc")) {
+                         if (auto c = parseColor(kw["fc"]); c.a > 0)
+                             col = c;
+                     }
+                     s.sk->patchLabels.push_back(patchlabel);
+                     s.sk->add(std::move(fl), std::move(lbs),
+                               std::move(ors), col);
+                     s.kwlist.emplace_back(
+                         py::dict(kw), trunklength, rotation,
+                         prior.is_none() ? -1 : prior.cast<int>(),
+                         connect.is_none()
+                             ? std::pair<int, int>{0, 0}
+                             : connect.cast<std::pair<int, int>>());
+                     return s;
+                 },
+                 py::arg("patchlabel") = "",
+                 py::arg("flows") = py::none(),
+                 py::arg("orientations") = py::none(),
+                 py::arg("labels") = "",
+                 py::arg("trunklength") = 1.0,
+                 py::arg("pathlengths") = py::none(),
+                 py::arg("prior") = py::none(),
+                 py::arg("connect") = py::none(),
+                 py::arg("rotation") = 0.0f,
+                 py::return_value_policy::reference_internal)
+            .def("finish",
+                 [](PySankey& s) {
+                     auto diags = s.sk->finish();
+                     // mpl sets axis extent + equal aspect.
+                     s.ax->setAspectEqual();
+                     py::list out;
+                     for (auto& d : diags) {
+                         py::dict dd;
+                         if (d.patch)
+                             dd["patch"] = py::cast(
+                                 PyPatch{s.owner, s.ax, nullptr,
+                                         nullptr, plot::Patch{},
+                                         d.patch, py::dict()});
+                         else dd["patch"] = py::none();
+                         dd["flows"] = py::cast(d.flows);
+                         py::list angles;
+                         for (auto& a : d.angles)
+                             angles.append(a ? py::cast(*a)
+                                             : py::none());
+                         dd["angles"] = angles;
+                         py::list tips;
+                         for (auto& t : d.tips)
+                             tips.append(
+                                 py::make_tuple(t.x, t.y));
+                         dd["tips"] = tips;
+                         dd["text"] =
+                             d.text
+                                 ? py::cast(PyText{s.owner, s.ax,
+                                                   d.text, py::dict()})
+                                 : py::none();
+                         py::list texts;
+                         for (auto* t : d.texts)
+                             texts.append(
+                                 t ? py::cast(PyText{s.owner, s.ax, t,
+                                                     py::dict()})
+                                   : py::none());
+                         dd["texts"] = texts;
+                         out.append(dd);
+                     }
+                     return out;
+                 });
+    }
+
+    // ── mpl matplotlib.colorbar ──────────────────────────────────────
+    {
+        auto cbm = m.def_submodule("colorbar");
+        // Colorbar/ColorbarBase attrs are set after the class is
+        // registered (the class binding runs later in module init).
+        auto normLocOri =
+            [](const py::object& location,
+               const py::object& orientation)
+            -> std::pair<std::string, std::string> {
+                // mpl _normalize_location_orientation.
+                std::string loc, ori;
+                if (!location.is_none())
+                    loc = location.cast<std::string>();
+                if (!orientation.is_none())
+                    ori = orientation.cast<std::string>();
+                if (ori.empty())
+                    ori = (loc == "bottom" || loc == "top")
+                              ? "horizontal" : "vertical";
+                if (loc.empty())
+                    loc = ori == "horizontal" ? "bottom" : "right";
+                if (loc != "right" && loc != "left" &&
+                    loc != "bottom" && loc != "top")
+                    throw py::value_error(std::format(
+                        "'{}' is not a valid location", loc));
+                return {loc, ori};
+            };
+        // mpl make_axes: place a thin cax in the `fraction` slice of
+        // the parents' union box, anchored by `anchor`, shrunk by
+        // `shrink`.
+        auto makeAxesImpl =
+            [normLocOri](const py::object& parents,
+                         const py::object& location,
+                         const py::object& orientation,
+                         float fraction, float shrink, float aspect,
+                         const py::object& anchor, float pad,
+                         const py::kwargs& kw)
+            -> std::pair<PyAxes, py::dict> {
+                auto [loc, ori] = normLocOri(location, orientation);
+                // Union of parents' figure-fraction boxes.
+                std::vector<PyAxes> pas;
+                if (py::isinstance<PyAxes>(parents))
+                    pas.push_back(parents.cast<PyAxes>());
+                else
+                    for (auto p : parents)
+                        pas.push_back(p.cast<PyAxes>());
+                if (pas.empty())
+                    throw std::invalid_argument(
+                        "make_axes: at least one parent axes required");
+                auto& f = pas[0].owner;
+                auto [Wu, Hu] = figExtentPx(f);
+                const float W = float(Wu), H = float(Hu);
+                float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                for (auto& a : pas) {
+                    auto r = axesRectPx(a);
+                    x0 = std::min(x0, r.x / W);
+                    y0 = std::min(y0,
+                                  1.0f - (r.y + r.height) / H);
+                    x1 = std::max(x1, (r.x + r.width) / W);
+                    y1 = std::max(y1, 1.0f - r.y / H);
+                }
+                float pw = x1 - x0, ph = y1 - y0;
+                float anch = 0.5f;
+                if (!anchor.is_none()) {
+                    if (py::isinstance<py::tuple>(anchor) ||
+                        py::isinstance<py::list>(anchor)) {
+                        auto t = anchor.cast<std::vector<float>>();
+                        anch = t.size() > 1 ? t[1] : t[0];
+                    } else anch = anchor.cast<float>();
+                }
+                // mpl: cax box = `fraction` slice at the location edge,
+                // shrunk by `shrink` along the long axis, padded by
+                // `pad` on the location side.
+                float cx, cy, cw, ch;
+                if (ori == "vertical") {
+                    cw = fraction * pw;
+                    ch = shrink * ph;
+                    cy = y0 + (ph - ch) * anch;
+                    cx = loc == "left"
+                             ? x0 + pad * pw
+                             : x1 - cw - pad * pw;
+                } else {
+                    ch = fraction * ph;
+                    cw = shrink * pw;
+                    cx = x0 + (pw - cw) * anch;
+                    cy = loc == "top"
+                             ? y1 - ch - pad * ph
+                             : y0 + pad * ph;
+                }
+                auto* cax = f->addAxesFraction(cx, cy, cw, ch);
+                cax->style().colorbar.orientation = ori;
+                cax->style().colorbar.aspect = aspect;
+                py::dict out(kw);
+                out["orientation"] = ori;
+                out["location"] = loc;
+                return {wrapAxes(f, cax), out};
+            };
+        cbm.def("make_axes", makeAxesImpl,
+                py::arg("parents"), py::arg("location") = py::none(),
+                py::arg("orientation") = py::none(),
+                py::arg("fraction") = 0.15f, py::arg("shrink") = 1.0f,
+                py::arg("aspect") = 20.0f, py::arg("anchor") = py::none(),
+                py::arg("pad") = 0.05f,
+                "mpl colorbar.make_axes — returns (cax, kwargs).");
+        cbm.def("make_axes_gridspec",
+                [makeAxesImpl](const py::object& parent,
+                               const py::object& location,
+                               const py::object& orientation,
+                               float fraction, float shrink,
+                               float aspect, const py::object& anchor,
+                               const py::kwargs& kw) {
+                    return makeAxesImpl(
+                        py::make_tuple(parent), location, orientation,
+                        fraction, shrink, aspect, anchor, 0.05f, kw);
+                },
+                py::arg("parent"), py::arg("location") = py::none(),
+                py::arg("orientation") = "vertical",
+                py::arg("fraction") = 0.15f, py::arg("shrink") = 1.0f,
+                py::arg("aspect") = 20.0f, py::arg("anchor") = py::none(),
+                "mpl colorbar.make_axes_gridspec — returns (cax, kwargs).");
+        cbm.def("colorbar_factory",
+                [](const py::object& cax, const py::object& mappable,
+                   const py::kwargs& kw) {
+                    PyAxes a = cax.cast<PyAxes>();
+                    auto& cbs = a.ax->style().colorbar;
+                    cbs.visible = true;
+                    cbs.caxMode = true;
+                    if (!mappable.is_none()) {
+                        if (py::isinstance<PyScalarMappable>(mappable)) {
+                            auto& sm =
+                                mappable.cast<PyScalarMappable&>();
+                            cbs.cmapPtr = sm.cm;
+                            cbs.norm = sm.norm;
+                            if (!sm.arr.empty()) {
+                                auto [mn, mx] =
+                                    std::ranges::minmax(sm.arr);
+                                cbs.explicitRange = plot::Range{mn, mx};
+                            }
+                        } else if (auto* mp = mappableFrom(mappable)) {
+                            cbs.mappable = mp;
+                        }
+                    }
+                    a.ax->touch();
+                    return py::cast(PyColorbar{a.owner, a.ax, mappable});
+                },
+                py::arg("cax"), py::arg("mappable"),
+                "mpl colorbar.colorbar_factory — Colorbar over a cax.");
+        // `vp.colorbar(mappable, ...)` also serves as the plt.colorbar
+        // pyplot forward: make the submodule itself callable via a
+        // ModuleType __call__ shim.
+        py::exec(R"PY(
+import types as _vp_cb_types
+class _CallableColorbarModule(_vp_cb_types.ModuleType):
+    def __call__(self, mappable=None, cax=None, ax=None, **kw):
+        import volcanoplot as _vp
+        return _vp.gcf().colorbar(mappable, cax=cax, ax=ax, **kw)
+del _vp_cb_types
+)PY", m.attr("__dict__"));
+        cbm.attr("__class__") = m.attr("_CallableColorbarModule");
     }
 
     // ── mpl matplotlib.colors ────────────────────────────────────────
@@ -11417,7 +14416,113 @@ class LinearSegmentedColormap:
                  c.cbs().visible = false;
                  c.touch();
              },
-             "Hide the colorbar (mpl Colorbar.remove).");
+             "Hide the colorbar (mpl Colorbar.remove).")
+        .def("set_alpha",
+             [](PyColorbar& c, float a) {
+                 c.cbs().alpha = a;
+                 c.touch();
+             },
+             "mpl Colorbar.set_alpha — strip alpha.")
+        .def("update_normal",
+             [](PyColorbar& c, const py::object& mappable) {
+                 // mpl: pull cmap+norm from the mappable.
+                 c.mappable = mappable;
+                 auto& cb = c.cbs();
+                 if (auto* mp = mappableFrom(mappable)) {
+                     cb.mappable = mp;
+                     if (mp->norm()) cb.norm = mp->norm();
+                     if (mp->cmap()) cb.cmapPtr = mp->cmap();
+                 }
+                 c.touch();
+             },
+             py::arg("mappable"),
+             "mpl Colorbar.update_normal — sync cmap/norm.")
+        .def("update_ticks",
+             [](PyColorbar& c) { c.touch(); },
+             "mpl Colorbar.update_ticks — recompute tick positions.")
+        .def("add_lines",
+             [](PyColorbar& c, py::args args, py::kwargs kw) {
+                 // mpl draws LineCollections over the strip; we record
+                 // them on the handle for introspection.
+                 py::list l;
+                 for (auto a : args) l.append(a);
+                 c.props_["_colorbar_lines"] = l;
+                 return py::none();
+             },
+             "mpl Colorbar.add_lines — overlay line artists.")
+        .def("drag_pan", [](PyColorbar&, const py::object&,
+                            const py::object&) {},
+             py::arg("button"), py::arg("key"),
+             "mpl Colorbar.drag_pan — no-op in headless mode.")
+        .def_property("locator",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "locator", py::none());
+             },
+             [](PyColorbar& c, const py::object& v) {
+                 c.props_["locator"] = v;
+                 c.touch();
+             })
+        .def_property("formatter",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "formatter", py::none());
+             },
+             [](PyColorbar& c, const py::object& v) {
+                 c.props_["formatter"] = v;
+                 c.touch();
+             })
+        .def_property("minorlocator",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "minorlocator", py::none());
+             },
+             [](PyColorbar& c, const py::object& v) {
+                 c.props_["minorlocator"] = v;
+             })
+        .def_property("minorformatter",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "minorformatter", py::none());
+             },
+             [](PyColorbar& c, const py::object& v) {
+                 c.props_["minorformatter"] = v;
+             })
+        .def_property("n_rasterize",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "n_rasterize", py::int_(50));
+             },
+             [](PyColorbar& c, const py::object& v) {
+                 c.props_["n_rasterize"] = v;
+             })
+        .def_property_readonly("long_axis",
+             [](PyColorbar& c) {
+                 // mpl Colorbar.long_axis — the colorbar axes' long
+                 // axis object.
+                 PyAxes a{c.owner, c.ax};
+                 return c.cbs().orientation == "horizontal"
+                     ? py::cast(a).attr("xaxis")
+                     : py::cast(a).attr("yaxis");
+             })
+        .def_property_readonly("solids",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "solids", py::none());
+             })
+        .def_property_readonly("lines",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "_colorbar_lines", py::none());
+             })
+        .def_property_readonly("patch",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "patch", py::none());
+             })
+        .def_property_readonly("outline",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "outline", py::none());
+             })
+        .def_property_readonly("divider",
+             [](PyColorbar& c) {
+                 return aProp(c.props_, "divider", py::none());
+             });
+    // mpl: Colorbar lives in matplotlib.colorbar.
+    m.attr("colorbar").attr("Colorbar") = m.attr("Colorbar");
+    m.attr("colorbar").attr("ColorbarBase") = m.attr("Colorbar");
 
     // mpl Legend artist (ax.legend/fig.legend result). Mutations go to
     // the owning axes'/figure's LegendStyle.
@@ -12460,9 +15565,9 @@ class LinearSegmentedColormap:
         } else if (k == "title") {
             a.ax->setTitle(v.cast<std::string>());
         } else if (k == "xscale") {
-            a.ax->setXscale(v.cast<std::string>());
+            setAxisScale(a, true, v, {});
         } else if (k == "yscale") {
-            a.ax->setYscale(v.cast<std::string>());
+            setAxisScale(a, false, v, {});
         } else if (k == "aspect") {
             if (py::isinstance<py::str>(v)) {
                 auto s = v.cast<std::string>();
@@ -12909,7 +16014,7 @@ class LinearSegmentedColormap:
              [](PyAxes& a, const py::object& x,
                 const py::object& h, const py::object& color,
                 float width, const std::string& label) {
-                 auto hv = toFloats(h);
+                 auto hv = toFloatsUnits(h, a, false);
                  plot::BarData b;
                  b.heights = hv;
                  if (isStringSeq(x)) {
@@ -12941,7 +16046,7 @@ class LinearSegmentedColormap:
              [](PyAxes& a, const py::object& y,
                 const py::object& w, const py::object& color,
                 float height, const std::string& label) {
-                 auto wv = toFloats(w);
+                 auto wv = toFloatsUnits(w, a, true);
                  plot::BarData b;
                  b.heights = wv;
                  b.horizontal = true;
@@ -13082,7 +16187,8 @@ class LinearSegmentedColormap:
                 const std::string& label,
                 const py::object& ecolor, const py::object& elinewidth,
                 const py::object& capsize) {
-                 auto xv = toFloats(x), yv = toFloats(y);
+                 auto xv = toFloatsUnits(x, a, true),
+                      yv = toFloatsUnits(y, a, false);
                  const float p2x = pt2px(*a.ax);
                  plot::ErrorbarConfig cfg;
                  cfg.label = label;
@@ -13146,7 +16252,8 @@ class LinearSegmentedColormap:
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& color, const std::string& label,
                 const py::object& bottom) {
-                 auto xv = toFloats(x), yv = toFloats(y);
+                 auto xv = toFloatsUnits(x, a, true),
+                      yv = toFloatsUnits(y, a, false);
                  const float p2x = pt2px(*a.ax);
                  plot::StemConfig cfg;
                  cfg.label = label;
@@ -13174,7 +16281,8 @@ class LinearSegmentedColormap:
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const std::string& where, const py::object& color,
                 const std::string& label) {
-                 auto xv = toFloats(x), yv = toFloats(y);
+                 auto xv = toFloatsUnits(x, a, true),
+                      yv = toFloatsUnits(y, a, false);
                  auto w = where == "post" ? plot::StepWhere::Post
                         : where == "mid"  ? plot::StepWhere::Mid
                                           : plot::StepWhere::Pre;
@@ -13196,7 +16304,7 @@ class LinearSegmentedColormap:
                 bool interpolate, const py::object& color) {
                  auto c = parseColor(color);
                  if (c.a == 0) c = plot::Color::fromRgba8(31, 119, 180, 128);
-                 auto xv = toFloats(x);
+                 auto xv = toFloatsUnits(x, a, true);
                  auto y1v = toFloatList(y1);
                  if (y1v.size() == 1) y1v.assign(xv.size(), y1v[0]);
                  std::unique_ptr<plot::FillBetweenPlot> p;
@@ -13523,8 +16631,19 @@ class LinearSegmentedColormap:
              py::arg("vmin") = py::none(), py::arg("vmax") = py::none())
         .def("set_xlim", [](PyAxes& a, float lo, float hi) { a.ax->setXlim(lo, hi); })
         .def("set_ylim", [](PyAxes& a, float lo, float hi) { a.ax->setYlim(lo, hi); })
-        .def("set_xscale", [](PyAxes& a, std::string s) { a.ax->setXscale(s); })
-        .def("set_yscale", [](PyAxes& a, std::string s) { a.ax->setYscale(s); })
+        // mpl set_xscale(value, **kwargs): str name or ScaleBase
+        // instance; kwargs only apply to string values (axis-registered
+        // scale_factory semantics).
+        .def("set_xscale",
+             [](PyAxes& a, const py::object& v, const py::kwargs& kw) {
+                 setAxisScale(a, true, v, kw);
+             },
+             py::arg("value"))
+        .def("set_yscale",
+             [](PyAxes& a, const py::object& v, const py::kwargs& kw) {
+                 setAxisScale(a, false, v, kw);
+             },
+             py::arg("value"))
         .def("set_xlabel",
              [](PyAxes& a, std::string s, const py::kwargs& kw) {
                  a.ax->style().xAxis.label = std::move(s);
@@ -16005,7 +19124,7 @@ class LinearSegmentedColormap:
              [](PyAxes& a, const py::object& y, const py::object& x1,
                 const py::object& x2, const py::object& color,
                 const std::string& label) {
-                 auto yv = toFloats(y);
+                 auto yv = toFloatsUnits(y, a, false);
                  auto x1v = toFloatList(x1);
                  auto x2v = x2.is_none()
                      ? std::vector<float>(yv.size(), 0.0f)
@@ -16966,20 +20085,9 @@ class LinearSegmentedColormap:
              },
              py::arg("inset_ax"), py::arg("edgecolor") = py::none(),
              py::arg("alpha") = -1.0f);
-    py::class_<PyAnimation>(m, "FuncAnimation")
-        .def(py::init<std::shared_ptr<PyFigure>, py::object, py::object,
-                      py::object, py::object, int, bool, bool, int>(),
-             py::arg("fig"), py::arg("func"), py::arg("frames"),
-             py::arg("init_func") = py::none(),
-             py::arg("fargs") = py::none(),
-             py::arg("interval") = 200, py::arg("blit") = false,
-             py::arg("repeat") = true, py::arg("repeat_delay") = 0)
-        .def("save", &PyAnimation::save, py::arg("path"),
-             py::arg("writer") = "", py::arg("fps") = 0.0,
-             "Save to .apng/.gif/.mp4 (ffmpeg) or .html (JS player).")
-        .def("to_jshtml", &PyAnimation::toJsHtml, py::arg("fps") = 0.0)
-        .def("to_html5_video", &PyAnimation::toHtml5Video,
-             py::arg("fps") = 0.0);
+    // vp.FuncAnimation — compat alias for vp.animation.FuncAnimation
+    // (the canonical class lives in the animation submodule).
+    m.attr("FuncAnimation") = m.attr("animation").attr("FuncAnimation");
 
     py::class_<plot::LegendStyle>(m, "LegendStyle")
         .def_readwrite("location", &plot::LegendStyle::location)
@@ -17241,8 +20349,18 @@ class LinearSegmentedColormap:
              py::arg("t"))
         .def("xlim", [](float lo, float hi) { gca().ax->setXlim(lo, hi); })
         .def("ylim", [](float lo, float hi) { gca().ax->setYlim(lo, hi); })
-        .def("xscale", [](const std::string& s) { gca().ax->setXscale(s); })
-        .def("yscale", [](const std::string& s) { gca().ax->setYscale(s); })
+        .def("xscale",
+             [](const py::object& v, const py::kwargs& kw) {
+                 auto a = gca();
+                 setAxisScale(a, true, v, kw);
+             },
+             py::arg("scale"))
+        .def("yscale",
+             [](const py::object& v, const py::kwargs& kw) {
+                 auto a = gca();
+                 setAxisScale(a, false, v, kw);
+             },
+             py::arg("scale"))
         .def("grid",
              [](bool on, const std::string& which,
                 const std::string& axis) {
@@ -17483,52 +20601,10 @@ class LinearSegmentedColormap:
                  if (!t) throw std::runtime_error("twiny failed");
                  return wrapAxes(a.owner, t);
              })
-        .def("colorbar",
-             [](const py::object& mappable, const py::object& axObj,
-                const std::string& orientation,
-                float fraction, float pad, float shrink,
-                const std::string& label) {
-                 auto f = gcf();
-                 plot::Axes* target = nullptr;
-                 if (!axObj.is_none())
-                     target = axObj.cast<PyAxes>().ax;
-                 else if (auto all = f->fig().allAxes();
-                          !all.empty())
-                     target =
-                         std::ranges::find(all, f->currentAx_) !=
-                                 all.end()
-                             ? f->currentAx_
-                             : all.back();
-                 if (!target)
-                     throw std::invalid_argument(
-                         "colorbar: no axes to attach to");
-                 auto& cb = target->style().colorbar;
-                 cb.visible = true;
-                 cb.orientation = orientation;
-                 cb.fraction = fraction;
-                 cb.pad = pad;
-                 cb.shrink = shrink;
-                 if (!label.empty()) cb.label = label;
-                 if (!mappable.is_none()) {
-                     plot::IPlot* mp = mappableFrom(mappable);
-                     if (!mp)
-                         throw std::invalid_argument(
-                             "colorbar: mappable must be an artist "
-                             "handle (image, collection, ...)");
-                     cb.mappable = mp;
-                 }
-                 target->touch();
-                 auto cbh = py::cast(PyColorbar{f, target, mappable});
-                 if (!mappable.is_none() &&
-                     py::hasattr(mappable, "_set_colorbar"))
-                     mappable.attr("_set_colorbar")(cbh);
-                 return cbh;
-             },
-             py::arg("mappable") = py::none(),
-             py::arg("ax") = py::none(),
-             py::arg("orientation") = "vertical",
-             py::arg("fraction") = 0.15f, py::arg("pad") = 0.05f,
-             py::arg("shrink") = 1.0f, py::arg("label") = "")
+        // mpl plt.colorbar: provided by the vp.colorbar
+        // submodule — the module itself is callable (see
+        // the _CallableColorbarModule shim in the submodule
+        // block).
         .def("savefig",
              [](const std::string& path, const py::object& transparent,
                 const py::object& dpi, const py::object& format,

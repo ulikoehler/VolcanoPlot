@@ -33,7 +33,7 @@ enum class ScaleKind : int {
 /// An axis scale: a monotone forward/inverse pair plus shader parameters.
 struct AxisScale {
     ScaleKind kind = ScaleKind::Linear;
-    float param1 = 1.0f, param2 = 1.0f;
+    float param1 = 1.0f, param2 = 1.0f, param3 = 10.0f;
 
     /// User functions for Function/FunctionLog kinds.
     std::function<float(float)> forwardFn, inverseFn;
@@ -50,6 +50,9 @@ struct AxisScale {
         switch (kind) {
         case ScaleKind::Log:
         case ScaleKind::FunctionLog:
+            // Nonpositive points are always dropped (the transform
+            // yields NaN). mpl's nonpositive='clip'|'mask' governs
+            // autoscale clamping only, not point visibility.
             return v > 0.0f;
         case ScaleKind::Logit:
             return v > 0.0f && v < 1.0f;
@@ -72,25 +75,43 @@ struct AxisScale {
 
     // --- Factories (matplotlib set_xscale names) ---
     static AxisScale linear() { return {}; }
-    static AxisScale log() { return {ScaleKind::Log, 1, 1, {}, {}}; }
-    /// symlog: linear within ±linthresh, log beyond. linscale stretches
-    /// the linear region.
-    static AxisScale symlog(float linthresh = 2.0f, float linscale = 1.0f) {
-        return {ScaleKind::Symlog, linthresh, linscale, {}, {}};
+    /// Log scale; `base` is the decade base (mpl LogScale `base`,
+    /// default 10) stored in param1. `mask` is mpl
+    /// `nonpositive='mask'` (drop nonpositive points) vs the default
+    /// 'clip' — stored in param2. The forward/inverse pair remains
+    /// base-10 since a constant log-space rescale is display-identical.
+    static AxisScale log(float base = 10.0f, bool mask = false) {
+        return {ScaleKind::Log, base, mask ? 1.0f : 0.0f, 10, {}, {}};
     }
-    static AxisScale logit() { return {ScaleKind::Logit, 1, 1, {}, {}}; }
+    /// symlog: linear within ±linthresh, log beyond. linscale stretches
+    /// the linear region; `base` is the decade base (param3, mpl
+    /// SymmetricalLogScale base, default 10).
+    static AxisScale symlog(float linthresh = 2.0f, float linscale = 1.0f,
+                            float base = 10.0f) {
+        return {ScaleKind::Symlog, linthresh, linscale, base, {}, {}};
+    }
+    static AxisScale logit() {
+        return {ScaleKind::Logit, 1, 1, 10, {}, {}};
+    }
     /// asinh: linear_width controls the linear region near zero.
     static AxisScale asinh(float linearWidth = 1.0f) {
-        return {ScaleKind::Asinh, linearWidth, 1, {}, {}};
+        return {ScaleKind::Asinh, linearWidth, 1, 10, {}, {}};
     }
-    static AxisScale mercator() { return {ScaleKind::Mercator, 1, 1, {}, {}}; }
+    static AxisScale mercator() {
+        return {ScaleKind::Mercator, 1, 1, 10, {}, {}};
+    }
     static AxisScale function(std::function<float(float)> fwd,
                               std::function<float(float)> inv) {
-        return {ScaleKind::Function, 1, 1, std::move(fwd), std::move(inv)};
+        return {ScaleKind::Function, 1, 1, 10, std::move(fwd),
+                std::move(inv)};
     }
+    /// functionlog: mpl FuncScaleLog — display is log_base(forward(x));
+    /// `base` stored in param1 (default 10).
     static AxisScale functionlog(std::function<float(float)> fwd,
-                                 std::function<float(float)> inv) {
-        return {ScaleKind::FunctionLog, 1, 1, std::move(fwd), std::move(inv)};
+                                 std::function<float(float)> inv,
+                                 float base = 10.0f) {
+        return {ScaleKind::FunctionLog, base, 1, 10, std::move(fwd),
+                std::move(inv)};
     }
 };
 

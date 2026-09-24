@@ -805,6 +805,9 @@ public:
     /// refreshing the FixedLocator/FixedFormatter.
     int xCategoryIndex(std::string_view label);
     int yCategoryIndex(std::string_view label);
+    /// Mutable category lists (vp.units/vp.category UnitData mapping).
+    std::vector<std::string>& xCategoriesMut() { return xCategories_; }
+    std::vector<std::string>& yCategoriesMut() { return yCategories_; }
 
     /// Set the property cycler (matplotlib axes.prop_cycle). Initialized
     /// from style_.colorCycle (or tab10 when unset).

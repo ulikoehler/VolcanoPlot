@@ -1424,7 +1424,8 @@ void VectorRenderer::emitColorbar(const plot::Axes& axes, Rect2D rect,
     // Same geometry as the raster drawColorbar: strip sits in the right
     // `fraction` region of the pre-shrink parent box (or pad-fraction
     // outside unshrunk axes), narrowed to height/aspect.
-    plot::Rect2D region = axes.colorbarRegion();
+    // mpl cax: the axes' own rect IS the colorbar region.
+    plot::Rect2D region = cbs.caxMode ? rect : axes.colorbarRegion();
     float regionX, regionW;
     if (region.width > 0) {
         regionX = float(region.x);
@@ -1459,9 +1460,11 @@ void VectorRenderer::emitColorbar(const plot::Axes& axes, Rect2D rect,
     const plot::Normalize* effNorm =
         cbs.norm ? cbs.norm.get() : mappableNorm.get();
     auto sampleAt = [&](float t) {
-        if (effNorm)
-            return cmap.sample((*effNorm)(valueMin + t * (valueMax - valueMin)));
-        return cmap.sample(t);
+        plot::Color c = effNorm
+            ? cmap.sample((*effNorm)(valueMin + t * (valueMax - valueMin)))
+            : cmap.sample(t);
+        c.a *= cbs.alpha; // mpl fig.colorbar(alpha=)
+        return c;
     };
 
     constexpr uint32_t kSegs = 64;
@@ -1506,7 +1509,7 @@ void VectorRenderer::emitColorbar(const plot::Axes& axes, Rect2D rect,
 
         auto cbt = colorbarTicks(cbs.ticks, cbs.tickLabels,
                                  cbs.minorTicksOn, effNorm,
-                                 valueMin, valueMax);
+                                 valueMin, valueMax, cbs.format);
         auto hToFrac = [&](float v) {
             return effNorm ? (*effNorm)(v)
                            : (v - valueMin) / (valueMax - valueMin);
@@ -1559,7 +1562,7 @@ void VectorRenderer::emitColorbar(const plot::Axes& axes, Rect2D rect,
     // Tick labels to the right of the strip; locator-appropriate ticks
     // for log/symlog norms (colorbarTicks), mpl clip-to-bar behavior.
     auto cbt = colorbarTicks(cbs.ticks, cbs.tickLabels, cbs.minorTicksOn,
-                             effNorm, valueMin, valueMax);
+                             effNorm, valueMin, valueMax, cbs.format);
     auto toFrac = [&](float v) {
         return effNorm ? (*effNorm)(v)
                        : (v - valueMin) / (valueMax - valueMin);

@@ -12,14 +12,16 @@ namespace volcano::render::shaders {
 
 /// GLSL: forward-scale one component. `s` = (code, param1, param2).
 inline constexpr const char* kScaleFn = R"(
-float scaleFwd(float v, vec3 s) {
+float scaleFwd(float v, vec4 s) {
     int c = int(s.x + 0.5);
     if (c == 1) return log(max(v, 1e-30)) / log(10.0);          // log
     if (c == 2) {                                                // symlog
-        float lt = s.y, ls = s.z;
+        // mpl SymmetricalLogTransform: linscale_adj = ls/(1-b^-1).
+        float lt = s.y, ls = s.z, b = max(s.w, 1.000001);
+        float adj = ls / (1.0 - pow(b, -1.0));
         float a = abs(v);
-        if (a <= lt) return ls * v;
-        return sign(v) * lt * (ls + log(a / lt) / log(10.0));
+        if (a <= lt) return adj * v;
+        return sign(v) * lt * (adj + log(a / lt) / log(b));
     }
     if (c == 3) {                                                // logit
         float p = clamp(v, 1e-7, 1.0 - 1e-7);
@@ -80,14 +82,15 @@ vec2 projFwd(vec2 p, vec3 pr) {
 
 /// GLSL: inverse of scaleFwd — maps a scaled axis value back to data.
 inline constexpr const char* kScaleInvFn = R"(
-float scaleInv(float w, vec3 s) {
+float scaleInv(float w, vec4 s) {
     int c = int(s.x + 0.5);
     if (c == 1) return pow(10.0, w);                             // log
     if (c == 2) {                                                // symlog
-        float lt = s.y, ls = s.z;
+        float lt = s.y, ls = s.z, b = max(s.w, 1.000001);
+        float adj = ls / (1.0 - pow(b, -1.0));
         float aw = abs(w);
-        if (aw <= ls * lt) return w / ls;
-        return sign(w) * lt * pow(10.0, aw / lt - ls);
+        if (aw <= lt * adj) return w / adj;
+        return sign(w) * lt * pow(b, aw / lt - adj);
     }
     if (c == 3) return 1.0 / (1.0 + exp(-w));                    // logit
     if (c == 4) {                                                // asinh

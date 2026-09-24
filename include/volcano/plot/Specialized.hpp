@@ -6,10 +6,13 @@
 #include "volcano/render/primitives/LineSegmentRenderer.hpp"
 #include "volcano/render/primitives/PointRenderer.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace volcano::plot {
+
+struct TextAnnotation;
 
 /// Table — `ax.table(...)`: a grid of text cells drawn along one edge of
 /// the axes (matplotlib `table`). Rows × cols cell text, optional row/column
@@ -53,15 +56,40 @@ public:
                 std::vector<std::string> labels = {},
                 std::vector<int> orientations = {},
                 Color color = Color{0.121f, 0.466f, 0.705f, 0.7f});
-    /// Emit ribbons + labels into the axes (mpl `finish()`).
-    void finish();
+    /// Emit ribbons + labels into the axes (mpl `finish()`). Returns one
+    /// info struct per add()ed subdiagram (mpl's diagrams list).
+    struct Diagram {
+        std::vector<float> flows;
+        /// mpl `angles`: arrow direction in deg/90 (0=RIGHT, 1=UP,
+        /// 2=LEFT, 3=DOWN); nullopt for |flow| < tolerance (skipped).
+        std::vector<std::optional<int>> angles;
+        /// mpl `tips`: outer tip/dip position of each flow path.
+        std::vector<Point2D> tips;
+        /// Trunk outline patch + per-flow ribbon patches.
+        Patch* patch = nullptr;
+        std::vector<Patch*> ribbons;
+        /// mpl `text`: the patchlabel Text (nullptr when unset).
+        TextAnnotation* text = nullptr;
+        /// mpl `texts`: one TextAnnotation* per rendered flow label
+        /// (nullptr for flows without labels).
+        std::vector<TextAnnotation*> texts;
+    };
+    std::vector<Diagram> finish();
+
+    /// mpl `scale`: multiplies the auto-normalized ribbon width.
+    float scale = 1.0f;
+    /// mpl `gap`: vertical gap between ribbons (data units).
+    float gap = 0.02f;
+    /// mpl `tolerance`: flows with |f| < tolerance are skipped.
+    float tolerance = 1e-6f;
+    /// mpl `patchlabel` per subdiagram (index into sets_).
+    std::vector<std::string> patchLabels;
 
 private:
     struct FlowSet { std::vector<float> flows; std::vector<std::string> labels;
                      std::vector<int> orientations; Color color; };
     Axes* axes_;
     std::vector<FlowSet> sets_;
-    float gap_ = 0.02f;   ///< vertical gap between ribbons (data units)
 };
 
 /// Squarified treemap layout (mpl third-party `squarify` equivalent):

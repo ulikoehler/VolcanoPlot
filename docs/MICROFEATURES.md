@@ -344,6 +344,16 @@ interpreting any data-carrying tier.
 | 189 | `anchored_artists` | `AnchoredText` + `AnchoredSizeBar` (framed offsetbox) |
 | 190 | `concise_dates` | `MonthLocator` + `DayLocator(7)` minor + `ConciseDateFormatter` |
 
+## Tier 23 — Parity batch 17 (191–195)
+
+| # | Name | Checks |
+|---|------|--------|
+| 191 | `log_base2` | `set_xscale("log", base=2)` — `2^k` decade ticks/labels |
+| 192 | `symlog_scale` | `set_yscale("symlog", linthresh=2)` — `±10^k` + 0 labels |
+| 193 | `sankey` | `Sankey(ax)` + `add`/`finish` — ribbons, labels, trunk |
+| 194 | `colorbar_fmt_extend` | `colorbar(extend="both", format="%.1f", extendfrac)` |
+| 195 | `cax_colorbar` | `make_axes` + `colorbar(cax=)` — strip fills the cax |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.py`

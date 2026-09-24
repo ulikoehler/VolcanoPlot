@@ -46,6 +46,7 @@
 #include <volcano/plot/plots/StackPlot.hpp>
 #include <volcano/plot/plots/HistPlot.hpp>
 #include <volcano/plot/GridSpec.hpp>
+#include <volcano/plot/Specialized.hpp>
 #include <volcano/plot/Triangulation.hpp>
 #include <volcano/plot/plots/TripcolorPlot.hpp>
 #include <volcano/plot/plots/TriplotPlot.hpp>
@@ -2205,6 +2206,79 @@ void f190_concise_dates(Figure& fig) {
     ax->setYlim(-1.2f, 1.2f);
 }
 
+// ═══ Tier 23 — scale / units / animation / sankey / colorbar ═══════════
+
+void f191_log_base2(Figure& fig) {
+    // mpl: ax.set_xscale("log", base=2) → ticks at 1,2,4,8,... labels 2^k.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int i = 0; i <= 8; ++i) {
+        float x = float(1 << i);
+        s.points.push_back({x, std::sqrt(x)});
+    }
+    s.color = Color::fromRgba8(31, 119, 180);
+    s.lineWidth = 1.5f * 200.0f / 72.0f;
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXscale(AxisScale::log(2.0f));
+    ax->setXlim(0.8f, 300.0f);
+    ax->setYlim(0.0f, 20.0f);
+}
+
+void f192_symlog_scale(Figure& fig) {
+    // mpl: ax.set_yscale("symlog", linthresh=2) — linear ±2, log beyond.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    auto xs = linspace(-1.0f, 1.0f, 60);
+    for (float x : xs)
+        s.points.push_back({x, x * x * x * 120.0f});
+    s.color = Color::fromRgba8(214, 39, 40);
+    s.lineWidth = 1.5f * 200.0f / 72.0f;
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setYscale(AxisScale::symlog(2.0f, 1.0f));
+    ax->setXlim(-1.0f, 1.0f);
+    ax->setYlim(-130.0f, 130.0f);
+}
+
+void f193_sankey(Figure& fig) {
+    // mpl: Sankey(ax=ax).add(flows, labels, orientations).finish().
+    auto* ax = mfAxes(fig);
+    ax->setXlim(-0.2f, 1.3f);
+    ax->setYlim(-1.2f, 1.2f);
+    Sankey sk(*ax);
+    sk.patchLabels = {"Sys"};
+    sk.add({1.0f, 0.5f, -0.8f, -0.7f}, {"in A", "in B", "out C", "out D"},
+           {1, -1, 1, -1});
+    auto diagrams = sk.finish();
+    (void)diagrams;
+}
+
+void f194_colorbar_fmt_extend(Figure& fig) {
+    // mpl: fig.colorbar(im, extend="both", format="%.1f", extendfrac=0.1).
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid()));
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.extend = "both";
+    cb.extendfrac = 0.1f;
+    cb.format = "%.1f";
+    cb.ticks = {0, 6, 12};
+}
+
+void f195_cax_colorbar(Figure& fig) {
+    // mpl: cax, kw = make_axes(ax); fig.colorbar(im, cax=cax) — the strip
+    // fills the cax rect with no axes chrome.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<HeatmapPlot>(smallGrid()));
+    auto* cax = fig.addAxesFraction(0.88f, 0.15f, 0.035f, 0.7f);
+    cax->setStyle(mfStyle());
+    auto& cb = cax->style().colorbar;
+    cb.visible = true;
+    cb.caxMode = true;
+    cb.cmapPtr = &Colormap::byName("viridis");
+    cb.explicitRange = Range{0.0f, 13.0f};
+    cb.ticks = {0, 4, 8, 12};
+}
+
 // ═══ Registry ═══════════════════════════════════════════════════════════
 
 struct Feature {
@@ -2403,6 +2477,11 @@ const Feature kFeatures[] = {
     {"188_date_locators",      f188_date_locators},
     {"189_anchored_artists",   f189_anchored_artists},
     {"190_concise_dates",      f190_concise_dates},
+    {"191_log_base2",          f191_log_base2},
+    {"192_symlog_scale",       f192_symlog_scale},
+    {"193_sankey",             f193_sankey},
+    {"194_colorbar_fmt_extend",f194_colorbar_fmt_extend},
+    {"195_cax_colorbar",       f195_cax_colorbar},
 };
 
 } // namespace

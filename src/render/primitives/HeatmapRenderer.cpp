@@ -47,8 +47,8 @@ void main() {
                 (a_pos * 0.5 + 0.5) * vec2(pc.u_gridRange.y - pc.u_gridRange.x,
                                            pc.u_gridRange.w - pc.u_gridRange.z);
     // Apply scales + projection, then map display coords to NDC.
-    vec2 p = projFwd(vec2(scaleFwd(data.x, pc.u_scaleX.xyz),
-                          scaleFwd(data.y, pc.u_scaleY.xyz)),
+    vec2 p = projFwd(vec2(scaleFwd(data.x, pc.u_scaleX),
+                          scaleFwd(data.y, pc.u_scaleY)),
                      pc.u_proj.xyz);
     vec2 ndc = (p - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
@@ -137,8 +137,8 @@ void main() {
         vec2 disp = vec2((v_ndc.x + 1.0) * 0.5 * pc.u_viewMinSpan.z + pc.u_viewMinSpan.x,
                          (-v_ndc.y + 1.0) * 0.5 * pc.u_viewMinSpan.w + pc.u_viewMinSpan.y);
         vec2 pre = projInv(disp, pc.u_proj.xyz);
-        vec2 data = vec2(scaleInv(pre.x, pc.u_scaleX.xyz),
-                         scaleInv(pre.y, pc.u_scaleY.xyz));
+        vec2 data = vec2(scaleInv(pre.x, pc.u_scaleX),
+                         scaleInv(pre.y, pc.u_scaleY));
         // mpl polar wraps theta mod 2pi so negative atan2 angles land in
         // the image's theta range instead of clipping to a half-disk.
         if (int(pc.u_proj.x + 0.5) == 1) {
@@ -474,9 +474,11 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
     pc.sxP1 = transform.scaleX.param1;
     pc.sxP2 = transform.scaleX.param2;
+    pc.sxPad = transform.scaleX.param3;
     pc.syCode = static_cast<float>(static_cast<int>(transform.codeY()));
     pc.syP1 = transform.scaleY.param1;
     pc.syP2 = transform.scaleY.param2;
+    pc.syPad = transform.scaleY.param3;
     pc.prCode = static_cast<float>(static_cast<int>(transform.projection.kind));
     pc.thetaOff = transform.projection.thetaOffset;
     pc.thetaDir = transform.projection.thetaDir;

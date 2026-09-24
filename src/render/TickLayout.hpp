@@ -88,6 +88,7 @@ ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
                               std::span<const std::string> explicitLabels,
                               bool minorTicksOn,
                               const plot::Normalize* norm,
-                              float vmin, float vmax);
+                              float vmin, float vmax,
+                              std::string_view fmt = {});
 
 } // namespace volcano::render

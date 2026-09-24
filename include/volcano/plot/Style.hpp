@@ -269,6 +269,29 @@ struct ColorbarStyle {
     /// mpl `Colorbar.minorticks_on` — draw minor tick marks (unlabeled)
     /// between the major ticks.
     bool minorTicksOn = false;
+    /// mpl `fig.colorbar(format=...)` — printf-style format applied to
+    /// auto/explicit tick labels; empty → default formatting.
+    std::string format;
+    /// mpl `fig.colorbar(alpha=...)` — strip alpha multiplier.
+    float alpha = 1.0f;
+    /// mpl `location` ("right"/"left"/"bottom"/"top") — recorded;
+    /// `orientation` carries the resolved direction.
+    std::string location;
+    /// mpl `ticklocation`: "auto" | "left" | "right" | "top" | "bottom".
+    std::string ticklocation = "auto";
+    /// mpl `spacing`: "uniform" | "proportional" (BoundaryNorm strips).
+    std::string spacing = "uniform";
+    /// mpl `extendfrac`: extension length as a fraction of the strip;
+    /// <= 0 → auto (0.05 of the strip length, or 0.025 for boundaries).
+    float extendfrac = -1.0f;
+    /// mpl `extendrect`: rectangular (not triangular) extensions.
+    bool extendrect = false;
+    /// mpl `drawedges`: stroke boundaries inside the strip.
+    bool drawedges = false;
+    /// mpl `fig.colorbar(cax=...)` / `colorbar.make_axes`: this axes IS
+    /// the colorbar axes — the strip fills its rect (no shrink, no
+    /// parent chrome, no spines/tick labels of its own).
+    bool caxMode = false;
 };
 
 /// Title configuration.

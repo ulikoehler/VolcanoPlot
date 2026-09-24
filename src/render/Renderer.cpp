@@ -1887,13 +1887,16 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         // rectangle — mplot3d renders its own box/panes instead.
         bool has3D = std::ranges::any_of(p->axes->drawOrder(),
             [](const plot::IPlot* pl) { return pl->is3D(); });
+        // mpl cax axes (fig.colorbar(cax=)/colorbar.make_axes) have no
+        // spines or tick furniture of their own.
+        bool isCax = p->axes->style().colorbar.caxMode;
 
         // Draw axis spines and tick marks. Polar axes get a circular
         // frame plus theta/r labels instead of rectilinear furniture.
         if (polar) drawPolarSpineAndLabels(cmd, *p->axes, rect);
-        else if (!has3D) drawSpines(cmd, *p->axes, rect);
+        else if (!has3D && !isCax) drawSpines(cmd, *p->axes, rect);
         // Draw text (axis labels, tick labels, title).
-        if (textInited_ && textReady_) {
+        if (!isCax && textInited_ && textReady_) {
             drawText(cmd, *p->axes, rect);
         }
 
@@ -2086,7 +2089,9 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     // for axes that didn't shrink (insets, overlays) fall back to a
     // region just outside the axes rect.
     const auto& cbs = style.colorbar;
-    plot::Rect2D region = axes.colorbarRegion();
+    // mpl cax: the axes' own rect IS the colorbar region (strip +
+    // tick-label space), no pad-relative placement.
+    plot::Rect2D region = cbs.caxMode ? rect : axes.colorbarRegion();
     float regionX, regionW;
     if (region.width > 0) {
         regionX = float(region.x);
@@ -2109,7 +2114,9 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         : std::min(regionW, stripH / cbs.aspect);
     bool extMin = (cbs.extend == "min" || cbs.extend == "both");
     bool extMax = (cbs.extend == "max" || cbs.extend == "both");
-    float extH = stripW * 0.6f;   // triangular extension height
+    // mpl: extension length = extendfrac·strip-length (auto → 0.05).
+    float extFrac = cbs.extendfrac > 0.0f ? cbs.extendfrac : 0.05f;
+    float extH = extFrac * stripH;
     float bodyY0 = stripY + (extMax ? extH : 0.0f);
     float bodyY1 = stripY + stripH - (extMin ? extH : 0.0f);
     float bodyH = bodyY1 - bodyY0;
@@ -2124,11 +2131,15 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     const plot::Normalize* effNorm =
         cbs.norm ? cbs.norm.get() : mappableNorm.get();
     auto sampleAt = [&](float t) -> plot::Color {
+        plot::Color c;
         if (effNorm) {
             float v = valueMin + t * (valueMax - valueMin);
-            return cmap.sample((*effNorm)(v));
+            c = cmap.sample((*effNorm)(v));
+        } else {
+            c = cmap.sample(t);
         }
-        return cmap.sample(t);
+        c.a *= cbs.alpha; // mpl fig.colorbar(alpha=)
+        return c;
     };
 
     if (cbs.orientation == "horizontal") {
@@ -2146,7 +2157,8 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         float stripY = cbs.padding > 0.0f
             ? float(rect.y) + float(rect.height) + cbs.padding
             : regionY;
-        float extW = stripH * 0.6f;
+        // mpl: extension length = extendfrac·strip-length (auto→0.05).
+        float extW = extFrac * stripW;
         float bodyX0 = stripX + (extMin ? extW : 0.0f);
         float bodyX1 = stripX + stripW - (extMax ? extW : 0.0f);
         float bodyW = bodyX1 - bodyX0;
@@ -2161,19 +2173,33 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                 sampleAt(t));
         }
         vk::Extent2D res2{ext.width, ext.height};
-        if (extMin) {   // left-pointing triangle
-            plot::Point2D tri[3] = {
-                {bodyX0, stripY}, {bodyX0, stripY + stripH},
-                {bodyX0 - extW, stripY + stripH * 0.5f}};
-            spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
-                                         sampleAt(0.0f));
+        if (extMin) {   // left-pointing extension
+            if (cbs.extendrect) {
+                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                    {int32_t(bodyX0 - extW), int32_t(stripY),
+                     uint32_t(extW), uint32_t(stripH)},
+                    sampleAt(0.0f));
+            } else {
+                plot::Point2D tri[3] = {
+                    {bodyX0, stripY}, {bodyX0, stripY + stripH},
+                    {bodyX0 - extW, stripY + stripH * 0.5f}};
+                spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                                             sampleAt(0.0f));
+            }
         }
-        if (extMax) {   // right-pointing triangle
-            plot::Point2D tri[3] = {
-                {bodyX1, stripY}, {bodyX1, stripY + stripH},
-                {bodyX1 + extW, stripY + stripH * 0.5f}};
-            spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
-                                         sampleAt(1.0f));
+        if (extMax) {   // right-pointing extension
+            if (cbs.extendrect) {
+                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                    {int32_t(bodyX1), int32_t(stripY),
+                     uint32_t(extW), uint32_t(stripH)},
+                    sampleAt(1.0f));
+            } else {
+                plot::Point2D tri[3] = {
+                    {bodyX1, stripY}, {bodyX1, stripY + stripH},
+                    {bodyX1 + extW, stripY + stripH * 0.5f}};
+                spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                                             sampleAt(1.0f));
+            }
         }
         spineRenderer_.drawRect(cmd, fullRect, ext,
             {int32_t(bodyX0), int32_t(stripY),
@@ -2185,7 +2211,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         // log/symlog norms get locator ticks via colorbarTicks.
         auto cbt = colorbarTicks(cbs.ticks, cbs.tickLabels,
                                  cbs.minorTicksOn, effNorm,
-                                 valueMin, valueMax);
+                                 valueMin, valueMax, cbs.format);
         for (size_t ti = 0; ti < cbt.majors.size(); ++ti) {
             float tick = cbt.majors[ti];
             float t = effNorm ? (*effNorm)(tick)
@@ -2241,19 +2267,34 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     // the bottom, max at the top; colored with the strip's end color.
     vk::Extent2D res{ext.width, ext.height};
     if (extMin) {
-        // Downward-pointing triangle under the strip.
-        plot::Point2D tri[3] = {
-            {stripX, bodyY1}, {stripX + stripW, bodyY1},
-            {stripX + stripW * 0.5f, bodyY1 + extH}};
-        spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
-                                     sampleAt(0.0f));
+        // mpl extendrect → rectangular extension; else downward
+        // triangle under the strip.
+        if (cbs.extendrect) {
+            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                {int32_t(stripX), int32_t(bodyY1),
+                 uint32_t(stripW), uint32_t(extH)},
+                sampleAt(0.0f));
+        } else {
+            plot::Point2D tri[3] = {
+                {stripX, bodyY1}, {stripX + stripW, bodyY1},
+                {stripX + stripW * 0.5f, bodyY1 + extH}};
+            spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
+                                         sampleAt(0.0f));
+        }
     }
     if (extMax) {
-        plot::Point2D tri[3] = {
-            {stripX, bodyY0}, {stripX + stripW, bodyY0},
-            {stripX + stripW * 0.5f, bodyY0 - extH}};
-        spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
-                                     sampleAt(1.0f));
+        if (cbs.extendrect) {
+            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                {int32_t(stripX), int32_t(bodyY0 - extH),
+                 uint32_t(stripW), uint32_t(extH)},
+                sampleAt(1.0f));
+        } else {
+            plot::Point2D tri[3] = {
+                {stripX, bodyY0}, {stripX + stripW, bodyY0},
+                {stripX + stripW * 0.5f, bodyY0 - extH}};
+            spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
+                                         sampleAt(1.0f));
+        }
     }
 
     // Draw border around the strip body (plus extend outlines).
@@ -2266,7 +2307,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     // mpl Colorbar.set_ticks/set_ticklabels override the auto ticks;
     // log/symlog norms get locator-appropriate ticks (colorbarTicks).
     auto cbt = colorbarTicks(cbs.ticks, cbs.tickLabels, cbs.minorTicksOn,
-                             effNorm, valueMin, valueMax);
+                             effNorm, valueMin, valueMax, cbs.format);
     for (size_t ti = 0; ti < cbt.majors.size(); ++ti) {
         float tick = cbt.majors[ti];
         float t = effNorm ? (*effNorm)(tick)

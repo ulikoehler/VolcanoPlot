@@ -14,17 +14,23 @@ constexpr float kPi = 3.14159265358979323846f;
 // Mercator latitude limit (~85.05113 deg in radians).
 constexpr float kMercatorLimit = 1.48442223f;
 
-float symlogFwd(float v, float linthresh, float linscale) {
+/// mpl SymmetricalLogTransform: linscale_adj = linscale/(1 - base⁻¹)
+/// normalizes the linear-region slope so the transform is C¹-smooth at
+/// ±linthresh.
+float symlogFwd(float v, float linthresh, float linscale, float base) {
+    float adj = linscale / (1.0f - std::pow(base, -1.0f));
     float a = std::fabs(v);
-    if (a <= linthresh) return linscale * v;
-    return std::copysign(linthresh * (linscale + std::log10(a / linthresh)), v);
+    if (a <= linthresh) return adj * v;
+    return std::copysign(
+        linthresh * (adj + std::log(a / linthresh) / std::log(base)), v);
 }
-float symlogInv(float v, float linthresh, float linscale) {
+float symlogInv(float v, float linthresh, float linscale, float base) {
+    float adj = linscale / (1.0f - std::pow(base, -1.0f));
     float a = std::fabs(v);
-    float linEdge = linscale * linthresh;
-    if (a <= linEdge) return v / linscale;
-    // inverse of linthresh*(linscale + log10(a'/linthresh)) = a
-    return std::copysign(linthresh * std::pow(10.0f, a / linthresh - linscale), v);
+    // invlinthresh = transform(linthresh) = linthresh * adj.
+    if (a <= linthresh * adj) return v / adj;
+    return std::copysign(
+        linthresh * std::pow(base, a / linthresh - adj), v);
 }
 } // namespace
 
@@ -32,7 +38,7 @@ float AxisScale::forward(float v) const {
     switch (kind) {
     case ScaleKind::Linear: return v;
     case ScaleKind::Log:    return std::log10(std::max(v, 1e-30f));
-    case ScaleKind::Symlog: return symlogFwd(v, param1, param2);
+    case ScaleKind::Symlog: return symlogFwd(v, param1, param2, param3);
     case ScaleKind::Logit: {
         float p = std::clamp(v, kEps, 1.0f - kEps);
         return std::log(p / (1.0f - p));
@@ -46,7 +52,14 @@ float AxisScale::forward(float v) const {
     case ScaleKind::Function:
         return forwardFn ? forwardFn(v) : v;
     case ScaleKind::FunctionLog:
-        return forwardFn ? forwardFn(std::log10(std::max(v, 1e-30f))) : v;
+        // mpl FuncScaleLog: transform = FuncTransform + LogTransform(base)
+        // → log_base(forward(v)).
+        if (!forwardFn) return v;
+        {
+            float base = param1 > 0.0f ? param1 : 10.0f;
+            return std::log(std::max(forwardFn(v), 1e-30f)) /
+                   std::log(base);
+        }
     }
     return v;
 }
@@ -55,7 +68,7 @@ float AxisScale::inverse(float v) const {
     switch (kind) {
     case ScaleKind::Linear: return v;
     case ScaleKind::Log:    return std::pow(10.0f, v);
-    case ScaleKind::Symlog: return symlogInv(v, param1, param2);
+    case ScaleKind::Symlog: return symlogInv(v, param1, param2, param3);
     case ScaleKind::Logit:  return 1.0f / (1.0f + std::exp(-v));
     case ScaleKind::Asinh:  return param1 * std::sinh(v / std::max(param1, 1e-30f));
     case ScaleKind::Mercator:
@@ -63,7 +76,12 @@ float AxisScale::inverse(float v) const {
     case ScaleKind::Function:
         return inverseFn ? inverseFn(v) : v;
     case ScaleKind::FunctionLog:
-        return inverseFn ? std::pow(10.0f, inverseFn(v)) : v;
+        // inverse of log_base(f(x)): f⁻¹(base^v).
+        if (!inverseFn) return v;
+        {
+            float base = param1 > 0.0f ? param1 : 10.0f;
+            return inverseFn(std::pow(base, v));
+        }
     }
     return v;
 }
@@ -87,45 +105,33 @@ std::vector<float> scaleTicks(const AxisScale& scale, float vmin, float vmax,
     float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
     switch (scale.kind) {
     case ScaleKind::Log: {
-        // Ticks at powers of 10 covering the range.
+        // Ticks at powers of `base` covering the range (mpl LogLocator).
         std::vector<float> out;
         if (lo <= 0.0f) return linearTicks(lo, hi, nbins);
-        int e0 = static_cast<int>(std::floor(std::log10(lo)));
-        int e1 = static_cast<int>(std::ceil(std::log10(hi)));
+        float base = scale.param1 > 0.0f ? scale.param1 : 10.0f;
+        float lb = std::log(base);
+        int e0 = static_cast<int>(std::floor(std::log(lo) / lb));
+        int e1 = static_cast<int>(std::ceil(std::log(hi) / lb));
         if (e1 - e0 <= nbins) {
             for (int e = e0; e <= e1; ++e) {
-                float t = std::pow(10.0f, static_cast<float>(e));
+                float t = std::pow(base, static_cast<float>(e));
                 if (t >= lo - 1e-9f && t <= hi + 1e-9f) out.push_back(t);
             }
         } else {
             // Too many decades: thin out.
             int stride = (e1 - e0 + nbins - 1) / nbins;
             for (int e = e0; e <= e1; e += stride)
-                out.push_back(std::pow(10.0f, static_cast<float>(e)));
+                out.push_back(std::pow(base, static_cast<float>(e)));
         }
         return out;
     }
-    case ScaleKind::Symlog: {
-        // Linear ticks inside ±linthresh, decade ticks beyond.
-        float lt = scale.param1;
-        std::vector<float> out = linearTicks(
-            std::max(lo, -lt), std::min(hi, lt), nbins / 2 + 1);
-        if (hi > lt) {
-            int e0 = static_cast<int>(std::ceil(std::log10(lt)));
-            int e1 = static_cast<int>(std::floor(std::log10(hi)));
-            for (int e = e0; e <= e1; ++e)
-                out.push_back(std::pow(10.0f, static_cast<float>(e)));
-        }
-        if (lo < -lt) {
-            int e0 = static_cast<int>(std::ceil(std::log10(lt)));
-            int e1 = static_cast<int>(std::floor(std::log10(-lo)));
-            for (int e = e0; e <= e1; ++e)
-                out.push_back(-std::pow(10.0f, static_cast<float>(e)));
-        }
-        std::sort(out.begin(), out.end());
-        out.erase(std::unique(out.begin(), out.end()), out.end());
-        return out;
-    }
+    case ScaleKind::Symlog:
+        // mpl SymmetricalLogLocator: decade ticks beyond ±linthresh,
+        // a lone 0 inside the linear segment.
+        return SymmetricalLogLocator{scale.param1,
+                                     scale.param3 > 1.0f ? scale.param3
+                                                         : 10.0f}
+            .tickValues(lo, hi);
     case ScaleKind::Logit: {
         // Nice probability ticks.
         static const float kProbs[] = {0.5f, 0.9f, 0.99f, 0.999f, 0.9999f,
@@ -158,8 +164,20 @@ std::vector<float> scaleTicks(const AxisScale& scale, float vmin, float vmax,
     case ScaleKind::Mercator:
         // Latitude ticks every 30 degrees within range.
         return linearTicks(lo, hi, nbins);
+    case ScaleKind::FunctionLog: {
+        // mpl FuncScaleLog inherits LogScale's locator: powers of base.
+        std::vector<float> out;
+        float base = scale.param1 > 0.0f ? scale.param1 : 10.0f;
+        float lb = std::log(base);
+        if (lo <= 0.0f) return linearTicks(lo, hi, nbins);
+        int e0 = static_cast<int>(std::floor(std::log(lo) / lb));
+        int e1 = static_cast<int>(std::ceil(std::log(hi) / lb));
+        int stride = std::max(1, (e1 - e0 + nbins - 1) / nbins);
+        for (int e = e0; e <= e1; e += stride)
+            out.push_back(std::pow(base, static_cast<float>(e)));
+        return out;
+    }
     case ScaleKind::Function:
-    case ScaleKind::FunctionLog:
         // Nice ticks in transformed space, mapped back via inverse.
         if (scale.forwardFn && scale.inverseFn) {
             float t0 = scale.forward(lo), t1 = scale.forward(hi);

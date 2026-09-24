@@ -1574,6 +1574,49 @@ def f190_concise_dates(fig, out):
     ax.set_xlim(18262, 18322); ax.set_ylim(-1.2, 1.2)
 
 
+def f191_log_base2(fig, out):
+    ax = mf_axes(fig)
+    xs = 2.0 ** np.arange(0, 9)
+    ax.plot(xs, np.sqrt(xs), color=(31 / 255, 119 / 255, 180 / 255))
+    ax.set_xscale("log", base=2)
+    ax.set_xlim(0.8, 300); ax.set_ylim(0, 20)
+
+
+def f192_symlog_scale(fig, out):
+    ax = mf_axes(fig)
+    xs = np.linspace(-1, 1, 60)
+    ax.plot(xs, xs ** 3 * 120.0, color=(214 / 255, 39 / 255, 40 / 255))
+    ax.set_yscale("symlog", linthresh=2)
+    ax.set_xlim(-1, 1); ax.set_ylim(-130, 130)
+
+
+def f193_sankey(fig, out):
+    from matplotlib.sankey import Sankey
+    ax = mf_axes(fig)
+    ax.set_xlim(-0.2, 1.3); ax.set_ylim(-1.2, 1.2)
+    ax.set_xticks([]); ax.set_yticks([])
+    sk = Sankey(ax=ax)
+    sk.add(flows=[1.0, 0.5, -0.8, -0.7],
+           labels=["in A", "in B", "out C", "out D"],
+           orientations=[1, -1, 1, -1], patchlabel="Sys")
+    sk.finish()
+
+
+def f194_colorbar_fmt_extend(fig, out):
+    ax = mf_axes(fig)
+    im = ax.imshow(small_grid(), origin="lower", cmap="viridis")
+    fig.colorbar(im, ax=ax, extend="both", extendfrac=0.1,
+                 format="%.1f", ticks=[0, 6, 12])
+
+
+def f195_cax_colorbar(fig, out):
+    from matplotlib.colorbar import make_axes
+    ax = mf_axes(fig)
+    im = ax.imshow(small_grid(), origin="lower", cmap="viridis")
+    cax, _ = make_axes(ax, fraction=0.05, pad=0.05)
+    fig.colorbar(im, cax=cax, ticks=[0, 4, 8, 12])
+
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # ═══ Registry ═══════════════════════════════════════════════════════════

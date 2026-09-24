@@ -308,17 +308,51 @@ std::vector<float> LogLocator::minorValues(float vmin, float vmax,
 
 std::vector<float> SymmetricalLogLocator::tickValues(float vmin,
                                                    float vmax) const {
-    // Linear ticks inside ±linthresh, decade ticks beyond.
-    auto out = MaxNLocator{5}.tickValues(std::max(vmin, -linthresh_),
-                                         std::min(vmax, linthresh_));
-    for (int sgn : {1, -1}) {
-        float edge = sgn > 0 ? vmax : -vmin;
-        if (edge > linthresh_) {
-            int e0 = static_cast<int>(std::ceil(std::log10(linthresh_)));
-            int e1 = static_cast<int>(std::floor(std::log10(edge)));
-            for (int e = e0; e <= e1; ++e)
-                out.push_back(sgn * std::pow(10.0f, static_cast<float>(e)));
+    // matplotlib SymmetricalLogLocator.tick_values: the domain splits
+    // into a) decades below -linthresh, b) the linear segment (labelled
+    // only at 0), and c) decades above linthresh.
+    const float t = linthresh_;
+    if (vmax < vmin) std::swap(vmin, vmax);
+
+    // "simple" mode: range entirely inside [-t, t] → (vmin, 0, vmax).
+    if (-t <= vmin && vmin < vmax && vmax <= t)
+        return {vmin, 0.0f, vmax};
+
+    const bool hasA = (vmin < -t);
+    const bool hasC = (vmax > t);
+    const bool hasB = (hasA && vmax > -t) || (hasC && vmin < t);
+    const float lb = std::log(base_);
+    auto logRange = [&](float lo, float hi) {
+        return std::pair{int(std::floor(std::log(lo) / lb)),
+                         int(std::ceil(std::log(hi) / lb))};
+    };
+    int aLo = 0, aHi = 0, cLo = 0, cHi = 0;
+    if (hasA) {
+        const float aUpper = std::min(-t, vmax);  // mpl a_upper_lim
+        std::tie(aLo, aHi) = logRange(std::abs(aUpper), -vmin + 1.0f);
+    }
+    if (hasC) std::tie(cLo, cHi) = logRange(std::max(t, vmin), vmax + 1.0f);
+
+    int totalTicks = (aHi - aLo) + (cHi - cLo) + (hasB ? 1 : 0);
+    const int stride = std::max(totalTicks / 14, 1);  // mpl numticks=15
+
+    std::vector<float> decades;
+    if (hasA)
+        for (int e = aLo; e < aHi; e += stride)
+            decades.push_back(-std::pow(base_, float(e)));
+    if (hasB) decades.push_back(0.0f);
+    if (hasC)
+        for (int e = cLo; e < cHi; e += stride)
+            decades.push_back(std::pow(base_, float(e)));
+
+    std::vector<float> out;
+    if (subs_.size() > 1 || subs_.empty() || subs_[0] != 1.0f) {
+        for (float d : decades) {
+            if (d == 0.0f) { out.push_back(d); continue; }
+            for (float s : subs_) out.push_back(s * d);
         }
+    } else {
+        out = std::move(decades);
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -699,7 +733,7 @@ bool LogFormatter::passesSublabels(float v) const {
 std::string LogFormatter::format(float v, int) const {
     if (!passesSublabels(v)) return {};
     if (auto e = exactPower(v, base_))
-        return std::format("$10^{{{}}}$", *e);
+        return std::format("${:g}^{{{}}}$", base_, *e);
     return gFormat(v);
 }
 
@@ -707,24 +741,37 @@ std::string LogFormatterExponent::format(float v, int) const {
     if (v <= 0.0f) return gFormat(v);
     if (!passesSublabels(v)) return {};
     int e = static_cast<int>(std::round(std::log(v) / std::log(base_)));
-    return std::format("$10^{{{}}}$", e);
+    return std::format("${:g}^{{{}}}$", base_, e);
 }
 
 std::string LogFormatterMathtext::format(float v, int) const {
-    if (v <= 0.0f) return gFormat(v);
-    if (!passesSublabels(v)) return {};
-    int e = static_cast<int>(std::round(std::log(v) / std::log(base_)));
+    if (v == 0.0f) return gFormat(v);
+    // mpl LogFormatter.format_data handles negatives via log|x|: a
+    // negative decade formats as "-b^{e}" (e.g. -1 → -10^{0}).
+    float fx = std::log(std::abs(v)) / std::log(base_);
+    if (v < 0.0f &&
+        std::abs(fx - std::round(fx)) < 1e-6f)
+        return std::format("$-{:g}^{{{}}}$", base_,
+                           int(std::round(fx)));
+    if (v < 0.0f || !passesSublabels(v)) return {};
+    int e = static_cast<int>(std::round(fx));
     return std::format("${:g}^{{{}}}$", base_, e);
 }
 
 std::string LogFormatterSciNotation::format(float v, int) const {
-    if (v <= 0.0f) return gFormat(v);
-    if (!passesSublabels(v)) return {};
-    int e = static_cast<int>(std::floor(std::log(v) / std::log(base_)));
+    if (v == 0.0f) return gFormat(v);
+    float fx = std::log(std::abs(v)) / std::log(base_);
+    if (v < 0.0f &&
+        std::abs(fx - std::round(fx)) < 1e-6f)
+        return std::format("$-{:g}^{{{}}}$", base_,
+                           int(std::round(fx)));
+    if (v < 0.0f || !passesSublabels(v)) return {};
+    int e = static_cast<int>(std::floor(fx));
     float m = v / std::pow(base_, static_cast<float>(e));
     if (std::abs(m - std::round(m)) < 1e-4f)
-        return std::format("${}\\times10^{{{}}}$", int(std::round(m)), e);
-    return std::format("${:.3g}\\times10^{{{}}}$", m, e);
+        return std::format("${}\\times{:g}^{{{}}}$", int(std::round(m)),
+                           base_, e);
+    return std::format("${:.3g}\\times{:g}^{{{}}}$", m, base_, e);
 }
 
 std::string LogitFormatter::format(float v, int) const {

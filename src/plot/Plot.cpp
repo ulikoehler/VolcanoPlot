@@ -368,7 +368,7 @@ void Figure::layoutInRect(Rect2D rect) {
         // (strip + padding + tick labels live in the reclaimed space).
         const auto& cbs = p.axes->style().colorbar;
         p.axes->setColorbarRegion({});
-        if (cbs.visible &&
+        if (cbs.visible && !cbs.caxMode &&
             (p.mode == PlacementMode::Grid ||
              p.mode == PlacementMode::FigureFraction)) {
             if (cbs.orientation == "horizontal") {

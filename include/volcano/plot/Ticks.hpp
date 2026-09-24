@@ -175,12 +175,17 @@ private:
 /// Ticks for symlog axes (matplotlib SymmetricalLogLocator).
 class SymmetricalLogLocator : public Locator {
 public:
-    explicit SymmetricalLogLocator(float linthresh = 2.0f)
-        : linthresh_(linthresh) {}
+    explicit SymmetricalLogLocator(float linthresh = 2.0f,
+                                   float base = 10.0f,
+                                   std::vector<float> subs = {1.0f})
+        : linthresh_(linthresh), base_(base), subs_(std::move(subs)) {}
     [[nodiscard]] std::vector<float> tickValues(float vmin,
                                                 float vmax) const override;
 private:
     float linthresh_;
+    float base_;
+    /// mpl `subs`: multiples of each decade (default [1]).
+    std::vector<float> subs_;
 };
 
 /// Ticks for logit axes (matplotlib LogitLocator).

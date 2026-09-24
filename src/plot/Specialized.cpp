@@ -111,40 +111,69 @@ Sankey& Sankey::add(std::vector<float> flows,
     return *this;
 }
 
-void Sankey::finish() {
+std::vector<Sankey::Diagram> Sankey::finish() {
     // Single-stage horizontal sankey in data space [0,1]×[0,1]:
     //   - trunk: vertical rectangle centered at x≈0.5 with height ∝ sum
     //     of all |flows|.
     //   - positive flows: ribbons entering the trunk's left edge from x=0.
     //   - negative flows: ribbons leaving the trunk's right edge to x=1.
     // Ribbons bend smoothly via cubic Bézier vertical transitions.
+    std::vector<Diagram> out(sets_.size());
     float total = 0;
     for (const auto& s : sets_)
-        for (float f : s.flows) total += std::abs(f);
-    if (total <= 0) return;
+        for (float f : s.flows)
+            if (std::abs(f) >= tolerance) total += std::abs(f);
+    if (total <= 0) return out;
 
     const float trunkX0 = 0.45f, trunkX1 = 0.55f;
-    const float scale = 0.8f / total; // trunk height = 0.8 of axes
-    float trunkTop = 0.5f + total * scale * 0.5f;
+    const float wscale = 0.8f / total * scale; // trunk height ≈ 0.8
+    float trunkTop = 0.5f + total * wscale * 0.5f;
+    const Point2D center{0.5f, 0.5f};
 
     // Trunk body.
-    Patch trunk = patch::Rectangle(trunkX0, 0.5f - total * scale * 0.5f,
-                                   trunkX1 - trunkX0, total * scale);
+    Patch trunk = patch::Rectangle(trunkX0, 0.5f - total * wscale * 0.5f,
+                                   trunkX1 - trunkX0, total * wscale);
     trunk.style.face = Color{0.4f, 0.4f, 0.4f, 0.6f};
     trunk.style.edge = Color{0.2f, 0.2f, 0.2f, 1.0f};
-    axes_->addPatch(std::move(trunk));
+    Patch& trunkRef = axes_->addPatch(std::move(trunk));
 
     // Stack ribbons: positives along the trunk top edge, negatives bottom.
     float inY = trunkTop;    // current top edge cursor
-    float outY = 0.5f - total * scale * 0.5f; // bottom edge cursor
+    float outY = 0.5f - total * wscale * 0.5f; // bottom edge cursor
     float inSrcY = 0.95f;    // outer endpoints fan from top-left
     float outSrcY = 0.05f;   // outputs fan to bottom-right
 
-    for (const auto& s : sets_) {
+    for (size_t si = 0; si < sets_.size(); ++si) {
+        const auto& s = sets_[si];
+        Diagram& d = out[si];
+        d.patch = &trunkRef;
         for (size_t i = 0; i < s.flows.size(); ++i) {
             float f = s.flows[i];
-            float w = std::abs(f) * scale;
+            int orient = i < s.orientations.size()
+                             ? s.orientations[i]
+                         : !s.orientations.empty() ? s.orientations[0]
+                                                   : 0;
+            d.flows.push_back(f);
+            if (std::abs(f) < tolerance) {
+                // mpl: skipped flow — angle None, tip at diagram center.
+                d.angles.push_back(std::nullopt);
+                d.tips.push_back(center);
+                d.ribbons.push_back(nullptr);
+                d.texts.push_back(nullptr);
+                continue;
+            }
+            // mpl angles: horizontal (orient 0) input/output → 0;
+            // orient +1 → input DOWN(3)/output UP(1); orient −1 →
+            // input UP(1)/output DOWN(3).
+            int angle;
+            if (orient == 0) angle = 0;
+            else if (orient > 0) angle = f >= 0 ? 3 : 1;
+            else                 angle = f >= 0 ? 1 : 3;
+            d.angles.push_back(angle);
+
+            float w = std::abs(f) * wscale;
             Path p;
+            size_t labelIdx = SIZE_MAX;
             if (f >= 0) {
                 // Ribbon: outer (0, inSrcY-w)..(0,inSrcY) → trunk left edge
                 // (trunkX0, inY-w)..(trunkX0, inY).
@@ -155,13 +184,15 @@ void Sankey::finish() {
                 p.lineTo(b0);
                 p.curve4({trunkX0 * 0.5f, b0.y}, {trunkX0 * 0.5f, a0.y}, a0);
                 p.close();
+                d.tips.push_back({0.0f, inSrcY - w * 0.5f});
                 if (i < s.labels.size() && !s.labels[i].empty()) {
                     auto* t = axes_->text(0.02f, inSrcY - w * 0.5f,
                                           s.labels[i], CoordSystem::Data);
                     t->valign = VAlign::Center;
                     t->fontSize = 7.2f;
+                    labelIdx = axes_->texts().size() - 1;
                 }
-                inSrcY -= w + gap_;
+                inSrcY -= w + gap;
                 inY -= w;
             } else {
                 Point2D a0{1.0f, outSrcY + w}, a1{1.0f, outSrcY};
@@ -173,24 +204,53 @@ void Sankey::finish() {
                 p.curve4({1.0f - (1.0f - trunkX1) * 0.5f, a0.y},
                          {1.0f - (1.0f - trunkX1) * 0.5f, b0.y}, b0);
                 p.close();
+                d.tips.push_back({1.0f, outSrcY + w * 0.5f});
                 if (i < s.labels.size() && !s.labels[i].empty()) {
                     auto* t = axes_->text(0.98f, outSrcY + w * 0.5f,
                                           s.labels[i], CoordSystem::Data);
                     t->valign = VAlign::Center;
                     t->halign = HAlign::Right;
                     t->fontSize = 7.2f;
+                    labelIdx = axes_->texts().size() - 1;
                 }
-                outSrcY += w + gap_;
+                outSrcY += w + gap;
                 outY += w;
             }
+            // TextAnnotation* resolves at the end — texts_ may
+            // reallocate across text() calls. Index is stored +1 so
+            // index 0 ≠ nullptr.
+            d.texts.push_back(labelIdx == SIZE_MAX
+                                  ? nullptr
+                                  : reinterpret_cast<TextAnnotation*>(
+                                        labelIdx + 1));
             Patch rib{std::move(p), {}};
             rib.style.face = s.color;
             rib.style.edge = s.color;
             rib.style.edge.a = std::min(1.0f, s.color.a + 0.3f);
             rib.style.lineWidth = 0.5f;
-            axes_->addPatch(std::move(rib));
+            d.ribbons.push_back(&axes_->addPatch(std::move(rib)));
+        }
+        // mpl patchlabel: centered text on the trunk.
+        if (si < patchLabels.size() && !patchLabels[si].empty()) {
+            auto* t = axes_->text(0.5f, 0.5f, patchLabels[si],
+                                  CoordSystem::Data);
+            t->halign = HAlign::Center;
+            t->valign = VAlign::Center;
+            t->fontSize = 8.0f;
+            d.text = reinterpret_cast<TextAnnotation*>(
+                axes_->texts().size());
         }
     }
+    // Resolve deferred text indices into stable pointers now that
+    // texts_ has stopped growing.
+    auto& texts = axes_->texts();
+    for (auto& d : out) {
+        for (auto*& t : d.texts)
+            if (t) t = &texts[reinterpret_cast<size_t>(t) - 1];
+        if (d.text)
+            d.text = &texts[reinterpret_cast<size_t>(d.text) - 1];
+    }
+    return out;
 }
 
 // ═══ squarify / treemap ═══════════════════════════════════════════════════

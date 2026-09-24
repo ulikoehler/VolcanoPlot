@@ -249,8 +249,9 @@ TEST(Scale, LogForwardInverse) {
 
 TEST(Scale, SymlogLinearNearZero) {
     auto s = AxisScale::symlog(2.0f, 1.0f);
-    // Within ±linthresh: linear.
-    EXPECT_NEAR(s.forward(1.0f), 1.0f, 1e-4f);
+    // mpl SymmetricalLogTransform: within ±linthresh the slope is
+    // linscale_adj = linscale/(1 - 1/base) = 1/0.9 ≈ 1.111.
+    EXPECT_NEAR(s.forward(1.0f), 1.111111f, 1e-4f);
     // Beyond: log.
     EXPECT_GT(s.forward(100.0f), s.forward(2.0f));
     // Roundtrip.

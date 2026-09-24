@@ -117,9 +117,14 @@ std::vector<float> axisMinorTicks(const plot::TickConfig& tc,
                                   std::span<const float> majors) {
     if (!minorEnabled(tc, scale)) return {};
     if (tc.minorLocator) return tc.minorLocator->tickValues(lo, hi);
-    if (scale.kind == plot::ScaleKind::Log ||
-        scale.kind == plot::ScaleKind::FunctionLog)
-        return plot::LogLocator{}.minorValues(lo, hi);
+    if (scale.kind == plot::ScaleKind::Log) {
+        float base = scale.param1 > 0.0f ? scale.param1 : 10.0f;
+        return plot::LogLocator{base}.minorValues(lo, hi);
+    }
+    if (scale.kind == plot::ScaleKind::FunctionLog) {
+        float base = scale.param1 > 0.0f ? scale.param1 : 10.0f;
+        return plot::LogLocator{base}.minorValues(lo, hi);
+    }
     if (isLogish(scale.kind)) return {};
     return plot::AutoMinorLocator{}.between(majors, lo, hi);
 }
@@ -139,10 +144,17 @@ plot::Formatter* axisFormatter(const plot::TickConfig& tc,
         strFmt = plot::FormatStrFormatter(tc.format);
         f = &strFmt;
     }
-    // mpl log axes default to LogFormatterSciNotation ($m×10^{k}$).
+    // mpl log axes default to LogFormatterSciNotation ($m×10^{k}$);
+    // symlog axes use the same formatter against their base (param3).
     if (!f && (scale.kind == plot::ScaleKind::Log ||
-               scale.kind == plot::ScaleKind::FunctionLog))
+               scale.kind == plot::ScaleKind::FunctionLog ||
+               scale.kind == plot::ScaleKind::Symlog)) {
+        float base = scale.kind == plot::ScaleKind::Symlog
+                         ? (scale.param3 > 0.0f ? scale.param3 : 10.0f)
+                         : (scale.param1 > 0.0f ? scale.param1 : 10.0f);
+        logFmt = plot::LogFormatterMathtext{base};
         f = &logFmt;
+    }
     if (!f) {
         defaultFmt = plot::ScalarFormatter{};
         defaultFmt.scilimits = style.formatterLimits;
@@ -200,15 +212,27 @@ ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
                               std::span<const std::string> explicitLabels,
                               bool minorTicksOn,
                               const plot::Normalize* norm,
-                              float vmin, float vmax) {
+                              float vmin, float vmax,
+                              std::string_view fmt) {
     ColorbarTickSet out;
     const float linStep = autoTickStep(vmin, vmax, 8);
+    // mpl `format=` — printf-style FormatStrFormatter; falls back to
+    // formatTick when the spec is malformed.
+    auto fmtOr = [&](float v, const std::string& fallback) {
+        if (fmt.empty()) return fallback;
+        char buf[128];
+        std::string f{fmt};
+        int n = std::snprintf(buf, sizeof buf, f.c_str(),
+                              static_cast<double>(v));
+        return n > 0 ? std::string(buf, size_t(n)) : fallback;
+    };
     if (!explicitTicks.empty()) {
         out.majors.assign(explicitTicks.begin(), explicitTicks.end());
         for (size_t i = 0; i < out.majors.size(); ++i)
             out.labels.push_back(i < explicitLabels.size()
                 ? std::string(explicitLabels[i])
-                : formatTick(out.majors[i], linStep));
+                : fmtOr(out.majors[i],
+                        formatTick(out.majors[i], linStep)));
     } else if (dynamic_cast<const plot::LogNorm*>(norm) && vmin > 0.0f) {
         // mpl: LogNorm colorbars put the long axis on log scale →
         // LogLocator decades + LogFormatterSciNotation + subs minors.
@@ -218,7 +242,9 @@ ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
         f.setViewInterval(vmin, vmax);
         f.setLocs(out.majors);
         for (size_t i = 0; i < out.majors.size(); ++i)
-            out.labels.push_back(fmtLabel(f, out.majors[i], int(i)));
+            out.labels.push_back(
+                fmtOr(out.majors[i],
+                      fmtLabel(f, out.majors[i], int(i))));
         out.minors = loc.minorValues(vmin, vmax);
     } else if (auto* sln = dynamic_cast<const plot::SymLogNorm*>(norm)) {
         // mpl: SymLogNorm colorbars get SymmetricalLogLocator ticks.
@@ -229,13 +255,16 @@ ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
         f.setLocs(out.majors);
         for (size_t i = 0; i < out.majors.size(); ++i) {
             std::string s = fmtLabel(f, out.majors[i], int(i));
-            out.labels.push_back(s.empty()
-                ? formatTick(out.majors[i], linStep) : s);
+            out.labels.push_back(
+                fmtOr(out.majors[i],
+                      s.empty() ? formatTick(out.majors[i], linStep)
+                                : s));
         }
     } else {
         out.majors = autoTicks(vmin, vmax, 8);
         for (float v : out.majors)
-            out.labels.push_back(formatTick(v, linStep));
+            out.labels.push_back(
+                fmtOr(v, formatTick(v, linStep)));
     }
     // mpl AutoMinorLocator-style minor marks between linear majors;
     // log minors come from the locator's subs above.

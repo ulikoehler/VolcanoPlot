@@ -1354,3 +1354,62 @@ tri_*) are checked off in the sections above.
       and `ecolor=None` → line-color fallback; errorbar caps render
       as `_`/`|` marker geometry (px-exact, raster + vector) instead
       of data-space segments.
+- [x] **`vp.scale` submodule** — `ScaleBase`/`LinearScale`/`LogScale`/
+      `SymmetricalLogScale`/`AsinhScale`/`LogitScale`/`FuncScale`/
+      `FuncScaleLog` classes (class-level `name` attrs), transform
+      classes + factories, `scale_factory`/`register_scale`/
+      `get_scale_names`; `set_xscale`/`set_yscale`/`Axes.set(xscale=)`
+      accept names **and** scale objects; log `base=`/`nonpositive=`
+      kwargs (native `AxisScale::log(base, mask)`, base-aware
+      `scaleTicks` + `LogLocator`/`LogFormatter` plumbing — `2^k`
+      labels render correctly); symlog transform rewritten to mpl's
+      formula (`linscale_adj = linscale/(1 − 1/base)`, `param3` base
+      through the GLSL `vec4` scale params); `SymmetricalLogLocator`
+      rewritten to mpl's a/b/c-section algorithm (decades + lone 0,
+      stride from numticks=15, `subs` support); symlog axes default
+      to `LogFormatterSciNotation`-style `±base^k` labels including
+      negative decades (`-10^{0}`).
+- [x] **`vp.units` + `vp.category` submodules** — `units.registry`
+      dict, `ConversionInterface`/`AxisInfo`/`DecimalConverter`,
+      `StrCategoryConverter`/`StrCategoryLocator`/
+      `StrCategoryFormatter`, `UnitData`; `Axis.units`/`set_units`/
+      `convert_units`/`update_units`; categorical string data routed
+      through `toFloats` (`xCategoryIndex`/`setXCategories` installs
+      `FixedLocator`+`FixedFormatter` like mpl's
+      `StrCategoryConverter.axisinfo`). Static py-object registries
+      are deliberately leaked to avoid interpreter-shutdown decref
+      crashes.
+- [x] **`vp.animation` submodule** — `Animation`/`TimedAnimation`/
+      `FuncAnimation`/`ArtistAnimation` (mpl ctor kwargs, frame
+      iteration via `__iter__`/`new_frame_seq`, `_draw_next_frame`
+      artist visibility/`animated` sync back to native flags),
+      `MovieWriter`/`AbstractMovieWriter`/`FileMovieWriter`/
+      `PillowWriter`/`FFMpegWriter`/`AVConvWriter`/`HTMLWriter` +
+      `writers` registry (`is_available`, `list`, `get`, `register`,
+      `reset_available_writers`), `anim.save(writer=…, fps=…)` with
+      mpl writer-selection + Pillow fallback; reuses the native
+      `plot::Animation`/`MovieWriter` GIF/APNG/HTML pipeline.
+- [x] **`vp.sankey` submodule** — `Sankey` with mpl ctor kwargs
+      (`ax`, `scale`, `unit`, `format`, `gap`, `radius`, `shoulder`,
+      `offset`, `head_angle`, `margin`, `tolerance`), `UP`/`DOWN`/
+      `LEFT`/`RIGHT` constants, `add` (flows/labels/orientations/
+      patchlabel kwargs), `finish()` returning mpl-shaped diagram
+      dicts (`patch`, `flows`, `angles` (None for sub-tolerance
+      flows), `tips`, `text`, `texts`, ribbon handles) backed by
+      native `Sankey::Diagram` (deferred text-index resolution for
+      pointer stability).
+- [x] **`vp.colorbar` submodule** — `Colorbar`/`ColorbarBase`
+      classes, `make_axes`/`make_axes_gridspec`/`colorbar_factory`,
+      callable-module shim (`vp.colorbar(m)` → `gcf().colorbar(m)`);
+      `Figure.colorbar` gains mpl kwargs (`location`, `orientation`,
+      `fraction`, `pad`, `shrink`, `aspect`, `label`, `extend`,
+      `extendfrac`, `extendrect`, `spacing`, `drawedges`, `ticks`,
+      `format`, `ticklocation`, `alpha`, `cmap`, `norm`, `cax`,
+      `use_gridspec`); `Colorbar` methods `set_label`/`set_ticks`/
+      `set_ticklabels`/`get_ticks`/`minorticks_on`/`minorticks_off`/
+      `set_alpha`/`update_normal`/`update_ticks`/`add_lines`/
+      `remove` + locator/formatter/`long_axis`/`solids`/`lines`/
+      `patch`/`outline`/`divider` properties; `cax` support via
+      `ColorbarStyle::caxMode` (strip fills the axes rect, no
+      chrome); raster + vector renderers honor `format`/`alpha`/
+      `extendfrac`/`extendrect`/minor ticks.
