@@ -10,8 +10,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/eval.h>
 
 #include <volcano/backend/Backend.hpp>
+#include <volcano/encode/ImageDecoder.hpp>
+#include <volcano/text/TextRenderer.hpp>
 #include <volcano/render/Renderer.hpp>
 #include <volcano/plot/Animation.hpp>
 #include <volcano/plot/Collections.hpp>
@@ -34,6 +37,7 @@
 #include <volcano/plot/plots/StackPlot.hpp>
 #include <volcano/plot/plots/HexbinPlot.hpp>
 #include <volcano/plot/plots/QuiverPlot.hpp>
+#include <volcano/plot/plots/QuiverKeyPlot.hpp>
 #include <volcano/plot/plots/StreamPlot.hpp>
 #include <volcano/plot/plots/ViolinPlot.hpp>
 #include <volcano/plot/plots/Hist2DPlot.hpp>
@@ -54,6 +58,7 @@
 #include <volcano/plot/Triangulation.hpp>
 #include <volcano/plot/Ticks.hpp>
 #include <volcano/plot/Annotation.hpp>
+#include "../src/render/TickLayout.hpp"
 #include <volcano/plot/plots/Plot3D.hpp>
 #include <volcano/plot/plots/Scatter3D.hpp>
 #include <volcano/plot/plots/SurfacePlot.hpp>
@@ -78,12 +83,20 @@
 #include <volcano/plot/Interaction.hpp>
 #include <volcano/plot/Events.hpp>
 
+#include <algorithm>
 #include <array>
+#include <deque>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <format>
 #include <numeric>
 #include <optional>
+#include <ranges>
+#include <set>
+#include <map>
+#include <cfloat>
+#include <limits>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -95,8 +108,15 @@ namespace {
 
 plot::Color parseColor(const py::object& c) {
     if (c.is_none()) return plot::Series2D::autoColor();
+    // mpl rejects bare scalar colors — grayscale is only valid as a
+    // string shorthand ('0.5'). Keep that strictness here.
     if (py::isinstance<py::str>(c)) {
         auto s = c.cast<std::string>();
+        // mpl 'none'/'None' → transparent (0,0,0,0).
+        auto lower = s;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        if (lower == "none") return plot::Color::transparent();
         if (auto p = plot::Color::parse(s)) return *p;
         throw std::invalid_argument("unknown color '" + s + "'");
     }
@@ -104,13 +124,108 @@ plot::Color parseColor(const py::object& c) {
         auto seq = c.cast<std::vector<float>>();
         if (seq.size() < 3 || seq.size() > 4)
             throw std::invalid_argument("color tuple must be (r,g,b[,a])");
-        auto to8 = [](float v) {
-            return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
-        };
-        return plot::Color::fromRgba8(to8(seq[0]), to8(seq[1]), to8(seq[2]),
-                                      seq.size() == 4 ? to8(seq[3]) : 255);
+        // mpl raises for components outside [0,1] and keeps float
+        // precision (no u8 quantize).
+        for (float v : seq)
+            if (v < 0.0f || v > 1.0f)
+                throw std::invalid_argument(
+                    "RGBA values should be within 0-1 range");
+        return plot::Color{seq[0], seq[1], seq[2],
+                           seq.size() == 4 ? seq[3] : 1.0f};
     }
     throw std::invalid_argument("color must be a string or (r,g,b[,a])");
+}
+
+/// mpl `path_effects` list → vector<PathEffect>. Elements are the
+/// `volcanoplot.patheffects.*` objects (bound as AbstractPathEffect).
+std::vector<plot::PathEffect> toPathEffects(const py::object& v) {
+    std::vector<plot::PathEffect> out;
+    if (v.is_none()) return out;
+    for (auto item : v.cast<py::sequence>())
+        out.push_back(item.cast<plot::PathEffect>());
+    return out;
+}
+
+/// mpl `Text.set_bbox` / `bbox=dict(...)` semantics:
+///   None → no bbox. dict → FancyBboxPatch with patch defaults
+///   (fc='C0', ec='black', lw=1.0pt). `boxstyle` absent → 'square'
+///   with pad = 4pt/fontsize (fraction); custom style absent pad →
+///   pad = 0.3. `pad` in the dict overrides when the boxstyle string
+///   has no explicit pad. `dpi` converts mpl's point units to px.
+/// Works on both TextAnnotation and Annotation (identical fields).
+template <typename T>
+void applyTextBbox(const py::object& bbox, T& t, float dpi) {
+    if (bbox.is_none()) {
+        t.hasBbox = false;
+        t.boxStyle.reset();
+        t.bboxFaceColor = plot::Color::transparent();
+        t.bboxEdgeColor = plot::Color::transparent();
+        t.bboxEdgeWidth = 1.0f;
+        return;
+    }
+    py::dict d = py::cast<py::dict>(bbox);
+    t.hasBbox = true;
+    // mpl FancyBboxPatch defaults (rcParams patch.*).
+    t.bboxFaceColor = plot::Color::fromRgba8(0x1f, 0x77, 0xb4, 0xff);  // C0
+    t.bboxEdgeColor = plot::Color::black();
+    t.bboxEdgeWidth = 1.0f * dpi / 72.0f;
+
+    std::string bsStr;
+    bool bsGiven = false;
+    if (d.contains("boxstyle")) {
+        bsStr = d["boxstyle"].cast<std::string>();
+        bsGiven = true;
+    } else {
+        bsStr = "square";
+    }
+    float pad;
+    if (d.contains("pad")) {
+        pad = d["pad"].cast<float>();
+    } else if (bsGiven) {
+        pad = 0.3f;
+    } else {
+        // mpl: pad = 4pt as a fraction of the fontsize.
+        float fontPt = t.fontSize;
+        pad = 4.0f / std::max(fontPt, 1e-3f);
+    }
+    if (bsStr.find("pad") == std::string::npos)
+        bsStr += std::format(",pad={:.2f}", pad);
+    if (auto spec = plot::parseBoxStyle(bsStr)) {
+        t.boxStyle = *spec;
+    } else {
+        // Unknown boxstyle → mpl would raise; fall back to square+pad.
+        t.boxStyle = plot::BoxStyleSpec{plot::BoxStyleSpec::Kind::Square,
+                                        pad};
+    }
+
+    auto pick = [&](const char* a, const char* b) -> py::object {
+        if (d.contains(a)) return py::reinterpret_borrow<py::object>(d[a]);
+        if (b && d.contains(b))
+            return py::reinterpret_borrow<py::object>(d[b]);
+        return py::none();
+    };
+    // mpl color 'none' → transparent (parseColor only knows names).
+    auto colorOrNone = [](const py::object& c) {
+        if (py::isinstance<py::str>(c)) {
+            auto s = c.cast<std::string>();
+            if (s == "none" || s == "None")
+                return plot::Color::transparent();
+        }
+        return parseColor(c);
+    };
+    if (auto c = pick("facecolor", "fc"); !c.is_none())
+        t.bboxFaceColor = colorOrNone(c);
+    if (auto c = pick("edgecolor", "ec"); !c.is_none())
+        t.bboxEdgeColor = colorOrNone(c);
+    if (auto v = pick("linewidth", "lw"); !v.is_none())
+        t.bboxEdgeWidth = v.template cast<float>() * dpi / 72.0f;
+    if (auto v = pick("alpha", nullptr); !v.is_none()) {
+        float al = std::clamp(v.template cast<float>(), 0.0f, 1.0f);
+        t.bboxFaceColor.a *= al;
+        t.bboxEdgeColor.a *= al;
+    }
+    if (auto v = pick("mutation_scale", nullptr); !v.is_none())
+        t.boxStyle->mutationSize *= v.template cast<float>();
 }
 
 /// Convert any array-like (list, tuple, numpy array, pandas Series/Index,
@@ -173,11 +288,106 @@ std::vector<float> toFloatList(const py::object& obj) {
     return toFloats(obj);
 }
 
+/// Iterable of strings → vector<string> (tick label lists).
+std::vector<std::string> toStrings(const py::object& obj) {
+    return obj.cast<std::vector<std::string>>();
+}
+
 /// parseColor + mpl default: None → black (ref-line helpers don't
 /// consume the prop cycle in volcano).
 plot::Color lineColor(const py::object& c, plot::Color fallback) {
     auto col = parseColor(c);
     return col.a > 0 ? col : fallback;
+}
+
+/// plot::Color → (r, g, b, a) float tuple (mpl get_color returns a
+/// color spec; an RGBA tuple is the unambiguous form).
+py::tuple colorToPy(const plot::Color& c) {
+    return py::make_tuple(c.r, c.g, c.b, c.a);
+}
+
+/// MarkerStyle → the mpl one-char spec (get_marker round-trip).
+std::string markerToSpec(plot::MarkerStyle m) {
+    using MS = plot::MarkerStyle;
+    switch (m) {
+    case MS::Point: return ".";
+    case MS::Circle: return "o";
+    case MS::Square: return "s";
+    case MS::Diamond: return "D";
+    case MS::ThinDiamond: return "d";
+    case MS::Triangle: return "^";
+    case MS::TriDown: return "v";
+    case MS::TriLeft: return "<";
+    case MS::TriRight: return ">";
+    case MS::Tri1: return "1";
+    case MS::Tri2: return "2";
+    case MS::Tri3: return "3";
+    case MS::Tri4: return "4";
+    case MS::Plus: return "+";
+    case MS::X: return "x";
+    case MS::PlusFilled: return "P";
+    case MS::XFilled: return "X";
+    case MS::Star: return "*";
+    case MS::Pentagon: return "p";
+    case MS::Hexagon1: return "h";
+    case MS::Hexagon2: return "H";
+    case MS::Octagon: return "8";
+    case MS::VLine: return "|";
+    case MS::HLine: return "_";
+    default: return "None";
+    }
+}
+
+/// mpl linestyle string for Line2D.get_linestyle.
+std::string lineStyleToSpec(plot::LineStyle ls) {
+    using LS = plot::LineStyle;
+    switch (ls) {
+    case LS::Solid: return "-";
+    case LS::Dashed: return "--";
+    case LS::DashDot: return "-.";
+    case LS::Dotted: return ":";
+    default: return "None";
+    }
+}
+
+/// mpl drawstyle string for Line2D.get_drawstyle.
+std::string drawStyleToSpec(plot::DrawStyle ds) {
+    using DS = plot::DrawStyle;
+    switch (ds) {
+    case DS::StepsPre: return "steps-pre";
+    case DS::StepsMid: return "steps-mid";
+    case DS::StepsPost: return "steps-post";
+    default: return "default";
+    }
+}
+
+/// mpl scale name for get_xscale/get_yscale.
+const char* scaleKindName(plot::ScaleKind k) {
+    using SK = plot::ScaleKind;
+    switch (k) {
+    case SK::Linear:   return "linear";
+    case SK::Log:      return "log";
+    case SK::Symlog:   return "symlog";
+    case SK::Logit:    return "logit";
+    case SK::Asinh:    return "asinh";
+    case SK::Mercator: return "mercator";
+    case SK::Function: case SK::FunctionLog: return "function";
+    }
+    return "linear";
+}
+
+/// mpl fillstyle string.
+std::string fillStyleToSpec(plot::MarkerFill f) {
+    using MF = plot::MarkerFill;
+    switch (f) {
+    case MF::Full: return "full";
+    case MF::Left: return "left";
+    case MF::Right: return "right";
+    case MF::Bottom: return "bottom";
+    case MF::Top: return "top";
+    case MF::None: return "none";
+    }
+    return "full";
 }
 
 /// 2D array-like → (row-major data, (nrows, ncols)). 1D input → 1×N.
@@ -276,44 +486,650 @@ bool isStringSeq(const py::object& obj) {
 }
 
 /// 2D array-like (nested sequence or numpy 2D) → Grid2D.
-plot::Grid2D toGrid2D(const py::object& obj) {
-    if (py::isinstance<py::array>(obj)) {
-        py::array_t<float, py::array::forcecast | py::array::c_style> f =
-            py::array_t<float, py::array::forcecast | py::array::c_style>::ensure(obj);
-        if (!f || f.ndim() != 2)
-            throw std::invalid_argument("expected a 2D array");
-        auto r = f.unchecked<2>();
-        plot::Grid2D g;
-        g.height = uint32_t(r.shape(0));
-        g.width = uint32_t(r.shape(1));
-        g.xRange = {0.0f, float(g.width)};
-        g.yRange = {0.0f, float(g.height)};
-        g.values.resize(size_t(g.width) * g.height);
-        for (py::ssize_t j = 0; j < r.shape(0); ++j)
-            for (py::ssize_t i = 0; i < r.shape(1); ++i)
-                g.values[size_t(j) * g.width + size_t(i)] = r(j, i);
-        return g;
-    }
-    auto rows = obj.cast<std::vector<std::vector<float>>>();
-    if (rows.empty() || rows[0].empty())
-        throw std::invalid_argument("expected a non-empty 2D array");
-    plot::Grid2D g;
-    g.height = uint32_t(rows.size());
-    g.width = uint32_t(rows[0].size());
-    g.xRange = {0.0f, float(g.width)};
-    g.yRange = {0.0f, float(g.height)};
-    g.values.reserve(size_t(g.width) * g.height);
-    for (auto& row : rows) {
-        if (row.size() != g.width)
-            throw std::invalid_argument("ragged 2D array");
-        g.values.insert(g.values.end(), row.begin(), row.end());
-    }
-    return g;
-}
 
 const plot::Colormap& cmapByName(const std::string& name) {
     try { return plot::Colormap::byName(name); }
     catch (...) { return plot::colormaps::viridis(); }
+}
+
+// (PyColormap is declared with the other artist handles below; this
+// forward-free overload resolution uses py::isinstance at runtime.)
+struct PyColormap;
+
+/// mpl cmap arg: a colormap name string, a Colormap object, or None
+/// (→ viridis, the mpl image.cmap default).
+const plot::Colormap& cmapArg(const py::object& o);
+
+// ── mpl font_manager.FontProperties ────────────────────────────────
+/// Python-side font spec with mpl's full field set; converts to
+/// plot::FontProperties for rendering.
+struct PyFontProps {
+    std::vector<std::string> family{"sans-serif"};
+    std::string style = "normal";
+    std::string variant = "normal";
+    py::object weight = py::str("normal");   // str name or int 0-1000
+    py::object stretch = py::str("normal");  // str name or int 0-1000
+    float size = 10.0f;  // points
+    std::string file;    // mpl fname
+    std::string mathFontfamily = "dejavusans";
+};
+
+// mpl FontEntry — one discovered font file.
+struct PyFontEntry {
+    std::string fname, name, style = "normal",
+                variant = "normal", weight = "normal",
+                stretch = "normal", size = "scalable";
+};
+
+// mpl FontManager — scanned system font list + defaults.
+struct PyFontManager {
+    std::vector<PyFontEntry> ttflist;
+    std::vector<PyFontEntry> afmlist;
+    float defaultSize = 10.0f;
+    std::string defaultWeight = "normal";
+    std::map<std::string, std::string> defaultFamily{
+        {"ttf", "DejaVu Sans"}, {"afm", "Helvetica"}};
+};
+
+/// The singleton fontManager instance (set during module init).
+inline std::shared_ptr<PyFontManager>& theFontManager() {
+    static std::shared_ptr<PyFontManager> m;
+    return m;
+}
+
+/// Scan the usual Linux font directories for TTF/OTF faces.
+inline std::vector<PyFontEntry> scanSystemFonts() {
+    std::vector<PyFontEntry> out;
+    std::vector<std::filesystem::path> dirs = {
+        "/usr/share/fonts", "/usr/local/share/fonts",
+        std::filesystem::path(
+            getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
+        std::filesystem::path(
+            getenv("HOME") ? getenv("HOME") : ".") /
+            ".local/share/fonts"};
+    for (const auto& d : dirs) {
+        if (!std::filesystem::exists(d)) continue;
+        for (auto& e :
+             std::filesystem::recursive_directory_iterator(d)) {
+            if (!e.is_regular_file()) continue;
+            auto ext = e.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           ::tolower);
+            if (ext != ".ttf" && ext != ".otf") continue;
+            PyFontEntry fe;
+            fe.fname = e.path().string();
+            // Read the real name-table metadata like mpl's ft2font.
+            auto info = text::fontFileInfo(fe.fname);
+            fe.name = info.familyName;
+            fe.weight = info.bold ? "bold" : "normal";
+            fe.style = info.italic ? "italic" : "normal";
+            if (fe.name.empty()) {
+                // Fallback: filename heuristic.
+                auto stem = e.path().stem().string();
+                std::string lower = stem;
+                std::transform(lower.begin(), lower.end(),
+                               lower.begin(), ::tolower);
+                fe.weight =
+                    lower.find("bold") != std::string::npos
+                        ? "bold" : "normal";
+                fe.style = lower.find("italic") != std::string::npos ||
+                           lower.find("oblique") != std::string::npos
+                               ? "italic" : "normal";
+                auto dash = stem.find('-');
+                fe.name = dash == std::string::npos
+                              ? stem : stem.substr(0, dash);
+                std::string nm;
+                for (size_t i = 0; i < fe.name.size(); ++i) {
+                    if (i > 0 && std::isupper(fe.name[i]) &&
+                        !std::isupper(fe.name[i - 1]))
+                        nm += ' ';
+                    nm += fe.name[i];
+                }
+                fe.name = nm;
+            }
+            out.push_back(std::move(fe));
+        }
+    }
+    return out;
+}
+
+/// mpl generic-family aliases → resolved names.
+inline std::string resolveFontAlias(std::string fam) {
+    std::transform(fam.begin(), fam.end(), fam.begin(), ::tolower);
+    static const std::map<std::string, std::string> gen = {
+        {"sans-serif", "dejavu sans"}, {"sans", "dejavu sans"},
+        {"serif", "dejavu serif"},
+        {"monospace", "dejavu sans mono"},
+        {"mono", "dejavu sans mono"},
+        {"cursive", "dejavu sans"}, {"fantasy", "dejavu sans"}};
+    if (auto it = gen.find(fam); it != gen.end()) return it->second;
+    return fam;
+}
+
+/// Normalize a font-family name for comparison: lowercase, no spaces
+/// or punctuation ("DejaVu Sans" → "dejavusans").
+inline std::string normFontName(std::string s) {
+    std::string o;
+    for (char c : s)
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            o += static_cast<char>(std::tolower(
+                static_cast<unsigned char>(c)));
+    return o;
+}
+
+/// mpl FontManager.findfont scoring: family match > style > weight.
+/// Returns the best entry, or nullptr if nothing matches.
+inline const PyFontEntry* findFontEntry(const PyFontProps& fp) {
+    auto& mgr = theFontManager();
+    if (!mgr) return nullptr;
+    // mpl: fname wins outright when set to a real file.
+    if (!fp.file.empty() && std::filesystem::exists(fp.file)) {
+        for (auto& e : mgr->ttflist)
+            if (e.fname == fp.file) return &e;
+        static PyFontEntry fileEntry;
+        fileEntry = PyFontEntry{};
+        fileEntry.fname = fp.file;
+        fileEntry.name =
+            std::filesystem::path(fp.file).stem().string();
+        return &fileEntry;
+    }
+    // mpl tries each family in order; take the best-scoring entry
+    // across all requested families.
+    const PyFontEntry* best = nullptr;
+    int bestScore = -1;
+    std::string pw = py::isinstance<py::str>(fp.weight)
+                         ? fp.weight.cast<std::string>()
+                         : (fp.weight.cast<int>() >= 600 ? "bold"
+                                                         : "normal");
+    for (const auto& fam0 : fp.family) {
+        std::string want = normFontName(resolveFontAlias(fam0));
+        // Pass 1: exact normalized name equality.
+        // Pass 2 (fallback): substring containment.
+        for (int pass = 0; pass < 2 && !best; ++pass) {
+            for (const auto& e : mgr->ttflist) {
+                std::string n = normFontName(e.name);
+                bool hit = pass == 0
+                               ? n == want
+                               : (n.find(want) != std::string::npos ||
+                                  want.find(n) != std::string::npos);
+                if (!hit) continue;
+                int score = 1;
+                if (e.style == fp.style ||
+                    (fp.style == "italic" && e.style == "oblique") ||
+                    (fp.style == "oblique" && e.style == "italic"))
+                    score += 2;
+                if (e.weight == pw) score += 4;
+                if (score > bestScore) { bestScore = score; best = &e; }
+            }
+        }
+        if (best) break;  // mpl uses the first family that matches
+    }
+    return best;
+}
+
+/// mpl findfont fallback: the default face (DejaVu Sans regular).
+inline const PyFontEntry* defaultFontEntry() {
+    auto& mgr = theFontManager();
+    if (!mgr) return nullptr;
+    for (const auto& e : mgr->ttflist) {
+        if (normFontName(e.name) == "dejavusans" &&
+            e.style == "normal" && e.weight == "normal")
+            return &e;
+    }
+    return mgr->ttflist.empty() ? nullptr : &mgr->ttflist.front();
+}
+
+inline std::string findFontPath(const PyFontProps& fp, bool fallback) {
+    if (auto* e = findFontEntry(fp)) return e->fname;
+    if (!fallback)
+        throw std::runtime_error("findfont: no matching font");
+    if (auto* e = defaultFontEntry()) return e->fname;
+    return {};
+}
+
+py::object normWeight(const py::object& w);
+py::object normStretch(const py::object& s);
+float normSize(const py::object& s);
+
+// ── fontconfig pattern parsing (mpl _fontconfig_pattern.py) ──
+/// Split `s` on `sep`, honoring `\` escapes; unescapes each part.
+inline std::vector<std::string> fcSplit(const std::string& s, char sep,
+                                        const std::string& escapable) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size() &&
+            escapable.find(s[i + 1]) != std::string::npos) {
+            cur += s[++i];
+            continue;
+        }
+        if (c == sep) { out.push_back(std::move(cur)); cur.clear(); }
+        else cur += c;
+    }
+    out.push_back(std::move(cur));
+    return out;
+}
+/// Split on the first *unescaped* `sep` (for name=value props).
+inline std::pair<std::string, std::string>
+fcSplitOnce(const std::string& s, char sep, const std::string& escapable) {
+    std::string a, b;
+    bool inB = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size() &&
+            escapable.find(s[i + 1]) != std::string::npos) {
+            (inB ? b : a) += s[++i];
+            continue;
+        }
+        if (c == sep && !inB) { inB = true; continue; }
+        (inB ? b : a) += c;
+    }
+    return {a, b};
+}
+
+/// mpl _CONSTANTS: bare property words in a fontconfig pattern.
+inline const std::map<std::string,
+                      std::pair<std::string, std::string>>&
+fcConstants() {
+    static const std::map<std::string,
+                          std::pair<std::string, std::string>> c = {
+        {"thin", {"weight", "light"}},
+        {"extralight", {"weight", "light"}},
+        {"ultralight", {"weight", "light"}},
+        {"light", {"weight", "light"}},
+        {"book", {"weight", "book"}},
+        {"regular", {"weight", "regular"}},
+        {"normal", {"weight", "normal"}},
+        {"medium", {"weight", "medium"}},
+        {"demibold", {"weight", "demibold"}},
+        {"semibold", {"weight", "semibold"}},
+        {"bold", {"weight", "bold"}},
+        {"extrabold", {"weight", "extra bold"}},
+        {"black", {"weight", "black"}},
+        {"heavy", {"weight", "heavy"}},
+        {"roman", {"slant", "normal"}},
+        {"italic", {"slant", "italic"}},
+        {"oblique", {"slant", "oblique"}},
+        {"ultracondensed", {"width", "ultra-condensed"}},
+        {"extracondensed", {"width", "extra-condensed"}},
+        {"condensed", {"width", "condensed"}},
+        {"semicondensed", {"width", "semi-condensed"}},
+        {"expanded", {"width", "expanded"}},
+        {"extraexpanded", {"width", "extra-expanded"}},
+        {"ultraexpanded", {"width", "ultra-expanded"}},
+    };
+    return c;
+}
+
+/// mpl set_fontconfig_pattern: 'Fam1,Fam2-12:prop=val:const...'.
+/// Keys map to FontProperties setters (slant→style, width→stretch).
+void applyFontconfigPattern(PyFontProps& p, const std::string& pat) {
+    // Top-level ':' splits, honoring escapes.
+    auto segs = fcSplit(pat, ':', "\\-,:=_");
+    auto setKey = [&](const std::string& k, const std::string& v) {
+        if (k == "family" || k == "name") p.family = {v};
+        else if (k == "style" || k == "slant") p.style = v;
+        else if (k == "variant") p.variant = v;
+        else if (k == "weight")
+            p.weight = normWeight(py::str(v));
+        else if (k == "stretch" || k == "width")
+            p.stretch = normStretch(py::str(v));
+        else if (k == "size") p.size = normSize(py::str(v));
+        else if (k == "file") p.file = v;
+    };
+    // First segment: families[-sizes].
+    if (!segs.empty() && !segs[0].empty()) {
+        auto dash = fcSplitOnce(segs[0], '-', "\\-:,");
+        // mpl: props['family'] list → set_family(list) keeps only
+        // the first (set_fontconfig_pattern calls set_(val[0])).
+        auto fams = fcSplit(dash.first, ',', "\\-:,");
+        if (!fams.empty() && !fams[0].empty())
+            p.family = {fams[0]};
+        if (!dash.second.empty()) {
+            auto sizes = fcSplit(dash.second, ',', "\\=_:,");
+            if (!sizes.empty() && !sizes[0].empty())
+                p.size = normSize(py::str(sizes[0]));
+        }
+    }
+    for (size_t i = 1; i < segs.size(); ++i) {
+        auto& seg = segs[i];
+        if (seg.empty()) continue;
+        auto eq = fcSplitOnce(seg, '=', "\\=_:,");
+        if (eq.second.empty() && eq.first == seg) {
+            // Bare constant word.
+            auto low = eq.first;
+            std::transform(low.begin(), low.end(), low.begin(),
+                           ::tolower);
+            if (auto it = fcConstants().find(low);
+                it != fcConstants().end())
+                setKey(it->second.first, it->second.second);
+            else
+                throw py::value_error(
+                    "Could not parse fontconfig pattern '" + pat + "'");
+        } else {
+            auto vals = fcSplit(eq.second, ',', "\\=_:,");
+            setKey(eq.first, vals.empty() ? "" : vals[0]);
+        }
+    }
+}
+
+/// mpl generate_fontconfig_pattern: 'Fam1,Fam2:k=v:k=v...'.
+inline std::string generateFontconfigPattern(const PyFontProps& p) {
+    auto escFam = [](std::string s) {  // escape \ - : ,
+        std::string o;
+        for (char c : s) {
+            if (c == '\\' || c == '-' || c == ':' || c == ',') o += '\\';
+            o += c;
+        }
+        return o;
+    };
+    auto escVal = [](std::string s) {  // escape \ = _ : ,
+        std::string o;
+        for (char c : s) {
+            if (c == '\\' || c == '=' || c == '_' || c == ':' ||
+                c == ',')
+                o += '\\';
+            o += c;
+        }
+        return o;
+    };
+    std::string out;
+    for (size_t i = 0; i < p.family.size(); ++i) {
+        if (i) out += ',';
+        out += escFam(p.family[i]);
+    }
+    auto wstr = py::isinstance<py::str>(p.weight)
+                    ? p.weight.cast<std::string>()
+                    : std::to_string(p.weight.cast<int>());
+    auto sstr = py::isinstance<py::str>(p.stretch)
+                    ? p.stretch.cast<std::string>()
+                    : std::to_string(p.stretch.cast<int>());
+    std::string sizeStr = std::format("{}", p.size);
+    if (sizeStr.find('.') == std::string::npos) sizeStr += ".0";
+    out += std::format(":style={}:variant={}:weight={}:stretch={}",
+                       escVal(p.style), escVal(p.variant),
+                       escVal(wstr), escVal(sstr));
+    if (!p.file.empty())
+        out += std::format(":file={}", escVal(p.file));
+    out += std::format(":size={}", escVal(sizeStr));
+    return out;
+}
+
+/// mpl FontProperties._from_any: FontProperties | PathLike | str
+/// (fontconfig pattern) | dict of kwargs.
+PyFontProps fontPropsFromAny(const py::object& arg) {
+    PyFontProps p;
+    if (arg.is_none()) return p;
+    if (py::isinstance<PyFontProps>(arg))
+        return *arg.cast<PyFontProps*>();
+    if (py::isinstance<py::str>(arg)) {
+        applyFontconfigPattern(p, arg.cast<std::string>());
+        return p;
+    }
+    if (py::isinstance<py::dict>(arg)) {
+        auto d = py::reinterpret_borrow<py::dict>(arg);
+        if (d.contains("family")) {
+            auto f = py::reinterpret_borrow<py::object>(d["family"]);
+            if (py::isinstance<py::str>(f))
+                p.family = {f.cast<std::string>()};
+            else
+                p.family = f.cast<std::vector<std::string>>();
+        }
+        if (d.contains("style"))
+            p.style = py::reinterpret_borrow<py::object>(d["style"])
+                          .cast<std::string>();
+        if (d.contains("variant"))
+            p.variant = py::reinterpret_borrow<py::object>(d["variant"])
+                            .cast<std::string>();
+        if (d.contains("weight"))
+            p.weight = normWeight(
+                py::reinterpret_borrow<py::object>(d["weight"]));
+        if (d.contains("stretch"))
+            p.stretch = normStretch(
+                py::reinterpret_borrow<py::object>(d["stretch"]));
+        if (d.contains("size"))
+            p.size = normSize(
+                py::reinterpret_borrow<py::object>(d["size"]));
+        if (d.contains("fname") || d.contains("file")) {
+            auto v = py::reinterpret_borrow<py::object>(
+                d.contains("fname") ? d["fname"] : d["file"]);
+            if (!v.is_none()) p.file = v.cast<std::string>();
+        }
+        if (d.contains("math_fontfamily"))
+            p.mathFontfamily =
+                py::reinterpret_borrow<py::object>(
+                    d["math_fontfamily"]).cast<std::string>();
+        return p;
+    }
+    // PathLike.
+    if (py::hasattr(arg, "__fspath__")) {
+        p.file = arg.attr("__fspath__")().cast<std::string>();
+        return p;
+    }
+    throw py::type_error(
+        "fontproperties must be a FontProperties, dict, str, or "
+        "path-like");
+}
+
+/// mpl font_manager.weight_dict.
+inline const std::map<std::string, int>& weightDict() {
+    static const std::map<std::string, int> d = {
+        {"ultralight", 100}, {"light", 200}, {"normal", 400},
+        {"regular", 400}, {"book", 400}, {"medium", 500},
+        {"roman", 500}, {"semibold", 600}, {"demibold", 600},
+        {"demi", 600}, {"bold", 700}, {"heavy", 800},
+        {"extra bold", 800}, {"black", 900}};
+    return d;
+}
+/// mpl font_manager.stretch_dict.
+inline const std::map<std::string, int>& stretchDict() {
+    static const std::map<std::string, int> d = {
+        {"ultra-condensed", 100}, {"extra-condensed", 200},
+        {"condensed", 300}, {"semi-condensed", 400}, {"normal", 500},
+        {"semi-expanded", 600}, {"semi-extended", 600},
+        {"expanded", 700}, {"extended", 700}, {"extra-expanded", 800},
+        {"extra-extended", 800}, {"ultra-expanded", 900},
+        {"ultra-extended", 900}};
+    return d;
+}
+/// mpl font_scalings × default 10pt.
+inline const std::map<std::string, float>& fontScalings() {
+    static const std::map<std::string, float> d = {
+        {"xx-small", 0.579f}, {"x-small", 0.694f}, {"small", 0.833f},
+        {"medium", 1.0f}, {"large", 1.2f}, {"x-large", 1.44f},
+        {"xx-large", 1.728f}, {"larger", 1.2f}, {"smaller", 0.833f}};
+    return d;
+}
+
+/// mpl FontProperties.set_weight: name or int 0-1000 → py object.
+py::object normWeight(const py::object& w) {
+    if (w.is_none()) return py::str("normal");
+    if (py::isinstance<py::str>(w)) {
+        auto s = w.cast<std::string>();
+        if (weightDict().contains(s)) return py::str(s);
+        try { return py::int_(std::stoi(s)); } catch (...) {}
+        throw py::value_error(
+            std::format("weight={} is invalid", s));
+    }
+    int v = w.cast<int>();
+    if (v < 0 || v > 1000)
+        throw py::value_error(std::format("weight={} is invalid", v));
+    return py::int_(v);
+}
+py::object normStretch(const py::object& s) {
+    if (s.is_none()) return py::str("normal");
+    if (py::isinstance<py::str>(s)) {
+        auto v = s.cast<std::string>();
+        if (stretchDict().contains(v)) return py::str(v);
+        try { return py::int_(std::stoi(v)); } catch (...) {}
+        throw py::value_error(
+            std::format("stretch={} is invalid", v));
+    }
+    int v = s.cast<int>();
+    if (v < 0 || v > 1000)
+        throw py::value_error(std::format("stretch={} is invalid", v));
+    return py::int_(v);
+}
+/// mpl size: float pt or a font_scalings name (× 10pt default).
+float normSize(const py::object& s) {
+    if (s.is_none()) return 10.0f;
+    if (py::isinstance<py::str>(s)) {
+        auto v = s.cast<std::string>();
+        if (auto it = fontScalings().find(v); it != fontScalings().end())
+            return it->second * 10.0f;
+        try { return std::stof(v); } catch (...) {}
+        throw py::value_error(std::format("Size is invalid: {}", v));
+    }
+    float v = s.cast<float>();
+    return std::max(v, 1.0f);  // mpl clamps to >=1pt
+}
+
+/// Convert a PyFontProps to the renderer's FontProperties.
+plot::FontProperties fontToPlot(const PyFontProps& p) {
+    plot::FontProperties f;
+    f.family = p.family.empty() ? "DejaVu Sans" : p.family.front();
+    f.style = p.style;
+    f.variant = p.variant;
+    f.stretch = p.stretch.is_none() ? "normal"
+                : py::isinstance<py::str>(p.stretch)
+                    ? p.stretch.cast<std::string>()
+                    : std::to_string(p.stretch.cast<int>());
+    if (p.weight.is_none()) f.weight = "normal";
+    else if (py::isinstance<py::str>(p.weight))
+        f.weight = p.weight.cast<std::string>();
+    else {
+        int w = p.weight.cast<int>();
+        f.weight = w >= 600 ? "bold" : "normal";
+    }
+    f.size = p.size;
+    f.file = p.file;
+    return f;
+}
+
+void applyFontPropertiesArg(plot::FontProperties& f,
+                            const py::object& v);
+
+
+/// mpl shared font kwargs on text-ish calls: fontproperties,
+/// fontfamily/family, fontstyle/style, fontvariant/variant,
+/// fontweight/weight, fontstretch/stretch, fontsize/size.
+void applyFontKwargs(plot::FontProperties& f, const py::kwargs& kw) {
+    if (!kw) return;
+    auto take = [&](std::initializer_list<const char*> names)
+        -> py::object {
+        for (auto* n : names)
+            if (kw.contains(n)) return py::reinterpret_borrow<py::object>(kw[n]);
+        return py::none();
+    };
+    // mpl fontdict= — a dict of font kwargs (applied first; explicit
+    // kwargs override it in mpl).
+    if (auto v = take({"fontdict"}); !v.is_none() &&
+        py::isinstance<py::dict>(v))
+        applyFontKwargs(f, py::kwargs(v));
+    if (auto v = take({"fontproperties", "font_properties"});
+        !v.is_none())
+        applyFontPropertiesArg(f, v);
+    if (auto v = take({"fontfamily", "family"}); !v.is_none()) {
+        if (py::isinstance<py::str>(v))
+            f.family = v.cast<std::string>();
+        else if (py::isinstance<py::sequence>(v)) {
+            auto seq = v.cast<std::vector<std::string>>();
+            if (!seq.empty()) f.family = seq.front();
+        }
+    }
+    if (auto v = take({"fontstyle", "style"}); !v.is_none())
+        f.style = v.cast<std::string>();
+    if (auto v = take({"fontvariant", "variant"}); !v.is_none())
+        f.variant = v.cast<std::string>();
+    if (auto v = take({"fontweight", "weight"}); !v.is_none()) {
+        if (py::isinstance<py::str>(v))
+            f.weight = v.cast<std::string>();
+        else
+            f.weight = v.cast<int>() >= 600 ? "bold" : "normal";
+    }
+    if (auto v = take({"fontstretch", "stretch"}); !v.is_none())
+        f.stretch = py::isinstance<py::str>(v)
+                        ? v.cast<std::string>()
+                        : std::to_string(v.cast<int>());
+    if (auto v = take({"fontsize", "size"}); !v.is_none())
+        f.size = normSize(v);
+}
+
+/// mpl `fontproperties=` arg: FontProperties, dict of kwargs, a
+/// fontconfig pattern string, or a font file path.
+void applyFontPropertiesArg(plot::FontProperties& f,
+                            const py::object& v) {
+    PyFontProps tmp;
+    auto* fp = &tmp;
+    if (py::isinstance<py::dict>(v)) {
+        applyFontKwargs(f, py::kwargs(v));
+        return;
+    }
+    if (py::isinstance<py::str>(v)) {
+        // mpl _from_any: str → fontconfig pattern. A bare path
+        // pointing to a real font file acts as fname.
+        auto s = v.cast<std::string>();
+        if (s.find(':') == std::string::npos &&
+            s.find('=') == std::string::npos &&
+            std::filesystem::exists(s)) {
+            f.file = s;
+            return;
+        }
+        applyFontconfigPattern(tmp, s);
+    } else {
+        tmp = fontPropsFromAny(v);
+    }
+    auto pf = fontToPlot(*fp);
+    // Keep the renderer-relevant fields; rotation/halign stay local.
+    f.family = pf.family; f.style = pf.style; f.variant = pf.variant;
+    f.weight = pf.weight; f.stretch = pf.stretch; f.size = pf.size;
+    f.file = pf.file;
+}
+
+static plot::HAlign parseHAlign(const std::string& h);
+
+/// mpl text-ish kwargs beyond fonts (shared by text/annotate/fig.text).
+template <typename T>
+void applyTextKwargs(T& t, const py::kwargs& kw) {
+    if (!kw) return;
+    auto take = [&](std::initializer_list<const char*> names)
+        -> py::object {
+        for (auto* n : names)
+            if (kw.contains(n))
+                return py::reinterpret_borrow<py::object>(kw[n]);
+        return py::none();
+    };
+    if (auto v = take({"usetex"}); !v.is_none())
+        t.usetex = v.template cast<bool>();
+    if (auto v = take({"wrap"}); !v.is_none())
+        t.wrap = v.template cast<bool>();
+    if (auto v = take({"rotation_mode"}); !v.is_none())
+        t.rotationMode = v.template cast<std::string>();
+    if (auto v = take({"linespacing"}); !v.is_none())
+        t.lineSpacing = v.template cast<float>();
+    if (auto v = take({"multialignment", "ma"}); !v.is_none())
+        t.multiAlign = parseHAlign(v.template cast<std::string>());
+    if (auto v = take({"backgroundcolor"}); !v.is_none())
+        t.backgroundColor = parseColor(v);
+}
+
+/// mpl `norm=` arg: a Normalize object, a scale-name string
+/// ('linear'/'log'/'symlog'/'asinh' — mpl normalize_kwargs scale
+/// names), or None (→ nullptr = default linear autoscale).
+std::shared_ptr<plot::Normalize> normArg(const py::object& o) {
+    if (o.is_none()) return nullptr;
+    if (py::isinstance<py::str>(o)) {
+        auto s = o.cast<std::string>();
+        if (s == "linear") return plot::norms::linear();
+        if (s == "log") return plot::norms::log();
+        if (s == "symlog") return plot::norms::symlog();
+        if (s == "asinh") return plot::norms::asinh();
+        throw std::invalid_argument(
+            "norm must be a Normalize or one of "
+            "'linear'/'log'/'symlog'/'asinh'");
+    }
+    return o.cast<std::shared_ptr<plot::Normalize>>();
 }
 
 /// mpl figimage input: (H,W) scalars → cmap-mapped RGBA8, or
@@ -384,6 +1200,76 @@ RgbaImage toRgbaImage(const py::object& obj, const std::string& cmap,
         return out;
     }
     throw std::invalid_argument("figimage expects a 2D or 3D array");
+}
+
+/// mpl `imsave` input: float [0,1] or uint8 arrays, 2D (scalar +
+/// cmap) or (H,W,3|4). Returns interleaved RGBA8 bytes.
+struct RgbaBytes { std::vector<uint8_t> bytes; uint32_t w, h; };
+RgbaBytes toRgba8Bytes(const py::object& obj, const std::string& cmap,
+                       const py::object& vmin, const py::object& vmax,
+                       const std::string& origin) {
+    auto im = toRgbaImage(obj, cmap, vmin, vmax);
+    RgbaBytes out;
+    out.w = im.w; out.h = im.h;
+    out.bytes.resize(im.px.size() * 4);
+    // mpl imsave origin='lower' flips rows so row 0 lands at the bottom.
+    for (uint32_t j = 0; j < im.h; ++j) {
+        uint32_t dst = origin == "lower" ? im.h - 1 - j : j;
+        for (uint32_t i = 0; i < im.w; ++i) {
+            uint32_t p = im.px[size_t(j) * im.w + i];
+            uint8_t* d = &out.bytes[(size_t(dst) * im.w + i) * 4];
+            d[0] = p & 0xFF; d[1] = (p >> 8) & 0xFF;
+            d[2] = (p >> 16) & 0xFF; d[3] = (p >> 24) & 0xFF;
+        }
+    }
+    return out;
+}
+
+plot::Grid2D toGrid2D(const py::object& obj) {
+    if (py::isinstance<py::array>(obj)) {
+        // mpl imshow: (H,W) scalar or (H,W,3|4) RGB(A).
+        auto ndim = obj.cast<py::array>().ndim();
+        if (ndim == 3) {
+            auto im = toRgbaImage(obj, "viridis", py::none(), py::none());
+            plot::Grid2D g;
+            g.height = im.h;
+            g.width = im.w;
+            g.rgba = std::move(im.px);
+            g.xRange = {0.0f, float(g.width)};
+            g.yRange = {0.0f, float(g.height)};
+            return g;
+        }
+        py::array_t<float, py::array::forcecast | py::array::c_style> f =
+            py::array_t<float, py::array::forcecast | py::array::c_style>::ensure(obj);
+        if (!f || f.ndim() != 2)
+            throw std::invalid_argument("expected a 2D array");
+        auto r = f.unchecked<2>();
+        plot::Grid2D g;
+        g.height = uint32_t(r.shape(0));
+        g.width = uint32_t(r.shape(1));
+        g.xRange = {0.0f, float(g.width)};
+        g.yRange = {0.0f, float(g.height)};
+        g.values.resize(size_t(g.width) * g.height);
+        for (py::ssize_t j = 0; j < r.shape(0); ++j)
+            for (py::ssize_t i = 0; i < r.shape(1); ++i)
+                g.values[size_t(j) * g.width + size_t(i)] = r(j, i);
+        return g;
+    }
+    auto rows = obj.cast<std::vector<std::vector<float>>>();
+    if (rows.empty() || rows[0].empty())
+        throw std::invalid_argument("expected a non-empty 2D array");
+    plot::Grid2D g;
+    g.height = uint32_t(rows.size());
+    g.width = uint32_t(rows[0].size());
+    g.xRange = {0.0f, float(g.width)};
+    g.yRange = {0.0f, float(g.height)};
+    g.values.reserve(size_t(g.width) * g.height);
+    for (auto& row : rows) {
+        if (row.size() != g.width)
+            throw std::invalid_argument("ragged 2D array");
+        g.values.insert(g.values.end(), row.begin(), row.end());
+    }
+    return g;
 }
 
 plot::Series2D makeSeries(const std::vector<float>& x,
@@ -481,6 +1367,10 @@ plot::Viewport gridRange3(const plot::Grid2D& g) {
 /// Owns the headless backend + renderer + figure.
 class PyFigure {
 public:
+    /// Tag ctor for subviews — no backend/renderer/figure init.
+    struct SubviewTag {};
+    explicit PyFigure(SubviewTag) {}
+
     PyFigure(uint32_t w, uint32_t h, float dpi) {
         backend::BackendDesc desc;
         desc.width = w;
@@ -490,14 +1380,42 @@ public:
         renderer_ = std::make_unique<render::Renderer>(*backend_);
         figure_.style().dpi = dpi;
     }
-
-    plot::Axes* addAxes() { return figure_.addAxes(0, 0); }
-    plot::Axes* addAxesFraction(float l, float b, float w, float h) {
-        return figure_.addAxesFraction(l, b, w, h);
+    /// mpl SubFigure view: a child `plot::Figure` living inside the
+    /// parent's placements; shares the root backend/renderer.
+    static std::shared_ptr<PyFigure> subview(
+        std::shared_ptr<PyFigure> root, plot::Figure* sub) {
+        auto f = std::shared_ptr<PyFigure>(new PyFigure(SubviewTag{}),
+            [](PyFigure* p) { p->root_.reset(); delete p; });
+        f->root_ = std::move(root);
+        f->sub_ = sub;
+        return f;
     }
 
-    bool savefig(const std::string& path) {
-        return renderer_->savefig(figure_, path);
+    plot::Axes* addAxes() { return fig().addAxes(0, 0); }
+    plot::Axes* addAxesFraction(float l, float b, float w, float h) {
+        return fig().addAxesFraction(l, b, w, h);
+    }
+
+    /// The figure this handle refers to (root figure, or the subfigure
+    /// for SubFigure handles).
+    plot::Figure& fig() { return sub_ ? *sub_ : figure_; }
+    const plot::Figure& fig() const {
+        return sub_ ? *sub_ : figure_;
+    }
+    /// Backend/renderer always live on the root figure.
+    backend::IBackend* backend() {
+        return root_ ? root_->backend() : backend_.get();
+    }
+    render::Renderer* renderer() {
+        return root_ ? root_->renderer() : renderer_.get();
+    }
+    vk::Extent2D extent() { return backend()->extent(); }
+
+    bool savefig(const std::string& path,
+                 const encode::SaveOptions& opts = {}) {
+        // mpl renders the whole canvas — a subfigure saves its root.
+        if (root_) return root_->savefig(path, opts);
+        return renderer_->savefig(figure_, path, opts);
     }
 
     // Declaration order = destruction order (reversed): renderer dies
@@ -505,12 +1423,45 @@ public:
     std::unique_ptr<backend::IBackend> backend_;
     plot::Figure figure_;
     std::unique_ptr<render::Renderer> renderer_;
+    /// Subfigure view state (nullptr for root figures).
+    std::shared_ptr<PyFigure> root_;
+    plot::Figure* sub_ = nullptr;
+    /// mpl Figure._axstack current axes — set when an Axes is added to
+    /// this figure, read by gca()/sca().
+    plot::Axes* currentAx_ = nullptr;
+    /// mpl ax.containers / ax.tables registries (add_container/add_table
+    /// plus the container-returning plot helpers).
+    std::unordered_map<const plot::Axes*, py::list> containers_;
+    std::unordered_map<const plot::Axes*, py::list> tables_;
+    /// mpl axes_locator callables (set_axes_locator).
+    std::unordered_map<const plot::Axes*, py::object> axesLocators_;
+    /// mpl Axes._current_image — last ScalarMappable added per axes
+    /// (read by gci/colorbar when no mappable is passed).
+    std::unordered_map<const plot::Axes*, py::object> currentMappable_;
+    /// mpl Figure.number — the pyplot figure() `num` (0 = unmanaged).
+    int num_ = 0;
+    /// mpl figure label (figure(num=str) / fig.set_label()).
+    std::string label_;
+    /// Per-artist free-form property store backing the generic Artist
+    /// API (agg_filter, urls, gid, … that have no C++ field).
+    py::dict props_;
 };
+
+struct PyGridSpec;
 
 /// Non-owning view of an Axes inside a PyFigure.
 struct PyAxes {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax;
+    /// mpl `ax.remove()`: keeps a detached axes alive and usable.
+    std::shared_ptr<plot::Axes> owned;
+    /// When created via fig.add_subplot(gs[i,j]): keeps the GridSpec
+    /// (and its parent chain) alive — the spec holds raw grid ptrs.
+    std::shared_ptr<PyGridSpec> gsKeepAlive;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl Line2D handle — keeps the figure alive; `set_data`/`set_xdata`/
@@ -518,13 +1469,27 @@ struct PyAxes {
 /// fits the existing allocation) and mark the figure stale.
 struct PyLine2D {
     std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
     plot::LinePlot* line;
+    /// mpl remove(): the detached artist's ownership lives here so the
+    /// handle stays usable (re-addable) like a real mpl artist.
+    std::shared_ptr<plot::IPlot> owned;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl PathCollection handle for scatter (set_offsets).
 struct PyCollection {
     std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
     plot::ScatterPlot* scatter;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl ax.xaxis / ax.yaxis proxy — locator/formatter accessors.
@@ -532,6 +1497,64 @@ struct PyAxis {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax;
     bool isX;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl tick-label Text handle (from get_xticklabels/Axis.get_ticklabels).
+/// Virtual artist: `loc`/`index` resolve against the tick list computed
+/// for the current viewport; style mutators write through to the axis'
+/// tickFont/labelColor (matplotlib stores one Text per tick — we apply
+/// per-axis like plt.setp(ax.get_xticklabels(), ...) does in practice).
+struct PyTickLabel {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax;
+    bool isX;
+    bool minor = false;
+    int index = -1;      ///< -1 → the axis label (mpl Axis.label)
+    float loc = 0.0f;
+    plot::TickConfig& tc() const {
+        return isX ? ax->style().xAxis.ticks : ax->style().yAxis.ticks;
+    }
+    plot::AxisStyle& as() const {
+        return isX ? ax->style().xAxis : ax->style().yAxis;
+    }
+    void touch() const { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl tick-mark / grid-line Line2D handle (from get_xticklines /
+/// get_xgridlines / Tick.tick1line etc.).
+struct PyTickLine {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax;
+    bool isX;
+    bool minor = false;
+    bool grid = false;
+    float loc = 0.0f;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Tick object (from Axis.get_major_ticks/get_minor_ticks).
+struct PyTick {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax;
+    bool isX;
+    bool minor = false;
+    int index = 0;
+    float loc = 0.0f;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl Patch handle — `patches.Rectangle(...)` builds `spec` detached;
@@ -542,10 +1565,17 @@ struct PyPatch {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax = nullptr;
     plot::Collection* coll = nullptr;
+    /// After remove(): the detached PatchCollection lives here so
+    /// `live`/`coll` keep pointing at a valid object.
+    std::shared_ptr<plot::IPlot> ownedColl;
     plot::Patch spec;
     plot::Patch* live = nullptr;
     plot::Patch& tgt() { return live ? *live : spec; }
     void touch() { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl Collection handle — factory-built unique_ptr until `add_collection`
@@ -554,9 +1584,15 @@ struct PyColl {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax = nullptr;
     std::unique_ptr<plot::Collection> owned;
+    /// After remove(): detached ownership (`live` stays valid).
+    std::shared_ptr<plot::IPlot> ownedPlot;
     plot::Collection* live = nullptr;
     plot::Collection& tgt() { return live ? *live : *owned; }
     void touch() { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
 
 /// mpl Widget handle — the figure owns the C++ widget; this struct keeps
@@ -579,9 +1615,59 @@ struct PyCanvas {
 /// Bars are positioned at integer indices (category-style).
 struct PyBarContainer {
     std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
     std::vector<float> x, heights;
     float baseline = 0.0f;
     bool horizontal = false;
+    /// Backing BarPlot (for remove()/property forwarding).
+    plot::IPlot* plot = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// mpl BarContainer.errorbar — ErrorbarContainer or None.
+    py::object errorbar_ = py::none();
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl container.ErrorbarContainer — `lines` is the mpl
+/// ``(data_line, caplines, barlinecols)`` triple of child artists.
+struct PyErrorbarContainer {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::ErrorbarPlot* plot = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    bool hasXerr = false, hasYerr = false;
+    py::dict props_;
+};
+
+/// mpl container.StemContainer — markerline/stemlines/baseline.
+struct PyStemContainer {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::StemPlot* plot = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    py::dict props_;
+};
+
+/// mpl collections.EventCollection — per-position-row handle returned
+/// by ax.eventplot (one collection per row).
+struct PyEventCollection {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::EventPlot* plot = nullptr;
+    size_t row = 0;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    py::dict props_;
+};
+
+/// mpl collections.QuadMesh — the pcolormesh/pcolor artist.
+struct PyQuadMesh {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::PcolormeshPlot* plot = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    py::dict props_;
 };
 
 /// mpl ax.spines['top'] proxy — single spine visibility.
@@ -589,7 +1675,1362 @@ struct PySpine {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax;
     std::string side;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
 };
+
+/// mpl Text artist — wraps an Axes::TextAnnotation (stable: the vector
+/// is append-only within a render cycle; handles are refreshed per
+/// access from ax.texts).
+struct PyText {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;   ///< null → figure-level text (fig.text)
+    plot::TextAnnotation* t = nullptr;
+    void touch() {
+        if (ax) ax->touch();
+        else if (owner) owner->fig().markStale();
+    }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl `ax.title` / `fig.suptitle` — a Text artist over the axes or
+/// figure TitleStyle (ax==nullptr → figure title).
+struct PyTitle {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    /// Figure-level only: which artist this handle wraps (mpl exposes
+    /// suptitle/supxlabel/supylabel as separate Text artists).
+    enum class Which { Title, SupX, SupY } which = Which::Title;
+    plot::TitleStyle& ts() const {
+        return ax ? ax->style().title : owner->fig().style().title;
+    }
+    std::string text() const {
+        if (which == Which::SupX) return owner->fig().supxlabel();
+        if (which == Which::SupY) return owner->fig().supylabel();
+        return ts().text;
+    }
+    void setText(const std::string& s) {
+        if (which == Which::SupX) owner->fig().supxlabel(s);
+        else if (which == Which::SupY) owner->fig().supylabel(s);
+        else ts().text = s;
+    }
+    plot::FontProperties& font() const {
+        if (which == Which::SupX) return owner->fig().supXlabelFont;
+        if (which == Which::SupY) return owner->fig().supYlabelFont;
+        return ts().font;
+    }
+    plot::Color& color() const {
+        if (which == Which::SupX) return owner->fig().supXlabelColor;
+        if (which == Which::SupY) return owner->fig().supYlabelColor;
+        return ts().color;
+    }
+    void touch() {
+        if (ax) ax->touch();
+        else if (owner) owner->fig().markStale();
+    }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Annotation artist (Text subclass) — wraps an Axes::Annotation.
+struct PyAnnotation {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::Annotation* an = nullptr;
+    void touch() { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Quiver artist handle — reference for ax.quiverkey and property
+/// access.
+struct PyQuiver {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::QuiverPlot* quiver = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// Generic artist handle for introspection (ax.artists / get_children
+/// entries that aren't Line2D/Collection/Patch/Text/Image).
+///
+/// `channel` marks a virtual child artist of a composite plot
+/// (errorbar/stem/event): style methods route to the child's native
+/// config field instead of the whole plot.
+struct PyArtist {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::IPlot* artist = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// "" → the whole artist. Otherwise a named sub-artist:
+    /// errorbar: "data_line"|"caplines"|"barlinecols"
+    /// stem:     "markerline"|"stemlines"|"baseline"
+    /// event:    "row:<i>"
+    std::string channel;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl ContourSet handle (contour/contourf result). Wraps the plot
+/// object; `clabel` toggles level labels on it.
+struct PyContourSet {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::IPlot* cs = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// config access for both ContourPlot and ContourfPlot.
+    plot::ContourConfig* cfg() const {
+        if (auto* p = dynamic_cast<plot::ContourPlot*>(cs))
+            return &p->mutableConfig();
+        if (auto* p = dynamic_cast<plot::ContourfPlot*>(cs))
+            return &p->mutableConfig();
+        return nullptr;
+    }
+    void touch() { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl AxesImage handle (imshow/pcolorfast result).
+struct PyImage {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::IPlot* img = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl InsetIndicator handle (ax.indicate_inset/_zoom result).
+struct PyInsetIndicator {
+    std::shared_ptr<PyFigure> owner;
+    plot::InsetIndicator* ind = nullptr;
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Legend artist handle (ax.legend/fig.legend result). The legend
+/// is axes/figure chrome (LegendStyle), so the handle mutates that.
+struct PyLegend {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;   ///< null → figure-level legend
+    plot::LegendStyle& ls() {
+        return ax ? ax->style().legend : owner->fig().figureLegend();
+    }
+    void touch() { if (ax) ax->touch(); else owner->fig().setStale(true); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Colorbar handle (fig.colorbar result). The strip is axes chrome
+/// (style.colorbar on the parent axes), so the handle mutates that.
+struct PyColorbar {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    py::object mappable;  // the artist passed to fig.colorbar, if any
+    plot::ColorbarStyle& cbs() { return ax->style().colorbar; }
+    void touch() { if (ax) ax->touch(); }
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// mpl Colormap handle — wraps a const plot::Colormap* pointing into
+/// the builtin statics or the registered-colormap map (both stable for
+/// the process lifetime). Mutating methods (set_bad/…) write a
+/// modified copy back into the registry under the same name — mpl's
+/// global-singleton mutation semantics.
+struct PyColormap {
+    const plot::Colormap* cm = &plot::colormaps::viridis();
+    /// Re-register a modified copy under the current name and repoint
+    /// this handle (overrideBuiltin: the copy may shadow a builtin).
+    const plot::Colormap& mutate(plot::Colormap next) {
+        next.name = cm->name;
+        cm = &plot::Colormap::registerCmap(std::move(next), true);
+        return *cm;
+    }
+};
+
+/// mpl cm.ScalarMappable — standalone norm+cmap+array holder accepted
+/// by fig.colorbar(mappable) without an axes artist.
+struct PyScalarMappable {
+    std::shared_ptr<plot::Normalize> norm =
+        std::make_shared<plot::NormalizeLinear>();
+    const plot::Colormap* cm = &plot::colormaps::viridis();
+    std::vector<float> arr;
+};
+
+/// mpl transforms.Bbox — axis-aligned bounding box; corners are kept
+/// as passed (mpl stores unordered corner pairs).
+struct PyBbox {
+    double x0 = 0, y0 = 0, x1 = 1, y1 = 1;
+    [[nodiscard]] double xMin() const { return std::min(x0, x1); }
+    [[nodiscard]] double yMin() const { return std::min(y0, y1); }
+    [[nodiscard]] double xMax() const { return std::max(x0, x1); }
+    [[nodiscard]] double yMax() const { return std::max(y0, y1); }
+    static PyBbox null() {
+        double inf = std::numeric_limits<double>::infinity();
+        return {inf, inf, -inf, -inf};
+    }
+    [[nodiscard]] bool isNull() const {
+        return !(xMin() <= xMax()) || !(yMin() <= yMax());
+    }
+};
+
+/// mpl transforms.TransformedBbox — a Bbox lazily mapped through a
+/// transform. Snapshot semantics: the child bbox is held by value.
+struct PyTransformedBbox {
+    PyBbox bbox;
+    plot::TransformPtr transform;
+    /// The transformed 4-corner bounding box.
+    [[nodiscard]] PyBbox resolved() const {
+        const double xs[] = {bbox.x0, bbox.x1},
+                     ys[] = {bbox.y0, bbox.y1};
+        PyBbox out = PyBbox::null();
+        for (double x : xs)
+            for (double y : ys) {
+                auto q = transform->apply({float(x), float(y)});
+                out.x0 = std::min(out.x0, double(q.x));
+                out.x1 = std::max(out.x1, double(q.x));
+                out.y0 = std::min(out.y0, double(q.y));
+                out.y1 = std::max(out.y1, double(q.y));
+            }
+        return out;
+    }
+};
+
+/// mpl transforms.TransformedPath — a Path lazily mapped through a
+/// transform.
+struct PyTransformedPath {
+    plot::Path path;
+    plot::TransformPtr transform;
+};
+
+/// mpl Transform.get_affine: extract the 2D affine part. Affine2D
+/// subclasses are returned directly; other affine transforms are
+/// probed at the basis points to recover the matrix.
+inline plot::Affine2D affineOf(const plot::Transform& t) {
+    if (const auto* a = dynamic_cast<const plot::Affine2D*>(&t))
+        return *a;
+    const plot::Point2D o = t.apply({0, 0}), ex = t.apply({1, 0}),
+                        ey = t.apply({0, 1});
+    // matrix [[a c e],[b d f],[0 0 1]]
+    return {ex.x - o.x, ex.y - o.y, ey.x - o.x, ey.y - o.y, o.x, o.y};
+}
+
+/// mpl `dateutil.rrule.weekday` — weekday constants MO..SU with an
+/// optional occurrence index `n` (`MO(2)` = 2nd Monday).
+struct PyWeekday {
+    int weekday = 0;   ///< mpl convention: 0=Monday .. 6=Sunday
+    int n = 0;         ///< 0 = every occurrence
+};
+
+/// mpl dates.RRuleLocator — ticks generated by a dateutil rrule /
+/// rrulewrapper instance. The rule is asked for datetimes between the
+/// view limits (expanded by the range delta, as mpl does).
+class PyRRuleLocator : public plot::Locator {
+public:
+    py::object rule;
+    explicit PyRRuleLocator(py::object r) : rule(std::move(r)) {}
+    [[nodiscard]] std::vector<float>
+    tickValues(float vmin, float vmax) const override {
+        const auto d = tickValuesD(vmin, vmax);
+        return {d.begin(), d.end()};
+    }
+    [[nodiscard]] std::vector<double>
+    tickValuesD(double vmin, double vmax) const override;
+};
+
+inline std::vector<double>
+PyRRuleLocator::tickValuesD(double vmin, double vmax) const {
+    py::gil_scoped_acquire gil;
+    auto mod = py::module_::import("datetime");
+    py::object utc = mod.attr("timezone").attr("utc");
+    // Match the rule's own tz-awareness — dateutil refuses to
+    // compare naive and aware datetimes inside `between`.
+    bool aware = true;
+    try {
+        py::object ds = rule.attr("_dtstart");
+        aware = !ds.is_none() && !ds.attr("tzinfo").is_none();
+    } catch (const py::error_already_set&) { aware = true; }
+    auto toDt = [&](double days) {
+        py::object dt = mod.attr("datetime").attr("fromtimestamp")(
+            days * 86400.0, py::arg("tz") = utc);
+        return aware ? dt : dt.attr("replace")(py::arg("tzinfo") = py::none());
+    };
+    auto toNum = [&](const py::object& o) {
+        py::object o2 = o;
+        if (!o2.attr("tzinfo").is_none())
+            o2 = o2.attr("astimezone")(utc)
+                      .attr("replace")(py::arg("tzinfo") = py::none());
+        py::object td =
+            o2.attr("__sub__")(mod.attr("datetime")(1970, 1, 1));
+        const double S = td.attr("days").cast<int64_t>() * 86400.0 +
+                         td.attr("seconds").cast<double>();
+        return (S + td.attr("microseconds").cast<double>() / 1e6) /
+               86400.0;
+    };
+    py::object start = toDt(vmin), stop = toDt(vmax);
+    // mpl uses a calendar relativedelta (6 months), not a raw
+    // timedelta — the two differ across month-length boundaries.
+    py::object delta = py::module_::import("dateutil.relativedelta")
+                           .attr("relativedelta")(stop, start);
+    if (py::hasattr(rule, "set")) {
+        // mpl _create_rrule expands dtstart/until by the span delta.
+        try {
+            rule.attr("set")(
+                py::arg("dtstart") = start.attr("__sub__")(delta),
+                py::arg("until") = stop.attr("__add__")(delta));
+        } catch (const py::error_already_set&) {
+            // datetime range caps (year 1 / 9999).
+            rule.attr("set")(py::arg("dtstart") = start,
+                             py::arg("until") = stop);
+        }
+    }
+    py::object dates =
+        rule.attr("between")(start, stop, py::arg("inc") = true);
+    std::vector<double> out;
+    for (auto d : dates)
+        out.push_back(toNum(d.cast<py::object>()));
+    if (out.empty()) {
+        out.push_back(vmin);
+        out.push_back(vmax);
+    }
+    return out;
+}
+
+// ── mpl offsetbox ─────────────────────────────────────────────────────
+
+/// mpl offsetbox.TextArea — a text child for packers/anchored boxes.
+struct PyTextArea {
+    std::string s;
+    plot::FontProperties font{.size = 10.0f};
+    plot::Color color = plot::Color::black();
+    py::dict props_;
+};
+
+/// mpl offsetbox.DrawingArea — fixed-size child (the SizeBar bar body).
+struct PyDrawingArea {
+    float width = 0, height = 0, xdescent = 0, ydescent = 0;
+    bool clip = false;
+    py::dict props_;
+};
+
+/// mpl offsetbox.PackerBase/HPacker/VPacker — child list + spacing.
+struct PyPacker {
+    py::list children;
+    float pad = 0.0f, sep = 0.0f;
+    std::string mode = "fixed";
+    std::string align;
+    std::optional<float> width, height;
+    bool vertical = false;
+    py::dict props_;
+};
+
+/// mpl offsetbox.HPacker — horizontal packer.
+struct PyHPacker : PyPacker {
+    PyHPacker() { vertical = false; }
+};
+/// mpl offsetbox.VPacker — vertical packer.
+struct PyVPacker : PyPacker {
+    PyVPacker() { vertical = true; }
+};
+
+/// mpl offsetbox.AnchoredOffsetbox — anchored container. Renders via
+/// the axes' anchoredTexts slot when its child flattens to text.
+struct PyAnchoredOffsetbox {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    std::string loc;
+    float pad = 0.4f, borderpad = 0.5f;
+    bool frameon = true;
+    py::object child;                  ///< the OffsetBox child
+    PyBbox bboxToAnchor{0, 0, 1, 1};   ///< mpl bbox_to_anchor
+    bool hasBboxToAnchor = false;
+    size_t atIndex = SIZE_MAX;         ///< slot in ax->anchoredTexts()
+    py::dict props_;
+};
+
+/// mpl offsetbox.AnchoredText — text + frame anchored in the axes.
+struct PyAnchoredText {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    size_t index = SIZE_MAX;           ///< slot in ax->anchoredTexts()
+    std::string loc;
+    py::object txt;                    ///< the TextArea child
+    float pad = 0.4f, borderpad = 0.5f;
+    bool frameon = true;
+    py::dict props_;
+    [[nodiscard]] plot::AnchoredText* at() const {
+        if (!ax || index >= ax->anchoredTexts().size()) return nullptr;
+        return &ax->anchoredTexts()[index];
+    }
+};
+
+/// mpl_toolkits.axes_grid1.AnchoredSizeBar — scale bar + label.
+struct PyAnchoredSizeBar {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    size_t index = SIZE_MAX;           ///< slot in ax->sizeBars()
+    plot::SizeBar pending;             ///< config until add_artist
+    py::list children;                 ///< [size_bar area, txt area]
+    py::dict props_;
+    [[nodiscard]] plot::SizeBar* sb() const {
+        if (!ax || index >= ax->sizeBars().size()) return nullptr;
+        return &ax->sizeBars()[index];
+    }
+};
+
+/// Resolve the rendered AnchoredText slot of an AnchoredOffsetbox
+/// (index into axes.anchoredTexts()). nullptr when not yet added.
+inline plot::AnchoredText*
+anchoredTextSlot(const PyAnchoredOffsetbox& b) {
+    if (!b.ax || b.atIndex >= b.ax->anchoredTexts().size())
+        return nullptr;
+    return &b.ax->anchoredTexts()[b.atIndex];
+}
+
+/// Flatten an offsetbox child to displayable text (TextArea → its
+/// string, VPacker → '\n'-joined, HPacker → ' '-joined when sep>0).
+inline std::string flattenOffsetbox(const py::object& o) {
+    if (o.is_none()) return {};
+    if (py::isinstance<PyTextArea>(o))
+        return o.cast<const PyTextArea&>().s;
+    if (py::isinstance<PyAnchoredText>(o))
+        return flattenOffsetbox(o.cast<const PyAnchoredText&>().txt);
+    if (py::isinstance<PyAnchoredOffsetbox>(o))
+        return flattenOffsetbox(
+            o.cast<const PyAnchoredOffsetbox&>().child);
+    if (py::isinstance<PyPacker>(o)) {
+        const auto& p = o.cast<const PyPacker&>();
+        const std::string sep = p.vertical ? "\n"
+                                           : (p.sep > 0 ? " " : "");
+        std::string out;
+        for (auto c : p.children) {
+            if (!out.empty()) out += sep;
+            out += flattenOffsetbox(c.cast<py::object>());
+        }
+        return out;
+    }
+    if (py::isinstance<py::str>(o)) return o.cast<std::string>();
+    return {};
+}
+
+/// First font found walking the offsetbox child tree (mpl `prop=`
+/// cascade: AnchoredOffsetbox.prop propagates to TextArea children).
+inline std::optional<plot::FontProperties>
+offsetboxFont(const py::object& o) {
+    if (o.is_none()) return std::nullopt;
+    if (py::isinstance<PyTextArea>(o))
+        return o.cast<const PyTextArea&>().font;
+    if (py::isinstance<PyAnchoredOffsetbox>(o))
+        return offsetboxFont(o.cast<const PyAnchoredOffsetbox&>().child);
+    if (py::isinstance<PyPacker>(o))
+        for (auto c : o.cast<const PyPacker&>().children)
+            if (auto f = offsetboxFont(c.cast<py::object>())) return f;
+    return std::nullopt;
+}
+
+/// mpl cbook.GrouperView — read-only view over a shared-axis group
+/// (get_shared_x_axes / get_shared_y_axes).
+struct PyGrouperView {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    bool xaxis = true;
+    [[nodiscard]] const std::vector<plot::Axes*>& group() const {
+        return xaxis ? ax->sharedX() : ax->sharedY();
+    }
+};
+
+/// mpl `_XYPair` view over Axes::stickyEdges (x/y get or set).
+struct PyStickyEdges {
+    std::shared_ptr<PyFigure> owner;
+    std::shared_ptr<plot::StickyEdges> e =
+        std::make_shared<plot::StickyEdges>();
+};
+
+// ── mpl matplotlib.tri support ─────────────────────────────────────────
+
+/// mpl Triangulation — x, y, triangle index triples, optional mask.
+struct PyTriangulation {
+    std::vector<float> x, y;
+    std::vector<plot::Triangle> tris;
+    std::vector<char> mask;  // empty → no mask
+    bool isDelaunay = false;
+
+    /// Triangles with masked entries removed (mpl get_masked_triangles).
+    [[nodiscard]] std::vector<plot::Triangle> maskedTris() const {
+        if (mask.empty()) return tris;
+        std::vector<plot::Triangle> out;
+        for (size_t i = 0; i < tris.size(); ++i)
+            if (!mask[i]) out.push_back(tris[i]);
+        return out;
+    }
+
+    /// mpl edges — each unmasked edge once, (nedges, 2).
+    [[nodiscard]] std::vector<std::pair<uint32_t, uint32_t>>
+    edges() const {
+        std::set<std::pair<uint32_t, uint32_t>> seen;
+        for (auto& t : maskedTris()) {
+            const uint32_t v[3] = {t.a, t.b, t.c};
+            for (int k = 0; k < 3; ++k) {
+                auto p = std::minmax(v[k], v[(k + 1) % 3]);
+                seen.insert({p.first, p.second});
+            }
+        }
+        return {seen.begin(), seen.end()};
+    }
+
+    /// mpl neighbors — neighbors[i][j] is the triangle sharing the edge
+    /// (tri[i][j] → tri[i][(j+1)%3]), or -1 on the border.
+    [[nodiscard]] std::vector<std::array<int32_t, 3>>
+    neighbors() const {
+        auto ts = maskedTris();
+        std::map<std::pair<uint32_t, uint32_t>, size_t> edgeTri;
+        std::vector<std::array<int32_t, 3>> out(
+            ts.size(), {-1, -1, -1});
+        for (size_t i = 0; i < ts.size(); ++i) {
+            const uint32_t v[3] = {ts[i].a, ts[i].b, ts[i].c};
+            for (int k = 0; k < 3; ++k) {
+                auto key = std::minmax(v[k], v[(k + 1) % 3]);
+                auto [it, fresh] = edgeTri.emplace(key, i);
+                if (fresh) continue;
+                auto& other = ts[it->second];
+                const uint32_t ov[3] = {other.a, other.b, other.c};
+                for (int j = 0; j < 3; ++j)
+                    if (std::minmax(ov[j], ov[(j + 1) % 3]) == key)
+                        out[it->second][j] = int32_t(i);
+                out[i][k] = int32_t(it->second);
+            }
+        }
+        return out;
+    }
+
+    /// Brute-force trifinder: index of the unmasked triangle containing
+    /// (px, py), or -1.
+    [[nodiscard]] int find(float px, float py) const {
+        auto ts = maskedTris();
+        for (size_t i = 0; i < ts.size(); ++i) {
+            auto& t = ts[i];
+            float ax = x[t.a], ay = y[t.a];
+            float bx = x[t.b], by = y[t.b];
+            float cx = x[t.c], cy = y[t.c];
+            float d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+            float d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+            float d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+            bool neg = d1 < 0 || d2 < 0 || d3 < 0;
+            bool pos = d1 > 0 || d2 > 0 || d3 > 0;
+            if (!(neg && pos)) return int(i);
+        }
+        return -1;
+    }
+};
+
+/// mpl TriFinder — __call__(x, y) → triangle index (-1 outside).
+struct PyTrapezoidMapTriFinder {
+    std::shared_ptr<PyTriangulation> tri;
+};
+
+/// Barycentric interpolation engine shared by Linear/CubicTriInterpolator.
+/// CubicTriInterpolator approximates mpl's Clough-Tocher with linear
+/// barycentric interpolation (same API surface).
+struct PyLinearTriInterpolator {
+    std::shared_ptr<PyTriangulation> tri;
+    std::vector<float> z;
+
+    /// Per-triangle plane coefficients (a*x + b*y + c).
+    [[nodiscard]] std::tuple<float, float, float> plane(size_t i) const {
+        auto ts = tri->maskedTris();
+        auto& t = ts[i];
+        float x1 = tri->x[t.a], y1 = tri->y[t.a], z1 = z[t.a];
+        float x2 = tri->x[t.b], y2 = tri->y[t.b], z2 = z[t.b];
+        float x3 = tri->x[t.c], y3 = tri->y[t.c], z3 = z[t.c];
+        float det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
+        if (det == 0) return {0, 0, z1};
+        float a = ((y2 - y3) * (z1 - z3) + (z3 - z2) * (y1 - y3)) / det;
+        float b = ((x3 - x2) * (z1 - z3) + (z3 - z2) * (x1 - x3)) / det;
+        return {a, b, z3 - a * x3 - b * y3};
+    }
+};
+
+/// mpl TriRefiner/UniformTriRefiner.
+struct PyUniformTriRefiner {
+    std::shared_ptr<PyTriangulation> tri;
+};
+
+/// mpl TriAnalyzer — mesh-quality helpers.
+struct PyTriAnalyzer {
+    std::shared_ptr<PyTriangulation> tri;
+
+    /// mpl scale_factors — rescale used points into a unit square.
+    [[nodiscard]] std::pair<float, float> scaleFactors() const {
+        auto ts = tri->maskedTris();
+        std::vector<char> used(tri->x.size(), 0);
+        for (auto& t : ts) used[t.a] = used[t.b] = used[t.c] = 1;
+        float x0 = FLT_MAX, x1 = -FLT_MAX, y0 = FLT_MAX, y1 = -FLT_MAX;
+        for (size_t i = 0; i < tri->x.size(); ++i)
+            if (used[i]) {
+                x0 = std::min(x0, tri->x[i]);
+                x1 = std::max(x1, tri->x[i]);
+                y0 = std::min(y0, tri->y[i]);
+                y1 = std::max(y1, tri->y[i]);
+            }
+        return {1.0f / (x1 - x0), 1.0f / (y1 - y0)};
+    }
+
+    /// mpl circle_ratios — incircle/circumcircle radius ratio per
+    /// triangle (masked entries reported as NaN; mpl returns a masked
+    /// array).
+    [[nodiscard]] std::vector<float> circleRatios(bool rescale) const {
+        float kx = 1, ky = 1;
+        if (rescale) std::tie(kx, ky) = scaleFactors();
+        std::vector<float> out(tri->tris.size());
+        for (size_t i = 0; i < tri->tris.size(); ++i) {
+            if (!tri->mask.empty() && tri->mask[i]) {
+                out[i] = std::numeric_limits<float>::quiet_NaN();
+                continue;
+            }
+            auto& t = tri->tris[i];
+            float ax = tri->x[t.a] * kx, ay = tri->y[t.a] * ky;
+            float bx = tri->x[t.b] * kx, by = tri->y[t.b] * ky;
+            float cx = tri->x[t.c] * kx, cy = tri->y[t.c] * ky;
+            float A = std::hypot(bx - ax, by - ay);
+            float B = std::hypot(cx - bx, cy - by);
+            float C = std::hypot(ax - cx, ay - cy);
+            float s = (A + B + C) * 0.5f;
+            float prod = s * (A + B - s) * (A + C - s) * (B + C - s);
+            if (prod <= 0) {
+                out[i] = 0;
+                continue;
+            }
+            float R = A * B * C / (4.0f * std::sqrt(prod));
+            float r = A * B * C / (4.0f * R * s);
+            out[i] = r / R;
+        }
+        return out;
+    }
+};
+
+/// mpl UniformTriRefiner._refine_triangulation_once semantics:
+/// each triangle splits into 4 children at edge-midpoint nodes
+/// (recursed `subdiv` times). Returns the refined triangulation plus,
+/// for each refined node, the index of the *original* triangle
+/// containing it (mpl `found_index`). Masked triangles split too,
+/// children inheriting the parent mask bit.
+inline std::pair<std::shared_ptr<PyTriangulation>, std::vector<int>>
+refineTri(const PyTriangulation& src, int subdiv) {
+    if (subdiv < 0)
+        throw std::invalid_argument("subdiv must be a positive integer");
+    PyTriangulation cur = src;
+    // Seed per-node ancestor with a containing original triangle
+    // (mpl found_index indexes the masked_triangles table).
+    std::vector<int> anc(cur.x.size());
+    for (size_t i = 0; i < cur.x.size(); ++i) {
+        int ti = src.find(cur.x[i], cur.y[i]);
+        anc[i] = ti >= 0 ? ti : 0;
+    }
+    // Per-triangle ancestor (index into the original masked table).
+    std::vector<int> triAnc(cur.tris.size());
+    {
+        // cur.tris may include masked triangles; map each triangle to
+        // its own masked index (unmasked position).
+        int k = 0;
+        for (size_t i = 0; i < cur.tris.size(); ++i) {
+            bool m = !cur.mask.empty() && cur.mask[i];
+            triAnc[i] = m ? -1 : k;
+            if (!m) ++k;
+        }
+    }
+    for (int level = 0; level < subdiv; ++level) {
+        const auto ts = cur.tris;
+        PyTriangulation next;
+        next.x = cur.x;
+        next.y = cur.y;
+        std::vector<int> nextAnc = anc;
+        std::vector<int> nextTriAnc;
+        nextTriAnc.reserve(ts.size() * 4);
+        std::map<std::pair<uint32_t, uint32_t>, uint32_t> mid;
+        auto midpoint = [&](uint32_t p, uint32_t q,
+                            int parentAnc) -> uint32_t {
+            auto key = std::minmax(p, q);
+            auto [it, fresh] = mid.emplace(key, uint32_t(next.x.size()));
+            if (!fresh) return it->second;
+            next.x.push_back((cur.x[p] + cur.x[q]) * 0.5f);
+            next.y.push_back((cur.y[p] + cur.y[q]) * 0.5f);
+            nextAnc.push_back(parentAnc);
+            return it->second;
+        };
+        next.tris.reserve(ts.size() * 4);
+        next.mask.reserve(ts.size() * 4);
+        for (size_t i = 0; i < ts.size(); ++i) {
+            auto& t = ts[i];
+            uint32_t mab = midpoint(t.a, t.b, triAnc[i]);
+            uint32_t mbc = midpoint(t.b, t.c, triAnc[i]);
+            uint32_t mca = midpoint(t.c, t.a, triAnc[i]);
+            next.tris.push_back({t.a, mab, mca});
+            next.tris.push_back({mab, t.b, mbc});
+            next.tris.push_back({mca, mbc, t.c});
+            next.tris.push_back({mab, mbc, mca});
+            for (int k = 0; k < 4; ++k)
+                nextTriAnc.push_back(triAnc[i]);
+            if (!cur.mask.empty())
+                for (int k = 0; k < 4; ++k)
+                    next.mask.push_back(cur.mask[i]);
+        }
+        cur = std::move(next);
+        anc = std::move(nextAnc);
+        triAnc = std::move(nextTriAnc);
+    }
+    return {std::make_shared<PyTriangulation>(std::move(cur)), anc};
+}
+
+/// Cast obj to a Triangulation handle, or nullptr.
+inline std::shared_ptr<PyTriangulation>
+asTriangulation(const py::object& obj) {
+    try {
+        return obj.cast<std::shared_ptr<PyTriangulation>>();
+    } catch (const py::cast_error&) {
+        return nullptr;
+    }
+}
+
+struct PySubplotSpec;
+
+/// mpl GridSpec handle — owns or aliases a native plot::GridSpec.
+struct PyGridSpec {
+    std::shared_ptr<PyFigure> owner;          // owning figure (may be null)
+    std::shared_ptr<plot::GridSpec> g;        // keeps the grid alive
+    /// For nested grids: the parent handle — keeps the parent grid
+    /// (and transitively its own parent chain) alive, since the
+    /// native parent chain holds raw pointers back to it.
+    std::shared_ptr<PyGridSpec> parent;
+};
+
+/// mpl SubplotSpec handle — a cell range inside a GridSpec.
+struct PySubplotSpec {
+    std::shared_ptr<PyFigure> owner;
+    plot::SubplotSpec spec;
+    /// Keeps spec.grid (and its parent chain) alive.
+    std::shared_ptr<PyGridSpec> gs;
+};
+
+/// Aliasing shared_ptr to a GridSpec owned by a figure (the figure
+/// keeps it alive; the handle shares the figure's ownership).
+inline std::shared_ptr<plot::GridSpec> gridRef(
+    const std::shared_ptr<PyFigure>& owner, const plot::GridSpec* g) {
+    return std::shared_ptr<plot::GridSpec>(
+        std::static_pointer_cast<void>(owner),
+        const_cast<plot::GridSpec*>(g));
+}
+
+/// mpl SubplotParams — fig.subplotpars (left/bottom/right/top/
+/// wspace/hspace live on the figure's top-level GridSpec).
+struct PySubplotParams {
+    std::shared_ptr<PyFigure> owner;
+};
+
+/// mpl ax.table artist handle (TablePlot is an IPlot child).
+struct PyTable {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    plot::IPlot* plot = nullptr;
+    std::shared_ptr<plot::IPlot> owned;  ///< after remove()
+    /// mpl free-form Artist properties (gid, url, picker,
+    /// sketch params, …) with no dedicated C++ field.
+    py::dict props_;
+
+};
+
+/// Run figure layout so axes->rect is valid (mpl resolves positions
+/// lazily at draw; introspection APIs force it).
+static void ensureLayout(PyFigure& f) {
+    auto e = f.backend()->extent();
+    f.fig().layout({e.width, e.height});
+}
+
+const plot::Colormap& cmapArg(const py::object& o) {
+    if (o.is_none()) return plot::colormaps::viridis();
+    if (py::isinstance<PyColormap>(o)) return *o.cast<PyColormap>().cm;
+    if (py::isinstance<py::str>(o))
+        return plot::Colormap::byName(o.cast<std::string>());
+    throw std::invalid_argument("cmap must be a name or a Colormap");
+}
+
+/// Extract the IPlot* behind any artist handle (for colorbar mappable).
+static plot::IPlot* mappableFrom(const py::object& o) {
+    if (o.is_none()) return nullptr;
+    if (py::isinstance<PyLine2D>(o)) return o.cast<PyLine2D>().line;
+    if (py::isinstance<PyCollection>(o)) return o.cast<PyCollection>().scatter;
+    if (py::isinstance<PyQuiver>(o)) return o.cast<PyQuiver>().quiver;
+    if (py::isinstance<PyImage>(o)) return o.cast<PyImage>().img;
+    if (py::isinstance<PyArtist>(o)) return o.cast<PyArtist>().artist;
+    if (py::isinstance<PyColl>(o)) {
+        auto& c = o.cast<PyColl&>();
+        return c.live ? c.live : c.owned.get();
+    }
+    if (py::isinstance<PyPatch>(o)) return o.cast<PyPatch>().coll;
+    return nullptr;
+}
+
+/// mpl `Artist.remove()`: detach `p` from whichever axes owns it and
+/// return ownership so the Python handle keeps it alive and usable.
+/// Returns nullptr when the artist isn't currently on any axes.
+static std::shared_ptr<plot::IPlot> detachArtist(PyFigure& f,
+                                                 plot::IPlot* p) {
+    if (!p) return nullptr;
+    for (auto* ax : f.fig().allAxes())
+        if (auto owned = ax->removePlot(p)) return owned;
+    return nullptr;
+}
+
+// ── mpl tick introspection helpers ───────────────────────────────
+// Resolve the axis' current major tick positions in data coords —
+// the same chain Renderer::drawAxesFrame uses (locator → fixed
+// positions → scale-aware auto ticks with the axis-length cap).
+static std::vector<float> axisMajorTickLocs(plot::Axes& ax, bool isX) {
+    const auto& as = isX ? ax.style().xAxis : ax.style().yAxis;
+    const auto& tc = as.ticks;
+    const auto& v = isX ? ax.viewport().x : ax.viewport().y;
+    float lo = std::min(v.min, v.max), hi = std::max(v.min, v.max);
+    const auto& sc = isX ? ax.xscale() : ax.yscale();
+    // axisTicks handles the locator/positions/default chain including
+    // the mpl 'auto' nbins cap from the axis pixel length.
+    float lenPx = isX ? ax.rect.width : ax.rect.height;
+    float dpi = ax.figure() ? ax.figure()->dpi() : 100.0f;
+    return render::axisTicks(tc, sc, lo, hi, lenPx,
+                           as.tickFont.size, dpi, !isX);
+}
+
+/// mpl Axis.get_majorticklocs / get_minorticklocs.
+static std::vector<float> axisTickLocs(plot::Axes& ax, bool isX,
+                                       bool minor) {
+    if (!minor) return axisMajorTickLocs(ax, isX);
+    const auto& as = isX ? ax.style().xAxis : ax.style().yAxis;
+    const auto& v = isX ? ax.viewport().x : ax.viewport().y;
+    float lo = std::min(v.min, v.max), hi = std::max(v.min, v.max);
+    const auto& sc = isX ? ax.xscale() : ax.yscale();
+    auto majors = axisMajorTickLocs(ax, isX);
+    return render::axisMinorTicks(as.ticks, sc, lo, hi, majors);
+}
+
+/// Format the tick labels for the axis' current major tick positions
+/// (matplotlib Axis.iter_ticklabels). Applies the same formatter chain
+/// as the renderer: explicit formatter → legacy format string →
+/// log-scale sci-notation → ScalarFormatter.
+static std::vector<std::string> axisTickLabels(plot::Axes& ax, bool isX,
+                                             std::vector<float>& locs) {
+    auto& as = isX ? ax.style().xAxis : ax.style().yAxis;
+    auto& tc = as.ticks;
+    const auto& v = isX ? ax.viewport().x : ax.viewport().y;
+    float lo = std::min(v.min, v.max), hi = std::max(v.min, v.max);
+    const auto& sc = isX ? ax.xscale() : ax.yscale();
+    plot::ScalarFormatter scalarFmt;
+    plot::FormatStrFormatter strFmt{""};
+    plot::LogFormatterMathtext logFmt;
+    auto* fmt = render::axisFormatter(tc, locs, ax.style(), sc, lo, hi,
+                                      scalarFmt, strFmt, logFmt);
+    std::vector<std::string> out;
+    out.reserve(locs.size());
+    for (size_t i = 0; i < locs.size(); ++i)
+        out.push_back(render::tickLabel(tc, *fmt, locs[i], int(i)));
+    return out;
+}
+
+/// mpl Text.set_rotation accepts degrees, 'horizontal', or 'vertical'.
+static float rotationDeg(const py::object& v) {
+    if (py::isinstance<py::str>(v)) {
+        auto s = v.cast<std::string>();
+        if (s == "vertical") return 90.0f;
+        if (s == "horizontal") return 0.0f;
+        return std::stof(s);  // mpl also accepts numeric strings
+    }
+    return v.cast<float>();
+}
+
+/// mpl point-unit kwargs (linewidth, markersize, elinewidth, capsize,
+/// capthick, markeredgewidth) → native pixels at the axes' figure dpi.
+static float pt2px(const plot::Axes& ax) {
+    return (ax.figure() ? ax.figure()->dpi() : 100.0f) / 72.0f;
+}
+
+/// mpl ha/horizontalalignment string → HAlign.
+static plot::HAlign parseHAlign(const std::string& h) {
+    if (h == "right") return plot::HAlign::Right;
+    if (h == "left") return plot::HAlign::Left;
+    return plot::HAlign::Center;
+}
+
+/// HAlign → mpl alignment name.
+static std::string halignName(plot::HAlign h) {
+    switch (h) {
+        case plot::HAlign::Left: return "left";
+        case plot::HAlign::Right: return "right";
+        default: return "center";
+    }
+}
+
+/// mpl va/verticalalignment string → VAlign.
+static plot::VAlign parseVAlign(const std::string& v) {
+    if (v == "top") return plot::VAlign::Top;
+    if (v == "bottom") return plot::VAlign::Bottom;
+    if (v == "center") return plot::VAlign::Center;
+    return plot::VAlign::Baseline;  // 'baseline', 'center_baseline'
+}
+
+/// mpl font weight: int (100-900) or name → canonical name string.
+static std::string fontWeightName(const py::object& w) {
+    if (py::isinstance<py::str>(w)) return w.cast<std::string>();
+    int n = w.cast<int>();
+    // mpl weight_dict anchors; nearest-bucket mapping.
+    if (n >= 800) return "heavy";
+    if (n >= 700) return "bold";
+    if (n >= 600) return "semibold";
+    if (n >= 500) return "medium";
+    if (n >= 300) return "normal";
+    if (n >= 200) return "light";
+    return "ultralight";
+}
+
+/// Formatted label text for a PyTickLabel (shared by get_text and
+/// Tick.get_label).
+static std::string tickLabelText(const PyTickLabel& t) {
+    if (t.index < 0) return t.as().label;
+    const auto& v =
+        t.isX ? t.ax->viewport().x : t.ax->viewport().y;
+    float lo = std::min(v.min, v.max), hi = std::max(v.min, v.max);
+    if (t.minor) {
+        auto locs = axisTickLocs(*t.ax, t.isX, true);
+        if (t.index >= (int)locs.size()) return {};
+        plot::LogFormatterSciNotation defFmt;
+        plot::Formatter* f = t.tc().minorFormatter
+                                 ? t.tc().minorFormatter.get()
+                                 : &defFmt;
+        f->setViewInterval(lo, hi);
+        f->setLocs(locs);
+        return f->format(locs[t.index], t.index);
+    }
+    auto locs = axisTickLocs(*t.ax, t.isX, false);
+    auto labels = axisTickLabels(*t.ax, t.isX, locs);
+    return t.index < (int)labels.size() ? labels[t.index]
+                                        : std::string{};
+}
+
+/// mpl font size names → points (rcParams font.size=10 base).
+static float fontSizePt(const py::object& v) {
+    if (v.is_none()) return -1.0f;
+    if (py::isinstance<py::str>(v)) {
+        static const std::pair<const char*, float> sizes[] = {
+            {"xx-small", 5.79f}, {"x-small", 6.94f}, {"small", 8.33f},
+            {"medium", 10.0f}, {"large", 12.0f}, {"x-large", 14.4f},
+            {"xx-large", 17.28f}, {"smaller", 8.33f}, {"larger", 12.0f}};
+        auto s = v.cast<std::string>();
+        for (auto& [n, p] : sizes)
+            if (s == n) return p;
+        throw std::invalid_argument("unknown font size '" + s + "'");
+    }
+    return v.cast<float>();
+}
+
+/// Shared mpl Axis.set_ticks / Axes.set_xticks / plt.xticks
+/// implementation: FixedLocator (+FixedFormatter for labels), minor
+/// support, and view-interval expansion to cover the ticks (mpl
+/// _set_tick_locations → set_view_interval, preserving inversion).
+static void axisSetTicks(plot::Axes& ax, bool isX,
+                         const py::object& ticks, const py::object& labels,
+                         bool minor, const py::kwargs& kw) {
+    if (labels.is_none() && kw.size())
+        throw std::invalid_argument(std::format(
+            "Keyword argument '{}' can only be used if 'labels' are "
+            "passed as well",
+            kw.begin()->first.cast<std::string>()));
+    auto& tc = isX ? ax.style().xAxis.ticks : ax.style().yAxis.ticks;
+    if (ticks.is_none()) {
+        // mpl: ticks=None restores the default locator.
+        if (minor) {
+            tc.minorLocator.reset();
+            tc.minor = false;
+        } else {
+            tc.positions.reset();
+            tc.locator.reset();
+        }
+        ax.touch();
+        return;
+    }
+    auto locs = toFloats(ticks);
+    // mpl: the view interval expands to cover the given ticks
+    // (set_view_interval). It does not disable autoscaling, so write
+    // the viewport directly rather than going through setXlim/setYlim.
+    if (!locs.empty()) {
+        auto [tlo, thi] = std::ranges::minmax(locs);
+        auto& v = isX ? ax.viewport().x : ax.viewport().y;
+        if (v.min <= v.max) {
+            v.min = std::min({tlo, v.min});
+            v.max = std::max({thi, v.max});
+        } else {
+            // Inverted axis keeps its inversion.
+            v.min = std::max({thi, v.min});
+            v.max = std::min({tlo, v.max});
+        }
+    }
+    if (minor) {
+        tc.minor = true;
+        tc.minorLocator =
+            std::make_shared<plot::FixedLocator>(locs);
+        if (!labels.is_none())
+            tc.minorFormatter =
+                std::make_shared<plot::FixedFormatter>(
+                    toStrings(labels));
+    } else {
+        tc.positions = locs;
+        tc.locator.reset();
+        if (!labels.is_none())
+            tc.labels = toStrings(labels);
+        else
+            tc.labels.reset();
+        ax.markMajorTicksSet(isX);
+    }
+    ax.touch();
+}
+
+/// Shared mpl tick_params(**kwargs) → TickConfig/AxisStyle/AxisFurniture.
+/// Implements mpl's Axis._translate_tick_params keymap: length→size,
+/// direction→tickdir, rotation→labelrotation, left/bottom→tick1On,
+/// right/top→tick2On, labelleft/labelbottom→label1On,
+/// labelright/labeltop→label2On, colors→color+labelcolor.
+static void applyTickParams(plot::Axes& ax, bool isX,
+                            const std::string& which, bool reset,
+                            const py::kwargs& kw) {
+    if (which != "major" && which != "minor" && which != "both")
+        throw std::invalid_argument(std::format(
+            "which must be 'major', 'minor', or 'both'; got '{}'",
+            which));
+    auto& as = isX ? ax.style().xAxis : ax.style().yAxis;
+    auto& tc = as.ticks;
+    auto& furn = isX ? ax.xFurniture() : ax.yFurniture();
+    if (reset) {
+        tc = plot::TickConfig{};
+        furn = plot::Axes::AxisFurniture{};
+    }
+    bool maj = which == "major" || which == "both";
+    bool min = which == "minor" || which == "both";
+    for (auto item : kw) {
+        auto k = item.first.cast<std::string>();
+        py::object v =
+            py::reinterpret_borrow<py::object>(item.second);
+        if (k == "length" || k == "size") {
+            float p = v.cast<float>();
+            if (maj) tc.majorSize = p;
+            if (min) tc.minorSize = p;
+        } else if (k == "width") {
+            float p = v.cast<float>();
+            if (maj) tc.majorWidth = p;
+            if (min) tc.minorWidth = p;
+        } else if (k == "direction" || k == "tickdir") {
+            auto d = v.cast<std::string>();
+            if (d != "in" && d != "out" && d != "inout")
+                throw std::invalid_argument(std::format(
+                    "direction must be 'in', 'out', or 'inout'; got "
+                    "'{}'", d));
+            tc.direction = d;
+        } else if (k == "pad") {
+            float p = v.cast<float>();
+            if (maj) tc.majorPad = p;
+            if (min) tc.minorPad = p;
+        } else if (k == "labelsize") {
+            as.tickFont.size = fontSizePt(v);
+        } else if (k == "labelcolor") {
+            tc.labelColor = parseColor(v);
+        } else if (k == "labelfontfamily") {
+            as.tickFont.family = v.cast<std::string>();
+        } else if (k == "rotation" || k == "labelrotation") {
+            as.tickFont.rotation =
+                rotationDeg(v) * float(M_PI) / 180.0f;
+        } else if (k == "rotation_mode") {
+            tc.labelRotationMode = v.cast<std::string>();
+        } else if (k == "color") {
+            as.color = parseColor(v);
+        } else if (k == "colors") {
+            auto c = parseColor(v);
+            as.color = c;
+            tc.labelColor = c;
+        } else if (k == "gridOn") {
+            as.grid = v.cast<bool>();
+        } else if (k == "grid_color") {
+            as.gridColor = parseColor(v);
+        } else if (k == "grid_alpha") {
+            as.gridColor.a = v.cast<float>();
+        } else if (k == "grid_linewidth") {
+            as.gridLineWidth = v.cast<float>();
+        } else if (k == "grid_linestyle") {
+            as.gridLineStyle = v.cast<std::string>();
+        } else if (k == "zorder") {
+            // Accepted for API parity; tick z-order is not layered in
+            // this renderer.
+        } else if (k == "left" || k == "bottom" || k == "right" ||
+                   k == "top") {
+            bool on = v.cast<bool>();
+            bool near = (isX && k == "bottom") ||
+                        (!isX && k == "left");
+            // mpl maps left/bottom→tick1On, right/top→tick2On; the
+            // mismatched-side keys are silently ignored there too.
+            if ((isX && (k == "bottom" || k == "top")) ||
+                (!isX && (k == "left" || k == "right"))) {
+                if (near) furn.marksNear = on;
+                else furn.marksFar = on;
+            }
+        } else if (k == "labelleft" || k == "labelbottom" ||
+                   k == "labelright" || k == "labeltop") {
+            bool on = v.cast<bool>();
+            bool near = (isX && k == "labelbottom") ||
+                        (!isX && k == "labelleft");
+            if ((isX && (k == "labelbottom" || k == "labeltop")) ||
+                (!isX && (k == "labelleft" || k == "labelright"))) {
+                if (near) furn.labelsNear = on;
+                else furn.labelsFar = on;
+            }
+        } else {
+            throw std::invalid_argument(std::format(
+                "keyword '{}' is not recognized; valid keywords are "
+                "size, length, width, color, colors, tickdir, "
+                "direction, pad, labelsize, labelcolor, "
+                "labelfontfamily, rotation, labelrotation, "
+                "rotation_mode, zorder, gridOn, grid_color, "
+                "grid_alpha, grid_linewidth, grid_linestyle, left, "
+                "bottom, right, top, labelleft, labelbottom, "
+                "labelright, labeltop", k));
+        }
+    }
+    ax.touch();
+}
+
+/// Shared mpl legend(**kwargs) → LegendStyle. Handles the full kwarg
+/// set for both ax.legend and fig.legend. `inheritFc`/`inheritEc` are
+/// the colors mpl's facecolor='inherit' resolves to (axes/figure patch).
+static void applyLegendKwargs(plot::LegendStyle& ls, const py::dict& kw,
+                              plot::Color inheritFc, plot::Color inheritEc) {
+    auto get = [&](const char* k) -> py::object {
+        return kw.contains(k) ? py::reinterpret_borrow<py::object>(kw[k])
+                              : py::none();
+    };
+    auto setColor = [&](plot::Color& dst, const char* k,
+                        plot::Color inherit) {
+        auto v = get(k);
+        if (v.is_none()) return;
+        if (py::isinstance<py::str>(v) &&
+            v.cast<std::string>() == "inherit") {
+            dst = inherit;
+            return;
+        }
+        dst = parseColor(v);
+    };
+    auto setF = [&](float& dst, const char* k) {
+        auto v = get(k);
+        if (!v.is_none()) dst = v.cast<float>();
+    };
+    auto setB = [&](bool& dst, const char* k) {
+        auto v = get(k);
+        if (!v.is_none()) dst = v.cast<bool>();
+    };
+    auto setI = [&](int& dst, const char* k) {
+        auto v = get(k);
+        if (!v.is_none()) dst = v.cast<int>();
+    };
+
+    // loc: name string or mpl int code 0-10.
+    if (auto v = get("loc"); !v.is_none()) {
+        if (py::isinstance<py::int_>(v))
+            ls.location = std::to_string(v.cast<int>());
+        else
+            ls.location = v.cast<std::string>();
+    }
+    // bbox_to_anchor: (x, y) or (x, y, w, h).
+    if (auto v = get("bbox_to_anchor"); !v.is_none()) {
+        auto t = v.cast<std::vector<float>>();
+        if (t.size() < 2)
+            throw std::invalid_argument(
+                "bbox_to_anchor must be (x, y) or (x, y, w, h)");
+        ls.anchorX = t[0];
+        ls.anchorY = t[1];
+        if (t.size() >= 4) { ls.anchorW = t[2]; ls.anchorH = t[3]; }
+    }
+    // bbox_transform: "axes"/"figure" (a Transform object keeps the
+    // axes-space default — matching the common mpl usage).
+    if (auto v = get("bbox_transform"); !v.is_none() &&
+        py::isinstance<py::str>(v)) {
+        auto s = v.cast<std::string>();
+        ls.anchorSpace = s == "figure" ? plot::CoordSystem::Figure
+                                       : plot::CoordSystem::Axes;
+    }
+    // handles=: snapshot each artist's legend entries.
+    if (auto v = get("handles"); !v.is_none()) {
+        std::vector<plot::LegendHandle> hs;
+        for (auto h : v.cast<py::sequence>())
+            if (auto* p = mappableFrom(h.cast<py::object>()))
+                for (auto& e : p->legendEntries())
+                    hs.push_back(std::move(e));
+        ls.explicitHandles = std::move(hs);
+    }
+    // labels=: applied positionally over the collected handles.
+    if (auto v = get("labels"); !v.is_none()) {
+        ls.explicitLabels.clear();
+        for (auto l : v.cast<py::sequence>())
+            ls.explicitLabels.push_back(l.cast<std::string>());
+    }
+    setI(ls.ncols, "ncols");
+    setI(ls.ncols, "ncol");   // mpl legacy alias
+    setI(ls.nrows, "nrows");
+    if (auto v = get("title"); !v.is_none())
+        ls.title = v.cast<std::string>();
+    if (float fs = fontSizePt(get("fontsize")); fs > 0.0f)
+        ls.font.size = fs;
+    // mpl prop= accepts a FontProperties, dict, or fname string.
+    if (auto v = get("prop"); !v.is_none())
+        applyFontPropertiesArg(ls.font, v);
+    if (auto v = get("title_fontproperties"); !v.is_none())
+        applyFontPropertiesArg(ls.titleFont, v);
+    if (float fs = fontSizePt(get("title_fontsize")); fs > 0.0f)
+        ls.titleFont.size = fs;
+    setB(ls.frameOn, "frameon");
+    setB(ls.fancyBox, "fancybox");
+    setB(ls.shadow, "shadow");
+    setF(ls.frameAlpha, "framealpha");
+    setColor(ls.faceColor, "facecolor", inheritFc);
+    setColor(ls.edgeColor, "edgecolor", inheritEc);
+    if (auto v = get("labelcolor"); !v.is_none()) {
+        if (py::isinstance<py::str>(v) &&
+            v.cast<std::string>() == "inherit")
+            ls.labelColor.reset();
+        else
+            ls.labelColor = parseColor(v);
+    }
+    setF(ls.borderPad, "borderpad");
+    setF(ls.labelSpacing, "labelspacing");
+    setF(ls.handleTextPad, "handletextpad");
+    setF(ls.handleLength, "handlelength");
+    setF(ls.handleHeight, "handleheight");
+    setF(ls.columnSpacing, "columnspacing");
+    setF(ls.borderAxesPad, "borderaxespad");
+    setF(ls.markerScale, "markerscale");
+    setI(ls.numpoints, "numpoints");
+    setI(ls.scatterpoints, "scatterpoints");
+    setB(ls.markerFirst, "markerfirst");
+    setB(ls.reverse, "reverse");
+    setB(ls.draggable, "draggable");
+    if (auto v = get("mode"); !v.is_none())
+        ls.expand = v.cast<std::string>() == "expand";
+    if (auto v = get("alignment"); !v.is_none()) {
+        auto s = v.cast<std::string>();
+        if (s != "left" && s != "center" && s != "right")
+            throw std::invalid_argument(
+                "alignment must be 'left', 'center' or 'right'");
+        ls.alignment = s;
+    }
+}
+
+/// mpl savefig kwargs → SaveOptions. `dpi='figure'` resolves to the
+/// figure's dpi; facecolor/edgecolor 'auto' → unset (figure's own).
+static encode::SaveOptions makeSaveOptions(
+        const plot::Figure& fig, const py::object& transparent,
+        const py::object& dpi, const py::object& format,
+        const py::object& metadata, const py::object& bboxInches,
+        float padInches, const py::object& facecolor,
+        const py::object& edgecolor, const py::kwargs& kw) {
+    encode::SaveOptions o;
+    o.dpi = fig.style().dpi;
+    if (!transparent.is_none())
+        o.transparent = transparent.cast<bool>();
+    if (!dpi.is_none()) {
+        if (py::isinstance<py::str>(dpi)) {
+            if (dpi.cast<std::string>() != "figure")
+                throw py::type_error("dpi must be a number or 'figure'");
+        } else {
+            o.dpi = dpi.cast<float>();
+        }
+    }
+    if (!format.is_none()) {
+        std::string f = format.cast<std::string>();
+        static const std::map<std::string, encode::ImageFormat> fmts = {
+            {"png", encode::ImageFormat::Png},
+            {"webp", encode::ImageFormat::Webp},
+            {"bmp", encode::ImageFormat::Bmp},
+            {"raw", encode::ImageFormat::Raw},
+            {"rgba", encode::ImageFormat::Raw},
+            {"jpg", encode::ImageFormat::Jpeg},
+            {"jpeg", encode::ImageFormat::Jpeg},
+            {"tif", encode::ImageFormat::Tiff},
+            {"tiff", encode::ImageFormat::Tiff},
+            {"pdf", encode::ImageFormat::Pdf},
+            {"svg", encode::ImageFormat::Svg},
+            {"svgz", encode::ImageFormat::Svg},
+            {"eps", encode::ImageFormat::Eps},
+            {"ps", encode::ImageFormat::Eps},
+            {"pgf", encode::ImageFormat::Pgf},
+        };
+        auto it = fmts.find(f);
+        if (it == fmts.end())
+            throw py::value_error(
+                std::format("unknown savefig format '{}'", f));
+        o.format = it->second;
+    }
+    if (!metadata.is_none())
+        for (auto item : py::reinterpret_borrow<py::dict>(metadata))
+            o.metadata[item.first.cast<std::string>()] =
+                py::str(item.second).cast<std::string>();
+    if (!bboxInches.is_none()) {
+        if (!py::isinstance<py::str>(bboxInches) ||
+            bboxInches.cast<std::string>() != "tight")
+            throw py::type_error(
+                "bbox_inches must be 'tight' or None");
+        o.tight = true;
+    }
+    o.padInches = padInches;
+    auto colorKw = [](const py::object& c)
+        -> std::optional<std::array<float, 4>> {
+        if (c.is_none()) return std::nullopt;
+        if (py::isinstance<py::str>(c) &&
+            c.cast<std::string>() == "auto")
+            return std::nullopt;
+        auto col = parseColor(c);
+        return std::array{col.r, col.g, col.b, col.a};
+    };
+    o.facecolor = colorKw(facecolor);
+    o.edgecolor = colorKw(edgecolor);
+    for (auto item : kw) {
+        std::string k = item.first.cast<std::string>();
+        if (k == "quality")
+            o.quality = py::reinterpret_borrow<py::object>(item.second)
+                            .cast<int>();
+        else if (k == "backend") { /* mpl backend= — ignored */ }
+        else
+            throw py::type_error(
+                std::format("unexpected savefig keyword '{}'", k));
+    }
+    return o;
+}
 
 /// mpl cycler(): build a Cycler from keyword sequences —
 /// cycler(color=['r','b'], lw=[1,2]) is the outer product, mpl-style.
@@ -660,13 +3101,13 @@ plot::Cycler makeCycler(const py::args& args, const py::kwargs& kw) {
 
 /// Figure extent in pixels (backend extent → plot Extent2D).
 plot::Extent2D figExtentPx(const std::shared_ptr<PyFigure>& f) {
-    auto e = f->backend_->extent();
+    auto e = f->backend()->extent();
     return {e.width, e.height};
 }
 
 /// Canvas pixel rect of an axes (running layout if needed).
 plot::Rect2D axesRectPx(PyAxes& a) {
-    a.owner->figure_.layout(figExtentPx(a.owner));
+    a.owner->fig().layout(figExtentPx(a.owner));
     return a.ax->rect;
 }
 
@@ -740,17 +3181,84 @@ void applyCollStyle(plot::Collection& c, const py::kwargs& kw) {
 
 PyAxes wrapAxes(const std::shared_ptr<PyFigure>& fig, plot::Axes* ax) {
     if (!ax) throw std::runtime_error("add_axes failed");
+    // mpl: adding an Axes to a figure makes it the figure's current
+    // axes (_axstack), which gca()/plt functions operate on.
+    fig->currentAx_ = ax;
     return {fig, ax};
 }
 
-/// mpl `plot(x, y, [fmt])` — datetime64 inputs install date converters.
-/// `fmt` is the mpl format string ("ro--"); explicit kwargs (color,
-/// marker, linestyle, ...) override it.
+/// mpl subplot reuse: `plt.subplot(111)`/`fig.add_subplot(111)` returns
+/// the existing axes when one already occupies the same grid cell with
+/// the same projection (no kwargs → same axes again).
+PyAxes subplotAt(const std::shared_ptr<PyFigure>& f,
+                 uint32_t nrows, uint32_t ncols,
+                 uint32_t r, uint32_t c,
+                 const std::string& projName,
+                 uint32_t rowSpan = 1, uint32_t colSpan = 1) {
+    const auto proj = projName.empty()
+        ? plot::ProjectionKind::Rectilinear
+        : plot::Projection::parse(projName).kind;
+    for (auto* ax : f->fig().allAxes()) {
+        const auto& ss = ax->subplotSpec();
+        if (!ss || !ss->grid) continue;
+        if (ss->grid->rows() == nrows && ss->grid->cols() == ncols &&
+            ss->row == r && ss->col == c && ss->rowSpan == rowSpan &&
+            ss->colSpan == colSpan && ax->projection().kind == proj) {
+            f->currentAx_ = ax;
+            return {f, ax};
+        }
+    }
+    auto* ax = f->fig().subplot2grid({nrows, ncols}, {r, c},
+                                     rowSpan, colSpan);
+    if (!projName.empty()) ax->setProjection(projName);
+    return wrapAxes(f, ax);
+}
+
+/// mpl `markevery` — accepts None, int, float, (int,int), (float,float),
+/// or a list of point indices.
+void applyMarkevery(plot::Series2D& s, const py::object& me) {
+    if (me.is_none()) return;
+    if (py::isinstance<py::int_>(me)) {
+        s.setMarkevery(me.cast<int>());
+        return;
+    }
+    if (py::isinstance<py::float_>(me)) {
+        s.setMarkevery(me.cast<double>());
+        return;
+    }
+    if (py::isinstance<py::sequence>(me)) {
+        auto seq = py::reinterpret_borrow<py::sequence>(me);
+        if (py::len(seq) == 2 &&
+            py::isinstance<py::int_>(seq[0]) &&
+            py::isinstance<py::int_>(seq[1])) {
+            s.setMarkevery(seq[0].cast<int>(), seq[1].cast<int>());
+            return;
+        }
+        if (py::len(seq) == 2 &&
+            py::isinstance<py::float_>(seq[0]) &&
+            py::isinstance<py::float_>(seq[1])) {
+            s.setMarkevery(seq[0].cast<double>(), seq[1].cast<double>());
+            return;
+        }
+        std::vector<int> idx;
+        for (auto item : seq) idx.push_back(item.cast<int>());
+        s.setMarkevery(std::move(idx));
+        return;
+    }
+    throw std::invalid_argument("unrecognized markevery spec");
+}
+
 PyLine2D axesPlot(PyAxes& a, const py::object& x, const py::object& y,
                   const py::object& fmt, const py::object& color,
                   float linewidth, const py::object& marker,
                   const py::object& linestyle, float markersize,
-                  float alpha, const std::string& label) {
+                  float alpha, const std::string& label,
+                  const py::object& markevery,
+                  const py::object& transform,
+                  const py::object& pathEffects) {
+    // mpl `plot(x, y, [fmt])` — datetime64 inputs install date
+    // converters. `fmt` is the mpl format string ("ro--"); explicit
+    // kwargs (color, marker, linestyle, ...) override it.
     bool xDate = false, yDate = false;
     auto xv = toFloats(x, &xDate), yv = toFloats(y, &yDate);
     if (xDate) a.ax->xaxis_date();
@@ -770,29 +3278,167 @@ PyLine2D axesPlot(PyAxes& a, const py::object& x, const py::object& y,
             throw std::invalid_argument("unrecognized linestyle spec");
         s.lineStyle = *ls;
     }
-    if (markersize > 0.0f) s.size = markersize;
+    const float p2x = pt2px(*a.ax);
+    if (markersize > 0.0f) s.size = markersize * p2x;
+    else s.size = 6.0f * p2x;  // mpl rcParam lines.markersize = 6pt
     s.label = label;
-    s.lineWidth = linewidth;
+    s.lineWidth = linewidth * p2x;
+    applyMarkevery(s, markevery);
     auto* lp = static_cast<plot::LinePlot*>(
         a.ax->addPlot(std::make_unique<plot::LinePlot>(std::move(s))));
     if (alpha >= 0.0f) lp->series().color.a *= alpha;
-    return {a.owner, lp};
+    if (!transform.is_none())
+        lp->transform =
+            transform.cast<std::shared_ptr<plot::Transform>>();
+    if (!pathEffects.is_none())
+        lp->pathEffects = toPathEffects(pathEffects);
+    return {a.owner, a.ax, lp};
 }
 
+/// mpl scatter `c` disambiguation: a color spec (string, (r,g,b[,a])
+/// tuple), a list of per-point colors, or a scalar array to colormap.
+enum class CKind { None, Color, Colors, Values };
+struct CSplit { CKind kind = CKind::None; std::vector<float> vals;
+                std::vector<plot::Color> cols; plot::Color single; };
+CSplit splitCArg(const py::object& c, size_t npts) {
+    CSplit out;
+    if (c.is_none()) return out;
+    if (py::isinstance<py::str>(c)) {
+        out.kind = CKind::Color;
+        out.single = parseColor(c);
+        return out;
+    }
+    if (!py::isinstance<py::sequence>(c)) {
+        out.kind = CKind::Color;
+        out.single = parseColor(c);
+        return out;
+    }
+    auto seq = py::reinterpret_borrow<py::sequence>(c);
+    size_t n = py::len(seq);
+    if (n == 0) { out.kind = CKind::Color; out.single = parseColor(c); return out; }
+    auto first = py::reinterpret_borrow<py::object>(seq[py::int_(0)]);
+    // A sequence of sequences/str → per-point colors.
+    if (py::isinstance<py::sequence>(first) ||
+        py::isinstance<py::str>(first)) {
+        out.kind = CKind::Colors;
+        for (auto item : seq)
+            out.cols.push_back(
+                parseColor(py::reinterpret_borrow<py::object>(item)));
+        return out;
+    }
+    // Numeric sequence: (r,g,b[,a]) color when length is 3/4 and it
+    // doesn't match the point count, else scalar values to colormap.
+    if ((n == 3 || n == 4) && n != npts) {
+        out.kind = CKind::Color;
+        out.single = parseColor(c);
+        return out;
+    }
+    out.kind = CKind::Values;
+    out.vals = toFloats(c);
+    return out;
+}
+
+/// mpl scatter — x, y, s (pt², scalar or array), c (color spec, list of
+/// colors, or scalar array colormapped via cmap+norm).
 PyCollection axesScatter(PyAxes& a, const py::object& x,
-                         const py::object& y, const py::object& color,
-                         float s, const std::string& label) {
+                         const py::object& y, const py::object& s,
+                         const py::object& c, const py::object& marker,
+                         const py::object& cmap, const py::object& norm,
+                         const py::object& vmin, const py::object& vmax,
+                         const py::object& alpha, const py::object& linewidths,
+                         const py::object& edgecolors,
+                         const py::object& color,
+                         const std::string& label,
+                         const py::object& transform,
+                         const py::object& pathEffects) {
     bool xDate = false, yDate = false;
     auto xv = toFloats(x, &xDate), yv = toFloats(y, &yDate);
     if (xDate) a.ax->xaxis_date();
     if (yDate) a.ax->yaxis_date();
     auto ser = makeSeries(xv, yv);
-    if (auto c = parseColor(color); c.a > 0) ser.color = c;
-    ser.label = label;
-    ser.size = s;
-    auto* sp = static_cast<plot::ScatterPlot*>(
-        a.ax->addPlot(std::make_unique<plot::ScatterPlot>(std::move(ser))));
-    return {a.owner, sp};
+    const size_t npts = ser.points.size();
+    const float dpi = a.ax->figure() ? a.ax->figure()->dpi() : 100.0f;
+    const float pt2px = dpi / 72.0f;
+    // mpl s: marker area in pt² → diameter px = sqrt(s)·dpi/72.
+    // Scalar or per-point array; default = rcParams markersize² = 36.
+    auto sp = std::make_unique<plot::ScatterPlot>(std::move(ser));
+    auto* spp = sp.get();
+    if (s.is_none()) {
+        spp->series().size = 6.0f * pt2px;
+    } else if (py::isinstance<py::sequence>(s) &&
+               !py::isinstance<py::str>(s)) {
+        std::vector<float> sz;
+        sz.reserve(py::len(py::reinterpret_borrow<py::sequence>(s)));
+        for (auto item : py::reinterpret_borrow<py::sequence>(s))
+            sz.push_back(std::sqrt(
+                             std::max(py::reinterpret_borrow<py::object>(item)
+                                          .cast<float>(), 0.0f)) *
+                         pt2px);
+        spp->sizes_ = std::move(sz);
+    } else {
+        spp->series().size =
+            std::sqrt(std::max(s.cast<float>(), 0.0f)) * pt2px;
+    }
+    // mpl: `color` is a deprecated alias of `c`; c wins when both given.
+    auto cs = splitCArg(!c.is_none() ? c : color, npts);
+    switch (cs.kind) {
+    case CKind::Color:
+        if (cs.single.a > 0) spp->series().color = cs.single;
+        break;
+    case CKind::Colors:
+        spp->colors_ = std::move(cs.cols);
+        break;
+    case CKind::Values:
+        spp->array_ = std::move(cs.vals);
+        break;
+    case CKind::None:
+        break;
+    }
+    if (!marker.is_none() &&
+        !spp->series().setMarker(marker.cast<std::string>()))
+        throw std::invalid_argument("unknown marker");
+    if (!cmap.is_none()) spp->setCmap(cmapArg(cmap));
+    if (auto n = normArg(norm); n) spp->setNorm(std::move(n));
+    if (!vmin.is_none() || !vmax.is_none())
+        spp->setClim(vmin.is_none() ? std::optional<float>{}
+                                    : std::optional{vmin.cast<float>()},
+                     vmax.is_none() ? std::optional<float>{}
+                                    : std::optional{vmax.cast<float>()});
+    if (!alpha.is_none()) spp->series().alpha = alpha.cast<float>();
+    if (!linewidths.is_none()) {
+        // mpl linewidths: scalar (pt) or first element of a sequence.
+        float lw;
+        if (py::isinstance<py::sequence>(linewidths) &&
+            !py::isinstance<py::str>(linewidths)) {
+            auto seq = py::reinterpret_borrow<py::sequence>(linewidths);
+            lw = py::len(seq) > 0
+                     ? py::reinterpret_borrow<py::object>(seq[py::int_(0)])
+                           .cast<float>()
+                     : 1.0f;
+        } else {
+            lw = linewidths.cast<float>();
+        }
+        spp->series().markerEdgeWidth = lw * pt2px;
+    }
+    if (!edgecolors.is_none()) {
+        if (py::isinstance<py::str>(edgecolors)) {
+            auto e = edgecolors.cast<std::string>();
+            if (e == "face") spp->series().markerEdgeColor.reset();
+            else if (e == "none" || e == "None")
+                spp->series().markerEdgeColor = plot::Color::transparent();
+            else spp->series().markerEdgeColor = parseColor(edgecolors);
+        } else {
+            spp->series().markerEdgeColor = parseColor(edgecolors);
+        }
+    }
+    spp->series().label = label;
+    if (!transform.is_none())
+        spp->transform =
+            transform.cast<std::shared_ptr<plot::Transform>>();
+    if (!pathEffects.is_none())
+        spp->pathEffects = toPathEffects(pathEffects);
+    return {a.owner, a.ax, static_cast<plot::ScatterPlot*>(
+                         a.ax->addPlot(std::move(sp)))};
 }
 
 // --- 3D helpers ---------------------------------------------------------
@@ -830,7 +3476,7 @@ plot::Camera3D cameraFor3D(PyAxes& a, const plot::Viewport& v) {
         elev = it->second[0]; azim = it->second[1]; roll = it->second[2];
     }
     auto cam = plot::Camera3D::viewInit(elev, azim, roll);
-    auto ext = a.owner->backend_->extent();
+    auto ext = a.owner->backend()->extent();
     if (ext.height > 0)
         cam.aspect = float(ext.width) / float(ext.height);
     cam.dataMin = {v.x.min, v.y.min, v.z.min};
@@ -875,7 +3521,7 @@ void axesErrorbar3D(PyAxes& a, const py::object& x, const py::object& y,
     cfg.label = label;
     if (auto c = parseColor(color); c.a > 0)
         cfg.markerColor = cfg.errorbarColor = c;
-    if (markersize > 0) cfg.markerSize = markersize;
+    if (markersize > 0) cfg.markerSize = markersize * pt2px(*a.ax);
     // mpl err semantics: scalar broadcasts; (N,) symmetric;
     // (2,N) → [lower, upper] asymmetric.
     auto applyErr = [&](const py::object& e, std::vector<float>& sym,
@@ -928,20 +3574,70 @@ void axesText3D(PyAxes& a, float x, float y, float z,
     a.ax->touch();
 }
 
-// --- pyplot-style module state (current figure / axes) ---
+// --- pyplot-style module state (figure registry / current figure) ---
+// mpl keeps a global figure registry (_pylab_helpers.Gcf): every
+// pyplot-created figure gets an integer `number` (auto-incremented)
+// and an optional string label; figure(num) activates an existing
+// figure when the number/label matches. `gCurrentFig` is the active
+// figure (mpl: the most recently created/activated managed figure);
+// `gFigReg` holds all managed figures in creation order.
+struct FigRegEntry {
+    int num;
+    std::string label;
+    std::shared_ptr<PyFigure> fig;
+};
+std::vector<FigRegEntry> gFigReg;
+int gNextFigNum = 1;
 std::shared_ptr<PyFigure> gCurrentFig;
-plot::Axes* gCurrentAx = nullptr;
+bool gInteractive = false;
+std::string gBackend = "headless";   // the only real backend so far
+
+/// mpl mpl_connect/mpl_disconnect: registered callback ids. The
+/// headless backend never fires events, but the connect/disconnect
+/// bookkeeping (cid numbering, removal, KeyError on unknown cid)
+/// matches matplotlib.
+struct EventCallback {
+    std::string event;
+    py::object func;
+};
+std::unordered_map<int, EventCallback> gEventCallbacks;
+int gNextCid = 0;
+
+void registerFigure(const std::shared_ptr<PyFigure>& f, int num,
+                    const std::string& label) {
+    f->num_ = num;
+    f->label_ = label;
+    gFigReg.push_back({num, label, f});
+    gCurrentFig = f;
+}
+
+/// Next unused figure number (mpl: max managed number + 1 after close).
+int allocFigNum() {
+    const int n = gNextFigNum;
+    gNextFigNum = gFigReg.empty()
+        ? 1
+        : std::ranges::max(
+              gFigReg | std::views::transform(&FigRegEntry::num)) + 1;
+    return n;
+}
 
 std::shared_ptr<PyFigure> gcf() {
-    if (!gCurrentFig)
-        gCurrentFig = std::make_shared<PyFigure>(800, 600, 100.0f);
+    if (!gCurrentFig) {
+        auto f = std::make_shared<PyFigure>(800, 600, 100.0f);
+        registerFigure(f, allocFigNum(), "");
+    }
     return gCurrentFig;
 }
 
 PyAxes gca() {
     auto f = gcf();
-    if (!gCurrentAx) gCurrentAx = f->addAxes();
-    return {f, gCurrentAx};
+    auto all = f->fig().allAxes();
+    if (!f->currentAx_ ||
+        std::ranges::find(all, f->currentAx_) == all.end())
+        // mpl Figure.gca: current axes if any, else the most recently
+        // added, else a new default axes.
+        f->currentAx_ = all.empty() ? f->addAxes() : all.back();
+    return {f, f->currentAx_};
 }
 
 /// mpl `plot(y)` → implicit x = 0..n-1.
@@ -1000,7 +3696,7 @@ public:
             };
         }
         anim_ = std::make_unique<plot::FuncAnimation>(
-            owner_->figure_, std::move(fn), count, std::move(init),
+            owner_->fig(), std::move(fn), count, std::move(init),
             interval, blit, repeat);
         anim_->repeatDelay = repeatDelay;
     }
@@ -1013,25 +3709,25 @@ public:
         if (fps <= 0) fps = 1000.0 / anim_->interval;
         auto ext = std::filesystem::path(path).extension().string();
         if (ext == ".html" || ext == ".htm") {
-            auto html = owner_->renderer_->toJsHtml(*anim_, fps);
+            auto html = owner_->renderer()->toJsHtml(*anim_, fps);
             if (html.empty()) return false;
             std::ofstream(path, std::ios::binary) << html;
             return true;
         }
-        return owner_->renderer_->saveAnimation(*anim_, path, fps, writer);
+        return owner_->renderer()->saveAnimation(*anim_, path, fps, writer);
     }
 
     std::string toJsHtml(double fps) {
         if (fps <= 0) fps = 1000.0 / anim_->interval;
-        return owner_->renderer_->toJsHtml(*anim_, fps);
+        return owner_->renderer()->toJsHtml(*anim_, fps);
     }
     std::string toHtml5Video(double fps) {
         if (fps <= 0) fps = 1000.0 / anim_->interval;
-        return owner_->renderer_->toHtml5Video(*anim_, fps);
+        return owner_->renderer()->toHtml5Video(*anim_, fps);
     }
 
 private:
-    // anim_ references owner_->figure_ — declared after so it dies first.
+    // anim_ references owner_->fig() — declared after so it dies first.
     std::shared_ptr<PyFigure> owner_;
     py::object func_;
     py::object initFn_;
@@ -1102,12 +3798,1167 @@ struct PyStyleContext {
 /// shadow map so writes are visible via either path.
 std::shared_ptr<PyRcParams> gRcParams = std::make_shared<PyRcParams>();
 
+/// ── Generic mpl Artist surface ─────────────────────────────────────
+/// Every artist handle gets a `props_` dict holding the free-form mpl
+/// artist state that has no dedicated C++ field (gid, url, picker,
+/// sketch params, clip box/path, path effects, …). `defArtistAPI` fills
+/// in the shared `Artist` methods — it only registers names the class
+/// doesn't already provide, so native implementations always win.
+template<typename T> std::shared_ptr<PyFigure> artistOwner(T& t) {
+    if constexpr (requires { t.owner; }) return t.owner;
+    else return {};
+}
+template<typename T> plot::Axes* artistAxes(T& t) {
+    if constexpr (requires { t.ax; }) return t.ax;
+    else return nullptr;
+}
+template<typename T> void artistTouch(T& t) {
+    if constexpr (requires { t.touch(); }) t.touch();
+    else if (auto* ax = artistAxes(t)) ax->touch();
+    else if (auto o = artistOwner(t)) o->fig().markStale();
+}
+
+/// mpl per-class zorder defaults (lines.py, collections.py, text.py,
+/// legend.py …). Handles with native zorder keep theirs; these feed the
+/// props_-backed fallback getter.
+inline float artistZorderDefault(const PyLine2D&) { return 2.f; }
+inline float artistZorderDefault(const PyCollection&) { return 1.f; }
+inline float artistZorderDefault(const PyColl&) { return 1.f; }
+inline float artistZorderDefault(const PyImage&) { return 0.f; }
+inline float artistZorderDefault(const PyText&) { return 3.f; }
+inline float artistZorderDefault(const PyAnnotation&) { return 3.f; }
+inline float artistZorderDefault(const PyTitle&) { return 3.f; }
+inline float artistZorderDefault(const PyLegend&) { return 5.f; }
+inline float artistZorderDefault(const PyAxes&) { return 0.f; }
+inline float artistZorderDefault(const PyFigure&) { return 0.f; }
+template<typename T> float artistZorderDefault(const T&) { return 1.f; }
+
+inline py::object aProp(const py::dict& p, const char* k,
+                        const py::object& def) {
+    py::str key(k);
+    return p.contains(key) ? p[key] : def;
+}
+
+/// The backing IPlot for hit-testing (`contains`) where the handle has
+/// one (LinePlot/ScatterPlot/QuiverPlot/…).
+template<typename T> plot::IPlot* artistPlot(T& t) {
+    if constexpr (requires { t.plot; }) return t.plot;
+    else if constexpr (requires { t.line; }) return t.line;
+    else if constexpr (requires { t.scatter; }) return t.scatter;
+    else if constexpr (requires { t.quiver; }) return t.quiver;
+    else if constexpr (requires { t.img; }) return t.img;
+    else if constexpr (requires { t.artist; }) return t.artist;
+    else if constexpr (requires { t.cs; }) return t.cs;
+    else return nullptr;
+}
+
+/// Register the generic mpl `Artist` methods on a bound handle class.
+/// `cls` is the already-registered class object (fetched via
+/// `m.attr("Name")`); only missing names are added.
+template<typename T>
+void defArtistAPI(const py::object& cls) {
+    auto def = [&](const char* name, auto&& f, auto&&... extra) {
+        if (!py::hasattr(cls, name)) {
+            // InstanceMethod so `obj.m(...)` binds the handle as the
+            // first (self) argument — plain setattr'd cpp_functions
+            // don't implement the descriptor protocol.
+            py::object cf = py::cpp_function(
+                std::forward<decltype(f)>(f), py::arg("self"),
+                std::forward<decltype(extra)>(extra)...);
+            cls.attr(name) = py::reinterpret_steal<py::object>(
+                PyInstanceMethod_New(cf.ptr()));
+        }
+    };
+    auto defProp = [&](const char* name, auto&& get, auto&& set) {
+        if (!py::hasattr(cls, name)) {
+            const auto propType = py::reinterpret_borrow<py::object>(
+                reinterpret_cast<PyObject*>(&PyProperty_Type));
+            cls.attr(name) = propType(
+                py::cpp_function(std::forward<decltype(get)>(get)),
+                py::cpp_function(std::forward<decltype(set)>(set)));
+        }
+    };
+
+    // ── figure / axes wiring ─────────────────────────────────────
+    def("get_figure", [](T& t) -> py::object {
+        auto o = artistOwner(t);
+        return o ? py::cast(o) : py::none();
+    });
+    def("set_figure", [](T& t, std::shared_ptr<PyFigure> f) {
+        if constexpr (requires { t.owner = f; }) {
+            if (f) t.owner = f;
+        }
+        artistTouch(t);
+    }, py::arg("fig"));
+    def("is_figure_set", [](T& t) {
+        return static_cast<bool>(artistOwner(t));
+    });
+    def("get_axes", [](T& t) -> py::object {
+        if (auto* ax = artistAxes(t)) {
+            if (auto o = artistOwner(t)) return py::cast(PyAxes{o, ax});
+        }
+        return py::none();
+    });
+    def("set_axes", [](T& t, const PyAxes& a) {
+        if constexpr (requires { t.ax = a.ax; }) {
+            if (a.ax) {
+                t.ax = a.ax;
+                if constexpr (requires { t.owner = a.owner; })
+                    if (a.owner) t.owner = a.owner;
+            }
+        }
+        artistTouch(t);
+    }, py::arg("axes"));
+    defProp("figure", [](T& t) -> py::object {
+                auto o = artistOwner(t);
+                return o ? py::cast(o) : py::none();
+            },
+            [](T& t, std::shared_ptr<PyFigure> f) {
+                if constexpr (requires { t.owner = f; })
+                    if (f) t.owner = f;
+            });
+    defProp("axes", [](T& t) -> py::object {
+                if (auto* ax = artistAxes(t))
+                    if (auto o = artistOwner(t))
+                        return py::cast(PyAxes{o, ax});
+                return py::object(py::none());
+            },
+            [](T& t, const PyAxes& a) {
+                if constexpr (requires { t.ax = a.ax; }) {
+                    if (a.ax) t.ax = a.ax;
+                    if constexpr (requires { t.owner = a.owner; })
+                        if (a.owner) t.owner = a.owner;
+                }
+            });
+
+    // ── free-form artist properties (props_-backed) ─────────────
+    def("get_label", [](T& t) {
+        return aProp(t.props_, "label", py::str(""));
+    });
+    def("set_label", [](T& t, const py::object& s) {
+        t.props_["label"] = s;
+        artistTouch(t);
+    }, py::arg("s"));
+    defProp("label", [](T& t) { return aProp(t.props_, "label", py::str("")); },
+            [](T& t, const py::object& s) { t.props_["label"] = s; });
+    def("get_gid", [](T& t) { return aProp(t.props_, "gid", py::str("")); });
+    def("set_gid", [](T& t, const py::object& g) {
+        t.props_["gid"] = g;
+        artistTouch(t);
+    }, py::arg("gid"));
+    def("get_url", [](T& t) { return aProp(t.props_, "url", py::str("")); });
+    def("set_url", [](T& t, const py::object& u) {
+        t.props_["url"] = u;
+        artistTouch(t);
+    }, py::arg("url"));
+    def("get_urls", [](T& t) {
+        return aProp(t.props_, "urls", py::list());
+    });
+    def("set_urls", [](T& t, const py::object& u) {
+        t.props_["urls"] = u;
+        artistTouch(t);
+    }, py::arg("urls"));
+    def("get_picker", [](T& t) {
+        return aProp(t.props_, "picker", py::none());
+    });
+    def("set_picker", [](T& t, const py::object& p) {
+        t.props_["picker"] = p;
+    }, py::arg("picker"));
+    def("pickable", [](T& t) {
+        return t.props_.contains("picker") && !t.props_["picker"].is_none();
+    });
+    def("pick", [](T& t) { artistTouch(t); });
+    def("set_pickradius", [](T& t, float r) {
+        t.props_["pickradius"] = py::float_(r);
+    }, py::arg("r"));
+    def("get_pickradius", [](T& t) {
+        return aProp(t.props_, "pickradius", py::float_(15.0));
+    });
+    def("get_snap", [](T& t) {
+        return aProp(t.props_, "snap", py::none());
+    });
+    def("set_snap", [](T& t, const py::object& s) {
+        t.props_["snap"] = s;
+        artistTouch(t);
+    }, py::arg("s"));
+    def("get_sketch_params", [](T& t) {
+        return aProp(t.props_, "sketch_params",
+                     py::make_tuple(py::none(), py::none(), py::none()));
+    });
+    def("set_sketch_params", [](T& t, const py::object& scale,
+                                const py::object& length,
+                                const py::object& randomness) {
+        t.props_["sketch_params"] = py::make_tuple(scale, length, randomness);
+        artistTouch(t);
+    }, py::arg("scale") = py::none(), py::arg("length") = py::none(),
+       py::arg("randomness") = py::none());
+    def("get_path_effects", [](T& t) {
+        return aProp(t.props_, "path_effects", py::list());
+    });
+    def("set_path_effects", [](T& t, const py::object& e) {
+        t.props_["path_effects"] = e;
+        artistTouch(t);
+    }, py::arg("path_effects"));
+    def("get_rasterized", [](T& t) {
+        return aProp(t.props_, "rasterized", py::none());
+    });
+    def("set_rasterized", [](T& t, const py::object& r) {
+        t.props_["rasterized"] = r;
+        artistTouch(t);
+    }, py::arg("rasterized"));
+    def("get_animated", [](T& t) {
+        return aProp(t.props_, "animated", py::bool_(false));
+    });
+    def("set_animated", [](T& t, bool b) {
+        t.props_["animated"] = py::bool_(b);
+    }, py::arg("b"));
+    def("get_alpha", [](T& t) {
+        return aProp(t.props_, "alpha", py::none());
+    });
+    def("set_alpha", [](T& t, const py::object& a) {
+        t.props_["alpha"] = a;
+        artistTouch(t);
+    }, py::arg("alpha"));
+    def("get_visible", [](T& t) {
+        return aProp(t.props_, "visible", py::bool_(true));
+    });
+    def("set_visible", [](T& t, bool b) {
+        t.props_["visible"] = py::bool_(b);
+        artistTouch(t);
+    }, py::arg("b"));
+    def("get_zorder", [](T& t) {
+        return aProp(t.props_, "zorder",
+                     py::float_(artistZorderDefault(t)));
+    });
+    def("set_zorder", [](T& t, const py::object& z) {
+        t.props_["zorder"] = z;
+        artistTouch(t);
+    }, py::arg("level"));
+    // mpl Artist.zorder property — delegates to whichever get/set the
+    // class resolved (native or props_-backed).
+    defProp("zorder",
+            [](const py::object& self) {
+                return self.attr("get_zorder")();
+            },
+            [](const py::object& self, const py::object& v) {
+                self.attr("set_zorder")(v);
+            });
+    def("get_mouseover", [](T& t) {
+        return aProp(t.props_, "mouseover", py::bool_(false));
+    });
+    def("set_mouseover", [](T& t, bool b) {
+        t.props_["mouseover"] = py::bool_(b);
+    }, py::arg("mouseover"));
+    defProp("mouseover", [](T& t) {
+                return aProp(t.props_, "mouseover", py::bool_(false));
+            },
+            [](T& t, bool b) { t.props_["mouseover"] = py::bool_(b); });
+    def("get_in_layout", [](T& t) {
+        return aProp(t.props_, "in_layout", py::bool_(true));
+    });
+    def("set_in_layout", [](T& t, bool b) {
+        t.props_["in_layout"] = py::bool_(b);
+    }, py::arg("in_layout"));
+    def("get_agg_filter", [](T& t) {
+        return aProp(t.props_, "agg_filter", py::none());
+    });
+    def("set_agg_filter", [](T& t, const py::object& f) {
+        t.props_["agg_filter"] = f;
+    }, py::arg("filter_func"));
+
+    // ── clipping ─────────────────────────────────────────────────
+    def("get_clip_on", [](T& t) {
+        return aProp(t.props_, "clip_on", py::bool_(true));
+    });
+    def("set_clip_on", [](T& t, bool b) {
+        t.props_["clip_on"] = py::bool_(b);
+        artistTouch(t);
+    }, py::arg("b"));
+    def("get_clip_box", [](T& t) {
+        return aProp(t.props_, "clip_box", py::none());
+    });
+    def("set_clip_box", [](T& t, const py::object& b) {
+        t.props_["clip_box"] = b;
+        artistTouch(t);
+    }, py::arg("clipbox"));
+    def("get_clip_path", [](T& t) {
+        return aProp(t.props_, "clip_path", py::none());
+    });
+    def("set_clip_path", [](T& t, const py::args& args,
+                          const py::kwargs& kw) {
+        t.props_["clip_path"] =
+            args.empty() ? py::none() : py::cast<py::object>(args[0]);
+        artistTouch(t);
+    });
+    def("get_transformed_clip_path_and_affine", [](T& t) {
+        return aProp(t.props_, "clip_path", py::none());
+    });
+
+    // ── transforms / extents ─────────────────────────────────────
+    def("get_transform", [](T& t) {
+        return aProp(t.props_, "transform", py::none());
+    });
+    def("set_transform", [](T& t, const py::object& tr) {
+        t.props_["transform"] = tr;
+        artistTouch(t);
+    }, py::arg("t"));
+    def("is_transform_set", [](T& t) {
+        return t.props_.contains("transform") &&
+               !t.props_["transform"].is_none();
+    });
+    def("get_window_extent", [](T& t, const py::object&) {
+        return py::cast(PyBbox{0, 0, 0, 0});
+    }, py::arg("renderer") = py::none());
+    def("get_tightbbox", [](T& t, const py::object&, bool) -> py::object {
+        return aProp(t.props_, "tightbbox", py::none());
+    }, py::arg("renderer") = py::none(), py::arg("for_layout_only") = false);
+    def("get_datalim", [](T& t, const py::object&) {
+        if (auto* ax = artistAxes(t)) {
+            const auto& dl = ax->dataLim();
+            return py::cast(
+                PyBbox{dl.x.min, dl.y.min, dl.x.max, dl.y.max});
+        }
+        return py::cast(PyBbox{});
+    }, py::arg("transData") = py::none());
+
+    // ── stale / callbacks ────────────────────────────────────────
+    def("pchanged", [](T&) {});
+    def("is_stale", [](T& t) {
+        return aProp(t.props_, "stale", py::bool_(true));
+    });
+    defProp("stale", [](T& t) {
+                return aProp(t.props_, "stale", py::bool_(true));
+            },
+            [](T& t, bool b) { t.props_["stale"] = py::bool_(b); });
+    def("add_callback", [](T& t, const py::object& func) {
+        if (!t.props_.contains("_cbs")) t.props_["_cbs"] = py::dict();
+        py::dict cbs = py::cast<py::dict>(t.props_["_cbs"]);
+        int cid = 0;
+        while (cbs.contains(py::int_(cid))) ++cid;
+        cbs[py::int_(cid)] = func;
+        return cid;
+    }, py::arg("func"));
+    def("remove_callback", [](T& t, int oid) {
+        if (t.props_.contains("_cbs"))
+            py::cast<py::dict>(t.props_["_cbs"]).attr("pop")(oid);
+    }, py::arg("oid"));
+
+    // ── contains / picking ───────────────────────────────────────
+    def("contains", [](T& t, const py::object& ev) {
+        // mpl: transform event display px → data coords, hit-test the
+        // artist. Plot-backed handles use the native hit test.
+        if (auto* p = artistPlot(t)) {
+            if (auto* ax = artistAxes(t)) {
+                try {
+                    const float x = ev.attr("x").cast<float>();
+                    const float y = ev.attr("y").cast<float>();
+                    const auto& r = ax->rect;
+                    const float fx =
+                        r.width > 0 ? (x - r.x) / float(r.width) : 0;
+                    const float fy =
+                        r.height > 0
+                            ? 1.0f - (y - r.y) / float(r.height)
+                            : 0;
+                    if (p->contains(*ax, ax->fractionToData({fx, fy})))
+                        return py::make_tuple(true, py::dict());
+                } catch (const py::error_already_set&) {
+                }
+            }
+        }
+        return py::make_tuple(false, py::dict());
+    }, py::arg("mouseevent"));
+    def("containsx", [](T&, const py::object&) { return false; },
+        py::arg("mouseevent"));
+    def("containsy", [](T&, const py::object&) { return false; },
+        py::arg("mouseevent"));
+    def("get_cursor_data", [](T&, const py::object&) -> py::object {
+        return py::none();
+    }, py::arg("event"));
+    def("format_cursor_data", [](T&, const py::object& data) {
+        return std::format("[{}]", py::str(data).cast<std::string>());
+    }, py::arg("data"));
+
+    // ── introspection / housekeeping ─────────────────────────────
+    def("get_children", [](T&) { return py::list(); });
+    def("findobj", [](const py::object& self, const py::object& match,
+                      bool includeSelf, bool) {
+        py::list out;
+        auto test = [&](const py::object& o) {
+            if (match.is_none()) return true;
+            if (py::isinstance<py::type>(match))
+                return py::isinstance(o, match);
+            if (py::hasattr(match, "__call__"))
+                return match(o).cast<bool>();
+            return false;
+        };
+        if (includeSelf && test(self)) out.append(self);
+        if (py::hasattr(self, "get_children")) {
+            for (auto h : self.attr("get_children")()) {
+                py::object c = py::reinterpret_borrow<py::object>(h);
+                if (test(c)) out.append(c);
+            }
+        }
+        return out;
+    }, py::arg("match") = py::none(), py::arg("include_self") = true,
+       py::arg("recurse") = true);
+    def("have_units", [](T&) { return false; });
+    def("convert_xunits", [](T&, const py::object& d) { return d; },
+        py::arg("x"));
+    def("convert_yunits", [](T&, const py::object& d) { return d; },
+        py::arg("y"));
+    defProp("sticky_edges", [](T& t) {
+                if (t.props_.contains("sticky_edges"))
+                    return py::cast<py::object>(t.props_["sticky_edges"]);
+                auto se = py::cast(PyStickyEdges{artistOwner(t)});
+                t.props_["sticky_edges"] = se;
+                return se;
+            },
+            [](T& t, const PyStickyEdges& se) {
+                t.props_["sticky_edges"] = py::cast(se);
+            });
+    def("draw", [](T& t, const py::object&) {
+        if (auto o = artistOwner(t)) o->fig().markStale();
+    }, py::arg("renderer") = py::none());
+    def("remove", [](T& t) {
+        artistTouch(t);
+        t.props_["_removed"] = py::bool_(true);
+    });
+
+    // ── bulk property access (mpl `set`/`update`/`update_from`) ──
+    def("set", [](const py::object& self, const py::kwargs& kw) {
+        for (const auto& [k, v] : kw) {
+            const std::string key = k.cast<std::string>();
+            const std::string name = "set_" + key;
+            if (!py::hasattr(self, name.c_str()))
+                throw py::attribute_error(std::format(
+                    "{} object has no property '{}'",
+                    py::str(self.attr("__class__").attr("__name__"))
+                        .cast<std::string>(),
+                    key));
+            self.attr(name.c_str())(v);
+        }
+    });
+    def("update", [](const py::object& self, const py::dict& props) {
+        for (const auto& [k, v] : props) {
+            const std::string name =
+                "set_" + k.cast<std::string>();
+            if (!py::hasattr(self, name.c_str()))
+                throw py::attribute_error(std::format(
+                    "unknown property '{}'", k.cast<std::string>()));
+            self.attr(name.c_str())(v);
+        }
+    }, py::arg("props"));
+    def("update_from", [](const py::object& self, const py::object& other) {
+        self.attr("update")(other.attr("properties")());
+    }, py::arg("other"));
+    def("properties", [](const py::object& self) {
+        // mpl Artist.properties — the kwarg dict reflecting the
+        // artist's current get_* values.
+        py::dict d;
+        const char* keys[] = {"label",  "gid",      "url",
+                              "picker", "snap",     "sketch_params",
+                              "path_effects",       "rasterized",
+                              "animated", "alpha",  "visible",
+                              "zorder", "mouseover", "in_layout",
+                              "clip_on", "clip_box", "clip_path",
+                              "agg_filter", "transform"};
+        for (const char* k : keys) {
+            const std::string g = std::format("get_{}", k);
+            if (py::hasattr(self, g.c_str()))
+                d[k] = self.attr(g.c_str())();
+        }
+        return d;
+    });
+    def("set_props", [](const py::object& self, const py::kwargs& kw) {
+        self.attr("set")(**kw);
+    });
+}
+
+/// Wrap an IPlot* child in the right mpl-style handle (used by plot
+/// methods returning artists and by introspection like ax.artists).
+// ── Channel artists (mpl container children) ────────────────────────
+/// A channel artist is a virtual sub-artist of a composite plot —
+/// e.g. ErrorbarContainer's data_line / caplines / barlinecols or
+/// StemContainer's markerline / stemlines / baseline. Style mutations
+/// route through `channel` to the matching native config field.
+inline PyArtist channelArtist(const std::shared_ptr<PyFigure>& owner,
+                              plot::Axes* ax, plot::IPlot* p,
+                              std::string ch) {
+    PyArtist a{owner, ax, p, nullptr, std::move(ch)};
+    return a;
+}
+
+/// The native Color slot a channel artist writes to, or nullptr when
+/// the channel/plot combination has none.
+inline plot::Color* channelColor(PyArtist& a) {
+    if (a.channel.empty()) return nullptr;
+    if (auto* p = dynamic_cast<plot::ErrorbarPlot*>(a.artist)) {
+        if (a.channel == "data_line") return &p->config().color;
+        return &p->config().errorbarColor;  // caplines, barlinecols
+    }
+    if (auto* p = dynamic_cast<plot::StemPlot*>(a.artist)) {
+        if (a.channel == "markerline") return &p->config().markerColor;
+        if (a.channel == "baseline")   return &p->config().baselineColor;
+        return &p->config().lineColor;      // stemlines
+    }
+    if (auto* p = dynamic_cast<plot::BarPlot*>(a.artist)) {
+        if (a.channel.rfind("bar:", 0) == 0) {
+            size_t i = std::stoul(a.channel.substr(4));
+            auto& d = p->mutableData();
+            if (d.colors.size() < d.heights.size()) {
+                plot::Color def =
+                    d.colors.empty()
+                        ? plot::Color::fromRgba8(31, 119, 180)
+                        : d.colors.back();
+                d.colors.assign(d.heights.size(), def);
+            }
+            if (i < d.colors.size()) return &d.colors[i];
+        }
+    }
+    return nullptr;
+}
+
+/// The native line-width slot a channel artist writes to.
+inline float* channelWidth(PyArtist& a) {
+    if (a.channel.empty()) return nullptr;
+    if (auto* p = dynamic_cast<plot::ErrorbarPlot*>(a.artist)) {
+        if (a.channel == "data_line") return &p->config().lineWidth;
+        return &p->config().errorbarWidth;
+    }
+    if (auto* p = dynamic_cast<plot::StemPlot*>(a.artist)) {
+        if (a.channel == "markerline") return nullptr;
+        if (a.channel == "baseline") return &p->config().baselineWidth;
+        return &p->config().lineWidth;
+    }
+    return nullptr;
+}
+
+/// mpl child remove(): hide just this component when the native plot
+/// supports it, else fall back to a transparent color.
+inline void channelRemove(PyArtist& a) {
+    if (auto* p = dynamic_cast<plot::ErrorbarPlot*>(a.artist)) {
+        if (a.channel == "data_line") {
+            p->config().drawLine = false;
+            p->config().drawMarker = false;
+        } else if (a.channel == "caplines") {
+            p->config().drawCaps = false;
+        } else {
+            p->config().xerr.clear();
+            p->config().yerr.clear();
+            p->config().xerrLower.clear();
+            p->config().xerrUpper.clear();
+            p->config().yerrLower.clear();
+            p->config().yerrUpper.clear();
+        }
+        a.artist->touch();
+        return;
+    }
+    if (auto* p = dynamic_cast<plot::StemPlot*>(a.artist)) {
+        if (a.channel == "markerline")
+            p->config().markers = false;
+        else if (a.channel == "baseline")
+            p->config().showBaseline = false;
+        else
+            p->config().lineColor.a = 0;
+        a.artist->touch();
+        return;
+    }
+    a.props_["visible"] = py::bool_(false);
+}
+
+inline py::object wrapArtist(const std::shared_ptr<PyFigure>& owner,
+                             plot::Axes* ax, plot::IPlot* p) {
+    if (auto* lp = dynamic_cast<plot::LinePlot*>(p))
+        return py::cast(PyLine2D{owner, ax, lp});
+    if (auto* sp = dynamic_cast<plot::ScatterPlot*>(p))
+        return py::cast(PyCollection{owner, ax, sp});
+    if (auto* qp = dynamic_cast<plot::QuiverPlot*>(p))
+        return py::cast(PyQuiver{owner, ax, qp});
+    if (dynamic_cast<plot::HeatmapPlot*>(p) ||
+        dynamic_cast<plot::MatshowPlot*>(p))
+        return py::cast(PyImage{owner, ax, p});
+    // mpl: pcolormesh/pcolor return QuadMesh, errorbar/stem return
+    // named containers, eventplot rows return EventCollections.
+    if (auto* q = dynamic_cast<plot::PcolormeshPlot*>(p))
+        return py::cast(PyQuadMesh{owner, ax, q});
+    if (auto* e = dynamic_cast<plot::ErrorbarPlot*>(p))
+        return py::cast(PyErrorbarContainer{owner, ax, e, nullptr,
+                                            !e->config().xerr.empty() ||
+                                                !e->config()
+                                                     .xerrLower.empty(),
+                                            !e->config().yerr.empty() ||
+                                                !e->config()
+                                                     .yerrLower.empty()});
+    if (auto* s = dynamic_cast<plot::StemPlot*>(p))
+        return py::cast(PyStemContainer{owner, ax, s});
+    if (auto* ev = dynamic_cast<plot::EventPlot*>(p))
+        // Introspection sees the row-0 collection; ax.eventplot
+        // returns the full per-row list itself.
+        return py::cast(PyEventCollection{owner, ax, ev, 0});
+    if (auto* c = dynamic_cast<plot::Collection*>(p))
+        return py::cast(PyColl{owner, ax, nullptr, nullptr, c});
+    return py::cast(PyArtist{owner, ax, p});
+}
+
+/// ── mpl ScalarMappable extras ──────────────────────────────────────
+/// `changed`/`colorbar`/`colorizer` shared by every mappable handle.
+template<typename T>
+void defMappableAPI(const py::object& cls) {
+    auto def = [&](const char* name, auto&& f, auto&&... extra) {
+        if (!py::hasattr(cls, name)) {
+            py::object cf = py::cpp_function(
+                std::forward<decltype(f)>(f), py::arg("self"),
+                std::forward<decltype(extra)>(extra)...);
+            cls.attr(name) = py::reinterpret_steal<py::object>(
+                PyInstanceMethod_New(cf.ptr()));
+        }
+    };
+    def("_set_colorbar", [](T& t, const py::object& cb) {
+        t.props_["colorbar"] = cb;
+    }, py::arg("cb"));
+    def("changed", [](T& t) {
+        // mpl ScalarMappable.changed: the attached colorbar re-syncs
+        // itself from the mappable on draw — our renderer reads the
+        // mappable live, so just mark stale.
+        artistTouch(t);
+    });
+    def("colorizer", [](T&) -> py::object { return py::none(); });
+    def("update_scalarmappable", [](T& t) { artistTouch(t); });
+    if (!py::hasattr(cls, "colorbar")) {
+        const auto propType = py::reinterpret_borrow<py::object>(
+            reinterpret_cast<PyObject*>(&PyProperty_Type));
+        cls.attr("colorbar") = propType(
+            py::cpp_function([](T& t) {
+                return aProp(t.props_, "colorbar", py::none());
+            }, py::arg("self")),
+            py::none());
+    }
+}
+
+/// Color spec or sequence of color specs → vector<Color> (mpl
+/// set_facecolors accepts either).
+inline std::vector<plot::Color> toColorVec(const py::object& c) {
+    std::vector<plot::Color> out;
+    if (c.is_none()) return out;
+    if (py::isinstance<py::str>(c)) return {parseColor(c)};
+    auto seq = py::cast<py::sequence>(c);
+    if (seq.size() == 3 || seq.size() == 4) {
+        bool flat = seq.size() > 0;
+        for (const auto h : seq)
+            if (!py::isinstance<py::int_>(h) &&
+                !py::isinstance<py::float_>(h)) {
+                flat = false;
+                break;
+            }
+        if (flat) return {parseColor(c)};
+    }
+    for (const auto h : seq)
+        out.push_back(
+            parseColor(py::reinterpret_borrow<py::object>(h)));
+    return out;
+}
+
+inline py::list colorsToPy(const std::vector<plot::Color>& cs) {
+    py::list out;
+    for (const auto& c : cs) out.append(colorToPy(c));
+    return out;
+}
+
+/// ── mpl Collection extras ──────────────────────────────────────────
+/// The facecolors/edgecolors/linewidths/dashes/hatch/offsets surface,
+/// backed by `tgt()` (a `plot::Collection&`) where the handle has one
+/// and by props_ otherwise.
+template<typename T>
+void defCollectionAPI(const py::object& cls) {
+    auto def = [&](const char* name, auto&& f, auto&&... extra) {
+        if (!py::hasattr(cls, name)) {
+            py::object cf = py::cpp_function(
+                std::forward<decltype(f)>(f), py::arg("self"),
+                std::forward<decltype(extra)>(extra)...);
+            cls.attr(name) = py::reinterpret_steal<py::object>(
+                PyInstanceMethod_New(cf.ptr()));
+        }
+    };
+    def("get_facecolors", [](T& t) {
+        if constexpr (requires { t.tgt(); })
+            return colorsToPy(t.tgt().faceColors);
+        else
+            return colorsToPy({});
+    });
+    def("set_facecolors", [](T& t, const py::object& c) {
+        if constexpr (requires { t.tgt(); }) {
+            t.tgt().faceColors = toColorVec(c);
+            t.touch();
+        }
+    }, py::arg("c"));
+    def("set_facecolor", [](py::object self, const py::object& c) {
+        self.attr("set_facecolors")(c);
+    }, py::arg("c"));
+    def("get_facecolor", [](const py::object& self) {
+        return self.attr("get_facecolors")();
+    });
+    def("get_fc", [](const py::object& self) {
+        return self.attr("get_facecolors")();
+    });
+    def("set_fc", [](py::object self, const py::object& c) {
+        self.attr("set_facecolors")(c);
+    }, py::arg("c"));
+    def("get_edgecolors", [](T& t) {
+        if constexpr (requires { t.tgt(); })
+            return colorsToPy(t.tgt().edgeColors);
+        else
+            return colorsToPy({});
+    });
+    def("set_edgecolors", [](T& t, const py::object& c) {
+        if constexpr (requires { t.tgt(); }) {
+            if (py::isinstance<py::str>(c) &&
+                c.cast<std::string>() == "face") {
+                t.tgt().edgeColors = t.tgt().faceColors;
+            } else {
+                t.tgt().edgeColors = toColorVec(c);
+            }
+            t.touch();
+        }
+    }, py::arg("c"));
+    def("set_edgecolor", [](py::object self, const py::object& c) {
+        self.attr("set_edgecolors")(c);
+    }, py::arg("c"));
+    def("get_edgecolor", [](const py::object& self) {
+        return self.attr("get_edgecolors")();
+    });
+    def("get_ec", [](const py::object& self) {
+        return self.attr("get_edgecolors")();
+    });
+    def("set_ec", [](py::object self, const py::object& c) {
+        self.attr("set_edgecolors")(c);
+    }, py::arg("c"));
+    def("set_color", [](py::object self, const py::object& c) {
+        self.attr("set_facecolors")(c);
+        self.attr("set_edgecolors")(c);
+    }, py::arg("c"));
+    def("get_linewidths", [](T& t) {
+        if constexpr (requires { t.tgt(); }) {
+            // Stored px → mpl pt on read.
+            const float inv =
+                t.ax ? 1.0f / pt2px(*t.ax) : 1.0f;
+            py::list out;
+            for (const float w : t.tgt().lineWidths)
+                out.append(w * inv);
+            return py::cast<py::object>(out);
+        }
+        return py::cast<py::object>(
+            aProp(t.props_, "linewidths", py::list()));
+    });
+    def("get_linewidth", [](const py::object& self) {
+        return self.attr("get_linewidths")();
+    });
+    def("set_linewidths", [](T& t, const py::object& w) {
+        if constexpr (requires { t.tgt(); }) {
+            // mpl linewidths are pt → stored px.
+            const float k = t.ax ? pt2px(*t.ax) : 1.0f;
+            if (py::isinstance<py::int_>(w) ||
+                py::isinstance<py::float_>(w))
+                t.tgt().lineWidths = {w.cast<float>() * k};
+            else {
+                auto ws = toFloats(w);
+                for (auto& v : ws) v *= k;
+                t.tgt().lineWidths = std::move(ws);
+            }
+            t.touch();
+        } else {
+            t.props_["linewidths"] = w;
+        }
+    }, py::arg("lw"));
+    def("set_linewidth", [](py::object self, const py::object& w) {
+        self.attr("set_linewidths")(w);
+    }, py::arg("lw"));
+    def("get_lw", [](const py::object& self) {
+        return self.attr("get_linewidths")();
+    });
+    def("set_lw", [](py::object self, const py::object& w) {
+        self.attr("set_linewidths")(w);
+    }, py::arg("lw"));
+    def("get_linestyle", [](T& t) -> py::object {
+        if constexpr (requires { t.tgt(); })
+            return py::cast<py::object>(
+                py::str(lineStyleToSpec(t.tgt().lineStyle)));
+        return aProp(t.props_, "linestyle", py::str("-"));
+    });
+    def("get_linestyles", [](const py::object& self) {
+        py::list out;
+        out.append(self.attr("get_linestyle")());
+        return out;
+    });
+    def("set_linestyle", [](T& t, const py::object& ls) {
+        if constexpr (requires { t.tgt(); }) {
+            if (auto s = plot::lineStyleFromString(
+                    ls.cast<std::string>()))
+                t.tgt().lineStyle = *s;
+            t.touch();
+        } else {
+            t.props_["linestyle"] = ls;
+            artistTouch(t);
+        }
+    }, py::arg("ls"));
+    def("set_linestyles", [](py::object self, const py::object& ls) {
+        self.attr("set_linestyle")(ls);
+    }, py::arg("ls"));
+    def("get_ls", [](const py::object& self) {
+        return self.attr("get_linestyle")();
+    });
+    def("set_ls", [](py::object self, const py::object& ls) {
+        self.attr("set_linestyle")(ls);
+    }, py::arg("ls"));
+    def("get_dashes", [](T& t) {
+        py::list out;
+        if constexpr (requires { t.tgt(); }) {
+            py::list seg;
+            for (const float d : t.tgt().dashes) seg.append(d);
+            out.append(py::make_tuple(0.0f, seg));
+        } else if (t.props_.contains("dashes")) {
+            out.append(py::make_tuple(0.0f, t.props_["dashes"]));
+        }
+        return out;
+    });
+    def("set_dashes", [](T& t, const py::object& ls) {
+        if constexpr (requires { t.tgt(); }) {
+            if (py::isinstance<py::sequence>(ls) ||
+                py::isinstance<py::array>(ls))
+                t.tgt().dashes = toFloats(ls);
+            else if (auto s = plot::lineStyleFromString(
+                         ls.cast<std::string>()))
+                t.tgt().lineStyle = *s;
+            t.touch();
+        } else {
+            t.props_["dashes"] = ls;
+            artistTouch(t);
+        }
+    }, py::arg("ls"));
+    def("get_antialiased", [](T& t) {
+        return aProp(t.props_, "antialiased", py::bool_(true));
+    });
+    def("get_antialiaseds", [](const py::object& self) {
+        py::list out;
+        out.append(self.attr("get_antialiased")());
+        return out;
+    });
+    def("set_antialiased", [](T& t, const py::object& a) {
+        t.props_["antialiased"] = a;
+        artistTouch(t);
+    }, py::arg("aa"));
+    def("set_antialiaseds", [](py::object self, const py::object& a) {
+        self.attr("set_antialiased")(a);
+    }, py::arg("aa"));
+    def("get_aa", [](const py::object& self) {
+        return self.attr("get_antialiased")();
+    });
+    def("set_aa", [](py::object self, const py::object& a) {
+        self.attr("set_antialiased")(a);
+    }, py::arg("aa"));
+    def("get_capstyle", [](T& t) {
+        return aProp(t.props_, "capstyle", py::str("butt"));
+    });
+    def("set_capstyle", [](T& t, const std::string& s) {
+        t.props_["capstyle"] = py::str(s);
+        artistTouch(t);
+    }, py::arg("cs"));
+    def("get_joinstyle", [](T& t) {
+        return aProp(t.props_, "joinstyle", py::str("round"));
+    });
+    def("set_joinstyle", [](T& t, const std::string& s) {
+        t.props_["joinstyle"] = py::str(s);
+        artistTouch(t);
+    }, py::arg("js"));
+    def("get_hatch", [](T& t) -> py::object {
+        if constexpr (requires { t.tgt(); }) {
+            if (!t.tgt().hatch.empty())
+                return py::cast<py::object>(py::str(t.tgt().hatch));
+        }
+        return aProp(t.props_, "hatch", py::none());
+    });
+    def("set_hatch", [](T& t, const py::object& h) {
+        if constexpr (requires { t.tgt(); }) {
+            t.tgt().hatch = h.is_none() ? "" : h.cast<std::string>();
+            t.touch();
+        } else {
+            t.props_["hatch"] = h;
+        }
+    }, py::arg("hatch"));
+    def("get_hatch_linewidth", [](T& t) {
+        return aProp(t.props_, "hatch_linewidth", py::float_(1.0));
+    });
+    def("set_hatch_linewidth", [](T& t, float w) {
+        t.props_["hatch_linewidth"] = py::float_(w);
+    }, py::arg("lw"));
+    def("get_fill", [](T& t) {
+        if constexpr (requires { t.tgt(); })
+            return !t.tgt().faceColors.empty() &&
+                   t.tgt().faceColors[0].a > 0;
+        return true;
+    });
+    def("get_offsets", [](T& t) {
+        py::list out;
+        if constexpr (requires { t.tgt(); })
+            for (const auto& o : t.tgt().offsets)
+                out.append(py::make_tuple(o.x, o.y));
+        return out;
+    });
+    def("set_offsets", [](T& t, const py::object& offs) {
+        if constexpr (requires { t.tgt(); }) {
+            std::vector<plot::Point2D> pts;
+            for (const auto h : py::cast<py::sequence>(offs)) {
+                auto p = toFloats(
+                    py::reinterpret_borrow<py::object>(h));
+                if (p.size() >= 2) pts.push_back({p[0], p[1]});
+            }
+            t.tgt().offsets = std::move(pts);
+            t.touch();
+        }
+    }, py::arg("offs"));
+    def("get_offset_transform", [](T& t) -> py::object {
+        if constexpr (requires { t.tgt(); }) {
+            if (t.tgt().offsetTransform)
+                return py::cast(t.tgt().offsetTransform);
+        }
+        return aProp(t.props_, "offset_transform", py::none());
+    });
+    def("set_offset_transform", [](T& t, const py::object& tr) {
+        if constexpr (requires { t.tgt(); }) {
+            if (tr.is_none()) {
+                t.tgt().offsetTransform.reset();
+            } else {
+                t.tgt().offsetTransform =
+                    tr.cast<std::shared_ptr<plot::Transform>>();
+            }
+            t.touch();
+        } else {
+            t.props_["offset_transform"] = tr;
+        }
+    }, py::arg("transOffset"));
+    def("get_transOffset", [](const py::object& self) {
+        return self.attr("get_offset_transform")();
+    });
+    def("set_transOffset", [](py::object self, const py::object& tr) {
+        self.attr("set_offset_transform")(tr);
+    }, py::arg("transOffset"));
+    def("get_transforms", [](T& t) {
+        py::list out;
+        if constexpr (requires {
+                          dynamic_cast<plot::PathCollection*>(&t.tgt());
+                      }) {
+            if (auto* pc =
+                    dynamic_cast<plot::PathCollection*>(&t.tgt()))
+                for (const auto& tr : pc->transforms)
+                    out.append(py::cast(tr));
+        }
+        return out;
+    });
+    def("get_paths", [](T& t) {
+        py::list out;
+        if constexpr (requires {
+                          dynamic_cast<plot::PathCollection*>(&t.tgt());
+                      }) {
+            if (auto* pc =
+                    dynamic_cast<plot::PathCollection*>(&t.tgt()))
+                out.append(py::cast(pc->path));
+        }
+        return out;
+    });
+    def("set_paths", [](T& t, const py::args& args) {
+        if constexpr (requires {
+                          dynamic_cast<plot::PathCollection*>(&t.tgt());
+                      }) {
+            if (auto* pc =
+                    dynamic_cast<plot::PathCollection*>(&t.tgt())) {
+                if (!args.empty()) {
+                    auto seq = py::cast<py::sequence>(
+                        py::reinterpret_borrow<py::object>(args[0]));
+                    if (seq.size() > 0)
+                        pc->path = py::cast<plot::Path>(
+                            py::reinterpret_borrow<py::object>(
+                                seq[0]));
+                    pc->markTemplateDirty();
+                }
+            }
+        }
+    });
+    def("legend_elements", [](T&) {
+        return py::make_tuple(py::list(), py::list());
+    });
+    def("get_datalim", [](T& t, const py::object&) {
+        PyBbox b = PyBbox::null();
+        if constexpr (requires { t.tgt(); }) {
+            for (const auto& o : t.tgt().offsets) {
+                b.x0 = std::min(b.x0, double(o.x));
+                b.x1 = std::max(b.x1, double(o.x));
+                b.y0 = std::min(b.y0, double(o.y));
+                b.y1 = std::max(b.y1, double(o.y));
+            }
+        }
+        return py::cast(b);
+    }, py::arg("transData") = py::none());
+}
+
+/// ── mpl AxesImage extras ───────────────────────────────────────────
+/// Interpolation/filternorm/resample bookkeeping + set_data/set_extent.
+inline void defAxesImageAPI(const py::object& cls) {
+    auto def = [&](const char* name, auto&& f, auto&&... extra) {
+        if (!py::hasattr(cls, name)) {
+            py::object cf = py::cpp_function(
+                std::forward<decltype(f)>(f), py::arg("self"),
+                std::forward<decltype(extra)>(extra)...);
+            cls.attr(name) = py::reinterpret_steal<py::object>(
+                PyInstanceMethod_New(cf.ptr()));
+        }
+    };
+    auto img = [](PyImage& t) -> plot::HeatmapPlot* {
+        return dynamic_cast<plot::HeatmapPlot*>(t.img);
+    };
+    def("get_shape", [img](PyImage& t) {
+        if (auto* h = img(t)) {
+            const auto [w, hh] = h->dims();
+            return py::make_tuple(hh, w);
+        }
+        return py::make_tuple(0, 0);
+    });
+    def("set_data", [img](PyImage& t, const py::object& a) {
+        auto rows = toRows(a);
+        const uint32_t h = uint32_t(rows.size());
+        const uint32_t w = h ? uint32_t(rows[0].size()) : 0;
+        std::vector<float> flat;
+        flat.reserve(w * h);
+        for (const auto& r : rows)
+            flat.insert(flat.end(), r.begin(), r.end());
+        if (auto* hp = img(t))
+            hp->setArrayReshaped(std::move(flat), w, h);
+        artistTouch(t);
+    }, py::arg("A"));
+    def("set_extent", [img](PyImage& t, const py::object& e) {
+        const auto v = toFloats(e);
+        if (v.size() == 4) {
+            if (auto* hp = img(t)) {
+                hp->setExtent(v[0], v[1], v[2], v[3]);
+                if (t.ax) {
+                    // mpl AxesImage.set_extent: update dataLim and set
+                    // the view limits verbatim (inverted y for
+                    // origin='upper' — sticky edges keep autoscale
+                    // from restoring the margin).
+                    const std::array<plot::Point2D, 2> corners{
+                        plot::Point2D{v[0], v[2]},
+                        plot::Point2D{v[1], v[3]}};
+                    t.ax->updateDataLim(corners);
+                    t.ax->setXbound(v[0], v[1]);
+                    t.ax->setYbound(v[2], v[3]);
+                }
+            }
+            t.props_["extent"] = e;
+            artistTouch(t);
+        }
+    }, py::arg("extent"));
+    def("get_interpolation", [img](PyImage& t) -> py::object {
+        if (auto* hp = img(t))
+            return py::cast<py::object>(
+                py::str(hp->grid().interpolation));
+        return aProp(t.props_, "interpolation", py::str("auto"));
+    });
+    def("set_interpolation", [img](PyImage& t, const py::object& s) {
+        if (auto* hp = img(t)) {
+            hp->mutableGrid().interpolation =
+                s.is_none() ? "nearest" : s.cast<std::string>();
+        }
+        t.props_["interpolation"] = s;
+        artistTouch(t);
+    }, py::arg("s"));
+    def("get_interpolation_stage", [](PyImage& t) {
+        return aProp(t.props_, "interpolation_stage", py::str("auto"));
+    });
+    def("set_interpolation_stage", [](PyImage& t, const py::object& s) {
+        t.props_["interpolation_stage"] = s;
+        artistTouch(t);
+    }, py::arg("s"));
+    def("get_filternorm", [](PyImage& t) {
+        return aProp(t.props_, "filternorm", py::bool_(true));
+    });
+    def("set_filternorm", [](PyImage& t, bool b) {
+        t.props_["filternorm"] = py::bool_(b);
+        artistTouch(t);
+    }, py::arg("filternorm"));
+    def("get_filterrad", [](PyImage& t) {
+        return aProp(t.props_, "filterrad", py::float_(4.0));
+    });
+    def("set_filterrad", [](PyImage& t, const py::object& r) {
+        t.props_["filterrad"] = r;
+        artistTouch(t);
+    }, py::arg("filterrad"));
+    def("get_resample", [](PyImage& t) {
+        return aProp(t.props_, "resample", py::bool_(false));
+    });
+    def("set_resample", [](PyImage& t, const py::object& v) {
+        t.props_["resample"] = v;
+        artistTouch(t);
+    }, py::arg("v"));
+    def("can_composite", [](PyImage&) { return true; });
+    def("make_image", [](PyImage& t, const py::args&, const py::kwargs&) {
+        // mpl returns (image, x, y) — a renderer-resolved raster. The
+        // headless pipeline rasterizes per-frame, so report identity.
+        return py::make_tuple(py::none(), 0, 0);
+    });
+    def("write_png", [](PyImage& t, const std::string& fname) {
+        // mpl AxesImage.write_png: save the colormapped array.
+        auto* hp = dynamic_cast<plot::HeatmapPlot*>(t.img);
+        if (!hp)
+            throw std::invalid_argument("write_png: no image data");
+        const auto [w, h] = hp->dims();
+        const auto& g = hp->grid();
+        const auto vr = hp->valueRange();
+        py::list rows;
+        for (uint32_t y = 0; y < h; ++y) {
+            py::list row;
+            for (uint32_t x = 0; x < w; ++x) {
+                if (!g.rgba.empty()) {
+                    const uint32_t px = g.rgba[y * w + x];
+                    row.append(py::make_tuple(
+                        (px & 0xff) / 255.0, ((px >> 8) & 0xff) / 255.0,
+                        ((px >> 16) & 0xff) / 255.0,
+                        ((px >> 24) & 0xff) / 255.0));
+                } else {
+                    const float v = g.values[y * w + x];
+                    const float t01 =
+                        vr && vr->span() > 0
+                            ? std::clamp((v - vr->min) / vr->span(),
+                                         0.0f, 1.0f)
+                            : 0.0f;
+                    row.append(colorToPy(hp->cmap()->sample(t01)));
+                }
+            }
+            rows.append(row);
+        }
+        py::module_::import("volcanoplot")
+            .attr("image")
+            .attr("imsave")(fname, rows);
+    }, py::arg("fname"));
+}
+
 } // namespace
 
 PYBIND11_MODULE(volcanoplot, m) {
     m.doc() = "VolcanoPlot — Vulkan-accelerated matplotlib-style plotting";
 
     py::class_<PyFigure, std::shared_ptr<PyFigure>>(m, "Figure")
+        // Pointer-identity equality — mpl figure() returns the same
+        // managed Figure object for a repeated num/label.
+        .def("__eq__",
+             [](const std::shared_ptr<PyFigure>& a,
+                const py::object& other) {
+                 try {
+                     auto b = other.cast<std::shared_ptr<PyFigure>>();
+                     return b && b.get() == a.get();
+                 } catch (const py::cast_error&) { return false; }
+             },
+             py::is_operator())
+        .def("__hash__", [](const std::shared_ptr<PyFigure>& f) {
+            return py::hash(py::cast(uintptr_t(f.get())));
+        })
         .def(py::init<uint32_t, uint32_t, float>(),
              py::arg("width") = 800, py::arg("height") = 600,
              py::arg("dpi") = 100.0f)
@@ -1119,10 +4970,37 @@ PYBIND11_MODULE(volcanoplot, m) {
              }),
              py::arg("figsize"), py::arg("dpi") = 100.0f)
         .def_property_readonly("stale",
-             [](const PyFigure& f) { return f.figure_.stale(); })
-        .def("add_axes", [](const std::shared_ptr<PyFigure>& f) {
-                 return wrapAxes(f, f->addAxes());
-             })
+             [](const PyFigure& f) { return f.fig().stale(); })
+        // mpl fig.number — the pyplot manager number (0 if unmanaged).
+        .def_property_readonly("number",
+             [](const PyFigure& f) { return f.num_; })
+        // mpl fig.get_label()/set_label() — the label used by
+        // plt.figure('label') lookup.
+        .def("get_label",
+             [](const PyFigure& f) { return f.label_; })
+        .def("set_label",
+             [](const std::shared_ptr<PyFigure>& f,
+                const std::string& s) {
+                 f->label_ = s;
+                 for (auto& e : gFigReg)
+                     if (e.fig == f) e.label = s;
+             },
+             py::arg("s"))
+        .def("add_axes",
+             [](const std::shared_ptr<PyFigure>& f,
+                const py::object& rect) {
+                 // mpl fig.add_axes([left, bottom, width, height]) in
+                 // figure fractions; add_axes() → default full axes.
+                 if (rect.is_none())
+                     return wrapAxes(f, f->addAxes());
+                 auto r = rect.cast<std::vector<float>>();
+                 if (r.size() != 4)
+                     throw std::invalid_argument(
+                         "add_axes: rect must be [left, bottom, w, h]");
+                 return wrapAxes(
+                     f, f->addAxesFraction(r[0], r[1], r[2], r[3]));
+             },
+             py::arg("rect") = py::none())
         .def("add_axes_fraction",
              [](const std::shared_ptr<PyFigure>& f, float l, float b,
                 float w, float h) {
@@ -1133,9 +5011,25 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("add_subplot",
              [](const std::shared_ptr<PyFigure>& f, const py::object& a,
                 const py::object& b, const py::object& c,
-                const py::object& projection) {
+                const py::object& projection, const py::object& sharex,
+                const py::object& sharey) {
+                 // mpl fig.add_subplot(gs[i, j]) — a SubplotSpec arg.
+                 const PySubplotSpec* ss = nullptr;
+                 try { ss = a.cast<const PySubplotSpec*>(); }
+                 catch (const py::cast_error&) {}
+                 if (ss) {
+                     auto ax = wrapAxes(f, f->fig().addAxes(ss->spec));
+                     ax.gsKeepAlive = ss->gs;
+                     if (!projection.is_none())
+                         ax.ax->setProjection(
+                             projection.cast<std::string>());
+                     return ax;
+                 }
                  uint32_t nrows, ncols, index;
-                 if (b.is_none()) {
+                 if (a.is_none()) {
+                     // mpl: bare add_subplot() == add_subplot(111).
+                     nrows = ncols = index = 1;
+                 } else if (b.is_none()) {
                      // mpl 3-digit shorthand: add_subplot(231).
                      int code = a.cast<int>();
                      if (code < 100 || code > 999)
@@ -1152,30 +5046,130 @@ PYBIND11_MODULE(volcanoplot, m) {
                  if (index < 1 || index > nrows * ncols)
                      throw std::invalid_argument(
                          "add_subplot index out of range");
-                 // mpl index is 1-based, row-major.
+                 // mpl index is 1-based, row-major. Identical args reuse
+                 // the existing axes (mpl add_subplot dedup).
                  uint32_t r = (index - 1) / ncols, col = (index - 1) % ncols;
-                 auto ax = wrapAxes(
-                     f, f->figure_.subplot2grid({nrows, ncols}, {r, col}));
-                 if (!projection.is_none())
-                     ax.ax->setProjection(
-                         projection.cast<std::string>());
+                 auto ax = subplotAt(f, nrows, ncols, r, col,
+                                     projection.is_none()
+                                         ? ""
+                                         : projection.cast<std::string>());
+                 if (!sharex.is_none())
+                     ax.ax->shareX(*sharex.cast<PyAxes>().ax);
+                 if (!sharey.is_none())
+                     ax.ax->shareY(*sharey.cast<PyAxes>().ax);
                  return ax;
              },
-             py::arg("nrows"), py::arg("ncols") = py::none(),
+             py::arg("nrows") = py::none(),
+             py::arg("ncols") = py::none(),
              py::arg("index") = py::none(),
              py::arg("projection") = py::none(),
+             py::arg("sharex") = py::none(), py::arg("sharey") = py::none(),
              "mpl fig.add_subplot(111) or add_subplot(nrows, ncols, index).")
         .def("subplot2grid",
              [](const std::shared_ptr<PyFigure>& f,
                 std::pair<uint32_t, uint32_t> shape,
                 std::pair<uint32_t, uint32_t> loc, uint32_t rowspan,
                 uint32_t colspan) {
-                 return wrapAxes(f, f->figure_.subplot2grid(shape, loc,
+                 return wrapAxes(f, f->fig().subplot2grid(shape, loc,
                                                             rowspan,
                                                             colspan));
              },
              py::arg("shape"), py::arg("loc"), py::arg("rowspan") = 1,
              py::arg("colspan") = 1)
+        // mpl fig.add_gridspec(rows, cols, **kw) → figure-bound GridSpec.
+        .def("add_gridspec",
+             [](std::shared_ptr<PyFigure> f, uint32_t rows,
+                uint32_t cols, const py::kwargs& kw)
+                 -> std::shared_ptr<PyGridSpec> {
+                 auto g = std::make_shared<plot::GridSpec>(rows, cols);
+                 auto setF = [&](const char* k, float& v) {
+                     if (kw && kw.contains(k) && !kw[k].is_none())
+                         v = kw[k].cast<float>();
+                 };
+                 setF("left", g->left); setF("right", g->right);
+                 setF("bottom", g->bottom); setF("top", g->top);
+                 setF("wspace", g->wspace); setF("hspace", g->hspace);
+                 if (kw && kw.contains("width_ratios") &&
+                     !kw["width_ratios"].is_none())
+                     g->widthRatios = toFloats(kw["width_ratios"]);
+                 if (kw && kw.contains("height_ratios") &&
+                     !kw["height_ratios"].is_none())
+                     g->heightRatios = toFloats(kw["height_ratios"]);
+                 return std::make_shared<PyGridSpec>(
+                     PyGridSpec{f, std::move(g), nullptr});
+             },
+             py::arg("nrows"), py::arg("ncols") = 1)
+        // mpl fig.subplots(nrows, ncols, sharex=, sharey=, squeeze=).
+        .def("subplots",
+             [](const std::shared_ptr<PyFigure>& f, int nrows, int ncols,
+                const py::object& sharex, const py::object& sharey,
+                bool squeeze) -> py::object {
+                 std::string sx = py::isinstance<py::bool_>(sharex)
+                     ? (sharex.cast<bool>() ? "all" : "none")
+                     : sharex.cast<std::string>();
+                 std::string sy = py::isinstance<py::bool_>(sharey)
+                     ? (sharey.cast<bool>() ? "all" : "none")
+                     : sharey.cast<std::string>();
+                 std::vector<std::vector<plot::Axes*>> grid(
+                     nrows, std::vector<plot::Axes*>(ncols));
+                 for (int r = 0; r < nrows; ++r)
+                     for (int c = 0; c < ncols; ++c)
+                         grid[r][c] = f->fig().subplot2grid(
+                             {uint32_t(nrows), uint32_t(ncols)},
+                             {uint32_t(r), uint32_t(c)});
+                 // mpl sharex/sharey: 'all' links every axes to the
+                 // first; 'col' shares within a column; 'row' within a
+                 // row; 'none'/False independent.
+                 if (sx == "all" || sx == "true")
+                     for (int r = 0; r < nrows; ++r)
+                         for (int c = 0; c < ncols; ++c)
+                             if (r || c) grid[r][c]->shareX(*grid[0][0]);
+                 if (sy == "all" || sy == "true")
+                     for (int r = 0; r < nrows; ++r)
+                         for (int c = 0; c < ncols; ++c)
+                             if (r || c) grid[r][c]->shareY(*grid[0][0]);
+                 if (sx == "col")
+                     for (int r = 1; r < nrows; ++r)
+                         for (int c = 0; c < ncols; ++c)
+                             grid[r][c]->shareX(*grid[0][c]);
+                 if (sy == "row")
+                     for (int r = 0; r < nrows; ++r)
+                         for (int c = 1; c < ncols; ++c)
+                             grid[r][c]->shareY(*grid[r][0]);
+                 // wrapAxes marks each new axes current; restore the
+                 // first (mpl sets axes[0] current).
+                 std::vector<std::vector<PyAxes>> pax;
+                 for (auto& row : grid) {
+                     pax.emplace_back();
+                     for (auto* a : row)
+                         pax.back().push_back(wrapAxes(f, a));
+                 }
+                 f->currentAx_ = grid[0][0];
+                 auto np = py::module_::import("numpy");
+                 py::object arr;
+                 if (nrows == 1) {
+                     py::list l;
+                     for (auto& a : pax[0]) l.append(py::cast(a));
+                     arr = np.attr("array")(l, py::arg("dtype") =
+                                               np.attr("object_"));
+                 } else {
+                     py::list rows;
+                     for (auto& row : pax) {
+                         py::list l;
+                         for (auto& a : row) l.append(py::cast(a));
+                         rows.append(l);
+                     }
+                     arr = np.attr("array")(rows, py::arg("dtype") =
+                                                    np.attr("object_"));
+                 }
+                 if (!squeeze) return arr;
+                 if (nrows == 1 && ncols == 1)
+                     return py::cast(pax[0][0]);
+                 return np.attr("squeeze")(arr);
+             },
+             py::arg("nrows") = 1, py::arg("ncols") = 1,
+             py::arg("sharex") = false, py::arg("sharey") = false,
+             py::arg("squeeze") = true)
         .def("subplot_mosaic",
              [](const std::shared_ptr<PyFigure>& f,
                 const py::object& mosaic) {
@@ -1208,7 +5202,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                      }
                  }
                  py::dict out;
-                 for (auto& [k, v] : f->figure_.subplotMosaic(layout))
+                 for (auto& [k, v] : f->fig().subplotMosaic(layout))
                      out[py::str(k)] = wrapAxes(f, v);
                  return out;
              },
@@ -1216,13 +5210,15 @@ PYBIND11_MODULE(volcanoplot, m) {
              "mpl fig.subplot_mosaic — returns {label: Axes}.")
         .def("colorbar",
              [](const std::shared_ptr<PyFigure>& f,
-                const py::object& axObj, const std::string& orientation,
+                const py::object& mappable, const py::object& axObj,
+                const std::string& orientation,
                 float fraction, float pad, float shrink, float aspect,
-                const std::string& label) {
+                const std::string& label, const std::string& extend,
+                const py::object& ticks) {
                  plot::Axes* target = nullptr;
                  if (!axObj.is_none())
                      target = axObj.cast<PyAxes>().ax;
-                 else if (auto all = f->figure_.allAxes(); !all.empty())
+                 else if (auto all = f->fig().allAxes(); !all.empty())
                      target = all.back();
                  if (!target)
                      throw std::invalid_argument(
@@ -1235,51 +5231,526 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cb.shrink = shrink;
                  if (aspect > 0.0f) cb.aspect = aspect;
                  if (!label.empty()) cb.label = label;
+                 cb.extend = extend;
+                 if (!mappable.is_none()) {
+                     plot::IPlot* mp = mappableFrom(mappable);
+                     if (!mp)
+                         throw std::invalid_argument(
+                             "colorbar: mappable must be an artist "
+                             "handle (image, collection, ...)");
+                     cb.mappable = mp;
+                 }
+                 if (!ticks.is_none()) cb.ticks = toFloats(ticks);
                  target->touch();
+                 auto cbh = py::cast(PyColorbar{f, target, mappable});
+                 // mpl: mappable.colorbar is the Colorbar created by
+                 // fig.colorbar(mappable).
+                 if (!mappable.is_none() &&
+                     py::hasattr(mappable, "_set_colorbar"))
+                     mappable.attr("_set_colorbar")(cbh);
+                 return cbh;
              },
+             py::arg("mappable") = py::none(),
              py::arg("ax") = py::none(),
              py::arg("orientation") = "vertical",
              py::arg("fraction") = 0.15f, py::arg("pad") = 0.05f,
              py::arg("shrink") = 1.0f, py::arg("aspect") = -1.0f,
-             py::arg("label") = "",
-             "mpl fig.colorbar(ax=...) — strip for the axes' "
-             "colormapped plot.")
-        .def("suptitle", [](PyFigure& f, std::string t) {
-                 f.figure_.suptitle(std::move(t));
-             })
-        .def("supxlabel", [](PyFigure& f, std::string t) {
-                 f.figure_.supxlabel(std::move(t));
-             })
-        .def("supylabel", [](PyFigure& f, std::string t) {
-                 f.figure_.supylabel(std::move(t));
-             })
-        .def("legend", [](PyFigure& f, std::string loc) {
-                 f.figure_.legend(loc);
+             py::arg("label") = "", py::arg("extend") = "neither",
+             py::arg("ticks") = py::none(),
+             "mpl fig.colorbar(mappable, ax=...) — returns a Colorbar.")
+        .def("suptitle",
+             [](const std::shared_ptr<PyFigure>& f, std::string t,
+                const py::kwargs& kw) {
+                 f->fig().suptitle(std::move(t));
+                 auto& font = f->fig().style().title.font;
+                 applyFontKwargs(font, kw);
+                 if (kw && kw.contains("color"))
+                     f->fig().style().title.color =
+                         parseColor(kw["color"]);
+                 // mpl returns the suptitle Text artist — expose a
+                 // TitleText-style handle over the figure title.
+                 return PyTitle{f, nullptr};
              },
-             py::arg("loc") = "upper right",
+             py::arg("t"))
+        .def("supxlabel",
+             [](const std::shared_ptr<PyFigure>& f, std::string t,
+                const py::kwargs& kw) {
+                 f->fig().supxlabel(std::move(t));
+                 applyFontKwargs(f->fig().supXlabelFont, kw);
+                 if (kw && kw.contains("color"))
+                     f->fig().supXlabelColor = parseColor(kw["color"]);
+                 return PyTitle{f, nullptr, PyTitle::Which::SupX};
+             },
+             py::arg("t"))
+        .def("supylabel",
+             [](const std::shared_ptr<PyFigure>& f, std::string t,
+                const py::kwargs& kw) {
+                 f->fig().supylabel(std::move(t));
+                 applyFontKwargs(f->fig().supYlabelFont, kw);
+                 if (kw && kw.contains("color"))
+                     f->fig().supYlabelColor = parseColor(kw["color"]);
+                 return PyTitle{f, nullptr, PyTitle::Which::SupY};
+             },
+             py::arg("t"))
+        .def("legend",
+             [](const std::shared_ptr<PyFigure>& f, py::args args,
+                py::kwargs kw) {
+                 auto& ls = f->fig().figureLegend();
+                 ls.visible = true;
+                 py::dict kwd = kw ? py::dict(kw) : py::dict();
+                 if (args.size() >= 1 && !kwd.contains("handles") &&
+                     !kwd.contains("labels")) {
+                     auto v = py::reinterpret_borrow<py::object>(args[0]);
+                     bool labelsForm = py::isinstance<py::sequence>(v) &&
+                         !py::isinstance<py::str>(v);
+                     if (labelsForm && py::len(v) > 0) {
+                         auto first = py::reinterpret_borrow<py::object>(
+                             v[py::int_(0)]);
+                         labelsForm = py::isinstance<py::str>(first);
+                     }
+                     if (labelsForm) kwd["labels"] = v;
+                     else kwd["handles"] = v;
+                 }
+                 if (args.size() >= 2 && !kwd.contains("labels"))
+                     kwd["labels"] =
+                         py::reinterpret_borrow<py::object>(args[1]);
+                 applyLegendKwargs(ls, kwd, f->fig().style().faceColor,
+                                   f->fig().style().edgeColor);
+                 return PyLegend{f, nullptr};
+             },
              "Figure-level legend collecting all axes' handles.")
         .def("tight_layout", [](PyFigure& f) {
-                 f.figure_.setTightLayout(true); })
+                 f.fig().setTightLayout(true); })
         .def("constrained_layout", [](PyFigure& f) {
-                 f.figure_.setConstrainedLayout(true); })
+                 f.fig().setConstrainedLayout(true); })
         .def("subplots_adjust",
              [](PyFigure& f, float left, float bottom, float right,
                 float top, float wspace, float hspace) {
-                 f.figure_.subplotsAdjust(left, bottom, right, top,
+                 f.fig().subplotsAdjust(left, bottom, right, top,
                                           wspace, hspace);
              },
              py::arg("left") = 0.125f, py::arg("bottom") = 0.11f,
              py::arg("right") = 0.9f, py::arg("top") = 0.88f,
              py::arg("wspace") = 0.2f, py::arg("hspace") = 0.2f)
-        .def("align_labels", [](PyFigure& f) { f.figure_.alignLabels(); })
-        .def("align_xlabels", [](PyFigure& f) { f.figure_.alignXlabels(); })
-        .def("align_ylabels", [](PyFigure& f) { f.figure_.alignYlabels(); })
+        // mpl fig.transFigure / dpi_scale_trans — figure fraction /
+        // points → display pixels.
+        .def_property_readonly("transFigure",
+            [](PyFigure& f) {
+                 ensureLayout(f);
+                 return f.fig().transFigure();
+             })
+        .def_property_readonly("dpi_scale_trans",
+            [](PyFigure& f) {
+                float dpi = f.fig().style().dpi;
+                return std::make_shared<plot::Affine2D>(
+                    plot::Affine2D::scale(dpi, dpi));
+            })
+        // mpl fig.text — figure-fraction text artist.
+        .def("text",
+             [](const std::shared_ptr<PyFigure>& f, float x, float y,
+                const std::string& s, const py::kwargs& kw) {
+                 auto& t = f->fig().text(x, y, s);
+                 if (kw) {
+                     if (kw.contains("fontsize") || kw.contains("size")) {
+                         auto v = kw.contains("fontsize")
+                                      ? kw["fontsize"] : kw["size"];
+                         if (float fs = fontSizePt(v); fs > 0.0f)
+                             t.fontSize = fs;
+                     }
+                     if (kw.contains("color"))
+                         if (auto c = parseColor(kw["color"]); c.a > 0)
+                             t.color = c;
+                     if (kw.contains("ha") || kw.contains("horizontalalignment")) {
+                         auto v = kw.contains("ha") ? kw["ha"]
+                                      : kw["horizontalalignment"];
+                         t.halign = parseHAlign(v.cast<std::string>());
+                     }
+                     if (kw.contains("va") || kw.contains("verticalalignment")) {
+                         auto v = kw.contains("va") ? kw["va"]
+                                      : kw["verticalalignment"];
+                         t.valign = parseVAlign(v.cast<std::string>());
+                     }
+                     if (kw.contains("rotation"))
+                         t.rotation = rotationDeg(kw["rotation"]) *
+                                      float(M_PI) / 180.0f;
+                     if (kw.contains("transform"))
+                         t.transform =
+                             kw["transform"].cast<plot::TransformPtr>();
+                     // mpl fontproperties/fontfamily/… kwargs.
+                     applyFontKwargs(t.font, kw);
+                     applyTextKwargs(t, kw);
+                     if (kw.contains("fontsize") || kw.contains("size") ||
+                         kw.contains("fontproperties") ||
+                         kw.contains("font_properties"))
+                         t.fontSize = t.font.size;
+                 }
+                 return PyText{f, nullptr, &t};
+             },
+             py::arg("x"), py::arg("y"), py::arg("s"))
+        .def_property_readonly("texts",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 py::list out;
+                 for (auto& t : f->fig().texts())
+                     if (!t.detached)
+                         out.append(py::cast(PyText{f, nullptr, &t}));
+                 return out;
+             })
+        // mpl fig.axes / get_axes — all axes in creation order.
+        .def_property_readonly("axes",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 py::list out;
+                 for (auto* ax : f->fig().allAxes())
+                     out.append(py::cast(PyAxes{f, ax}));
+                 return out;
+             })
+        .def("get_axes",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 py::list out;
+                 for (auto* ax : f->fig().allAxes())
+                     out.append(py::cast(PyAxes{f, ax}));
+                 return out;
+             })
+        // mpl fig.clf / clear — drop all axes and figure artists.
+        .def("clf",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 f->fig().clear();
+                 f->currentAx_ = nullptr;
+                 f->containers_.clear();
+                 f->tables_.clear();
+             })
+        .def("clear",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 f->fig().clear();
+                 f->currentAx_ = nullptr;
+                 f->containers_.clear();
+                 f->tables_.clear();
+             })
+        // mpl fig.gca / sca — per-figure current-axes stack.
+        .def("gca",
+             [](const std::shared_ptr<PyFigure>& f) -> py::object {
+                 if (f->currentAx_)
+                     return py::cast(PyAxes{f, f->currentAx_});
+                 auto axs = f->fig().allAxes();
+                 if (!axs.empty()) {
+                     f->currentAx_ = axs.back();
+                     return py::cast(PyAxes{f, axs.back()});
+                 }
+                 // mpl creates an axes when the figure has none.
+                 auto ax = wrapAxes(f, f->fig().addAxes(0, 0));
+                 return py::cast(ax);
+             })
+        .def("sca",
+             [](const std::shared_ptr<PyFigure>& f, PyAxes& a) {
+                 if (a.owner != f)
+                     throw std::invalid_argument(
+                         "sca: axes belongs to a different figure");
+                 f->currentAx_ = a.ax;
+             },
+             py::arg("ax"))
+        .def("delaxes",
+             [](PyFigure& f, PyAxes& a) {
+                 auto owned = f.fig().removeAxes(a.ax);
+                 if (a.ax == f.currentAx_) f.currentAx_ = nullptr;
+                 if (owned) a.owned = std::move(owned);
+             },
+             py::arg("ax"))
+        // mpl fig.subplotpars — view over the top-level GridSpec.
+        .def_property_readonly("subplotpars",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 return PySubplotParams{f};
+             })
+        // mpl subfigures — fig.subfigures(rows, cols) /
+        // add_subfigure(spec).
+        .def("subfigures",
+             [](std::shared_ptr<PyFigure> f, uint32_t rows,
+                uint32_t cols) {
+                 py::list out;
+                 for (auto* sf : f->fig().subfigures(rows, cols))
+                     out.append(py::cast(PyFigure::subview(f, sf)));
+                 return out;
+             },
+             py::arg("nrows") = 1, py::arg("ncols") = 1)
+        .def("add_subfigure",
+             [](std::shared_ptr<PyFigure> f, const PySubplotSpec& s) {
+                 return PyFigure::subview(f,
+                                          f->fig().addSubfigure(s.spec));
+             },
+             py::arg("subplotspec"))
+        .def("get_suptitle",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 return PyTitle{f, nullptr};
+             })
+        .def("get_supxlabel",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 return PyTitle{f, nullptr, PyTitle::Which::SupX};
+             })
+        .def("get_supylabel",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 return PyTitle{f, nullptr, PyTitle::Which::SupY};
+             })
+        .def("set_tight_layout",
+             [](PyFigure& f, bool on) { f.fig().setTightLayout(on); },
+             py::arg("tight"))
+        .def("get_tight_layout",
+             [](const PyFigure& f) { return f.fig().tightLayout(); })
+        .def("set_constrained_layout",
+             [](PyFigure& f, bool on) {
+                 f.fig().setConstrainedLayout(on);
+             },
+             py::arg("constrained"))
+        .def("get_constrained_layout",
+             [](const PyFigure& f) {
+                 return f.fig().constrainedLayout();
+             })
+        // mpl fig.set_layout_engine('tight'|'constrained'|'none').
+        .def("set_layout_engine",
+             [](PyFigure& f, const py::object& engine) {
+                 std::string e =
+                     engine.is_none() ? "none"
+                     : engine.cast<std::string>();
+                 f.fig().setTightLayout(e == "tight");
+                 f.fig().setConstrainedLayout(e == "constrained");
+                 if (e != "none" && e != "tight" && e != "constrained")
+                     throw py::value_error(
+                         "unknown layout engine: " + e);
+             },
+             py::arg("engine") = py::none())
+        .def("get_layout_engine",
+             [](const PyFigure& f) -> py::object {
+                 if (f.fig().tightLayout())
+                     return py::str("tight");
+                 if (f.fig().constrainedLayout())
+                     return py::str("constrained");
+                 return py::none();
+             })
+        .def("get_constrained_layout_pads",
+             [](const PyFigure&) {
+                 // mpl returns (w_pad, h_pad, wspace, hspace) in inches
+                 // — our constrained layout uses fixed defaults.
+                 return py::make_tuple(0.04167, 0.04167, 0.02, 0.02);
+             })
+        // mpl Figure artist state — figures are always visible and
+        // above the canvas patch.
+        .def("get_visible", [](const PyFigure&) { return true; })
+        .def("set_visible", [](PyFigure&, bool) {})
+        .def("get_zorder", [](const PyFigure&) { return 0.0f; })
+        .def("set_zorder", [](PyFigure&, float) {})
+        .def("get_figwidth",
+             [](PyFigure& f) {
+                 return f.backend()->extent().width /
+                        f.fig().style().dpi;
+             })
+        .def("get_figheight",
+             [](PyFigure& f) {
+                 return f.backend()->extent().height /
+                        f.fig().style().dpi;
+             })
+        .def("contains",
+             [](PyFigure& f, const py::object& mouseevent) {
+                 // mpl Figure.contains — any point inside the canvas.
+                 float x = float(mouseevent.attr("x").cast<double>());
+                 float y = float(mouseevent.attr("y").cast<double>());
+                 auto e = f.backend()->extent();
+                 return py::make_tuple(
+                     x >= 0 && y >= 0 && x <= e.width && y <= e.height,
+                     py::dict());
+             })
+        .def("findobj",
+             [](const std::shared_ptr<PyFigure>& f,
+                const py::object& match) {
+                 // mpl findobj — all artists whose properties match.
+                 py::list out;
+                 for (auto* ax : f->fig().allAxes())
+                     out.append(py::cast(PyAxes{f, ax}));
+                 for (auto& t : f->fig().texts())
+                     if (!t.detached)
+                         out.append(py::cast(PyText{f, nullptr, &t}));
+                 return out;
+             },
+             py::arg("match") = py::none())
+        .def("get_children",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 py::list out;
+                 for (auto* ax : f->fig().allAxes())
+                     out.append(py::cast(PyAxes{f, ax}));
+                 for (auto& t : f->fig().texts())
+                     if (!t.detached)
+                         out.append(py::cast(PyText{f, nullptr, &t}));
+                 return out;
+             })
+        .def("get_default_bbox_extra_artists",
+             [](const std::shared_ptr<PyFigure>& f) {
+                 py::list out;
+                 for (auto& t : f->fig().texts())
+                     if (!t.detached)
+                         out.append(py::cast(PyText{f, nullptr, &t}));
+                 return out;
+             })
+        .def("get_tightbbox",
+             [](PyFigure& f, const py::object&, bool) {
+                 // mpl Figure.get_tightbbox — union of axes tightbboxes;
+                 // approximate with the figure rect plus margins.
+                 ensureLayout(f);
+                 auto e = f.backend()->extent();
+                 return PyBbox{0.0, 0.0, double(e.width),
+                               double(e.height)};
+             },
+             py::arg("renderer") = py::none(),
+             py::arg("for_layout_only") = false)
+        .def("get_window_extent",
+             [](PyFigure& f, const py::object&) {
+                 auto e = f.backend()->extent();
+                 return PyBbox{0.0, 0.0, double(e.width),
+                               double(e.height)};
+             },
+             py::arg("renderer") = py::none())
+        .def("draw",
+             [](PyFigure& f) { f.renderer()->renderFrame(f.fig()); })
+                .def("align_labels", [](PyFigure& f) { f.fig().alignLabels(); })
+        .def("align_xlabels", [](PyFigure& f) { f.fig().alignXlabels(); })
+        .def("align_ylabels", [](PyFigure& f) { f.fig().alignYlabels(); })
+        // ── mpl figure geometry: inches × dpi = canvas pixels ──
+        .def("get_size_inches",
+             [](PyFigure& f) {
+                 auto e = f.backend()->extent();
+                 float dpi = f.fig().style().dpi;
+                 return py::make_tuple(e.width / dpi, e.height / dpi);
+             },
+             "mpl fig.get_size_inches() → (w, h) in inches.")
+        .def("set_size_inches",
+             [](PyFigure& f, const py::object& w,
+                const py::object& h, bool forward) {
+                 float wi, hi;
+                 if (py::isinstance<py::sequence>(w) &&
+                     !py::isinstance<py::str>(w)) {
+                     auto s = w.cast<std::pair<float, float>>();
+                     wi = s.first;
+                     hi = h.is_none() ? s.second : h.cast<float>();
+                 } else {
+                     wi = w.cast<float>();
+                     hi = h.is_none() ? wi : h.cast<float>();
+                 }
+                 if (forward) {
+                     float dpi = f.fig().style().dpi;
+                     f.backend()->resize(uint32_t(wi * dpi + 0.5f),
+                                        uint32_t(hi * dpi + 0.5f));
+                 }
+                 f.fig().markStale();
+             },
+             py::arg("w"), py::arg("h") = py::none(),
+             py::arg("forward") = true,
+             "mpl fig.set_size_inches(w, h, forward=True) — resizes the "
+             "canvas to w×h inches at the current dpi.")
+        .def("get_figwidth",
+             [](PyFigure& f) {
+                 return f.backend()->extent().width /
+                        f.fig().style().dpi;
+             })
+        .def("get_figheight",
+             [](PyFigure& f) {
+                 return f.backend()->extent().height /
+                        f.fig().style().dpi;
+             })
+        .def("set_figwidth",
+             [](PyFigure& f, float val, bool forward) {
+                 auto e = f.backend()->extent();
+                 float dpi = f.fig().style().dpi;
+                 if (forward)
+                     f.backend()->resize(uint32_t(val * dpi + 0.5f),
+                                        e.height);
+                 f.fig().markStale();
+             },
+             py::arg("val"), py::arg("forward") = true)
+        .def("set_figheight",
+             [](PyFigure& f, float val, bool forward) {
+                 auto e = f.backend()->extent();
+                 float dpi = f.fig().style().dpi;
+                 if (forward)
+                     f.backend()->resize(e.width,
+                                        uint32_t(val * dpi + 0.5f));
+                 f.fig().markStale();
+             },
+             py::arg("val"), py::arg("forward") = true)
+        // mpl fig.dpi — display resolution; set_dpi rescales the canvas
+        // (inches stay fixed, pixels change).
+        .def("get_dpi",
+             [](PyFigure& f) { return f.fig().style().dpi; })
+        .def("set_dpi",
+             [](PyFigure& f, float val) {
+                 auto e = f.backend()->extent();
+                 float old = f.fig().style().dpi;
+                 float wi = e.width / old, hi = e.height / old;
+                 f.fig().style().dpi = val;
+                 f.backend()->resize(uint32_t(wi * val + 0.5f),
+                                    uint32_t(hi * val + 0.5f));
+                 f.fig().markStale();
+             },
+             py::arg("val"))
+        .def_property("dpi",
+             [](PyFigure& f) { return f.fig().style().dpi; },
+             [](PyFigure& f, float val) {
+                 auto e = f.backend()->extent();
+                 float old = f.fig().style().dpi;
+                 f.fig().style().dpi = val;
+                 f.backend()->resize(uint32_t(e.width / old * val + 0.5f),
+                                    uint32_t(e.height / old * val + 0.5f));
+                 f.fig().markStale();
+             })
+        // ── mpl figure patch: facecolor / edgecolor / frameon ──
+        .def("set_facecolor",
+             [](PyFigure& f, const py::object& c) {
+                 if (py::isinstance<py::str>(c) &&
+                     c.cast<std::string>() == "none")
+                     f.fig().style().faceColor =
+                         plot::Color::transparent();
+                 else
+                     f.fig().style().faceColor = parseColor(c);
+                 f.fig().markStale();
+             },
+             py::arg("color"))
+        .def("get_facecolor",
+             [](PyFigure& f) {
+                 auto c = f.fig().style().faceColor;
+                 return py::make_tuple(c.r, c.g, c.b, c.a);
+             })
+        .def("set_edgecolor",
+             [](PyFigure& f, const py::object& c) {
+                 if (py::isinstance<py::str>(c) &&
+                     c.cast<std::string>() == "none")
+                     f.fig().style().edgeColor =
+                         plot::Color::transparent();
+                 else
+                     f.fig().style().edgeColor = parseColor(c);
+                 f.fig().markStale();
+             },
+             py::arg("color"))
+        .def("get_edgecolor",
+             [](PyFigure& f) {
+                 auto c = f.fig().style().edgeColor;
+                 return py::make_tuple(c.r, c.g, c.b, c.a);
+             })
+        .def("set_frameon",
+             [](PyFigure& f, bool b) {
+                 f.fig().style().frameOn = b;
+                 f.fig().markStale();
+             },
+             py::arg("b"))
+        .def("get_frameon",
+             [](PyFigure& f) { return f.fig().style().frameOn; })
+        .def("get_window_extent",
+             [](PyFigure& f, const py::object&) {
+                 auto e = f.backend()->extent();
+                 return py::make_tuple(0.0f, 0.0f, float(e.width),
+                                       float(e.height));
+             },
+             py::arg("renderer") = py::none(),
+             "mpl fig.get_window_extent() → (x0, y0, w, h) in display px.")
         // mpl fig.autofmt_xdate: rotate x tick labels (30° right-aligned
         // by default) so date labels don't overlap.
         .def("autofmt_xdate",
              [](PyFigure& f, float rotation, const std::string& ha,
                 const std::string& which) {
-                 for (auto* ax : f.figure_.allAxes()) {
+                 for (auto* ax : f.fig().allAxes()) {
                      auto& xf = ax->style().xAxis.tickFont;
                      xf.rotation = rotation * float(M_PI) / 180.0f;
                      if (ha == "right") xf.halign = plot::HAlign::Right;
@@ -1293,7 +5764,8 @@ PYBIND11_MODULE(volcanoplot, m) {
         // mpl fig.figimage(Z, xo, yo): pixel-space RGBA overlay that
         // ignores axes coordinates (watermarks, logos).
         .def("figimage",
-             [](PyFigure& f, const py::object& img, uint32_t xo,
+             [](const std::shared_ptr<PyFigure>& f,
+                const py::object& img, uint32_t xo,
                 uint32_t yo, const std::string& cmap,
                 const py::object& vmin, const py::object& vmax) {
                  auto im = toRgbaImage(img, cmap, vmin, vmax);
@@ -1301,12 +5773,16 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.x = xo; cfg.y = yo;
                  // FigImagePlot draws in figure pixels regardless of the
                  // owning axes' viewport — attach to the first axes.
-                 auto* ax = f.figure_.allAxes().empty()
-                                ? f.addAxes()
-                                : f.figure_.allAxes().front();
-                 ax->addPlot(std::make_unique<plot::FigImagePlot>(
-                     std::move(im.px), im.w, im.h, cfg));
+                 auto* ax = f->fig().allAxes().empty()
+                                ? f->addAxes()
+                                : f->fig().allAxes().front();
+                 auto* p = ax->addPlot(
+                     std::make_unique<plot::FigImagePlot>(
+                         std::move(im.px), im.w, im.h, cfg));
                  ax->touch();
+                 auto h = py::cast(PyImage{f, ax, p});
+                 f->currentMappable_[ax] = h;
+                 return h;
              },
              py::arg("X"), py::arg("xo") = 0, py::arg("yo") = 0,
              py::arg("cmap") = "viridis", py::arg("vmin") = py::none(),
@@ -1319,7 +5795,7 @@ PYBIND11_MODULE(volcanoplot, m) {
         /// display/SDL build.
         .def("show",
              [](std::shared_ptr<PyFigure> f) {
-                 auto ext = f->backend_->extent();
+                 auto ext = f->backend()->extent();
                  backend::BackendDesc desc;
                  desc.width = ext.width;
                  desc.height = ext.height;
@@ -1330,25 +5806,152 @@ PYBIND11_MODULE(volcanoplot, m) {
                      throw std::runtime_error(
                          "screen backend unavailable (no display/SDL)");
                  render::Renderer r(*win);
-                 r.prepare(f->figure_);
-                 auto& nav = f->figure_.nav();
+                 r.prepare(f->fig());
+                 auto& nav = f->fig().nav();
                  nav.scrollZoom = true;
                  bool running = true;
                  nav.onQuitRequest = [&] { running = false; };
                  nav.onFullscreenToggle = [&] { win->toggleFullscreen(); };
                  nav.onSaveRequest = [&] {
-                     r.savefig(f->figure_, "volcano_screen.png");
+                     r.savefig(f->fig(), "volcano_screen.png");
                  };
                  {
                      py::gil_scoped_release release;
                      while (running && win->pollEvents()) {
-                         if (!r.processInput(f->figure_)) break;
-                         r.renderFrame(f->figure_);
+                         if (!r.processInput(f->fig())) break;
+                         r.renderFrame(f->fig());
                      }
                  }
              })
-        .def("savefig", &PyFigure::savefig, py::arg("path"),
-             "Render and save (png/webp/bmp/jpg/tiff/pdf/svg/eps).");
+        .def("savefig",
+             [](const std::shared_ptr<PyFigure>& f,
+                const std::string& path, const py::object& transparent,
+                const py::object& dpi, const py::object& format,
+                const py::object& metadata, const py::object& bboxInches,
+                float padInches, const py::object& facecolor,
+                const py::object& edgecolor, const py::kwargs& kw) {
+                 auto opts = makeSaveOptions(f->fig(), transparent, dpi,
+                                             format, metadata, bboxInches,
+                                             padInches, facecolor,
+                                             edgecolor, kw);
+                 return f->savefig(path, opts);
+             },
+             py::arg("fname"), py::arg("transparent") = py::none(),
+             py::arg("dpi") = py::none(), py::arg("format") = py::none(),
+             py::arg("metadata") = py::none(),
+             py::arg("bbox_inches") = py::none(),
+             py::arg("pad_inches") = 0.1f,
+             py::arg("facecolor") = py::none(),
+             py::arg("edgecolor") = py::none(),
+             "mpl fig.savefig(fname, *, dpi='figure', transparent=, "
+             "facecolor=, edgecolor=, bbox_inches='tight', pad_inches=, "
+             "format=, metadata=).");
+
+    // mpl Line2D artist property dispatch — shared by Line2D.set(**kw),
+    // update(...), and the module-level setp().
+    auto lineSetProp = [](PyLine2D& l, const std::string& k,
+                          const py::object& v) {
+        auto& s = l.line->series();
+        if (k == "color" || k == "c") {
+            s.color = parseColor(v);
+        } else if (k == "linewidth" || k == "lw") {
+            s.lineWidth = v.cast<float>();
+        } else if (k == "linestyle" || k == "ls") {
+            if (py::isinstance<py::str>(v)) {
+                auto ls = plot::lineStyleFromString(v.cast<std::string>());
+                if (!ls)
+                    throw std::invalid_argument(
+                        "unrecognized linestyle: " + v.cast<std::string>());
+                s.lineStyle = *ls;
+                s.dashes.clear();
+            } else {
+                // (offset, (on, off, ...)) dash tuple
+                auto t = v.cast<py::tuple>();
+                if (t.size() != 2)
+                    throw std::invalid_argument("bad linestyle dash tuple");
+                s.dashOffset = t[0].cast<float>();
+                s.dashes.clear();
+                for (auto d : t[1].cast<py::sequence>())
+                    s.dashes.push_back(d.cast<float>());
+            }
+        } else if (k == "dashes") {
+            s.dashes.clear();
+            for (auto d : v.cast<py::sequence>())
+                s.dashes.push_back(d.cast<float>());
+        } else if (k == "marker") {
+            if (v.is_none())
+                s.marker = plot::MarkerStyle::None;
+            else if (!s.setMarker(v.cast<std::string>()))
+                throw std::invalid_argument(
+                    "unrecognized marker: " + v.cast<std::string>());
+        } else if (k == "markersize" || k == "ms") {
+            s.size = v.cast<float>();
+        } else if (k == "alpha") {
+            s.alpha = v.is_none() ? 1.0f : v.cast<float>();
+        } else if (k == "label") {
+            s.label = v.is_none() ? "" : v.cast<std::string>();
+        } else if (k == "visible") {
+            l.line->visible = v.cast<bool>();
+        } else if (k == "zorder") {
+            l.line->zorder = v.cast<float>();
+        } else if (k == "drawstyle" || k == "ds") {
+            auto ds = plot::drawStyleFromString(v.cast<std::string>());
+            if (!ds)
+                throw std::invalid_argument(
+                    "unrecognized drawstyle: " + v.cast<std::string>());
+            s.drawStyle = *ds;
+        } else if (k == "markerfacecolor" || k == "mfc") {
+            if (v.is_none()) s.markerFaceColor.reset();
+            else if (py::isinstance<py::str>(v) &&
+                     (v.cast<std::string>() == "none" ||
+                      v.cast<std::string>() == "None"))
+                s.markerFaceColor = plot::Color::transparent();
+            else if (py::isinstance<py::str>(v) &&
+                     v.cast<std::string>() == "auto")
+                s.markerFaceColor.reset();
+            else s.markerFaceColor = parseColor(v);
+        } else if (k == "markeredgecolor" || k == "mec") {
+            if (v.is_none()) s.markerEdgeColor.reset();
+            else if (py::isinstance<py::str>(v) &&
+                     (v.cast<std::string>() == "none" ||
+                      v.cast<std::string>() == "None"))
+                s.markerEdgeColor = plot::Color::transparent();
+            else if (py::isinstance<py::str>(v) &&
+                     v.cast<std::string>() == "auto")
+                s.markerEdgeColor.reset();
+            else s.markerEdgeColor = parseColor(v);
+        } else if (k == "markeredgewidth" || k == "mew") {
+            s.markerEdgeWidth = v.cast<float>();
+        } else if (k == "fillstyle" || k == "fs") {
+            auto f = plot::markerFillFromString(v.cast<std::string>());
+            if (!f)
+                throw std::invalid_argument(
+                    "unrecognized fillstyle: " + v.cast<std::string>());
+            s.markerFill = *f;
+        } else if (k == "clip_on") {
+            l.line->clipOn = v.cast<bool>();
+        } else if (k == "markevery") {
+            applyMarkevery(s, v);
+        } else if (k == "dash_capstyle" || k == "capstyle" ||
+                   k == "solid_capstyle") {
+            auto cs = plot::capStyleFromString(v.cast<std::string>());
+            if (!cs)
+                throw std::invalid_argument("unrecognized capstyle");
+            s.capStyle = *cs;
+        } else if (k == "dash_joinstyle" || k == "joinstyle" ||
+                   k == "solid_joinstyle") {
+            auto js = plot::joinStyleFromString(v.cast<std::string>());
+            if (!js)
+                throw std::invalid_argument("unrecognized joinstyle");
+            s.joinStyle = *js;
+        } else if (k == "path_effects") {
+            l.line->pathEffects = toPathEffects(v);
+        } else {
+            throw py::attribute_error(
+                "Line2D has no property '" + k + "'");
+        }
+        l.line->touch();
+    };
 
     py::class_<PyLine2D>(m, "Line2D")
         .def("set_data",
@@ -1362,18 +5965,634 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("set_ydata",
              [](PyLine2D& l, const py::object& y) {
                  l.line->setYdata(toFloats(y));
+             })
+        .def("get_xdata",
+             [](const PyLine2D& l) {
+                 std::vector<float> xs;
+                 xs.reserve(l.line->series().points.size());
+                 for (const auto& p : l.line->series().points)
+                     xs.push_back(p.x);
+                 return xs;
+             })
+        .def("get_ydata",
+             [](const PyLine2D& l) {
+                 std::vector<float> ys;
+                 ys.reserve(l.line->series().points.size());
+                 for (const auto& p : l.line->series().points)
+                     ys.push_back(p.y);
+                 return ys;
+             })
+        .def("set_markevery",
+             [](PyLine2D& l, const py::object& every) {
+                 applyMarkevery(l.line->series(), every);
+                 l.line->touch();
+             })
+        .def("get_markevery",
+             [](const PyLine2D& l) {
+                 return l.line->series().markevery.has_value();
+             })
+        .def("set_color",
+             [](PyLine2D& l, const py::object& c) {
+                 l.line->series().color = parseColor(c);
+                 l.line->touch();
+             })
+        .def("get_color",
+             [](const PyLine2D& l) {
+                 return colorToPy(l.line->series().resolvedColor());
+             })
+        .def("set_linewidth",
+             [](PyLine2D& l, float w) {
+                 l.line->series().lineWidth = w * pt2px(*l.ax);
+                 l.line->touch();
+             })
+        .def("get_linewidth",
+             [](const PyLine2D& l) {
+                 return l.line->series().lineWidth / pt2px(*l.ax);
+             })
+        .def("set_linestyle",
+             [lineSetProp](PyLine2D& l, const py::object& v) {
+                 lineSetProp(l, "linestyle", v);
+             })
+        .def("get_linestyle",
+             [](const PyLine2D& l) {
+                 return lineStyleToSpec(l.line->series().lineStyle);
+             })
+        .def("set_dashes",
+             [](PyLine2D& l, const py::object& seq) {
+                 auto& s = l.line->series();
+                 s.dashes.clear();
+                 // mpl set_dashes((on, off, ...)) — a flat seq.
+                 for (auto d : seq.cast<py::sequence>())
+                     s.dashes.push_back(d.cast<float>());
+                 l.line->touch();
+             })
+        .def("set_marker",
+             [](PyLine2D& l, const py::object& v) {
+                 if (v.is_none())
+                     l.line->series().marker = plot::MarkerStyle::None;
+                 else if (!l.line->series().setMarker(
+                              v.cast<std::string>()))
+                     throw std::invalid_argument("unrecognized marker");
+                 l.line->touch();
+             })
+        .def("get_marker",
+             [](const PyLine2D& l) {
+                 const auto& s = l.line->series();
+                 if (!s.markerTex.empty()) return "$" + s.markerTex + "$";
+                 return markerToSpec(s.marker);
+             })
+        .def("set_markersize",
+             [](PyLine2D& l, float s) {
+                 l.line->series().size = s * pt2px(*l.ax);
+                 l.line->touch();
+             })
+        .def("get_markersize",
+             [](const PyLine2D& l) {
+                 return l.line->series().size / pt2px(*l.ax);
+             })
+        .def("set_alpha",
+             [](PyLine2D& l, const py::object& a) {
+                 l.line->series().alpha =
+                     a.is_none() ? 1.0f : a.cast<float>();
+                 l.line->touch();
+             })
+        .def("get_alpha",
+             [](const PyLine2D& l) { return l.line->series().alpha; })
+        .def("set_label",
+             [](PyLine2D& l, const std::string& s) {
+                 l.line->series().label = s; l.line->touch();
+             })
+        .def("get_label",
+             [](const PyLine2D& l) { return l.line->series().label; })
+        .def("set_visible",
+             [](PyLine2D& l, bool v) {
+                 l.line->visible = v; l.line->touch();
+             })
+        .def("get_visible",
+             [](const PyLine2D& l) { return l.line->visible; })
+        .def("set_zorder",
+             [](PyLine2D& l, float z) {
+                 l.line->zorder = z; l.line->touch();
+             })
+        .def("get_zorder",
+             [](const PyLine2D& l) { return l.line->zorder; })
+        .def("set_drawstyle",
+             [](PyLine2D& l, const std::string& ds) {
+                 auto d = plot::drawStyleFromString(ds);
+                 if (!d) throw std::invalid_argument("unrecognized drawstyle");
+                 l.line->series().drawStyle = *d; l.line->touch();
+             })
+        .def("get_drawstyle",
+             [](const PyLine2D& l) {
+                 return drawStyleToSpec(l.line->series().drawStyle);
+             })
+        .def("set_markerfacecolor",
+             [lineSetProp](PyLine2D& l, const py::object& v) {
+                 lineSetProp(l, "markerfacecolor", v);
+             })
+        .def("set_markeredgecolor",
+             [lineSetProp](PyLine2D& l, const py::object& v) {
+                 lineSetProp(l, "markeredgecolor", v);
+             })
+        .def("get_markerfacecolor",
+             [](const PyLine2D& l) {
+                 const auto& s = l.line->series();
+                 return s.markerFaceColor ? colorToPy(*s.markerFaceColor)
+                                          : colorToPy(s.resolvedColor());
+             })
+        .def("get_markeredgecolor",
+             [](const PyLine2D& l) {
+                 const auto& s = l.line->series();
+                 return s.markerEdgeColor ? colorToPy(*s.markerEdgeColor)
+                                          : colorToPy(s.resolvedColor());
+             })
+        .def("set_markeredgewidth",
+             [](PyLine2D& l, float w) {
+                 l.line->series().markerEdgeWidth = w; l.line->touch();
+             })
+        .def("get_markeredgewidth",
+             [](const PyLine2D& l) {
+                 return l.line->series().markerEdgeWidth;
+             })
+        .def("set_fillstyle",
+             [](PyLine2D& l, const std::string& f) {
+                 auto mf = plot::markerFillFromString(f);
+                 if (!mf)
+                     throw std::invalid_argument("unrecognized fillstyle");
+                 l.line->series().markerFill = *mf; l.line->touch();
+             })
+        .def("get_fillstyle",
+             [](const PyLine2D& l) {
+                 return fillStyleToSpec(l.line->series().markerFill);
+             })
+        .def("set_clip_on",
+             [](PyLine2D& l, bool v) {
+                 l.line->clipOn = v; l.line->touch();
+             })
+        .def("get_clip_on",
+             [](const PyLine2D& l) { return l.line->clipOn; })
+        // mpl Artist.set_path_effects / get_path_effects.
+        .def("set_path_effects",
+             [](PyLine2D& l, const py::object& v) {
+                 l.line->pathEffects = toPathEffects(v);
+                 l.line->touch();
+             },
+             py::arg("path_effects"))
+        .def("get_path_effects",
+             [](const PyLine2D& l) {
+                 return py::cast(l.line->pathEffects);
+             })
+        // mpl Line2D.set_transform — transData/transAxes/…
+        .def("set_transform",
+             [](PyLine2D& l, std::shared_ptr<plot::Transform> t) {
+                 l.line->transform = std::move(t);
+                 l.line->touch();
+             },
+             py::arg("t"))
+        .def("get_transform",
+             [](const PyLine2D& l) {
+                 return py::cast(l.line->transform,
+                                 py::return_value_policy::reference);
+             })
+        .def("set_solid_capstyle", [lineSetProp](PyLine2D& l, std::string s) {
+                 lineSetProp(l, "capstyle", py::cast(s)); })
+        .def("set_dash_capstyle", [lineSetProp](PyLine2D& l, std::string s) {
+                 lineSetProp(l, "capstyle", py::cast(s)); })
+        .def("set_solid_joinstyle", [lineSetProp](PyLine2D& l, std::string s) {
+                 lineSetProp(l, "joinstyle", py::cast(s)); })
+        .def("set_dash_joinstyle", [lineSetProp](PyLine2D& l, std::string s) {
+                 lineSetProp(l, "joinstyle", py::cast(s)); })
+        // mpl Artist.set(**kwargs) — generic property dispatch.
+        .def("set", [lineSetProp](PyLine2D& l, const py::kwargs& kw) {
+                 for (auto [k, v] : kw)
+                     lineSetProp(l, k.cast<std::string>(),
+                                 py::reinterpret_borrow<py::object>(v));
+             })
+        // mpl Artist.update({'prop': value}) / iterable of pairs.
+        .def("update", [lineSetProp](PyLine2D& l, const py::object& props) {
+                 if (py::isinstance<py::dict>(props)) {
+                     for (auto [k, v] : props.cast<py::dict>())
+                         lineSetProp(l, k.cast<std::string>(),
+                                     py::reinterpret_borrow<py::object>(v));
+                 } else {
+                     for (auto kv : props.cast<py::sequence>()) {
+                         auto pair = kv.cast<py::sequence>();
+                         lineSetProp(l, pair[0].cast<std::string>(),
+                                     py::reinterpret_borrow<py::object>(
+                                         pair[1]));
+                     }
+                 }
+                 l.line->touch();
+                 return true;
+             })
+        // mpl Artist.remove() — detach from the axes; the handle stays
+        // usable (mpl artists outlive removal) and may be re-added.
+        .def("remove", [](PyLine2D& l) {
+                 if (auto o = detachArtist(*l.owner, l.line))
+                     l.owned = std::move(o);
              });
 
-    py::class_<PyCollection>(m, "PathCollection")
+    py::class_<PyCollection> pathCollCls(m, "PathCollection");
+
+    // mpl ScalarMappable methods shared by colormapped artist handles
+    // (scatter PathCollection, AxesImage). `get` returns the IPlot*.
+    auto mappableDefs = [&]<typename T, typename Get>(
+                            py::class_<T>& cls, Get&& get) {
+        cls
+            .def("set_cmap",
+                 [get](T& h, const py::object& c) {
+                     get(h)->setCmap(cmapArg(c));
+                 },
+                 py::arg("cmap"))
+            .def("get_cmap",
+                 [get](const T& h) -> py::object {
+                     if (auto* p = get(h); p->cmap())
+                         return py::cast(PyColormap{p->cmap()});
+                     return py::none();
+                 })
+            .def("set_norm",
+                 [get](T& h, const py::object& n) {
+                     get(h)->setNorm(normArg(n));
+                 },
+                 py::arg("norm"))
+            .def("get_norm",
+                 [get](const T& h) -> py::object {
+                     auto n = get(h)->norm();
+                     return n ? py::cast(n) : py::none();
+                 })
+            .def("set_clim",
+                 [get](T& h, const py::object& vmin,
+                      const py::object& vmax) {
+                     get(h)->setClim(
+                         vmin.is_none()
+                             ? std::nullopt
+                             : std::optional{vmin.cast<float>()},
+                         vmax.is_none()
+                             ? std::nullopt
+                             : std::optional{vmax.cast<float>()});
+                 },
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none())
+            .def("get_clim",
+                 [get](const T& h) -> py::object {
+                     if (auto vr = get(h)->valueRange();
+                         vr && vr->valid())
+                         return py::object(
+                             py::make_tuple(vr->min, vr->max));
+                     return py::none();
+                 })
+            .def("set_array",
+                 [get](T& h, const py::object& a) {
+                     auto* p = get(h);
+                     // mpl AxesImage.set_array accepts 2D or (H,W,3|4).
+                     if (py::isinstance<py::array>(a) &&
+                         a.cast<py::array>().ndim() == 3) {
+                         auto im = toRgbaImage(a, "viridis",
+                                               py::none(), py::none());
+                         if (auto* hp =
+                                 dynamic_cast<plot::HeatmapPlot*>(p))
+                             hp->setRgba(std::move(im.px), im.w, im.h);
+                         return;
+                     }
+                     // Flatten nested 2D input.
+                     auto [v, dims] = flat2d(a);
+                     if (auto* hp =
+                             dynamic_cast<plot::HeatmapPlot*>(p)) {
+                         hp->setArrayReshaped(std::move(v), dims.second,
+                                              dims.first);
+                     } else {
+                         p->setArray(std::move(v));
+                     }
+                 },
+                 py::arg("A"))
+            .def("get_array",
+                 [get](const T& h) -> py::object {
+                     auto* p = get(h);
+                     // mpl RGB(A) AxesImage.get_array → (H,W,4) floats.
+                     if (auto* hp =
+                             dynamic_cast<plot::HeatmapPlot*>(p);
+                         hp && !hp->rgba().empty()) {
+                         auto [w, hh] = hp->dims();
+                         py::list rows;
+                         for (uint32_t y = 0; y < hh; ++y) {
+                             py::list row;
+                             for (uint32_t x = 0; x < w; ++x) {
+                                 uint32_t px =
+                                     hp->rgba()[size_t(y) * w + x];
+                                 row.append(py::make_tuple(
+                                     (px & 0xFF) / 255.0f,
+                                     ((px >> 8) & 0xFF) / 255.0f,
+                                     ((px >> 16) & 0xFF) / 255.0f,
+                                     ((px >> 24) & 0xFF) / 255.0f));
+                             }
+                             rows.append(row);
+                         }
+                         return py::object(rows);
+                     }
+                     auto a = p->array();
+                     if (a.empty()) return py::none();
+                     // mpl AxesImage.get_array returns the 2D array.
+                     if (auto* hp =
+                             dynamic_cast<plot::HeatmapPlot*>(p)) {
+                         auto [w, hh] = hp->dims();
+                         if (w > 0 && hh > 0 &&
+                             a.size() == size_t(w) * hh) {
+                             py::list rows;
+                             for (uint32_t y = 0; y < hh; ++y)
+                                 rows.append(py::cast(std::vector<float>(
+                                     a.begin() + size_t(y) * w,
+                                     a.begin() + size_t(y + 1) * w)));
+                             return py::object(rows);
+                         }
+                     }
+                     return py::cast(a);
+                 })
+            // mpl ScalarMappable.to_rgba(x, alpha=None, bytes=False,
+            // norm=True) — map data values through norm+cmap.
+            .def("to_rgba",
+                 [get](T& h, const py::object& x,
+                       const py::object& alpha, bool bytes,
+                       bool norm) -> py::object {
+                     auto* p = get(h);
+                     auto nrm = p->norm();
+                     auto* cm = p->cmap();
+                     if (!cm)
+                         throw std::invalid_argument(
+                             "artist has no colormap");
+                     // Autoscale from the artist's array.
+                     auto arr = p->array();
+                     if (nrm) nrm->autoscale(arr);
+                     auto map1 = [&](float v) {
+                         auto c = cm->sample(
+                             norm && nrm ? (*nrm)(v) : v);
+                         if (!alpha.is_none()) c.a = alpha.cast<float>();
+                         if (bytes) {
+                             auto to8 = [](float f) {
+                                 return int(std::clamp(f, 0.0f, 1.0f) *
+                                            255.0f + 0.5f);
+                             };
+                             return py::make_tuple(to8(c.r), to8(c.g),
+                                                   to8(c.b), to8(c.a));
+                         }
+                         return py::make_tuple(c.r, c.g, c.b, c.a);
+                     };
+                     if (py::isinstance<py::sequence>(x) &&
+                         !py::isinstance<py::str>(x)) {
+                         py::list out;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(x))
+                             out.append(map1(
+                                 py::reinterpret_borrow<py::object>(item)
+                                     .cast<float>()));
+                         return std::move(out);
+                     }
+                     return map1(x.cast<float>());
+                 },
+                 py::arg("x"), py::arg("alpha") = py::none(),
+                 py::arg("bytes") = false, py::arg("norm") = true)
+            .def("autoscale",
+                 [get](T& h) {
+                     auto* p = get(h);
+                     if (auto n = p->norm()) n->autoscaleForce(p->array());
+                 })
+            .def("autoscale_None",
+                 [get](T& h) {
+                     auto* p = get(h);
+                     if (auto n = p->norm()) n->autoscale(p->array());
+                 })
+            .def_property("norm",
+                 [get](const T& h) -> py::object {
+                     auto n = get(h)->norm();
+                     return n ? py::cast(n) : py::none();
+                 },
+                 [get](T& h, const py::object& n) {
+                     get(h)->setNorm(normArg(n));
+                 })
+            .def_property("cmap",
+                 [get](const T& h) -> py::object {
+                     if (auto* p = get(h); p->cmap())
+                         return py::cast(PyColormap{p->cmap()});
+                     return py::none();
+                 },
+                 [get](T& h, const py::object& c) {
+                     get(h)->setCmap(cmapArg(c));
+                 });
+    };
+    mappableDefs(pathCollCls,
+                 [](const PyCollection& c) -> plot::IPlot* {
+                     return c.scatter;
+                 });
+
+    // mpl PathCollection.set_sizes/get_sizes (scatter s= array).
+    pathCollCls
+        .def("set_sizes",
+             [](PyCollection& c, const py::object& s) {
+                 // mpl sizes are marker areas in pt²; native sizes_ are
+                 // marker diameters in px.
+                 const float k = (c.ax && c.ax->figure()
+                                      ? c.ax->figure()->dpi() : 100.0f)
+                                 / 72.0f;
+                 auto v = toFloats(s);
+                 for (auto& d : v) d = std::sqrt(std::max(d, 0.0f)) * k;
+                 c.scatter->setSizes(std::move(v));
+             },
+             py::arg("sizes"))
+        .def("get_sizes",
+             [](const PyCollection& c) {
+                 // Convert stored px diameters back to mpl pt² areas.
+                 const float inv = 72.0f / (c.ax && c.ax->figure()
+                                                ? c.ax->figure()->dpi()
+                                                : 100.0f);
+                 auto v = c.scatter->sizes();
+                 for (auto& d : v) {
+                     d *= inv;
+                     d *= d;
+                 }
+                 return v;
+             })
+        .def("set_facecolor",
+             [](PyCollection& c, const py::object& col) {
+                 // mpl: facecolor replaces explicit per-point colors.
+                 c.scatter->colors_.clear();
+                 if (auto p = parseColor(col); p.a > 0)
+                     c.scatter->series().color = p;
+                 c.owner->fig().markStale();
+             },
+             py::arg("c"))
+        .def("set_edgecolor",
+             [](PyCollection& c, const py::object& col) {
+                 c.scatter->series().markerEdgeColor = parseColor(col);
+                 c.owner->fig().markStale();
+             },
+             py::arg("c"))
         .def("set_offsets",
-             [](PyCollection& c, const py::object& x,
-                const py::object& y) {
-                 c.scatter->setData(toFloats(x), toFloats(y));
+             [](PyCollection& c, const py::object& offs) {
+                 // mpl PathCollection.set_offsets(offsets): Nx2 array.
+                 std::vector<plot::Point2D> pts;
+                 for (const auto h : py::cast<py::sequence>(offs)) {
+                     auto p = toFloats(
+                         py::reinterpret_borrow<py::object>(h));
+                     if (p.size() >= 2) pts.push_back({p[0], p[1]});
+                 }
+                 c.scatter->setOffsets(std::move(pts));
+                 c.owner->fig().markStale();
+             },
+             py::arg("offsets"))
+        .def("get_offsets",
+             [](const PyCollection& c) {
+                 py::list out;
+                 for (const auto& p : c.scatter->series().points)
+                     out.append(py::make_tuple(p.x, p.y));
+                 return out;
+             })
+        // mpl get_facecolors: resolved RGBA array — explicit colors_
+        // when set, else cmap(norm(array)), else the series color.
+        .def("get_facecolors",
+             [](const PyCollection& c) {
+                 if (!c.scatter->colors_.empty())
+                     return colorsToPy(c.scatter->colors_);
+                 if (!c.scatter->array_.empty()) {
+                     auto nrm = c.scatter->norm();
+                     const auto* cm = c.scatter->cmap();
+                     py::list out;
+                     for (const float v : c.scatter->array_)
+                         out.append(colorToPy(cm->sample(
+                             nrm ? (*nrm)(v) : v)));
+                     return out;
+                 }
+                 return colorsToPy({c.scatter->series().resolvedColor()});
+             })
+        .def("set_facecolors",
+             [](PyCollection& c, const py::object& col) {
+                 c.scatter->colors_ = toColorVec(col);
+                 c.owner->fig().markStale();
+             },
+             py::arg("c"))
+        .def("get_edgecolors",
+             [](const PyCollection& c) {
+                 if (c.scatter->series().markerEdgeColor)
+                     return colorsToPy(
+                         {*c.scatter->series().markerEdgeColor});
+                 // mpl edgecolors='face' → edges track faces.
+                 if (!c.scatter->colors_.empty())
+                     return colorsToPy(c.scatter->colors_);
+                 return colorsToPy({});
+             })
+        .def("set_edgecolors",
+             [](PyCollection& c, const py::object& col) {
+                 // mpl 'face' → edges track the face colors.
+                 if (py::isinstance<py::str>(col) &&
+                     col.cast<std::string>() == "face") {
+                     c.scatter->series().markerEdgeColor = std::nullopt;
+                 } else if (auto v = toColorVec(col); !v.empty()) {
+                     c.scatter->series().markerEdgeColor = v.front();
+                 }
+                 c.owner->fig().markStale();
+             },
+             py::arg("c"))
+        .def("set_color",
+             [](PyCollection& c, const py::object& col) {
+                 c.scatter->colors_ = toColorVec(col);
+                 if (!c.scatter->colors_.empty())
+                     c.scatter->series().markerEdgeColor =
+                         c.scatter->colors_.front();
+                 c.owner->fig().markStale();
+             },
+             py::arg("c"))
+        .def("get_linewidths",
+             [](const PyCollection& c) {
+                 // Native markerEdgeWidth is px; mpl reports points.
+                 const float inv = 72.0f / (c.ax && c.ax->figure()
+                                                ? c.ax->figure()->dpi()
+                                                : 100.0f);
+                 py::list out;
+                 out.append(c.scatter->series().markerEdgeWidth * inv);
+                 return out;
+             })
+        .def("set_linewidths",
+             [](PyCollection& c, const py::object& w) {
+                 // mpl linewidths are points; native stores px.
+                 const float k = (c.ax && c.ax->figure()
+                                      ? c.ax->figure()->dpi() : 100.0f)
+                                 / 72.0f;
+                 if (py::isinstance<py::int_>(w) ||
+                     py::isinstance<py::float_>(w)) {
+                     c.scatter->series().markerEdgeWidth =
+                         w.cast<float>() * k;
+                 } else if (const auto v = toFloats(w); !v.empty())
+                     c.scatter->series().markerEdgeWidth = v[0] * k;
+                 c.owner->fig().markStale();
+             },
+             py::arg("linewidths"))
+        .def("legend_elements",
+             [](const PyCollection&) {
+                 return py::make_tuple(py::list(), py::list());
+             })
+        .def("set_visible",
+             [](PyCollection& c, bool v) {
+                 c.scatter->visible = v; c.owner->fig().markStale();
+             }, py::arg("b"))
+        .def("get_visible",
+             [](const PyCollection& c) { return c.scatter->visible; })
+        .def("set_zorder",
+             [](PyCollection& c, float z) {
+                 c.scatter->zorder = z; c.owner->fig().markStale();
+             }, py::arg("level"))
+        .def("get_zorder",
+             [](const PyCollection& c) { return c.scatter->zorder; })
+        .def("set_clip_on",
+             [](PyCollection& c, bool v) {
+                 c.scatter->clipOn = v; c.owner->fig().markStale();
+             }, py::arg("b"))
+        .def("get_clip_on",
+             [](const PyCollection& c) { return c.scatter->clipOn; })
+        .def("set_label",
+             [](PyCollection& c, const std::string& s) {
+                 c.scatter->series().label = s;
+                 c.owner->fig().markStale();
+             }, py::arg("s"))
+        .def("get_label",
+             [](const PyCollection& c) {
+                 return c.scatter->series().label;
+             })
+        .def("set_alpha",
+             [](PyCollection& c, float a) {
+                 c.scatter->series().alpha = a;
+                 c.owner->fig().markStale();
+             }, py::arg("a"))
+        .def("get_alpha",
+             [](const PyCollection& c) {
+                 return c.scatter->series().alpha;
+             })
+        .def("remove", [](PyCollection& c) {
+                 if (auto o = detachArtist(*c.owner, c.scatter))
+                     c.owned = std::move(o);
              });
 
     // ── mpl ticker: Locator / Formatter hierarchies ──
     py::class_<plot::Locator, std::shared_ptr<plot::Locator>>(m,
-                                                            "Locator");
+                                                            "Locator")
+        // mpl Locator.tick_values(vmin, vmax): floats for numeric
+        // locators; datetimes (or floats) for date locators.
+        .def("tick_values",
+             [](const plot::Locator& l, const py::object& vmin,
+                const py::object& vmax) {
+                 auto toNum = [](const py::object& o) -> double {
+                     if (py::isinstance<py::float_>(o) ||
+                         py::isinstance<py::int_>(o))
+                         return o.cast<double>();
+                     return py::module_::import("volcanoplot")
+                         .attr("dates").attr("date2num")(o)
+                         .cast<double>();
+                 };
+                 return l.tickValuesD(toNum(vmin), toNum(vmax));
+             },
+             py::arg("vmin"), py::arg("vmax"))
+        .def("__call__",
+             [](const plot::Locator& l) {
+                 // mpl uses the bound axis's view interval; our
+                 // locators are axis-agnostic — use the unit interval.
+                 return l.tickValuesD(0.0, 1.0);
+             });
     py::class_<plot::Formatter, std::shared_ptr<plot::Formatter>>(
         m, "Formatter");
 
@@ -1401,7 +6620,7 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("offset") = 0.0f);
     py::class_<plot::MaxNLocator, plot::Locator,
                std::shared_ptr<plot::MaxNLocator>>(m, "MaxNLocator")
-        .def(py::init<int>(), py::arg("nbins") = 9);
+        .def(py::init<int>(), py::arg("nbins") = 10);
     py::class_<plot::AutoLocator, plot::MaxNLocator,
                std::shared_ptr<plot::AutoLocator>>(m, "AutoLocator")
         .def(py::init<>());
@@ -1480,7 +6699,7 @@ PYBIND11_MODULE(volcanoplot, m) {
     py::class_<plot::EngFormatter, plot::Formatter,
                std::shared_ptr<plot::EngFormatter>>(m, "EngFormatter")
         .def(py::init<std::string, int, std::string>(),
-             py::arg("unit") = "", py::arg("places") = 1,
+             py::arg("unit") = "", py::arg("places") = -1,
              py::arg("sep") = " ");
     py::class_<plot::PercentFormatter, plot::Formatter,
                std::shared_ptr<plot::PercentFormatter>>(m,
@@ -1488,6 +6707,33 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def(py::init<float, int, std::string>(),
              py::arg("xmax") = 100.0f, py::arg("decimals") = -1,
              py::arg("symbol") = "%");
+    py::class_<plot::AsinhLocator, plot::Locator,
+               std::shared_ptr<plot::AsinhLocator>>(m, "AsinhLocator")
+        .def(py::init<double, int, double, double,
+                      std::vector<double>>(),
+             py::arg("linear_width"), py::arg("numticks") = 11,
+             py::arg("symthresh") = 0.2, py::arg("base") = 10.0,
+             py::arg("subs") = std::vector<double>{});
+
+    // ── mpl matplotlib.ticker submodule ─────────────────────────
+    // The locator/formatter classes are bound on the top module for
+    // convenience; matplotlib exposes them under matplotlib.ticker.
+    {
+        auto tk = m.def_submodule("ticker");
+        for (const char* n : {
+                 "Locator", "Formatter", "NullLocator", "FixedLocator",
+                 "LinearLocator", "MultipleLocator", "IndexLocator",
+                 "MaxNLocator", "AutoLocator", "LogLocator",
+                 "SymmetricalLogLocator", "LogitLocator",
+                 "AsinhLocator", "AutoMinorLocator", "NullFormatter",
+                 "FixedFormatter", "FuncFormatter",
+                 "FormatStrFormatter", "StrMethodFormatter",
+                 "ScalarFormatter", "LogFormatter",
+                 "LogFormatterExponent", "LogFormatterMathtext",
+                 "LogFormatterSciNotation", "LogitFormatter",
+                 "EngFormatter", "PercentFormatter"})
+            if (py::hasattr(m, n)) tk.attr(n) = m.attr(n);
+    }
 
     // ── mpl matplotlib.dates submodule ───────────────────────────
     {
@@ -1509,12 +6755,21 @@ PYBIND11_MODULE(volcanoplot, m) {
                     if (!py::isinstance(o2, mod.attr("datetime")))
                         throw std::invalid_argument(
                             "date2num: expected datetime/date/float");
-                    if (o2.attr("tzinfo").is_none())
-                        o2 = o2.attr("replace")(
-                            py::arg("tzinfo") =
-                                mod.attr("timezone").attr("utc"));
-                    return o2.attr("timestamp")().cast<double>() /
-                           86400.0;
+                    // mpl _dt64_to_ordinalf: aware → UTC-naive, then
+                    // (int64 epoch seconds + frac/1e9) / 86400.
+                    if (!o2.attr("tzinfo").is_none())
+                        o2 = o2.attr("astimezone")(
+                                 mod.attr("timezone").attr("utc"))
+                                 .attr("replace")(
+                                     py::arg("tzinfo") = py::none());
+                    py::object epoch = mod.attr("datetime")(
+                        1970, 1, 1);
+                    py::object td = o2.attr("__sub__")(epoch);
+                    const double S =
+                        td.attr("days").cast<int64_t>() * 86400.0 +
+                        td.attr("seconds").cast<double>();
+                    return (S + td.attr("microseconds").cast<double>() /
+                                    1e6) / 86400.0;
                 };
                 if (py::isinstance<py::sequence>(d) &&
                     !py::isinstance<py::str>(d)) {
@@ -1548,42 +6803,145 @@ PYBIND11_MODULE(volcanoplot, m) {
             return pd::strfnum(float(days), fmt.c_str());
         }, py::arg("days"), py::arg("fmt"));
 
+        // mpl accepts ints or (lists of) ints for the byxxx kwargs.
+        auto intSet = [](const py::object& o) {
+            std::vector<int> out;
+            if (o.is_none()) return out;
+            if (py::isinstance<py::sequence>(o) &&
+                !py::isinstance<py::str>(o))
+                for (auto v : o) out.push_back(v.cast<int>());
+            else out.push_back(o.cast<int>());
+            return out;
+        };
         py::class_<pd::YearLocator, plot::Locator,
                    std::shared_ptr<pd::YearLocator>>(dm, "YearLocator")
-            .def(py::init<int, int, int>(),
+            .def(py::init([](int base, int month, int day,
+                             const py::object& tz) {
+                     (void)tz;
+                     return pd::YearLocator{base, month, day};
+                 }),
                  py::arg("base") = 1, py::arg("month") = 1,
-                 py::arg("day") = 1);
+                 py::arg("day") = 1, py::arg("tz") = py::none());
         py::class_<pd::MonthLocator, plot::Locator,
                    std::shared_ptr<pd::MonthLocator>>(dm, "MonthLocator")
-            .def(py::init<int, int>(),
-                 py::arg("interval") = 1, py::arg("day") = 1);
+            .def(py::init([intSet](const py::object& bymonth, int day,
+                                   int interval,
+                                   const py::object& tz) {
+                     (void)tz;
+                     pd::MonthLocator l{interval, day};
+                     l.bymonth = intSet(bymonth);
+                     return l;
+                 }),
+                 py::arg("bymonth") = py::none(),
+                 py::arg("bymonthday") = 1, py::arg("interval") = 1,
+                 py::arg("tz") = py::none());
         py::class_<pd::WeekdayLocator, plot::Locator,
                    std::shared_ptr<pd::WeekdayLocator>>(dm,
                                                         "WeekdayLocator")
-            .def(py::init<int, int>(),
-                 py::arg("interval") = 1, py::arg("byweekday") = 0);
+            .def(py::init([](const py::object& byweekday, int interval,
+                             const py::object& tz) {
+                     (void)tz;
+                     int wd = 0;
+                     if (py::isinstance<py::int_>(byweekday))
+                         wd = byweekday.cast<int>();
+                     else if (py::isinstance<PyWeekday>(byweekday))
+                         wd = byweekday.cast<PyWeekday>().weekday;
+                     else if (!byweekday.is_none())
+                         wd = byweekday.attr("weekday").cast<int>();
+                     return pd::WeekdayLocator{interval, wd};
+                 }),
+                 py::arg("byweekday") = 0, py::arg("interval") = 1,
+                 py::arg("tz") = py::none());
         py::class_<pd::DayLocator, plot::Locator,
                    std::shared_ptr<pd::DayLocator>>(dm, "DayLocator")
-            .def(py::init<int>(), py::arg("interval") = 1);
+            .def(py::init([intSet](const py::object& bymonthday,
+                                   int interval, const py::object& tz) {
+                     (void)tz;
+                     pd::DayLocator l{interval};
+                     l.bymonthday = intSet(bymonthday);
+                     return l;
+                 }),
+                 py::arg("bymonthday") = py::none(),
+                 py::arg("interval") = 1, py::arg("tz") = py::none());
         py::class_<pd::HourLocator, plot::Locator,
                    std::shared_ptr<pd::HourLocator>>(dm, "HourLocator")
-            .def(py::init<int>(), py::arg("interval") = 1);
+            .def(py::init([intSet](const py::object& byhour,
+                                   int interval, const py::object& tz) {
+                     (void)tz;
+                     pd::HourLocator l{interval};
+                     l.byhour = intSet(byhour);
+                     return l;
+                 }),
+                 py::arg("byhour") = py::none(),
+                 py::arg("interval") = 1, py::arg("tz") = py::none());
         py::class_<pd::MinuteLocator, plot::Locator,
                    std::shared_ptr<pd::MinuteLocator>>(dm, "MinuteLocator")
-            .def(py::init<int>(), py::arg("interval") = 1);
+            .def(py::init([intSet](const py::object& byminute,
+                                   int interval, const py::object& tz) {
+                     (void)tz;
+                     pd::MinuteLocator l{interval};
+                     l.byminute = intSet(byminute);
+                     return l;
+                 }),
+                 py::arg("byminute") = py::none(),
+                 py::arg("interval") = 1, py::arg("tz") = py::none());
         py::class_<pd::SecondLocator, plot::Locator,
                    std::shared_ptr<pd::SecondLocator>>(dm, "SecondLocator")
-            .def(py::init<int>(), py::arg("interval") = 1);
+            .def(py::init([intSet](const py::object& bysecond,
+                                   int interval, const py::object& tz) {
+                     (void)tz;
+                     pd::SecondLocator l{interval};
+                     l.bysecond = intSet(bysecond);
+                     return l;
+                 }),
+                 py::arg("bysecond") = py::none(),
+                 py::arg("interval") = 1, py::arg("tz") = py::none());
         py::class_<pd::MicrosecondLocator, plot::Locator,
                    std::shared_ptr<pd::MicrosecondLocator>>(
             dm, "MicrosecondLocator")
-            .def(py::init<int64_t>(), py::arg("interval") = 1);
+            .def(py::init([](int64_t interval, const py::object& tz) {
+                     (void)tz;
+                     return pd::MicrosecondLocator(interval);
+                 }),
+                 py::arg("interval") = 1, py::arg("tz") = py::none());
         py::class_<pd::AutoDateLocator, plot::Locator,
                    std::shared_ptr<pd::AutoDateLocator>>(
             dm, "AutoDateLocator")
-            .def(py::init<>())
+            .def(py::init([](const py::object& tz, int minticks,
+                             const py::object& maxticks,
+                             bool intervalMultiples) {
+                     (void)tz;  // UTC only
+                     pd::AutoDateLocator l;
+                     l.minticks = minticks;
+                     if (py::isinstance<py::dict>(maxticks)) {
+                         for (auto kv : maxticks.cast<py::dict>())
+                             l.maxticks[kv.first.cast<int>()] =
+                                 kv.second.cast<int>();
+                     } else if (!maxticks.is_none()) {
+                         const int mt = maxticks.cast<int>();
+                         for (int f : {0, 1, 3, 4, 5, 6, 7})
+                             l.maxticks[f] = mt;
+                     }
+                     l.intervalMultiples = intervalMultiples;
+                     return l;
+                 }),
+                 py::arg("tz") = py::none(), py::arg("minticks") = 5,
+                 py::arg("maxticks") = py::none(),
+                 py::arg("interval_multiples") = true)
             .def_readwrite("minticks", &pd::AutoDateLocator::minticks)
-            .def_readwrite("maxticks", &pd::AutoDateLocator::maxticks);
+            .def_readwrite("maxticks", &pd::AutoDateLocator::maxticks)
+            .def_readwrite("interval_multiples",
+                           &pd::AutoDateLocator::intervalMultiples);
+
+        // mpl dates.RRuleLocator — wraps a dateutil rrule/rrulewrapper.
+        py::class_<PyRRuleLocator, plot::Locator,
+                   std::shared_ptr<PyRRuleLocator>>(dm, "RRuleLocator")
+            .def(py::init([](const py::object& o, const py::object& tz) {
+                     (void)tz;
+                     return std::make_shared<PyRRuleLocator>(o);
+                 }),
+                 py::arg("o"), py::arg("tz") = py::none())
+            .def_readonly("rule", &PyRRuleLocator::rule);
 
         py::class_<pd::DateFormatter, plot::Formatter,
                    std::shared_ptr<pd::DateFormatter>>(dm,
@@ -1593,11 +6951,805 @@ PYBIND11_MODULE(volcanoplot, m) {
                    std::shared_ptr<pd::AutoDateFormatter>>(
             dm, "AutoDateFormatter")
             .def(py::init<>());
+        // mpl signature: ConciseDateFormatter(locator=None, tz=None,
+        // formats=None, offset_formats=None, zero_formats=None,
+        // show_offset=True). The locator/tz args are accepted for
+        // signature parity; labels are driven by set_locs like mpl.
         py::class_<pd::ConciseDateFormatter, plot::Formatter,
                    std::shared_ptr<pd::ConciseDateFormatter>>(
             dm, "ConciseDateFormatter")
+            .def(py::init([](py::object locator, py::object tz,
+                             py::object formats, py::object offFmts,
+                             py::object zeroFmts, bool showOff) {
+                     auto fill = [](const py::object& seq,
+                                    std::array<const char*, 6>& out,
+                                    auto holder) {
+                         if (seq.is_none()) return;
+                         auto v = seq.cast<std::vector<std::string>>();
+                         for (size_t i = 0; i < v.size() && i < 6; ++i)
+                             out[i] = holder(std::move(v[i]));
+                     };
+                     auto strings = std::make_shared<
+                         std::deque<std::string>>();
+                     auto holder = [strings](std::string s) {
+                         strings->push_back(std::move(s));
+                         return strings->back().c_str();
+                     };
+                     std::array<const char*, 6> fmt =
+                         {"%Y", "%b", "%d", "%H:%M", "%H:%M", "%S.%f"};
+                     std::array<const char*, 6> off =
+                         {"", "%Y", "%Y-%b", "%Y-%b-%d",
+                          "%Y-%b-%d %H:%M", "%Y-%b-%d %H:%M"};
+                     std::array<const char*, 6> zro =
+                         {"", "%Y", "%b", "%b-%d", "%H:%M", "%H:%M"};
+                     fill(formats, fmt, holder);
+                     fill(offFmts, off, holder);
+                     fill(zeroFmts, zro, holder);
+                     auto p = std::shared_ptr<pd::ConciseDateFormatter>(
+                         new pd::ConciseDateFormatter(fmt, off, zro,
+                                                      showOff),
+                         [strings](pd::ConciseDateFormatter* q) {
+                             delete q;
+                         });
+                     return p;
+                 }),
+                 py::arg("locator") = py::none(),
+                 py::arg("tz") = py::none(),
+                 py::arg("formats") = py::none(),
+                 py::arg("offset_formats") = py::none(),
+                 py::arg("zero_formats") = py::none(),
+                 py::arg("show_offset") = true);
+
+        // mpl dates.DateConverter / ConciseDateConverter.
+        py::class_<pd::DateConverter,
+                   std::shared_ptr<pd::DateConverter>>(dm,
+                                                       "DateConverter")
             .def(py::init<>());
+        py::class_<pd::ConciseDateConverter, pd::DateConverter,
+                   std::shared_ptr<pd::ConciseDateConverter>>(
+            dm, "ConciseDateConverter")
+            .def(py::init<>());
+
+        // mpl dateutil.rrule.weekday constants + helpers.
+        py::class_<PyWeekday>(dm, "weekday")
+            .def(py::init<int>(), py::arg("weekday"))
+            .def_readwrite("weekday", &PyWeekday::weekday)
+            .def_readwrite("n", &PyWeekday::n)
+            .def("__call__",
+                 [](const PyWeekday& w, int n) {
+                     return PyWeekday{w.weekday, n};
+                 },
+                 py::arg("n"))
+            .def("__int__", [](const PyWeekday& w) { return w.weekday; })
+            .def("__index__",
+                 [](const PyWeekday& w) { return w.weekday; })
+            .def("__eq__",
+                 [](const PyWeekday& w, const py::object& o) {
+                     if (py::isinstance<py::int_>(o))
+                         return w.weekday == o.cast<int>();
+                     if (py::isinstance<PyWeekday>(o)) {
+                         auto v = o.cast<PyWeekday>();
+                         return w.weekday == v.weekday && w.n == v.n;
+                     }
+                     return false;
+                 },
+                 py::arg("other"))
+            .def("__hash__",
+                 [](const PyWeekday& w) { return w.weekday; })
+            .def("__repr__", [](const PyWeekday& w) {
+                static const char* names[] = {"MO", "TU", "WE", "TH",
+                                              "FR", "SA", "SU"};
+                std::string s = names[w.weekday % 7];
+                if (w.n) s += std::format("(+{})", w.n);
+                return s;
+            });
+        // mpl: MO..SU and MONDAY..SUNDAY are rrule.weekday instances.
+        static const char* wdNames[] = {"MO", "TU", "WE", "TH",
+                                        "FR", "SA", "SU"};
+        static const char* wdLong[] = {"MONDAY", "TUESDAY", "WEDNESDAY",
+                                       "THURSDAY", "FRIDAY", "SATURDAY",
+                                       "SUNDAY"};
+        py::tuple weekdays(7);
+        for (int i = 0; i < 7; ++i) {
+            py::object w = py::cast(PyWeekday{i, 0});
+            dm.attr(wdNames[i]) = w;
+            dm.attr(wdLong[i]) = w;
+            weekdays[i] = w;
+        }
+        dm.attr("WEEKDAYS") = weekdays;
+
+        // mpl frequency constants.
+        dm.attr("YEARLY") = 0;   dm.attr("MONTHLY") = 1;
+        dm.attr("WEEKLY") = 2;   dm.attr("DAILY") = 3;
+        dm.attr("HOURLY") = 4;   dm.attr("MINUTELY") = 5;
+        dm.attr("SECONDLY") = 6; dm.attr("MICROSECONDLY") = 7;
+        // mpl time-unit constants.
+        dm.attr("SEC_PER_MIN") = 60.0;
+        dm.attr("SEC_PER_HOUR") = 3600.0;
+        dm.attr("SEC_PER_DAY") = 86400.0;
+        dm.attr("SEC_PER_WEEK") = 604800.0;
+        dm.attr("MIN_PER_HOUR") = 60.0;
+        dm.attr("MINUTES_PER_DAY") = 1440.0;
+        dm.attr("HOURS_PER_DAY") = 24.0;
+        dm.attr("DAYS_PER_WEEK") = 7.0;
+        dm.attr("DAYS_PER_MONTH") = 30.0;
+        dm.attr("DAYS_PER_YEAR") = 365.0;
+        dm.attr("MONTHS_PER_YEAR") = 12.0;
+        dm.attr("MUSECONDS_PER_DAY") = 86400000000.0;
+        dm.attr("EPOCH_OFFSET") = 719163.0;
+        {
+            auto mod = py::module_::import("datetime");
+            dm.attr("UTC") = mod.attr("timezone").attr("utc");
+        }
+        // mpl DateLocator is the abstract base of date locators.
+        dm.attr("DateLocator") = m.attr("Locator");
+
+        // mpl dates.drange(dstart, dend, delta) → array of day-nums.
+        dm.def("drange",
+            [](const py::object& dstart, const py::object& dend,
+               const py::object& delta) {
+                auto dm2 =
+                    py::module_::import("volcanoplot").attr("dates");
+                const double start =
+                    dm2.attr("date2num")(dstart).cast<double>();
+                const double stop =
+                    dm2.attr("date2num")(dend).cast<double>();
+                const double step =
+                    delta.attr("total_seconds")().cast<double>() /
+                    86400.0;
+                const int n =
+                    int(std::ceil((stop - start) / step));
+                py::list out;
+                for (int i = 0; i < n; ++i)
+                    out.append(start + step * i);
+                return out;
+            },
+            py::arg("dstart"), py::arg("dend"), py::arg("delta"));
+
+        // mpl dates.datestr2num — parse a date string → day-num.
+        dm.def("datestr2num",
+            [](const py::object& d) -> py::object {
+                auto mod = py::module_::import("datetime");
+                auto dm2 =
+                    py::module_::import("volcanoplot").attr("dates");
+                auto one = [&](const py::object& s) -> py::object {
+                    py::object dt;
+                    try {
+                        dt = mod.attr("datetime").attr("fromisoformat")(
+                            s);
+                    } catch (const py::error_already_set&) {
+                        auto parser =
+                            py::module_::import("dateutil.parser");
+                        dt = parser.attr("parse")(s);
+                    }
+                    return dm2.attr("date2num")(dt);
+                };
+                if (py::isinstance<py::sequence>(d) &&
+                    !py::isinstance<py::str>(d)) {
+                    py::list out;
+                    for (auto item : d)
+                        out.append(one(item.cast<py::object>()));
+                    return out;
+                }
+                return one(d);
+            },
+            py::arg("d"));
     }
+
+    // ── mpl matplotlib.offsetbox ─────────────────────────────────
+    // Anchored artists (AnchoredText/AnchoredOffsetbox/AnchoredSizeBar)
+    // render through the axes' anchoredTexts/sizeBars slots; packers
+    // flatten their children to text.
+    {
+        auto ob = m.def_submodule("offsetbox");
+
+        py::class_<PyTextArea>(ob, "TextArea")
+            .def(py::init([](const std::string& s,
+                             const py::object& textprops,
+                             bool multilinebaseline) {
+                     (void)multilinebaseline;
+                     PyTextArea t;
+                     t.s = s;
+                     if (!textprops.is_none())
+                         applyFontPropertiesArg(t.font, textprops);
+                     return t;
+                 }),
+                 py::arg("s"), py::arg("textprops") = py::none(),
+                 py::arg("multilinebaseline") = false)
+            .def("get_text",
+                 [](const PyTextArea& t) { return t.s; })
+            .def("set_text",
+                 [](PyTextArea& t, const std::string& s) { t.s = s; })
+            .def("get_fontsize",
+                 [](const PyTextArea& t) { return t.font.size; })
+            .def("set_fontsize",
+                 [](PyTextArea& t, float s) { t.font.size = s; });
+
+        py::class_<PyDrawingArea>(ob, "DrawingArea")
+            .def(py::init([](float w, float h, float xd, float yd,
+                             bool clip) {
+                     return PyDrawingArea{w, h, xd, yd, clip, {}};
+                 }),
+                 py::arg("width"), py::arg("height"),
+                 py::arg("xdescent") = 0.0f, py::arg("ydescent") = 0.0f,
+                 py::arg("clip") = false);
+
+        py::class_<PyPacker, std::shared_ptr<PyPacker>>(ob, "PackerBase")
+            .def_readonly("children", &PyPacker::children)
+            .def("get_children",
+                 [](const PyPacker& p) { return p.children; });
+
+        // mpl PackerBase(pad=0, sep=0, width=None, height=None,
+        //                align="baseline", mode="fixed", children=None)
+        auto packerInit = [](bool vertical) {
+            return [vertical](float pad, float sep,
+                              const py::object& width,
+                              const py::object& height,
+                              const std::string& align,
+                              const std::string& mode,
+                              const py::object& children) {
+                PyPacker p;
+                if (!children.is_none())
+                    p.children = children.cast<py::list>();
+                p.pad = pad; p.sep = sep;
+                if (!width.is_none()) p.width = width.cast<float>();
+                if (!height.is_none()) p.height = height.cast<float>();
+                p.align = align; p.mode = mode;
+                p.vertical = vertical;
+                return p;
+            };
+        };
+        py::class_<PyHPacker, PyPacker,
+                   std::shared_ptr<PyHPacker>>(ob, "HPacker")
+            .def(py::init([packerInit](float pad, float sep,
+                                       const py::object& width,
+                                       const py::object& height,
+                                       const std::string& align,
+                                       const std::string& mode,
+                                       const py::object& children) {
+                     PyHPacker p;
+                     *static_cast<PyPacker*>(&p) = packerInit(false)(
+                         pad, sep, width, height, align, mode,
+                         children);
+                     return p;
+                 }),
+                 py::arg("pad") = 0.0f, py::arg("sep") = 0.0f,
+                 py::arg("width") = py::none(),
+                 py::arg("height") = py::none(),
+                 py::arg("align") = "baseline",
+                 py::arg("mode") = "fixed",
+                 py::arg("children") = py::none());
+        py::class_<PyVPacker, PyPacker,
+                   std::shared_ptr<PyVPacker>>(ob, "VPacker")
+            .def(py::init([packerInit](float pad, float sep,
+                                       const py::object& width,
+                                       const py::object& height,
+                                       const std::string& align,
+                                       const std::string& mode,
+                                       const py::object& children) {
+                     PyVPacker p;
+                     *static_cast<PyPacker*>(&p) = packerInit(true)(
+                         pad, sep, width, height, align, mode,
+                         children);
+                     return p;
+                 }),
+                 py::arg("pad") = 0.0f, py::arg("sep") = 0.0f,
+                 py::arg("width") = py::none(),
+                 py::arg("height") = py::none(),
+                 py::arg("align") = "baseline",
+                 py::arg("mode") = "fixed",
+                 py::arg("children") = py::none());
+
+        // mpl AnchoredOffsetbox(loc, pad, borderpad, child, prop,
+        //                       frameon, bbox_to_anchor, bbox_transform)
+        py::class_<PyAnchoredOffsetbox>(ob, "AnchoredOffsetbox")
+            .def(py::init([](const py::object& loc, float pad,
+                             float borderpad, const py::object& child,
+                             const py::object& prop, bool frameon,
+                             const py::object& bboxToAnchor,
+                             const py::object& bboxTransform) {
+                     (void)bboxTransform;
+                     PyAnchoredOffsetbox b;
+                     b.loc = py::isinstance<py::int_>(loc)
+                                 ? std::to_string(loc.cast<int>())
+                                 : loc.cast<std::string>();
+                     b.pad = pad; b.borderpad = borderpad;
+                     b.frameon = frameon;
+                     b.child = child;
+                     if (py::isinstance<PyBbox>(bboxToAnchor)) {
+                         b.bboxToAnchor = bboxToAnchor.cast<PyBbox>();
+                         b.hasBboxToAnchor = true;
+                     }
+                     // mpl prop= cascades to TextArea children.
+                     if (!prop.is_none() &&
+                         py::isinstance<PyTextArea>(child))
+                         applyFontPropertiesArg(
+                             child.cast<PyTextArea&>().font, prop);
+                     return b;
+                 }),
+                 py::arg("loc"), py::arg("pad") = 0.4f,
+                 py::arg("borderpad") = 0.5f,
+                 py::arg("child") = py::none(),
+                 py::arg("prop") = py::none(), py::arg("frameon") = true,
+                 py::arg("bbox_to_anchor") = py::none(),
+                 py::arg("bbox_transform") = py::none())
+            .def("set_child",
+                 [](PyAnchoredOffsetbox& b, const py::object& child) {
+                     b.child = child;
+                     if (auto* at = anchoredTextSlot(b))
+                         at->text = flattenOffsetbox(child);
+                     if (auto* at = anchoredTextSlot(b))
+                         if (auto f = offsetboxFont(child))
+                             at->font = *f;
+                 },
+                 py::arg("child"))
+            .def("get_child",
+                 [](const PyAnchoredOffsetbox& b) { return b.child; })
+            .def("get_children",
+                 [](const PyAnchoredOffsetbox& b) {
+                     py::list out;
+                     out.append(b.child);
+                     return out;
+                 })
+            .def("set_frame_on",
+                 [](PyAnchoredOffsetbox& b, bool on) {
+                     b.frameon = on;
+                     if (auto* at = anchoredTextSlot(b))
+                         at->frameon = on;
+                 },
+                 py::arg("b"))
+            .def("get_frame_on",
+                 [](const PyAnchoredOffsetbox& b) { return b.frameon; })
+            .def("set_bbox_to_anchor",
+                 [](PyAnchoredOffsetbox& b, const py::object& anchor,
+                    const py::object& transform) {
+                     (void)transform;
+                     if (py::isinstance<PyBbox>(anchor)) {
+                         b.bboxToAnchor = anchor.cast<PyBbox>();
+                         b.hasBboxToAnchor = true;
+                     }
+                 },
+                 py::arg("anchor"), py::arg("transform") = py::none())
+            .def("get_bbox_to_anchor",
+                 [](const PyAnchoredOffsetbox& b) {
+                     return b.bboxToAnchor;
+                 })
+            .def("get_visible",
+                 [](const PyAnchoredOffsetbox& b) {
+                     auto* at = anchoredTextSlot(b);
+                     return at ? !at->detached : true;
+                 })
+            .def("set_visible",
+                 [](PyAnchoredOffsetbox& b, bool v) {
+                     if (auto* at = anchoredTextSlot(b))
+                         at->detached = !v;
+                 },
+                 py::arg("b"))
+            .def("remove", [](PyAnchoredOffsetbox& b) {
+                if (auto* at = anchoredTextSlot(b))
+                    at->detached = true;
+                b.ax = nullptr; b.atIndex = SIZE_MAX; b.owner.reset();
+            });
+
+        // mpl AnchoredText(s, loc, pad=0.4, borderpad=0.5, prop=None)
+        py::class_<PyAnchoredText>(ob, "AnchoredText")
+            .def(py::init([](const std::string& s, const py::object& loc,
+                             float pad, float borderpad,
+                             const py::object& prop, bool frameon,
+                             const py::kwargs&) {
+                     PyAnchoredText t;
+                     t.loc = py::isinstance<py::int_>(loc)
+                                 ? std::to_string(loc.cast<int>())
+                                 : loc.cast<std::string>();
+                     t.pad = pad; t.borderpad = borderpad;
+                     t.frameon = frameon;
+                     PyTextArea ta;
+                     ta.s = s;
+                     if (!prop.is_none())
+                         applyFontPropertiesArg(ta.font, prop);
+                     t.txt = py::cast(ta);
+                     return t;
+                 }),
+                 py::arg("s"), py::arg("loc"), py::arg("pad") = 0.4f,
+                 py::arg("borderpad") = 0.5f,
+                 py::arg("prop") = py::none(),
+                 py::arg("frameon") = true)
+            .def_readonly("txt", &PyAnchoredText::txt)
+            .def("get_children",
+                 [](const PyAnchoredText& t) {
+                     py::list out;
+                     out.append(t.txt);
+                     return out;
+                 })
+            .def("set_frame_on",
+                 [](PyAnchoredText& t, bool on) {
+                     t.frameon = on;
+                     if (auto* at = t.at()) at->frameon = on;
+                 },
+                 py::arg("b"))
+            .def("get_frame_on",
+                 [](const PyAnchoredText& t) { return t.frameon; })
+            .def("get_visible",
+                 [](const PyAnchoredText& t) {
+                     auto* at = t.at();
+                     return at ? !at->detached : true;
+                 })
+            .def("set_visible",
+                 [](PyAnchoredText& t, bool v) {
+                     if (auto* at = t.at()) at->detached = !v;
+                 },
+                 py::arg("b"))
+            .def("remove", [](PyAnchoredText& t) {
+                if (auto* at = t.at()) at->detached = true;
+                t.ax = nullptr; t.index = SIZE_MAX; t.owner.reset();
+            });
+
+        // mpl_toolkits.axes_grid1.AnchoredSizeBar — bound under
+        // offsetbox (the discoverable mpl surface).
+        py::class_<PyAnchoredSizeBar>(ob, "AnchoredSizeBar")
+            .def(py::init([](const py::object& transform, float size,
+                             const std::string& label,
+                             const py::object& loc, float pad,
+                             float borderpad, float sep, bool frameon,
+                             float sizeVertical,
+                             const py::object& color, bool labelTop,
+                             const py::object& fontproperties,
+                             const py::object& fillBar) {
+                     (void)transform;
+                     PyAnchoredSizeBar h;
+                     h.pending.size = size;
+                     h.pending.label = label;
+                     h.pending.loc = py::isinstance<py::int_>(loc)
+                                         ? std::to_string(loc.cast<int>())
+                                         : loc.cast<std::string>();
+                     h.pending.pad = pad;
+                     h.pending.borderpad = borderpad;
+                     h.pending.sep = sep;
+                     h.pending.frameon = frameon;
+                     h.pending.sizeVertical = sizeVertical;
+                     h.pending.labelTop = labelTop;
+                     if (!color.is_none())
+                         h.pending.color = parseColor(color);
+                     if (!fillBar.is_none())
+                         h.pending.fillBar = fillBar.cast<bool>();
+                     plot::FontProperties fp{.size = h.pending.fontSize};
+                     if (!fontproperties.is_none())
+                         applyFontPropertiesArg(fp, fontproperties);
+                     h.pending.fontSize = fp.size;
+                     PyDrawingArea da;
+                     da.width = size;
+                     da.height = sizeVertical > 0 ? sizeVertical : 1;
+                     PyTextArea ta;
+                     ta.s = label;
+                     ta.font = fp;
+                     h.children.append(py::cast(da));
+                     h.children.append(py::cast(ta));
+                     return h;
+                 }),
+                 py::arg("transform"), py::arg("size"),
+                 py::arg("label"), py::arg("loc"),
+                 py::arg("pad") = 0.1f, py::arg("borderpad") = 0.1f,
+                 py::arg("sep") = 2.0f, py::arg("frameon") = true,
+                 py::arg("size_vertical") = 0.0f,
+                 py::arg("color") = py::str("black"),
+                 py::arg("label_top") = false,
+                 py::arg("fontproperties") = py::none(),
+                 py::arg("fill_bar") = py::none())
+            .def_readonly("children", &PyAnchoredSizeBar::children)
+            .def("get_children",
+                 [](const PyAnchoredSizeBar& h) { return h.children; })
+            .def("set_frame_on",
+                 [](PyAnchoredSizeBar& h, bool on) {
+                     if (auto* sb = h.sb()) sb->frameon = on;
+                 },
+                 py::arg("b"))
+            .def("get_visible",
+                 [](const PyAnchoredSizeBar& h) {
+                     auto* sb = h.sb();
+                     return sb ? !sb->detached : true;
+                 })
+            .def("set_visible",
+                 [](PyAnchoredSizeBar& h, bool v) {
+                     if (auto* sb = h.sb()) sb->detached = !v;
+                 },
+                 py::arg("b"))
+            .def("remove", [](PyAnchoredSizeBar& h) {
+                if (auto* sb = h.sb()) sb->detached = true;
+                h.ax = nullptr; h.index = SIZE_MAX; h.owner.reset();
+            });
+
+        // mpl OffsetBox base alias.
+        ob.attr("OffsetBox") = ob.attr("AnchoredOffsetbox");
+    }
+
+    // ── mpl tick artist handles ─────────────────────────────────
+    // TickLabel: the Text-like objects mpl's get_xticklabels /
+    // Axis.get_ticklabels return. Index -1 = the axis label itself.
+    auto tickLabelSetText = [](PyTickLabel& t, const std::string& s) {
+        if (t.index < 0) { t.as().label = s; t.touch(); return; }
+        auto& tc = t.tc();
+        if (t.minor) {
+            // mpl routes minor set_text through the minor
+            // formatter — install a FixedFormatter seeded with
+            // the current labels.
+            auto locs = axisTickLocs(*t.ax, t.isX, true);
+            const auto& v = t.isX ? t.ax->viewport().x
+                                  : t.ax->viewport().y;
+            plot::LogFormatterSciNotation defFmt;
+            plot::Formatter* f = tc.minorFormatter
+                                     ? tc.minorFormatter.get()
+                                     : &defFmt;
+            f->setViewInterval(std::min(v.min, v.max),
+                               std::max(v.min, v.max));
+            f->setLocs(locs);
+            std::vector<std::string> labels(locs.size());
+            for (size_t i = 0; i < locs.size(); ++i)
+                labels[i] = f->format(locs[i], int(i));
+            if (t.index < (int)labels.size())
+                labels[t.index] = s;
+            tc.minorFormatter =
+                std::make_shared<plot::FixedFormatter>(
+                    std::move(labels));
+        } else {
+            // Pin positions to the current locs so the labels
+            // array has a stable index, then overwrite ours.
+            if (!tc.positions)
+                tc.positions = axisMajorTickLocs(*t.ax, t.isX);
+            if (!tc.labels ||
+                tc.labels->size() < tc.positions->size()) {
+                auto locs = *tc.positions;
+                auto labels = axisTickLabels(*t.ax, t.isX, locs);
+                labels.resize(tc.positions->size());
+                tc.labels = std::move(labels);
+            }
+            if (t.index < (int)tc.labels->size())
+                (*tc.labels)[t.index] = s;
+            t.ax->markMajorTicksSet(t.isX);
+        }
+        t.touch();
+    };
+    py::class_<PyTickLabel>(m, "TickLabel")
+        .def("get_text",
+             [](const PyTickLabel& t) { return tickLabelText(t); })
+        .def("set_text", tickLabelSetText)
+        .def("set_label", tickLabelSetText)  // mpl Text.set_label alias
+        .def("get_position",
+             [](const PyTickLabel& t) {
+                 // mpl label position: (loc, axis-frac 0) for x,
+                 // (0, loc) for y — the label sits at the near side.
+                 return t.isX ? std::make_tuple(t.loc, 0.0f)
+                              : std::make_tuple(0.0f, t.loc);
+             })
+        .def("set_rotation",
+             [](PyTickLabel& t, const py::object& r) {
+                 auto& fp = t.index < 0 ? t.as().labelFont
+                                        : t.as().tickFont;
+                 fp.rotation = rotationDeg(r) * float(M_PI) / 180.0f;
+                 t.touch();
+             })
+        .def("get_rotation",
+             [](const PyTickLabel& t) {
+                 const auto& fp = t.index < 0 ? t.as().labelFont
+                                              : t.as().tickFont;
+                 return fp.rotation * 180.0f / float(M_PI);
+             })
+        .def("set_rotation_mode",
+             [](PyTickLabel& t, const std::string& m) {
+                 if (t.index >= 0) t.tc().labelRotationMode = m;
+                 t.touch();
+             })
+        .def("get_rotation_mode",
+             [](const PyTickLabel& t) {
+                 return t.index >= 0 ? t.tc().labelRotationMode
+                                     : std::string("default");
+             })
+        .def("set_fontsize",
+             [](PyTickLabel& t, const py::object& v) {
+                 float s = fontSizePt(v);
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont).size =
+                     s;
+                 t.touch();
+             })
+        .def("get_fontsize",
+             [](const PyTickLabel& t) {
+                 return (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .size;
+             })
+        .def("set_fontfamily",
+             [](PyTickLabel& t, const std::string& f) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .family = f;
+                 t.touch();
+             })
+        .def("get_fontfamily",
+             [](const PyTickLabel& t) {
+                 return std::vector<std::string>{
+                     (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                         .family};
+             })
+        .def("set_fontstyle",
+             [](PyTickLabel& t, const std::string& s) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont).style =
+                     s;
+                 t.touch();
+             })
+        .def("get_fontstyle",
+             [](const PyTickLabel& t) {
+                 return (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .style;
+             })
+        .def("set_fontvariant",
+             [](PyTickLabel& t, const std::string& s) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .variant = s;
+                 t.touch();
+             })
+        .def("get_fontvariant",
+             [](const PyTickLabel& t) {
+                 return (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .variant;
+             })
+        .def("set_fontstretch",
+             [](PyTickLabel& t, const std::string& s) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .stretch = s;
+                 t.touch();
+             })
+        .def("get_fontstretch",
+             [](const PyTickLabel& t) {
+                 return (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .stretch;
+             })
+        .def("set_fontproperties",
+             [](PyTickLabel& t, const py::object& fp) {
+                 applyFontPropertiesArg(
+                     t.index < 0 ? t.as().labelFont : t.as().tickFont,
+                     fp);
+                 t.touch();
+             },
+             py::arg("fontproperties"))
+        .def("get_fontweight",
+             [](const PyTickLabel& t) {
+                 return (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .weight;
+             })
+        .def("set_fontweight",
+             [](PyTickLabel& t, const py::object& w) {
+                 auto& fp =
+                     t.index < 0 ? t.as().labelFont : t.as().tickFont;
+                 fp.weight = fontWeightName(w);
+                 t.touch();
+             })
+        .def("set_color",
+             [](PyTickLabel& t, const py::object& c) {
+                 if (t.index < 0) t.as().labelColor = parseColor(c);
+                 else t.tc().labelColor = parseColor(c);
+                 t.touch();
+             })
+        .def("get_color",
+             [](const PyTickLabel& t) {
+                 plot::Color c =
+                     t.index < 0
+                         ? t.as().labelColor
+                         : t.tc().labelColor.value_or(t.as().color);
+                 return colorToPy(c);
+             })
+        .def("set_ha",
+             [](PyTickLabel& t, const std::string& h) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .halign = parseHAlign(h);
+                 t.touch();
+             })
+        .def("set_horizontalalignment",
+             [](PyTickLabel& t, const std::string& h) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .halign = parseHAlign(h);
+                 t.touch();
+             })
+        .def("set_va",
+             [](PyTickLabel& t, const std::string& v) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .valign = parseVAlign(v);
+                 t.touch();
+             })
+        .def("set_verticalalignment",
+             [](PyTickLabel& t, const std::string& v) {
+                 (t.index < 0 ? t.as().labelFont : t.as().tickFont)
+                     .valign = parseVAlign(v);
+                 t.touch();
+             })
+        .def("set_visible",
+             [](PyTickLabel& t, bool v) {
+                 if (t.index < 0) {
+                     t.as().visible = v;
+                 } else {
+                     auto& hidden = t.minor ? t.tc().hiddenMinorLabels
+                                            : t.tc().hiddenLabels;
+                     if (v) hidden.erase(t.index);
+                     else hidden.insert(t.index);
+                 }
+                 t.touch();
+             })
+        .def("get_visible",
+             [](const PyTickLabel& t) {
+                 if (t.index < 0) return t.as().visible;
+                 const auto& hidden = t.minor ? t.tc().hiddenMinorLabels
+                                              : t.tc().hiddenLabels;
+                 return !hidden.contains(t.index);
+             })
+        .def("get_figure", [](const PyTickLabel& t) { return t.owner; })
+        .def_property_readonly("figure",
+                               [](const PyTickLabel& t) { return t.owner; })
+        .def_property_readonly("axes",
+                               [](const PyTickLabel& t) {
+                                   return PyAxes{t.owner, t.ax, nullptr};
+                               });
+
+    // mpl tick-mark / grid-line Line2D handles.
+    py::class_<PyTickLine>(m, "TickLine")
+        .def("get_xdata",
+             [](const PyTickLine& l) {
+                 const auto& v = l.ax->viewport().y;
+                 return l.isX
+                            ? std::vector<float>{l.loc, l.loc}
+                            : std::vector<float>{v.min, v.max};
+             })
+        .def("get_ydata",
+             [](const PyTickLine& l) {
+                 const auto& v = l.ax->viewport().x;
+                 return l.isX
+                            ? std::vector<float>{v.min, v.max}
+                            : std::vector<float>{l.loc, l.loc};
+             })
+        .def("get_loc", [](const PyTickLine& l) { return l.loc; })
+        .def("get_visible", [](const PyTickLine&) { return true; })
+        .def("get_figure", [](const PyTickLine& l) { return l.owner; });
+
+    // mpl Tick objects (Axis.get_major_ticks / get_minor_ticks).
+    py::class_<PyTick>(m, "Tick")
+        .def("get_loc", [](const PyTick& t) { return t.loc; })
+        .def("get_label",
+             [](const PyTick& t) {
+                 return tickLabelText(PyTickLabel{t.owner, t.ax, t.isX,
+                                                  t.minor, t.index,
+                                                  t.loc});
+             })
+        .def_property_readonly("label",
+                               [](const PyTick& t) {
+                                   return PyTickLabel{t.owner, t.ax,
+                                                      t.isX, t.minor,
+                                                      t.index, t.loc};
+                               })
+        .def_property_readonly("label1",
+                               [](const PyTick& t) {
+                                   return PyTickLabel{t.owner, t.ax,
+                                                      t.isX, t.minor,
+                                                      t.index, t.loc};
+                               })
+        .def_property_readonly("label2",
+                               [](const PyTick& t) {
+                                   return PyTickLabel{t.owner, t.ax,
+                                                      t.isX, t.minor,
+                                                      t.index, t.loc};
+                               })
+        .def_property_readonly("tick1line",
+                               [](const PyTick& t) {
+                                   return PyTickLine{t.owner, t.ax, t.isX,
+                                                     t.minor, false,
+                                                     t.loc};
+                               })
+        .def_property_readonly("tick2line",
+                               [](const PyTick& t) {
+                                   return PyTickLine{t.owner, t.ax, t.isX,
+                                                     t.minor, false,
+                                                     t.loc};
+                               })
+        .def_property_readonly("gridline",
+                               [](const PyTick& t) {
+                                   return PyTickLine{t.owner, t.ax, t.isX,
+                                                     t.minor, true,
+                                                     t.loc};
+                               });
 
     // mpl ax.xaxis / ax.yaxis proxy.
     py::class_<PyAxis>(m, "Axis")
@@ -1628,9 +7780,2204 @@ PYBIND11_MODULE(volcanoplot, m) {
                  else s.ax->setYMinorFormatter(std::move(f));
                  s.ax->touch();
              },
-             py::arg("formatter"));
+             py::arg("formatter"))
+        // mpl Axis.set_ticks_position: x ∈ {top,bottom,both,default,
+        // none}; y ∈ {left,right,both,default,none}.
+        .def("set_ticks_position",
+             [](PyAxis& s, const std::string& pos) {
+                 if (s.isX) s.ax->setXTicksPosition(pos);
+                 else s.ax->setYTicksPosition(pos);
+             },
+             py::arg("position"))
+        .def("get_ticks_position",
+             [](const PyAxis& s) {
+                 return std::string(s.isX ? s.ax->xTicksPosition()
+                                          : s.ax->yTicksPosition());
+             })
+        .def("set_label_position",
+             [](PyAxis& s, const std::string& pos) {
+                 if (s.isX) s.ax->setXLabelPosition(pos);
+                 else s.ax->setYLabelPosition(pos);
+             },
+             py::arg("position"))
+        .def("get_label_position",
+             [](const PyAxis& s) {
+                 return std::string(s.isX ? s.ax->xLabelPosition()
+                                          : s.ax->yLabelPosition());
+             })
+        // mpl Axis.tick_top()/tick_bottom()/tick_left()/tick_right().
+        .def("tick_top",
+             [](PyAxis& s) {
+                 if (s.isX) s.ax->xaxisTickTop();
+                 else throw py::attribute_error(
+                     "'YAxis' object has no attribute 'tick_top'");
+             })
+        .def("tick_bottom",
+             [](PyAxis& s) {
+                 if (s.isX) s.ax->xaxisTickBottom();
+                 else throw py::attribute_error(
+                     "'YAxis' object has no attribute 'tick_bottom'");
+             })
+        .def("tick_left",
+             [](PyAxis& s) {
+                 if (!s.isX) s.ax->yaxisTickLeft();
+                 else throw py::attribute_error(
+                     "'XAxis' object has no attribute 'tick_left'");
+             })
+        .def("tick_right",
+             [](PyAxis& s) {
+                 if (!s.isX) s.ax->yaxisTickRight();
+                 else throw py::attribute_error(
+                     "'XAxis' object has no attribute 'tick_right'");
+             })
+        // ── mpl Axis introspection ──────────────────────────────
+        .def_property_readonly("axis_name",
+                               [](const PyAxis& s) {
+                                   return s.isX ? "x" : "y";
+                               })
+        .def("get_major_locator",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xLocator() : s.ax->yLocator();
+             })
+        .def("get_minor_locator",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xMinorLocator()
+                              : s.ax->yMinorLocator();
+             })
+        .def("get_major_formatter",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xFormatter() : s.ax->yFormatter();
+             })
+        .def("get_minor_formatter",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xMinorFormatter()
+                              : s.ax->yMinorFormatter();
+             })
+        // mpl attributes isDefault_majloc / isDefault_minloc /
+        // isDefault_majfmt / isDefault_minfmt.
+        .def_property_readonly("isDefault_majloc",
+                               [](const PyAxis& s) {
+                                   return s.ax->isDefaultMajLoc(s.isX);
+                               })
+        .def_property_readonly("isDefault_minloc",
+                               [](const PyAxis& s) {
+                                   return s.ax->isDefaultMinLoc(s.isX);
+                               })
+        .def_property_readonly("isDefault_majfmt",
+                               [](const PyAxis& s) {
+                                   return s.ax->isDefaultMajFmt(s.isX);
+                               })
+        .def_property_readonly("isDefault_minfmt",
+                               [](const PyAxis& s) {
+                                   return s.ax->isDefaultMinFmt(s.isX);
+                               })
+        .def("get_majorticklocs",
+             [](const PyAxis& s) {
+                 return axisTickLocs(*s.ax, s.isX, false);
+             })
+        .def("get_minorticklocs",
+             [](const PyAxis& s) {
+                 return axisTickLocs(*s.ax, s.isX, true);
+             })
+        .def("get_ticklocs",
+             [](const PyAxis& s, bool minor) {
+                 return axisTickLocs(*s.ax, s.isX, minor);
+             },
+             py::arg("minor") = false)
+        .def("get_majorticklabels",
+             [](const PyAxis& s) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, false);
+                 std::vector<PyTickLabel> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({s.owner, s.ax, s.isX, false,
+                                    int(i), locs[i]});
+                 return out;
+             })
+        .def("get_minorticklabels",
+             [](const PyAxis& s) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, true);
+                 std::vector<PyTickLabel> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({s.owner, s.ax, s.isX, true,
+                                    int(i), locs[i]});
+                 return out;
+             })
+        .def("get_ticklabels",
+             [](const PyAxis& s, bool minor) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, minor);
+                 std::vector<PyTickLabel> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({s.owner, s.ax, s.isX, minor,
+                                    int(i), locs[i]});
+                 return out;
+             },
+             py::arg("minor") = false)
+        .def("get_majorticklines",
+             [](const PyAxis& s) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, false);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({s.owner, s.ax, s.isX, false,
+                                    false, l});
+                 return out;
+             })
+        .def("get_minorticklines",
+             [](const PyAxis& s) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, true);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({s.owner, s.ax, s.isX, true,
+                                    false, l});
+                 return out;
+             })
+        .def("get_ticklines",
+             [](const PyAxis& s, bool minor) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, minor);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({s.owner, s.ax, s.isX, minor,
+                                    false, l});
+                 return out;
+             },
+             py::arg("minor") = false)
+        .def("get_gridlines",
+             [](const PyAxis& s) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, false);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({s.owner, s.ax, s.isX, false,
+                                    true, l});
+                 return out;
+             })
+        .def("get_major_ticks",
+             [](const PyAxis& s, int numticks) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, false);
+                 if (numticks > 0 &&
+                     (int)locs.size() > numticks)
+                     locs.resize(size_t(numticks));
+                 std::vector<PyTick> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({s.owner, s.ax, s.isX, false,
+                                    int(i), locs[i]});
+                 return out;
+             },
+             py::arg("numticks") = 0)
+        .def("get_minor_ticks",
+             [](const PyAxis& s, int numticks) {
+                 auto locs = axisTickLocs(*s.ax, s.isX, true);
+                 if (numticks > 0 &&
+                     (int)locs.size() > numticks)
+                     locs.resize(size_t(numticks));
+                 std::vector<PyTick> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({s.owner, s.ax, s.isX, true,
+                                    int(i), locs[i]});
+                 return out;
+             },
+             py::arg("numticks") = 0)
+        // mpl Axis.label — the axis-label Text artist.
+        .def("get_label",
+             [](const PyAxis& s) {
+                 return PyTickLabel{s.owner, s.ax, s.isX, false, -1,
+                                    0.0f};
+             })
+        .def_property_readonly("label",
+                               [](const PyAxis& s) {
+                                   return PyTickLabel{s.owner, s.ax,
+                                                      s.isX, false, -1,
+                                                      0.0f};
+                               })
+        .def("set_label",
+             [](PyAxis& s, const std::string& l) {
+                 auto& as = s.isX ? s.ax->style().xAxis
+                                  : s.ax->style().yAxis;
+                 as.label = l;
+                 s.ax->touch();
+             })
+        .def("set_label_text",
+             [](PyAxis& s, const std::string& l,
+                const py::object& fontdict, const py::kwargs& kw) {
+                 auto& as = s.isX ? s.ax->style().xAxis
+                                  : s.ax->style().yAxis;
+                 as.label = l;
+                 auto applyFontKw = [&](const py::dict& d) {
+                     for (auto item : d) {
+                         auto k = item.first.cast<std::string>();
+                         py::object v = py::reinterpret_borrow<py::object>(
+                             item.second);
+                         if (k == "size" || k == "fontsize")
+                             as.labelFont.size = fontSizePt(v);
+                         else if (k == "family" || k == "fontfamily")
+                             as.labelFont.family = v.cast<std::string>();
+                         else if (k == "style" || k == "fontstyle")
+                             as.labelFont.style = v.cast<std::string>();
+                         else if (k == "weight" || k == "fontweight")
+                             as.labelFont.weight = fontWeightName(v);
+                         else if (k == "color")
+                             as.labelColor = parseColor(v);
+                         else if (k == "rotation")
+                             as.labelFont.rotation =
+                                 rotationDeg(v) * float(M_PI) / 180.0f;
+                         else
+                             throw py::type_error(std::format(
+                                 "unexpected label keyword '{}'", k));
+                     }
+                 };
+                 if (!fontdict.is_none() &&
+                     py::isinstance<py::dict>(fontdict))
+                     applyFontKw(fontdict.cast<py::dict>());
+                 if (kw.size()) applyFontKw(py::dict(kw));
+                 s.ax->touch();
+             },
+             py::arg("label"), py::arg("fontdict") = py::none())
+        // mpl Axis.set_ticks(ticks, labels=None, *, minor=False).
+        // Expands the view interval to cover the ticks (mpl
+        // _set_tick_locations → set_view_interval), preserving any
+        // inversion.
+        .def("set_ticks",
+             [](PyAxis& s, const py::object& ticks,
+                const py::object& labels, bool minor,
+                const py::kwargs& kw) {
+                 axisSetTicks(*s.ax, s.isX, ticks, labels, minor, kw);
+             },
+             py::arg("ticks"), py::arg("labels") = py::none(),
+             py::arg("minor") = false)
+        // mpl Axis.set_ticklabels(labels, minor=False, fontdict=None).
+        .def("set_ticklabels",
+             [](PyAxis& s, const py::object& labels, bool minor,
+                const py::object& fontdict, const py::kwargs& kw) {
+                 auto& as = s.isX ? s.ax->style().xAxis
+                                  : s.ax->style().yAxis;
+                 auto& tc = as.ticks;
+                 auto strs = toStrings(labels);
+                 if (minor) {
+                     // mpl installs a FixedFormatter on the minor axis
+                     // and, unless ticks were given, a FixedLocator at
+                     // the current minor positions.
+                     if (!tc.minorLocator)
+                         tc.minorLocator =
+                             std::make_shared<plot::FixedLocator>(
+                                 axisTickLocs(*s.ax, s.isX, true));
+                     tc.minorFormatter =
+                         std::make_shared<plot::FixedFormatter>(
+                             std::move(strs));
+                 } else {
+                     // mpl: FixedFormatter + FixedLocator pinned to the
+                     // current major locs when positions aren't set.
+                     if (!tc.positions)
+                         tc.positions =
+                             axisMajorTickLocs(*s.ax, s.isX);
+                     tc.labels = std::move(strs);
+                     s.ax->markMajorTicksSet(s.isX);
+                 }
+                 // fontdict + kwargs style the labels (mpl behavior).
+                 auto applyKw = [&](const py::dict& d) {
+                     for (auto item : d) {
+                         auto k = item.first.cast<std::string>();
+                         py::object v = py::reinterpret_borrow<py::object>(
+                             item.second);
+                         if (k == "fontsize" || k == "size")
+                             as.tickFont.size = fontSizePt(v);
+                         else if (k == "fontfamily" || k == "family")
+                             as.tickFont.family = v.cast<std::string>();
+                         else if (k == "fontstyle" || k == "style")
+                             as.tickFont.style = v.cast<std::string>();
+                         else if (k == "fontweight" || k == "weight")
+                             as.tickFont.weight = fontWeightName(v);
+                         else if (k == "color" || k == "labelcolor")
+                             tc.labelColor = parseColor(v);
+                         else if (k == "rotation")
+                             as.tickFont.rotation =
+                                 rotationDeg(v) * float(M_PI) / 180.0f;
+                         else
+                             throw py::type_error(std::format(
+                                 "unexpected ticklabels keyword '{}'",
+                                 k));
+                     }
+                 };
+                 if (!fontdict.is_none() &&
+                     py::isinstance<py::dict>(fontdict))
+                     applyKw(fontdict.cast<py::dict>());
+                 if (kw.size()) applyKw(py::dict(kw));
+                 s.ax->touch();
+             },
+             py::arg("labels"), py::arg("minor") = false,
+             py::arg("fontdict") = py::none())
+        // mpl Axis.set_tick_params(which='major', reset=False, **kw).
+        .def("set_tick_params",
+             [](PyAxis& s, const std::string& which, bool reset,
+                const py::kwargs& kw) {
+                 applyTickParams(*s.ax, s.isX, which, reset, kw);
+             },
+             py::arg("which") = "major", py::arg("reset") = false)
+        // mpl Axis.minorticks_on/off.
+        .def("minorticks_on",
+             [](PyAxis& s) { s.ax->minorticksOnAxis(s.isX); })
+        .def("minorticks_off",
+             [](PyAxis& s) { s.ax->minorticksOffAxis(s.isX); })
+        // mpl Axis.set_inverted / get_inverted / inverted.
+        .def("set_inverted",
+             [](PyAxis& s, bool inverted) {
+                 if (s.isX) s.ax->setXInverted(inverted);
+                 else s.ax->setYInverted(inverted);
+             },
+             py::arg("inverted"))
+        .def("get_inverted",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xAxisInverted()
+                              : s.ax->yAxisInverted();
+             })
+        .def("inverted",
+             [](const PyAxis& s) {
+                 return s.isX ? s.ax->xAxisInverted()
+                              : s.ax->yAxisInverted();
+             })
+        .def("get_tick_padding",
+             [](const PyAxis& s) {
+                 return (s.isX ? s.ax->style().xAxis.ticks
+                               : s.ax->style().yAxis.ticks).majorPad;
+             })
+        .def("get_ticks_direction",
+             [](const PyAxis& s) {
+                 return (s.isX ? s.ax->style().xAxis.ticks
+                               : s.ax->style().yAxis.ticks).direction;
+             })
+        // mpl Axis.reset_ticks — restore auto locator/formatter, tick
+        // geometry, and furniture defaults.
+        .def("reset_ticks",
+             [](PyAxis& s) {
+                 auto& as = s.isX ? s.ax->style().xAxis
+                                  : s.ax->style().yAxis;
+                 as.ticks = plot::TickConfig{};
+                 (s.isX ? s.ax->xFurniture() : s.ax->yFurniture()) =
+                     plot::Axes::AxisFurniture{};
+                 s.ax->touch();
+             });
 
-    // ── mpl Path (vertices + codes) ──────────────────────────────
+    // ── mpl patheffects submodule ────────────────────────────────
+    {
+        auto pe = m.def_submodule("patheffects");
+        py::class_<plot::PathEffect> pefx(pe, "AbstractPathEffect");
+        pefx.def(py::init<>());
+        // mpl offset arg: None → default (0,0) for Stroke, (2,-2) for
+        // shadows; a (x, y) pair in points.
+        auto parseOffset = [](const py::object& off,
+                              plot::Point2D def) -> plot::Point2D {
+            if (off.is_none()) return def;
+            auto t = off.cast<py::sequence>();
+            if (t.size() != 2)
+                throw std::invalid_argument("offset must be (x, y)");
+            return {t[0].cast<float>(), t[1].cast<float>()};
+        };
+        // mpl gc kwargs shared by the effects: linewidth, foreground
+        // (alias edgecolor/color), alpha.
+        auto gcKw = [&parseOffset](plot::PathEffect& e,
+                                   const py::kwargs& kw,
+                                   plot::Point2D defOff) {
+            for (auto item : kw) {
+                std::string k = item.first.cast<std::string>();
+                py::object v = py::reinterpret_borrow<py::object>(item.second);
+                if (k == "linewidth" || k == "lw")
+                    e.lineWidth = v.cast<float>();
+                else if (k == "foreground" || k == "edgecolor" ||
+                         k == "color")
+                    e.foreground = parseColor(v);
+                else if (k == "alpha")
+                    e.alpha = v.cast<float>();
+                else if (k == "offset")
+                    e.offset = parseOffset(v, defOff);
+                else
+                    throw py::type_error(std::format(
+                        "unexpected path effect keyword '{}'", k));
+            }
+        };
+        pe.def("Normal", [] {
+            plot::PathEffect e;
+            e.kind = plot::PathEffect::Kind::Normal;
+            return e;
+        });
+        auto strokeFn = [&parseOffset, &gcKw](const py::object& offset,
+                                            const py::kwargs& kw,
+                                            bool thenNormal) {
+            plot::PathEffect e;
+            e.kind = plot::PathEffect::Kind::Stroke;
+            e.offset = parseOffset(offset, {0.0f, 0.0f});
+            e.thenNormal = thenNormal;
+            gcKw(e, kw, {0.0f, 0.0f});
+            return e;
+        };
+        pe.def("Stroke",
+                [strokeFn](const py::object& offset, const py::kwargs& kw) {
+                    return strokeFn(offset, kw, false);
+                },
+                py::arg("offset") = py::none());
+        pe.def("withStroke",
+                [strokeFn](const py::object& offset, const py::kwargs& kw) {
+                    return strokeFn(offset, kw, true);
+                },
+                py::arg("offset") = py::none());
+        auto patchShadowFn = [&parseOffset](const py::object& offset,
+                                            const py::object& shadow_rgbface,
+                                            const py::object& alpha,
+                                            float rho,
+                                            bool thenNormal) {
+            plot::PathEffect e;
+            e.kind = plot::PathEffect::Kind::PatchShadow;
+            e.offset = parseOffset(offset, {2.0f, -2.0f});
+            e.thenNormal = thenNormal;
+            if (!shadow_rgbface.is_none())
+                e.shadowColor = parseColor(shadow_rgbface);
+            if (!alpha.is_none())
+                e.shadowAlpha = alpha.cast<float>();
+            e.rho = rho;
+            return e;
+        };
+        pe.def("SimplePatchShadow",
+                [patchShadowFn](const py::object& offset,
+                                const py::object& shadow_rgbface,
+                                const py::object& alpha, float rho) {
+                    return patchShadowFn(offset, shadow_rgbface, alpha,
+                                         rho, false);
+                },
+                py::arg("offset") = py::none(),
+                py::arg("shadow_rgbface") = py::none(),
+                py::arg("alpha") = py::none(), py::arg("rho") = 0.3f);
+        pe.def("withSimplePatchShadow",
+                [patchShadowFn](const py::object& offset,
+                                const py::object& shadow_rgbface,
+                                const py::object& alpha, float rho) {
+                    return patchShadowFn(offset, shadow_rgbface, alpha,
+                                         rho, true);
+                },
+                py::arg("offset") = py::none(),
+                py::arg("shadow_rgbface") = py::none(),
+                py::arg("alpha") = py::none(), py::arg("rho") = 0.3f);
+        auto lineShadowFn = [&parseOffset](const py::object& offset,
+                                           const py::object& shadow_color,
+                                           const py::object& alpha,
+                                           float rho,
+                                           bool thenNormal) {
+            plot::PathEffect e;
+            e.kind = plot::PathEffect::Kind::LineShadow;
+            e.offset = parseOffset(offset, {2.0f, -2.0f});
+            e.thenNormal = thenNormal;
+            // mpl default shadow_color='k'; None → fg × rho.
+            if (shadow_color.is_none())
+                e.shadowColor.reset();
+            else
+                e.shadowColor = parseColor(shadow_color);
+            if (!alpha.is_none()) e.shadowAlpha = alpha.cast<float>();
+            e.rho = rho;
+            return e;
+        };
+        pe.def("SimpleLineShadow",
+                [lineShadowFn](const py::object& offset,
+                               const py::object& shadow_color,
+                               const py::object& alpha, float rho) {
+                    return lineShadowFn(offset, shadow_color, alpha,
+                                        rho, false);
+                },
+                py::arg("offset") = py::none(),
+                py::arg("shadow_color") = py::str("k"),
+                py::arg("alpha") = py::none(), py::arg("rho") = 0.3f);
+        pe.def("withSimpleLineShadow",
+                [lineShadowFn](const py::object& offset,
+                               const py::object& shadow_color,
+                               const py::object& alpha, float rho) {
+                    return lineShadowFn(offset, shadow_color, alpha,
+                                        rho, true);
+                },
+                py::arg("offset") = py::none(),
+                py::arg("shadow_color") = py::str("k"),
+                py::arg("alpha") = py::none(), py::arg("rho") = 0.3f);
+    }
+
+    // ── mpl transforms submodule ─────────────────────────────────
+    {
+        auto tm = m.def_submodule("transforms");
+        py::class_<plot::Transform, std::shared_ptr<plot::Transform>>
+            tcls(tm, "Transform");
+        tcls
+            .def("transform_point",
+                 [](const plot::Transform& t,
+                    std::pair<float, float> p) {
+                     auto q = t.apply({p.first, p.second});
+                     return std::pair<float, float>{q.x, q.y};
+                 },
+                 py::arg("point"))
+            .def("transform",
+                 [](const plot::Transform& t, const py::object& pts) {
+                     py::list out;
+                     for (auto item :
+                          pts.cast<py::sequence>()) {
+                         auto p = item.cast<std::pair<float, float>>();
+                         auto q = t.apply({p.first, p.second});
+                         out.append(py::make_tuple(q.x, q.y));
+                     }
+                     return out;
+                 },
+                 py::arg("points"))
+            .def("inverted",
+                 [](const plot::Transform& t) {
+                     auto inv = t.inverted();
+                     if (!inv)
+                         throw std::runtime_error(
+                             "transform is not invertible");
+                     return inv;
+                 })
+            .def("is_affine", &plot::Transform::isAffine)
+            // mpl `a + b` composes: apply a, then b.
+            .def("__add__",
+                 [](const std::shared_ptr<plot::Transform>& a,
+                    const std::shared_ptr<plot::Transform>& b) {
+                     return a->then(b);
+                 },
+                 py::arg("other"))
+            // mpl Transform metadata.
+            .def_property_readonly("input_dims", [](const plot::Transform&) { return 2; })
+            .def_property_readonly("output_dims", [](const plot::Transform&) { return 2; })
+            .def_property_readonly("is_bbox", [](const plot::Transform&) { return false; })
+            .def_property_readonly("is_separable", [](const plot::Transform&) { return false; })
+            .def_property_readonly("has_inverse",
+                 [](const plot::Transform& t) {
+                     return t.inverted() != nullptr;
+                 })
+            .def_property_readonly("depth",
+                 [](const plot::Transform& t) {
+                     // mpl: 1 + max child depth; 1 for leaf transforms.
+                     if (dynamic_cast<const plot::CompositeGenericTransform*>(&t) ||
+                         dynamic_cast<const plot::BlendedGenericTransform*>(&t) ||
+                         dynamic_cast<const plot::CompositeAffine2D*>(&t) ||
+                         dynamic_cast<const plot::BlendedAffine2D*>(&t))
+                         return 2;
+                     return 1;
+                 })
+            .def("get_affine",
+                 [](const plot::Transform& t) {
+                     // mpl returns an Affine2D for affine transforms;
+                     // the identity when fully non-affine.
+                     if (t.isAffine())
+                         return plot::Affine2D(affineOf(t));
+                     return plot::Affine2D::identity();
+                 })
+            .def("transform_affine",
+                 [](const plot::Transform& t, const py::object& pts) {
+                     py::list out;
+                     for (auto item : pts.cast<py::sequence>()) {
+                         auto p = item.cast<std::pair<float, float>>();
+                         auto q = t.apply({p.first, p.second});
+                         out.append(py::make_tuple(q.x, q.y));
+                     }
+                     return out;
+                 },
+                 py::arg("points"))
+            .def("transform_non_affine",
+                 [](const plot::Transform& t, const py::object& pts) {
+                     // mpl: non-affine part of a pure-affine transform
+                     // is the identity.
+                     if (t.isAffine()) return py::list(pts);
+                     py::list out;
+                     for (auto item : pts.cast<py::sequence>()) {
+                         auto p = item.cast<std::pair<float, float>>();
+                         auto q = t.apply({p.first, p.second});
+                         out.append(py::make_tuple(q.x, q.y));
+                     }
+                     return out;
+                 },
+                 py::arg("points"))
+            .def("transform_path",
+                 [](const plot::Transform& t, const plot::Path& p) {
+                     return p.transformed(t);
+                 },
+                 py::arg("path"))
+            .def("transform_path_affine",
+                 [](const plot::Transform& t, const plot::Path& p) {
+                     return p.transformed(t);
+                 },
+                 py::arg("path"))
+            .def("transform_path_non_affine",
+                 [](const plot::Transform& t, const plot::Path& p) {
+                     if (t.isAffine()) return p;
+                     return p.transformed(t);
+                 },
+                 py::arg("path"))
+            .def("transform_bbox",
+                 [](const plot::Transform& t, const PyBbox& b) {
+                     return PyTransformedBbox{b, t.clone()};
+                 },
+                 py::arg("bbox"))
+            .def("frozen",
+                 [](const plot::Transform& t) { return t.clone(); });
+        py::class_<plot::Affine2D, plot::Transform,
+                   std::shared_ptr<plot::Affine2D>>(tm, "Affine2D")
+            .def(py::init<>())
+            .def(py::init([](const std::vector<std::vector<float>>& mtx) {
+                     // mpl Affine2D(matrix) — 3x3 row-major.
+                     if (mtx.size() != 3)
+                         throw std::invalid_argument(
+                             "Affine2D matrix must be 3x3");
+                     for (auto& row : mtx)
+                         if (row.size() != 3)
+                             throw std::invalid_argument(
+                                 "Affine2D matrix must be 3x3");
+                     return plot::Affine2D{mtx[0][0], mtx[1][0],
+                                           mtx[0][1], mtx[1][1],
+                                           mtx[0][2], mtx[1][2]};
+                 }),
+                 py::arg("matrix"))
+            // mpl parity: scale/translate/rotate_* are instance
+            // mutators only (Affine2D().scale(2)), not static factories.
+            .def("get_matrix",
+                 [](const plot::Affine2D& t) {
+                     return std::vector<std::vector<float>>{
+                         {t.a, t.c, t.e}, {t.b, t.d, t.f}, {0, 0, 1}};
+                 })
+            // mpl Affine2D.from_values(a, b, c, d, e, f) — static.
+            .def_static("from_values",
+                 [](float a, float b, float c, float d, float e,
+                    float f) {
+                     return plot::Affine2D{a, b, c, d, e, f};
+                 },
+                 py::arg("a"), py::arg("b"), py::arg("c"), py::arg("d"),
+                 py::arg("e"), py::arg("f"))
+            // mpl Affine2D.to_values() → (a, b, c, d, e, f).
+            .def("to_values",
+                 [](const plot::Affine2D& t) {
+                     return std::tuple{t.a, t.b, t.c, t.d, t.e, t.f};
+                 })
+            .def("set_matrix",
+                 [](plot::Affine2D& t,
+                    const std::vector<std::vector<float>>& mtx) {
+                     if (mtx.size() != 3)
+                         throw std::invalid_argument(
+                             "Affine2D matrix must be 3x3");
+                     for (auto& row : mtx)
+                         if (row.size() != 3)
+                             throw std::invalid_argument(
+                                 "Affine2D matrix must be 3x3");
+                     t = plot::Affine2D{mtx[0][0], mtx[1][0],
+                                        mtx[0][1], mtx[1][1],
+                                        mtx[0][2], mtx[1][2]};
+                 },
+                 py::arg("mtx"))
+            .def("clear",
+                 [](plot::Affine2D& t) {
+                     t = plot::Affine2D{};
+                     return t;
+                 },
+                 py::return_value_policy::copy)
+            // mpl mutators premultiply (mtx = Op @ mtx) except
+            // translate, which adds to the translation column. All
+            // return self for chaining.
+            .def("translate",
+                 [](plot::Affine2D& t, float tx, float ty) {
+                     t.e += tx; t.f += ty;
+                     return t;
+                 },
+                 py::arg("tx"), py::arg("ty"),
+                 py::return_value_policy::copy)
+            .def("scale",
+                 [](plot::Affine2D& t, float sx, const py::object& sy) {
+                     float syv = sy.is_none() ? sx : sy.cast<float>();
+                     t.a *= sx; t.c *= sx; t.e *= sx;
+                     t.b *= syv; t.d *= syv; t.f *= syv;
+                     return t;
+                 },
+                 py::arg("sx"), py::arg("sy") = py::none(),
+                 py::return_value_policy::copy)
+            .def("rotate",
+                 [](plot::Affine2D& t, float theta) {
+                     t = plot::Affine2D::rotate(theta).concat(t);
+                     return t;
+                 },
+                 py::arg("theta"),
+                 py::return_value_policy::copy)
+            .def("rotate_deg",
+                 [](plot::Affine2D& t, float deg) {
+                     t = plot::Affine2D::rotateDeg(deg).concat(t);
+                     return t;
+                 },
+                 py::arg("degrees"),
+                 py::return_value_policy::copy)
+            .def("rotate_deg_around",
+                 [](plot::Affine2D& t, float x, float y, float deg) {
+                     t = plot::Affine2D::rotateAround(x, y, deg)
+                             .concat(t);
+                     return t;
+                 },
+                 py::arg("x"), py::arg("y"), py::arg("degrees"),
+                 py::return_value_policy::copy)
+            .def("skew_deg",
+                 [](plot::Affine2D& t, float xDeg, float yDeg) {
+                     t = plot::Affine2D::skewDeg(xDeg, yDeg).concat(t);
+                     return t;
+                 },
+                 py::arg("xSkewDeg"), py::arg("ySkewDeg"),
+                 py::return_value_policy::copy)
+            .def("rotate_around",
+                 [](plot::Affine2D& t, float x, float y, float theta) {
+                     t = plot::Affine2D::rotateAround(
+                         x, y, theta * 180.0f / 3.14159265358979f)
+                             .concat(t);
+                     return t;
+                 },
+                 py::arg("x"), py::arg("y"), py::arg("theta"),
+                 py::return_value_policy::copy)
+            .def("skew",
+                 [](plot::Affine2D& t, float xShear, float yShear) {
+                     t = plot::Affine2D::skew(xShear, yShear).concat(t);
+                     return t;
+                 },
+                 py::arg("xShear"), py::arg("yShear"),
+                 py::return_value_policy::copy);
+        py::class_<plot::IdentityTransform, plot::Transform,
+                   std::shared_ptr<plot::IdentityTransform>>(
+            tm, "IdentityTransform")
+            .def(py::init<>());
+        py::class_<plot::BlendedGenericTransform, plot::Transform,
+                   std::shared_ptr<plot::BlendedGenericTransform>>(
+            tm, "BlendedGenericTransform")
+            .def(py::init<plot::TransformPtr, plot::TransformPtr>(),
+                 py::arg("x_transform"), py::arg("y_transform"));
+        py::class_<plot::CompositeGenericTransform, plot::Transform,
+                   std::shared_ptr<plot::CompositeGenericTransform>>(
+            tm, "CompositeGenericTransform")
+            .def(py::init<plot::TransformPtr, plot::TransformPtr>(),
+                 py::arg("a"), py::arg("b"));
+        tm.def("blended_transform_factory",
+               &plot::blendedTransformFactory,
+               py::arg("x_transform"), py::arg("y_transform"));
+        // mpl offset_copy(trans, fig=None, x=0, y=0, units='inches').
+        tm.def("offset_copy",
+               [](const plot::Transform& base, const py::object& fig,
+                  float x, float y, const std::string& units) {
+                   float dpi = 100.0f;
+                   if (!fig.is_none()) {
+                       auto f = fig.cast<std::shared_ptr<PyFigure>>();
+                       dpi = f->fig().style().dpi;
+                   } else if (units != "dots") {
+                       throw std::invalid_argument(
+                           "For units of inches or points a fig "
+                           "kwarg is needed");
+                   }
+                   return plot::offsetCopy(base, dpi, x, y, units);
+               },
+               py::arg("trans"), py::arg("fig") = py::none(),
+               py::arg("x") = 0.0f, py::arg("y") = 0.0f,
+               py::arg("units") = "inches");
+
+        // mpl ScaledTranslation — pure translation by
+        // scale_trans((xt, yt)).
+        py::class_<plot::ScaledTranslation, plot::Affine2D,
+                   std::shared_ptr<plot::ScaledTranslation>>(
+            tm, "ScaledTranslation")
+            .def(py::init([](float xt, float yt,
+                             const plot::Transform& scaleT) {
+                     return plot::ScaledTranslation{xt, yt, scaleT};
+                 }),
+                 py::arg("xt"), py::arg("yt"), py::arg("scale_trans"));
+
+        // mpl AffineDeltaTransform — displacement transform:
+        // base(p) - base(0).
+        py::class_<plot::AffineDeltaTransform, plot::Transform,
+                   std::shared_ptr<plot::AffineDeltaTransform>>(
+            tm, "AffineDeltaTransform")
+            .def(py::init<plot::TransformPtr>(), py::arg("transform"))
+            .def("get_matrix",
+                 [](const plot::AffineDeltaTransform& t) {
+                     if (!t.isAffine())
+                         throw std::runtime_error(
+                             "non-affine base transform has no matrix");
+                     auto m = t.deltaMatrix();
+                     return std::vector<std::vector<float>>{
+                         {m.a, m.c, m.e}, {m.b, m.d, m.f}, {0, 0, 1}};
+                 });
+
+        // mpl BboxTransform / BboxTransformTo / BboxTransformFrom —
+        // snapshot bounds (our Bbox is a value type).
+        auto bboxBounds = [](const PyBbox& b) {
+            return std::array<float, 4>{
+                float(b.xMin()), float(b.yMin()),
+                float(b.xMax() - b.xMin()),
+                float(b.yMax() - b.yMin())};
+        };
+        py::class_<plot::BboxTransform, plot::Affine2D,
+                   std::shared_ptr<plot::BboxTransform>>(tm,
+                                                       "BboxTransform")
+            .def(py::init([bboxBounds](const PyBbox& boxin,
+                                       const PyBbox& boxout) {
+                     auto in = bboxBounds(boxin), out = bboxBounds(boxout);
+                     return plot::BboxTransform{in[0], in[1], in[2],
+                                                in[3], out[0], out[1],
+                                                out[2], out[3]};
+                 }),
+                 py::arg("boxin"), py::arg("boxout"));
+        py::class_<plot::BboxTransformTo, plot::BboxTransform,
+                   std::shared_ptr<plot::BboxTransformTo>>(
+            tm, "BboxTransformTo")
+            .def(py::init([bboxBounds](const PyBbox& boxout) {
+                     auto o = bboxBounds(boxout);
+                     return plot::BboxTransformTo{o[0], o[1], o[2],
+                                                  o[3]};
+                 }),
+                 py::arg("boxout"));
+        py::class_<plot::BboxTransformFrom, plot::BboxTransform,
+                   std::shared_ptr<plot::BboxTransformFrom>>(
+            tm, "BboxTransformFrom")
+            .def(py::init([bboxBounds](const PyBbox& boxin) {
+                     auto i = bboxBounds(boxin);
+                     return plot::BboxTransformFrom{i[0], i[1], i[2],
+                                                    i[3]};
+                 }),
+                 py::arg("boxin"));
+
+        // mpl composite_transform_factory.
+        tm.def("composite_transform_factory",
+               &plot::compositeTransformFactory,
+               py::arg("a"), py::arg("b"));
+
+        // mpl nonsingular(vmin, vmax, expander=0.001, tiny=1e-15,
+        //                 increasing=True).
+        tm.def("nonsingular",
+               [](double vmin, double vmax, double expander,
+                  double tiny, bool increasing) {
+                   if (!std::isfinite(vmin) || !std::isfinite(vmax))
+                       return std::pair{-expander, expander};
+                   bool swapped = false;
+                   if (vmax < vmin) {
+                       std::swap(vmin, vmax);
+                       swapped = true;
+                   }
+                   const double maxabs =
+                       std::max(std::abs(vmin), std::abs(vmax));
+                   if (maxabs <
+                       (1e6 / tiny) * std::numeric_limits<double>::min()) {
+                       vmin = -expander;
+                       vmax = expander;
+                   } else if (vmax - vmin <= maxabs * tiny) {
+                       if (vmax == 0 && vmin == 0) {
+                           vmin = -expander;
+                           vmax = expander;
+                       } else {
+                           vmin -= expander * std::abs(vmin);
+                           vmax += expander * std::abs(vmax);
+                       }
+                   }
+                   if (swapped && !increasing)
+                       std::swap(vmin, vmax);
+                   return std::pair{vmin, vmax};
+               },
+               py::arg("vmin"), py::arg("vmax"),
+               py::arg("expander") = 0.001, py::arg("tiny") = 1e-15,
+               py::arg("increasing") = true);
+
+        // mpl transforms.Bbox — points ctor Bbox([[x0,y0],[x1,y1]]).
+        py::class_<PyBbox>(tm, "Bbox")
+            .def(py::init([](const py::sequence& pts) {
+                     if (py::len(pts) != 2)
+                         throw std::invalid_argument(
+                             "Bbox expects [[x0,y0],[x1,y1]]");
+                     auto p0 = pts[0].cast<std::pair<double, double>>();
+                     auto p1 = pts[1].cast<std::pair<double, double>>();
+                     return PyBbox{p0.first, p0.second,
+                                   p1.first, p1.second};
+                 }),
+                 py::arg("points"))
+            .def_static("from_bounds",
+                        [](double x0, double y0, double w, double h) {
+                            return PyBbox{x0, y0, x0 + w, y0 + h};
+                        },
+                        py::arg("x0"), py::arg("y0"), py::arg("width"),
+                        py::arg("height"))
+            .def_static("from_extents",
+                        [](double x0, double y0, double x1, double y1,
+                           const py::object&) {
+                            return PyBbox{x0, y0, x1, y1};
+                        },
+                        py::arg("x0"), py::arg("y0"), py::arg("x1"),
+                        py::arg("y1"), py::arg("minpos") = py::none())
+            .def_static("null", [] { return PyBbox::null(); })
+            .def_static("unit", [] { return PyBbox{0, 0, 1, 1}; })
+            .def_static("union", [](const py::sequence& bboxes) {
+                PyBbox out = PyBbox::null();
+                for (auto b : bboxes) {
+                    auto bb = b.cast<PyBbox>();
+                    out.x0 = std::min(out.x0, bb.xMin());
+                    out.y0 = std::min(out.y0, bb.yMin());
+                    out.x1 = std::max(out.x1, bb.xMax());
+                    out.y1 = std::max(out.y1, bb.yMax());
+                }
+                return out;
+            }, py::arg("bboxes"))
+            .def_static("intersection",
+                        [](const py::object& a, const py::object& b) {
+                            PyBbox x = a.cast<PyBbox>(),
+                                   y = b.cast<PyBbox>();
+                            PyBbox out{std::max(x.xMin(), y.xMin()),
+                                       std::max(x.yMin(), y.yMin()),
+                                       std::min(x.xMax(), y.xMax()),
+                                       std::min(x.yMax(), y.yMax())};
+                            if (out.isNull()) return py::object(py::none());
+                            return py::object(py::cast(out));
+                        },
+                        py::arg("bbox1"), py::arg("bbox2"))
+            // mpl Bbox.x0 etc. are plain corner accessors.
+            .def_readwrite("x0", &PyBbox::x0)
+            .def_readwrite("y0", &PyBbox::y0)
+            .def_readwrite("x1", &PyBbox::x1)
+            .def_readwrite("y1", &PyBbox::y1)
+            .def_property_readonly("xmin", &PyBbox::xMin)
+            .def_property_readonly("ymin", &PyBbox::yMin)
+            .def_property_readonly("xmax", &PyBbox::xMax)
+            .def_property_readonly("ymax", &PyBbox::yMax)
+            .def_property_readonly("minposx",
+                                   [](const PyBbox& b) {
+                                       return std::max(0.0, b.xMin());
+                                   })
+            .def_property_readonly("minposy",
+                                   [](const PyBbox& b) {
+                                       return std::max(0.0, b.yMin());
+                                   })
+            .def_property_readonly("minpos",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(
+                                           std::max(0.0, b.xMin()),
+                                           std::max(0.0, b.yMin()));
+                                   })
+            .def_property_readonly("bounds",
+                                   [](const PyBbox& b) {
+                                       // mpl: raw corner diffs.
+                                       return py::make_tuple(
+                                           b.x0, b.y0, b.x1 - b.x0,
+                                           b.y1 - b.y0);
+                                   })
+            .def_property_readonly("extents",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(
+                                           b.xMin(), b.yMin(),
+                                           b.xMax(), b.yMax());
+                                   })
+            .def_property_readonly("intervalx",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(b.x0, b.x1);
+                                   })
+            .def_property_readonly("intervaly",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(b.y0, b.y1);
+                                   })
+            .def_property_readonly("width",
+                                   [](const PyBbox& b) {
+                                       return b.x1 - b.x0;
+                                   })
+            .def_property_readonly("height",
+                                   [](const PyBbox& b) {
+                                       return b.y1 - b.y0;
+                                   })
+            .def_property_readonly("size",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(
+                                           b.x1 - b.x0, b.y1 - b.y0);
+                                   })
+            .def_property_readonly("p0",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(b.x0, b.y0);
+                                   })
+            .def_property_readonly("p1",
+                                   [](const PyBbox& b) {
+                                       return py::make_tuple(b.x1, b.y1);
+                                   })
+            .def("get_points",
+                 [](const PyBbox& b) {
+                     return py::make_tuple(
+                         py::make_tuple(b.x0, b.y0),
+                         py::make_tuple(b.x1, b.y1));
+                 })
+            .def("corners",
+                 [](const PyBbox& b) {
+                     py::list out;
+                     out.append(py::make_tuple(b.x0, b.y0));
+                     out.append(py::make_tuple(b.x0, b.y1));
+                     out.append(py::make_tuple(b.x1, b.y0));
+                     out.append(py::make_tuple(b.x1, b.y1));
+                     return out;
+                 })
+            .def("frozen", [](const PyBbox& b) { return b; })
+            .def("is_unit",
+                 [](const PyBbox& b) {
+                     return b.x0 == 0 && b.y0 == 0 && b.x1 == 1 &&
+                            b.y1 == 1;
+                 })
+            .def("contains",
+                 [](const PyBbox& b, double x, double y) {
+                     return x >= b.xMin() && x <= b.xMax() &&
+                            y >= b.yMin() && y <= b.yMax();
+                 },
+                 py::arg("x"), py::arg("y"))
+            .def("containsx",
+                 [](const PyBbox& b, double x) {
+                     return x >= b.xMin() && x <= b.xMax();
+                 },
+                 py::arg("x"))
+            .def("containsy",
+                 [](const PyBbox& b, double y) {
+                     return y >= b.yMin() && y <= b.yMax();
+                 },
+                 py::arg("y"))
+            .def("fully_contains",
+                 [](const PyBbox& b, double x, double y) {
+                     return x > b.xMin() && x < b.xMax() &&
+                            y > b.yMin() && y < b.yMax();
+                 },
+                 py::arg("x"), py::arg("y"))
+            .def("fully_containsx",
+                 [](const PyBbox& b, double x) {
+                     return x > b.xMin() && x < b.xMax();
+                 },
+                 py::arg("x"))
+            .def("fully_containsy",
+                 [](const PyBbox& b, double y) {
+                     return y > b.yMin() && y < b.yMax();
+                 },
+                 py::arg("y"))
+            .def("overlaps",
+                 [](const PyBbox& a, const PyBbox& o) {
+                     return a.xMin() <= o.xMax() && a.xMax() >= o.xMin() &&
+                            a.yMin() <= o.yMax() && a.yMax() >= o.yMin();
+                 },
+                 py::arg("other"))
+            .def("fully_overlaps",
+                 [](const PyBbox& a, const PyBbox& o) {
+                     return a.xMin() < o.xMax() && a.xMax() > o.xMin() &&
+                            a.yMin() < o.yMax() && a.yMax() > o.yMin();
+                 },
+                 py::arg("other"))
+            .def("count_contains",
+                 [](const PyBbox& b, const py::object& xs,
+                    const py::object& ys) {
+                     auto xv = xs.cast<std::vector<double>>();
+                     auto yv = ys.cast<std::vector<double>>();
+                     size_t n = 0;
+                     for (size_t i = 0; i < xv.size(); ++i)
+                         n += xv[i] >= b.xMin() && xv[i] <= b.xMax() &&
+                              yv[i] >= b.yMin() && yv[i] <= b.yMax();
+                     return n;
+                 },
+                 py::arg("x"), py::arg("y"))
+            .def("count_contains_indices",
+                 [](const PyBbox& b, const py::object& xs,
+                    const py::object& ys) {
+                     auto xv = xs.cast<std::vector<double>>();
+                     auto yv = ys.cast<std::vector<double>>();
+                     py::list out;
+                     for (size_t i = 0; i < xv.size(); ++i)
+                         if (xv[i] >= b.xMin() && xv[i] <= b.xMax() &&
+                             yv[i] >= b.yMin() && yv[i] <= b.yMax())
+                             out.append(i);
+                     return out;
+                 },
+                 py::arg("x"), py::arg("y"))
+            .def("expanded",
+                 [](const PyBbox& b, double sw, double sh) {
+                     double w = (b.x1 - b.x0) * sw / 2.0;
+                     double h = (b.y1 - b.y0) * sh / 2.0;
+                     return PyBbox{b.x0 - w, b.y0 - h,
+                                   b.x1 + w, b.y1 + h};
+                 },
+                 py::arg("sw"), py::arg("sh"))
+            .def("padded",
+                 [](const PyBbox& b, double p) {
+                     return PyBbox{b.x0 - p, b.y0 - p,
+                                   b.x1 + p, b.y1 + p};
+                 },
+                 py::arg("p"))
+            .def("shrunk",
+                 [](const PyBbox& b, double mx, double my) {
+                     return PyBbox{b.x0 * mx, b.y0 * my,
+                                   b.x1 * mx, b.y1 * my};
+                 },
+                 py::arg("mx"), py::arg("my"))
+            .def("shrunk_to_aspect",
+                 [](const PyBbox& b, double boxAspect,
+                    const py::object& container, bool figAspect) {
+                     PyBbox cont = container.is_none()
+                                       ? PyBbox{0, 0, 1, 1}
+                                       : container.cast<PyBbox>();
+                     if (figAspect)
+                         boxAspect *= (cont.xMax() - cont.xMin()) /
+                                      (cont.yMax() - cont.yMin());
+                     double bw = b.xMax() - b.xMin(),
+                            bh = b.yMax() - b.yMin();
+                     double cur = bw / bh;
+                     double x0 = b.xMin(), y0 = b.yMin();
+                     if (cur > boxAspect)
+                         bw = bh * boxAspect;
+                     else
+                         bh = bw / boxAspect;
+                     return PyBbox{x0, y0, x0 + bw, y0 + bh};
+                 },
+                 py::arg("box_aspect"),
+                 py::arg("container") = py::none(),
+                 py::arg("fig_aspect") = true)
+            .def("translated",
+                 [](const PyBbox& b, double tx, double ty) {
+                     return PyBbox{b.x0 + tx, b.y0 + ty,
+                                   b.x1 + tx, b.y1 + ty};
+                 },
+                 py::arg("tx"), py::arg("ty"))
+            .def("transformed",
+                 [](const PyBbox& b, plot::TransformPtr t) {
+                     // mpl returns a lazy TransformedBbox.
+                     return PyTransformedBbox{b, std::move(t)};
+                 },
+                 py::arg("transform"))
+            .def("inverse_transformed",
+                 [](const PyBbox& b, const plot::Transform& t) {
+                     auto inv = t.inverted();
+                     if (!inv)
+                         throw std::runtime_error(
+                             "transform is not invertible");
+                     double xs[] = {b.x0, b.x1}, ys[] = {b.y0, b.y1};
+                     PyBbox out = PyBbox::null();
+                     for (double x : xs)
+                         for (double y : ys) {
+                             auto q = inv->apply({float(x), float(y)});
+                             out.x0 = std::min(out.x0, double(q.x));
+                             out.x1 = std::max(out.x1, double(q.x));
+                             out.y0 = std::min(out.y0, double(q.y));
+                             out.y1 = std::max(out.y1, double(q.y));
+                         }
+                     return out;
+                 },
+                 py::arg("transform"))
+            .def("anchored",
+                 [](const PyBbox& b, const py::object& anchor,
+                    const py::object& container) {
+                     // mpl Bbox.anchored: slide b inside container so
+                     // that the named point of b coincides with the same
+                     // named point of the container.
+                     PyBbox c = container.is_none()
+                                    ? PyBbox{0, 0, 1, 1}
+                                    : container.cast<PyBbox>();
+                     double ax = 0.5, ay = 0.5;
+                     if (py::isinstance<py::str>(anchor)) {
+                         static const std::unordered_map<
+                             std::string, std::pair<double, double>> m = {
+                             {"C", {0.5, 0.5}}, {"SW", {0, 0}},
+                             {"S", {0.5, 0}}, {"SE", {1, 0}},
+                             {"E", {1, 0.5}}, {"NE", {1, 1}},
+                             {"N", {0.5, 1}}, {"NW", {0, 1}},
+                             {"W", {0, 0.5}}};
+                         auto s = anchor.cast<std::string>();
+                         auto it = m.find(s);
+                         if (it == m.end())
+                             throw std::invalid_argument(
+                                 "Bad anchor " + s);
+                         ax = it->second.first;
+                         ay = it->second.second;
+                     } else {
+                         auto p = anchor.cast<std::pair<double, double>>();
+                         ax = p.first; ay = p.second;
+                     }
+                     double dx = (c.xMin() + ax * (c.xMax() - c.xMin())) -
+                                 (b.xMin() + ax * (b.xMax() - b.xMin()));
+                     double dy = (c.yMin() + ay * (c.yMax() - c.yMin())) -
+                                 (b.yMin() + ay * (b.yMax() - b.yMin()));
+                     return PyBbox{b.x0 + dx, b.y0 + dy,
+                                   b.x1 + dx, b.y1 + dy};
+                 },
+                 py::arg("anchor"), py::arg("container") = py::none())
+            // mpl splitx(*args): split at the given x-coordinates.
+            .def("splitx",
+                 [](const PyBbox& b, const py::args& args) {
+                     std::vector<double> xs{b.x0};
+                     for (auto a : args) xs.push_back(a.cast<double>());
+                     xs.push_back(b.x1);
+                     py::list out;
+                     for (size_t i = 0; i + 1 < xs.size(); ++i)
+                         out.append(PyBbox{xs[i], b.y0,
+                                           xs[i + 1], b.y1});
+                     return out;
+                 })
+            .def("splity",
+                 [](const PyBbox& b, const py::args& args) {
+                     std::vector<double> ys{b.y0};
+                     for (auto a : args) ys.push_back(a.cast<double>());
+                     ys.push_back(b.y1);
+                     py::list out;
+                     for (size_t i = 0; i + 1 < ys.size(); ++i)
+                         out.append(PyBbox{b.x0, ys[i],
+                                           b.x1, ys[i + 1]});
+                     return out;
+                 })
+            .def("__eq__",
+                 [](const PyBbox& a, const py::object& o) {
+                     if (!py::isinstance<PyBbox>(o)) return false;
+                     auto& b = o.cast<const PyBbox&>();
+                     return a.x0 == b.x0 && a.y0 == b.y0 &&
+                            a.x1 == b.x1 && a.y1 == b.y1;
+                 },
+                 py::arg("other"))
+            .def("__array__",
+                 [](const PyBbox& b) {
+                     py::module_ np = py::module_::import("numpy");
+                     return np.attr("array")(py::make_tuple(
+                         py::make_tuple(b.x0, b.y0),
+                         py::make_tuple(b.x1, b.y1)));
+                 })
+            .def("__repr__", [](const PyBbox& b) {
+                return std::format("Bbox(x0={0}, y0={1}, x1={2}, y1={3})",
+                                   b.x0, b.y0, b.x1, b.y1);
+            });
+        // mpl transforms.BboxBase aliases.
+        tm.attr("BboxBase") = tm.attr("Bbox");
+
+        // mpl transforms.TransformedBbox — lazily transformed bbox.
+        // Snapshot semantics; all Bbox methods delegate to the resolved
+        // box via __getattr__.
+        py::class_<PyTransformedBbox>(tm, "TransformedBbox")
+            .def(py::init([](const PyBbox& bbox, plot::TransformPtr t) {
+                     return PyTransformedBbox{bbox, std::move(t)};
+                 }),
+                 py::arg("bbox"), py::arg("transform"))
+            .def("get_points",
+                 [](const PyTransformedBbox& tb) {
+                     auto r = tb.resolved();
+                     return py::make_tuple(
+                         py::make_tuple(r.x0, r.y0),
+                         py::make_tuple(r.x1, r.y1));
+                 })
+            .def("get_transform",
+                 [](const PyTransformedBbox& tb) { return tb.transform; })
+            .def("frozen",
+                 [](const PyTransformedBbox& tb) {
+                     return tb.resolved();
+                 })
+            .def("transformed",
+                 [](const PyTransformedBbox& tb, plot::TransformPtr t) {
+                     return PyTransformedBbox{tb.resolved(),
+                                              std::move(t)};
+                 },
+                 py::arg("transform"))
+            // Forward any other BboxBase attribute to the resolved box
+            // (bounds, extents, xmin…, width, contains, padded, union,
+            // anchored, splitx…).
+            .def("__getattr__",
+                 [](const py::object& self, const std::string& name) {
+                     PyBbox r = self.cast<const PyTransformedBbox&>()
+                                    .resolved();
+                     return py::cast(r).attr(name.c_str());
+                 })
+            .def_property_readonly("bounds",
+                 [](const PyTransformedBbox& tb) {
+                     auto r = tb.resolved();
+                     return std::array<double, 4>{
+                         r.xMin(), r.yMin(), r.xMax() - r.xMin(),
+                         r.yMax() - r.yMin()};
+                 })
+            .def("__repr__", [](const PyTransformedBbox&) {
+                return std::string("TransformedBbox(...)");
+            });
+
+        // mpl transforms.TransformedPath — lazily transformed path.
+        py::class_<PyTransformedPath>(tm, "TransformedPath")
+            .def(py::init([](const plot::Path& path,
+                             plot::TransformPtr t) {
+                     return PyTransformedPath{path, std::move(t)};
+                 }),
+                 py::arg("path"), py::arg("transform"))
+            .def("get_fully_transformed_path",
+                 [](const PyTransformedPath& tp) {
+                     return tp.path.transformed(*tp.transform);
+                 })
+            .def("get_transformed_path_and_affine",
+                 [](const PyTransformedPath& tp) {
+                     // mpl: non-affine part applied, affine part
+                     // returned. Our transforms are atomic — for an
+                     // affine input the non-affine part is identity.
+                     if (tp.transform->isAffine())
+                         return py::make_tuple(
+                             py::cast(tp.path),
+                             py::cast(affineOf(*tp.transform)));
+                     return py::make_tuple(
+                         py::cast(tp.path.transformed(*tp.transform)),
+                         py::cast(plot::Affine2D::identity()));
+                 })
+            .def("get_transformed_points_and_affine",
+                 [](const PyTransformedPath& tp) {
+                     if (tp.transform->isAffine())
+                         return py::make_tuple(
+                             py::cast(tp.path),
+                             py::cast(affineOf(*tp.transform)));
+                     return py::make_tuple(
+                         py::cast(tp.path.transformed(*tp.transform)),
+                         py::cast(plot::Affine2D::identity()));
+                 })
+            .def("get_affine",
+                 [](const PyTransformedPath& tp) {
+                     // mpl returns the affine part of the transform;
+                     // identity when fully non-affine.
+                     if (tp.transform->isAffine())
+                         return py::cast(affineOf(*tp.transform));
+                     return py::cast(plot::Affine2D::identity());
+                 });
+    }
+
+    // ── mpl matplotlib.colors ────────────────────────────────────────
+    // Normalization classes, color conversion helpers, and the
+    // ListedColormap/LinearSegmentedColormap factories.
+    {
+        auto cm = m.def_submodule("colors");
+        auto rgbaTuple = [](plot::Color c) {
+            return py::make_tuple(c.r, c.g, c.b, c.a);
+        };
+        // mpl to_rgba input: name/hex/shorthand/Cn/gray strings, "none",
+        // (r,g,b[,a]) tuples. Throws on non-color-like input.
+        auto toRgba = [](const py::object& c) -> plot::Color {
+            if (py::isinstance<py::str>(c)) {
+                auto s = c.cast<std::string>();
+                if (s == "none" || s == "None")
+                    return plot::Color::transparent();
+            }
+            if (!py::isinstance<py::str>(c) &&
+                !py::isinstance<py::sequence>(c))
+                throw std::invalid_argument("not a color");
+            return parseColor(c);
+        };
+        // mpl keeps float64 precision for tuple inputs; only string
+        // colors go through the u8-quantized named/hex tables. Returns
+        // (r,g,b,a) as Python floats.
+        auto rgbaTupleF64 = [toRgba](const py::object& c) -> py::object {
+            if (py::isinstance<py::sequence>(c) &&
+                !py::isinstance<py::str>(c)) {
+                auto seq = c.cast<std::vector<double>>();
+                if (seq.size() < 3 || seq.size() > 4)
+                    throw std::invalid_argument(
+                        "color tuple must be (r,g,b[,a])");
+                for (double v : seq)
+                    if (v < 0.0 || v > 1.0)
+                        throw std::invalid_argument(
+                            "RGBA values should be within 0-1 range");
+                return py::make_tuple(seq[0], seq[1], seq[2],
+                                      seq.size() == 4 ? seq[3] : 1.0);
+            }
+            auto col = toRgba(c);
+            return py::make_tuple(static_cast<double>(col.r),
+                                  static_cast<double>(col.g),
+                                  static_cast<double>(col.b),
+                                  static_cast<double>(col.a));
+        };
+        cm.def("is_color_like",
+               [toRgba](const py::object& c) {
+                   try { (void)toRgba(c); return true; }
+                   catch (...) { return false; }
+               },
+               py::arg("c"));
+        cm.def("to_rgba",
+               [rgbaTupleF64](const py::object& c,
+                              const py::object& alpha) {
+                   py::tuple t = py::cast<py::tuple>(rgbaTupleF64(c));
+                   if (alpha.is_none()) return py::object(t);
+                   return py::object(py::make_tuple(
+                       t[0], t[1], t[2], alpha.cast<double>()));
+               },
+               py::arg("c"), py::arg("alpha") = py::none());
+        cm.def("to_rgb",
+               [rgbaTupleF64](const py::object& c) {
+                   py::tuple t = py::cast<py::tuple>(rgbaTupleF64(c));
+                   return py::make_tuple(t[0], t[1], t[2]);
+               },
+               py::arg("c"));
+        cm.def("to_hex",
+               [toRgba](const py::object& c, bool keep_alpha) {
+                   auto col = toRgba(c);
+                   auto to8 = [](float v) {
+                       return int(std::clamp(v, 0.0f, 1.0f) * 255.0f +
+                                  0.5f);
+                   };
+                   if (keep_alpha)
+                       return std::format("#{:02x}{:02x}{:02x}{:02x}",
+                                          to8(col.r), to8(col.g),
+                                          to8(col.b), to8(col.a));
+                   return std::format("#{:02x}{:02x}{:02x}",
+                                      to8(col.r), to8(col.g),
+                                      to8(col.b));
+               },
+               py::arg("c"), py::arg("keep_alpha") = false);
+        cm.def("rgb2hex",
+               [cm](const py::object& c) {
+                   return cm.attr("to_hex")(c, py::arg("keep_alpha") = false);
+               },
+               py::arg("c"));
+        cm.def("hex2color",
+               [](const std::string& s) {
+                   auto c = plot::Color::parse(s);
+                   if (!c) throw std::invalid_argument("bad hex color");
+                   return py::make_tuple(c->r, c->g, c->b);
+               },
+               py::arg("s"));
+        cm.def("same_color",
+               [toRgba](const py::object& a, const py::object& b) {
+                   auto ca = toRgba(a), cb = toRgba(b);
+                   return ca.r == cb.r && ca.g == cb.g && ca.b == cb.b &&
+                          ca.a == cb.a;
+               },
+               py::arg("c1"), py::arg("c2"));
+        cm.def("to_rgba_array",
+               [rgbaTupleF64](const py::object& c,
+                              const py::object& alpha) {
+                   auto applyAlpha = [&alpha](py::object t) {
+                       if (alpha.is_none()) return t;
+                       py::tuple tp = py::cast<py::tuple>(t);
+                       return py::object(py::make_tuple(
+                           tp[0], tp[1], tp[2], alpha.cast<double>()));
+                   };
+                   py::list out;
+                   // mpl accepts a single color spec too — returns
+                   // shape (1,4).
+                   if (!py::isinstance<py::sequence>(c) ||
+                       py::isinstance<py::str>(c)) {
+                       out.append(applyAlpha(rgbaTupleF64(c)));
+                       return out;
+                   }
+                   auto seq = py::reinterpret_borrow<py::sequence>(c);
+                   if (py::len(seq) > 0 &&
+                       !py::isinstance<py::sequence>(
+                           py::reinterpret_borrow<py::object>(
+                               seq[py::int_(0)])) &&
+                       !py::isinstance<py::str>(
+                           py::reinterpret_borrow<py::object>(
+                               seq[py::int_(0)])) &&
+                       (py::len(seq) == 3 || py::len(seq) == 4)) {
+                       out.append(applyAlpha(rgbaTupleF64(c)));
+                       return out;
+                   }
+                   for (auto item : seq) {
+                       out.append(applyAlpha(rgbaTupleF64(
+                           py::reinterpret_borrow<py::object>(item))));
+                   }
+                   return out;
+               },
+               py::arg("c"), py::arg("alpha") = py::none());
+        // hsv/rgb conversion (mpl colors.hsv_to_rgb / rgb_to_hsv).
+        cm.def("hsv_to_rgb",
+               [](const py::object& hsv) {
+                   auto v = hsv.cast<std::vector<float>>();
+                   if (v.size() != 3)
+                       throw std::invalid_argument("hsv must be (h,s,v)");
+                   float h = v[0] - std::floor(v[0]), s = v[1], val = v[2];
+                   float f = h * 6.0f;
+                   int i = int(f);
+                   float p = val * (1 - s), q = val * (1 - s * (f - i)),
+                         t = val * (1 - s * (1 - (f - i)));
+                   float r, g, b;
+                   switch (i % 6) {
+                   case 0: r = val; g = t; b = p; break;
+                   case 1: r = q; g = val; b = p; break;
+                   case 2: r = p; g = val; b = t; break;
+                   case 3: r = p; g = q; b = val; break;
+                   case 4: r = t; g = p; b = val; break;
+                   default: r = val; g = p; b = q; break;
+                   }
+                   return py::make_tuple(r, g, b);
+               },
+               py::arg("hsv"));
+        cm.def("rgb_to_hsv",
+               [](const py::object& rgb) {
+                   auto v = rgb.cast<std::vector<float>>();
+                   if (v.size() != 3)
+                       throw std::invalid_argument("rgb must be (r,g,b)");
+                   float r = v[0], g = v[1], b = v[2];
+                   float mx = std::max({r, g, b}), mn = std::min({r, g, b});
+                   float d = mx - mn;
+                   float h = 0.0f;
+                   if (d > 0) {
+                       if (mx == r) h = std::fmod((g - b) / d, 6.0f);
+                       else if (mx == g) h = (b - r) / d + 2.0f;
+                       else h = (r - g) / d + 4.0f;
+                       h /= 6.0f;
+                       if (h < 0) h += 1.0f;
+                   }
+                   float s = mx > 0 ? d / mx : 0.0f;
+                   return py::make_tuple(h, s, mx);
+               },
+               py::arg("rgb"));
+
+        // ── Normalize hierarchy ─────────────────────────────────────
+        // mpl colors.Normalize is the (concrete) linear norm; the C++
+        // abstract base is plot::Normalize. Bind the base under the mpl
+        // name with a factory producing NormalizeLinear.
+        py::class_<plot::Normalize, std::shared_ptr<plot::Normalize>>
+            normCls(cm, "Normalize");
+        auto vminKw = [](const py::object& vmin, const py::object& vmax,
+                         bool clip, auto n) {
+            if (!vmin.is_none()) n->setVmin(vmin.cast<float>());
+            if (!vmax.is_none()) n->setVmax(vmax.cast<float>());
+            n->setClip(clip);
+            return n;
+        };
+        normCls
+            .def(py::init([vminKw](const py::object& vmin,
+                                   const py::object& vmax,
+                                   bool clip)
+                     -> std::shared_ptr<plot::Normalize> {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::NormalizeLinear>());
+                 }),
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+                 py::arg("clip") = false)
+            // __call__ on a scalar or a sequence (mpl returns a masked
+            // array — a plain float/list here).
+            .def("__call__",
+                 [](const plot::Normalize& n, const py::object& v,
+                    const py::object& clip) -> py::object {
+                     auto map1 = [&](float x) {
+                         if (!clip.is_none()) {
+                             // mpl clip kwarg overrides per call.
+                             bool sv = n.clip();
+                             const_cast<plot::Normalize&>(n)
+                                 .setClip(clip.cast<bool>());
+                             float t = n(x);
+                             const_cast<plot::Normalize&>(n).setClip(sv);
+                             return t;
+                         }
+                         return n(x);
+                     };
+                     if (py::isinstance<py::sequence>(v) &&
+                         !py::isinstance<py::str>(v)) {
+                         py::list out;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(v))
+                             out.append(map1(
+                                 py::reinterpret_borrow<py::object>(item)
+                                     .cast<float>()));
+                         return std::move(out);
+                     }
+                     return py::float_(map1(v.cast<float>()));
+                 },
+                 py::arg("value"), py::arg("clip") = py::none())
+            .def("inverse",
+                 [](const plot::Normalize& n, const py::object& v)
+                     -> py::object {
+                     if (py::isinstance<py::sequence>(v) &&
+                         !py::isinstance<py::str>(v)) {
+                         py::list out;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(v))
+                             out.append(n.inverse(
+                                 py::reinterpret_borrow<py::object>(item)
+                                     .cast<float>()));
+                         return std::move(out);
+                     }
+                     return py::float_(n.inverse(v.cast<float>()));
+                 },
+                 py::arg("value"))
+            .def("autoscale",
+                 [](plot::Normalize& n, const py::object& a) {
+                     n.autoscaleForce(toFloats(a));
+                 },
+                 py::arg("A"))
+            .def("autoscale_None",
+                 [](plot::Normalize& n, const py::object& a) {
+                     n.autoscale(toFloats(a));
+                 },
+                 py::arg("A"))
+            // mpl .scaled() → vmin/vmax both set.
+            .def("scaled", &plot::Normalize::hasRange)
+            .def_property("vmin",
+                 [](const plot::Normalize& n) -> py::object {
+                     return std::isnan(n.vmin())
+                         ? py::object(py::none())
+                         : py::object(py::float_(n.vmin()));
+                 },
+                 [](plot::Normalize& n, const py::object& v) {
+                     n.setVmin(v.is_none() ? std::nanf("")
+                                           : v.cast<float>());
+                 })
+            .def_property("vmax",
+                 [](const plot::Normalize& n) -> py::object {
+                     return std::isnan(n.vmax())
+                         ? py::object(py::none())
+                         : py::object(py::float_(n.vmax()));
+                 },
+                 [](plot::Normalize& n, const py::object& v) {
+                     n.setVmax(v.is_none() ? std::nanf("")
+                                           : v.cast<float>());
+                 })
+            .def_property("clip", &plot::Normalize::clip,
+                          &plot::Normalize::setClip);
+
+        normCls.attr("__doc__") =
+            "mpl colors.Normalize — data → [0,1] mapping.";
+
+        // NoNorm: pass-through (values already in [0,1]).
+        py::class_<plot::NoNorm, plot::Normalize,
+                   std::shared_ptr<plot::NoNorm>>(cm, "NoNorm")
+            .def(py::init([vminKw](const py::object& vmin,
+                                   const py::object& vmax, bool clip) {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::NoNorm>());
+                 }),
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+                 py::arg("clip") = false);
+        py::class_<plot::LogNorm, plot::Normalize,
+                   std::shared_ptr<plot::LogNorm>>(cm, "LogNorm")
+            .def(py::init([vminKw](const py::object& vmin,
+                                   const py::object& vmax, bool clip) {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::LogNorm>());
+                 }),
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+                 py::arg("clip") = false);
+        py::class_<plot::PowerNorm, plot::Normalize,
+                   std::shared_ptr<plot::PowerNorm>>(cm, "PowerNorm")
+            .def(py::init([vminKw](float gamma, const py::object& vmin,
+                                   const py::object& vmax, bool clip) {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::PowerNorm>(gamma));
+                 }),
+                 py::arg("gamma"), py::arg("vmin") = py::none(),
+                 py::arg("vmax") = py::none(), py::arg("clip") = false)
+            .def_property_readonly("gamma", &plot::PowerNorm::gamma);
+        py::class_<plot::SymLogNorm, plot::Normalize,
+                   std::shared_ptr<plot::SymLogNorm>>(cm, "SymLogNorm")
+            .def(py::init([vminKw](float linthresh, float linscale,
+                                   const py::object& vmin,
+                                   const py::object& vmax, bool clip) {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::SymLogNorm>(
+                                       linthresh, linscale));
+                 }),
+                 py::arg("linthresh"), py::arg("linscale") = 1.0f,
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+                 py::arg("clip") = false)
+            .def_property_readonly("linthresh", &plot::SymLogNorm::linthresh)
+            .def_property_readonly("linscale", &plot::SymLogNorm::linscale);
+        py::class_<plot::AsinhNorm, plot::Normalize,
+                   std::shared_ptr<plot::AsinhNorm>>(cm, "AsinhNorm")
+            .def(py::init([vminKw](float linear_width,
+                                   const py::object& vmin,
+                                   const py::object& vmax, bool clip) {
+                     return vminKw(vmin, vmax, clip,
+                                   std::make_shared<plot::AsinhNorm>(
+                                       linear_width));
+                 }),
+                 py::arg("linear_width") = 1.0f, py::arg("vmin") = py::none(),
+                 py::arg("vmax") = py::none(), py::arg("clip") = false)
+            .def_property_readonly("linear_width",
+                                   &plot::AsinhNorm::linearWidth);
+        // mpl BoundaryNorm(boundaries, ncolors, clip=False, *,
+        //                  extend='neither').
+        py::class_<plot::BoundaryNorm, plot::Normalize,
+                   std::shared_ptr<plot::BoundaryNorm>>(cm, "BoundaryNorm")
+            .def(py::init([](const std::vector<float>& bounds,
+                             int ncolors, bool clip,
+                             const std::string& extend) {
+                     if (bounds.size() < 2)
+                         throw std::invalid_argument(
+                             "BoundaryNorm needs >= 2 boundaries");
+                     plot::BoundaryExtend ext = plot::BoundaryExtend::Neither;
+                     if (extend == "min") ext = plot::BoundaryExtend::Min;
+                     else if (extend == "max") ext = plot::BoundaryExtend::Max;
+                     else if (extend == "both") ext = plot::BoundaryExtend::Both;
+                     else if (extend != "neither")
+                         throw std::invalid_argument(
+                             "extend must be 'neither', 'min', 'max' or "
+                             "'both'");
+                     auto n = std::make_shared<plot::BoundaryNorm>(
+                         bounds, static_cast<size_t>(ncolors), ext);
+                     n->setClip(clip);
+                     return n;
+                 }),
+                 py::arg("boundaries"), py::arg("ncolors"),
+                 py::arg("clip") = false, py::arg("extend") = "neither")
+            .def_property_readonly("boundaries",
+                                   &plot::BoundaryNorm::boundaries)
+            .def_property_readonly("N",
+                                   [](const plot::BoundaryNorm& n) {
+                                       return n.boundaries().size();
+                                   });
+        // mpl CenteredNorm(vcenter=0.0, halfrange=None, clip=False).
+        py::class_<plot::CenteredNorm, plot::Normalize,
+                   std::shared_ptr<plot::CenteredNorm>>(cm, "CenteredNorm")
+            .def(py::init([](float vcenter, const py::object& halfrange,
+                             bool clip) {
+                     auto n = std::make_shared<plot::CenteredNorm>(
+                         vcenter, halfrange.is_none()
+                                      ? std::nanf("")
+                                      : halfrange.cast<float>());
+                     n->setClip(clip);
+                     return n;
+                 }),
+                 py::arg("vcenter") = 0.0f,
+                 py::arg("halfrange") = py::none(),
+                 py::arg("clip") = false)
+            .def_property_readonly("vcenter", &plot::CenteredNorm::center);
+        // mpl TwoSlopeNorm(vcenter, vmin=None, vmax=None).
+        py::class_<plot::TwoSlopeNorm, plot::Normalize,
+                   std::shared_ptr<plot::TwoSlopeNorm>>(cm, "TwoSlopeNorm")
+            .def(py::init([](float vcenter, const py::object& vmin,
+                             const py::object& vmax) {
+                     auto n = std::make_shared<plot::TwoSlopeNorm>(vcenter);
+                     if (!vmin.is_none()) n->setVmin(vmin.cast<float>());
+                     if (!vmax.is_none()) n->setVmax(vmax.cast<float>());
+                     return n;
+                 }),
+                 py::arg("vcenter") = 0.0f, py::arg("vmin") = py::none(),
+                 py::arg("vmax") = py::none())
+            .def_property_readonly("vcenter", &plot::TwoSlopeNorm::vcenter);
+        // mpl FuncNorm((forward, inverse), vmin=None, vmax=None, clip=False).
+        // Callables take a single scalar (mpl calls them on arrays).
+        py::class_<plot::FuncNorm, plot::Normalize,
+                   std::shared_ptr<plot::FuncNorm>>(cm, "FuncNorm")
+            .def(py::init([](const py::object& functions,
+                             const py::object& vmin,
+                             const py::object& vmax, bool clip) {
+                     auto pair = functions.cast<py::sequence>();
+                     if (pair.size() != 2)
+                         throw std::invalid_argument(
+                             "FuncNorm expects (forward, inverse)");
+                     py::function fwd = pair[0].cast<py::function>();
+                     py::function inv = pair[1].cast<py::function>();
+                     auto n = std::make_shared<plot::FuncNorm>(
+                         [fwd](float v, float, float) {
+                             py::gil_scoped_acquire g;
+                             return fwd(v).cast<float>();
+                         },
+                         [inv](float t, float, float) {
+                             py::gil_scoped_acquire g;
+                             return inv(t).cast<float>();
+                         });
+                     if (!vmin.is_none()) n->setVmin(vmin.cast<float>());
+                     if (!vmax.is_none()) n->setVmax(vmax.cast<float>());
+                     n->setClip(clip);
+                     return n;
+                 }),
+                 py::arg("functions"), py::arg("vmin") = py::none(),
+                 py::arg("vmax") = py::none(), py::arg("clip") = false);
+
+        // ── mpl colors.Colormap + ListedColormap/LinearSegmented ────
+        py::class_<PyColormap>(cm, "Colormap")
+            .def_property_readonly("name",
+                [](const PyColormap& c) { return c.cm->name; })
+            .def_property_readonly("N",
+                [](const PyColormap& c) { return c.cm->stops.size(); })
+            // mpl cmap(X): scalar → (r,g,b,a); sequence → list.
+            .def("__call__",
+                 [rgbaTuple](const PyColormap& c, const py::object& x,
+                             const py::object& alpha,
+                             bool bytes) -> py::object {
+                     auto map1 = [&](float t) {
+                         auto col = c.cm->sample(t);
+                         if (!alpha.is_none()) col.a = alpha.cast<float>();
+                         if (bytes) {
+                             auto to8 = [](float v) {
+                                 return int(std::clamp(v, 0.0f, 1.0f) *
+                                            255.0f + 0.5f);
+                             };
+                             return py::make_tuple(to8(col.r), to8(col.g),
+                                                   to8(col.b), to8(col.a));
+                         }
+                         return rgbaTuple(col);
+                     };
+                     if (py::isinstance<py::sequence>(x) &&
+                         !py::isinstance<py::str>(x)) {
+                         py::list out;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(x))
+                             out.append(map1(
+                                 py::reinterpret_borrow<py::object>(item)
+                                     .cast<float>()));
+                         return std::move(out);
+                     }
+                     return map1(x.cast<float>());
+                 },
+                 py::arg("X"), py::arg("alpha") = py::none(),
+                 py::arg("bytes") = false)
+            .def("reversed",
+                 [](const PyColormap& c, const py::object& name) {
+                     auto rev = c.cm->reversed();
+                     if (!name.is_none()) rev.name = name.cast<std::string>();
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(std::move(rev), true)};
+                 },
+                 py::arg("name") = py::none())
+            .def("resampled",
+                 [](const PyColormap& c, int lutsize, const py::object& name) {
+                     plot::Colormap r;
+                     r.name = name.is_none()
+                         ? c.cm->name : name.cast<std::string>();
+                     r.discrete = true;  // LUT sampling == listed
+                     r.bad = c.cm->bad; r.under = c.cm->under;
+                     r.over = c.cm->over;
+                     for (int i = 0; i < lutsize; ++i)
+                         r.stops.push_back(
+                             c.cm->sample(float(i) / float(lutsize - 1)));
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(std::move(r), true)};
+                 },
+                 py::arg("lutsize"), py::arg("name") = py::none())
+            .def("copy",
+                 [](const PyColormap& c) {
+                     auto dup = *c.cm;
+                     dup.name = c.cm->name;
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(dup, true)};
+                 })
+            // mpl set_bad/set_under/set_over(color=None, alpha=None):
+            // mutate in place — here: re-register the modified copy.
+            .def("set_bad",
+                 [](PyColormap& c, const py::object& color,
+                    const py::object& alpha) {
+                     auto next = *c.cm;
+                     if (color.is_none()) next.bad.reset();
+                     else {
+                         auto col = parseColor(color);
+                         if (!alpha.is_none()) col.a = alpha.cast<float>();
+                         next.bad = col;
+                     }
+                     c.mutate(std::move(next));
+                 },
+                 py::arg("color") = py::none(), py::arg("alpha") = py::none())
+            .def("set_under",
+                 [](PyColormap& c, const py::object& color,
+                    const py::object& alpha) {
+                     auto next = *c.cm;
+                     if (color.is_none()) next.under.reset();
+                     else {
+                         auto col = parseColor(color);
+                         if (!alpha.is_none()) col.a = alpha.cast<float>();
+                         next.under = col;
+                     }
+                     c.mutate(std::move(next));
+                 },
+                 py::arg("color") = py::none(), py::arg("alpha") = py::none())
+            .def("set_over",
+                 [](PyColormap& c, const py::object& color,
+                    const py::object& alpha) {
+                     auto next = *c.cm;
+                     if (color.is_none()) next.over.reset();
+                     else {
+                         auto col = parseColor(color);
+                         if (!alpha.is_none()) col.a = alpha.cast<float>();
+                         next.over = col;
+                     }
+                     c.mutate(std::move(next));
+                 },
+                 py::arg("color") = py::none(), py::arg("alpha") = py::none())
+            .def("get_bad", [rgbaTuple](const PyColormap& c) {
+                     return rgbaTuple(c.cm->bad.value_or(
+                         plot::Color::transparent()));
+                 })
+            .def("get_under", [rgbaTuple](const PyColormap& c) {
+                     return rgbaTuple(c.cm->under.value_or(
+                         c.cm->stops.empty() ? plot::Color::black()
+                                             : c.cm->stops.front()));
+                 })
+            .def("get_over", [rgbaTuple](const PyColormap& c) {
+                     return rgbaTuple(c.cm->over.value_or(
+                         c.cm->stops.empty() ? plot::Color::black()
+                                             : c.cm->stops.back()));
+                 })
+            .def("is_gray", [](const PyColormap& c) {
+                     for (auto& s : c.cm->stops)
+                         if (s.r != s.g || s.g != s.b) return false;
+                     return true;
+                 });
+        // mpl ListedColormap(colors, name='from_list', N=None).
+        cm.def("_lc_ctor",
+               [](const py::object& colors, const std::string& name,
+                  const py::object& N) {
+                     std::vector<plot::Color> cs;
+                     for (auto item :
+                          py::reinterpret_borrow<py::sequence>(colors))
+                         cs.push_back(
+                             parseColor(py::reinterpret_borrow<py::object>(
+                                 item)));
+                     if (!N.is_none() &&
+                         int(N.cast<int>()) != int(cs.size())) {
+                         // mpl N truncates/resamples the list.
+                         int n = N.cast<int>();
+                         std::vector<plot::Color> rs;
+                         for (int i = 0; i < n; ++i)
+                             rs.push_back(cs[size_t(
+                                 i * cs.size() / size_t(n))]);
+                         cs = std::move(rs);
+                     }
+                     auto lc = plot::Colormap::listed(name, std::move(cs));
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(std::move(lc), true)};
+               },
+               py::arg("colors"), py::arg("name") = "from_list",
+               py::arg("N") = py::none());
+        // mpl LinearSegmentedColormap(name, segmentdata, N=256, gamma=1.0)
+        // — segmentdata: {'red': [(x,y0,y1),…], 'green':…, 'blue':…}.
+        cm.def("_lsc_ctor",
+               [](const std::string& name, const py::dict& segdata,
+                  int N, float gamma) {
+                     auto chan = [&](const char* k) {
+                         std::vector<plot::Colormap::SegPoint> sp;
+                         if (!segdata.contains(k)) return sp;
+                         for (auto item : py::reinterpret_borrow<py::sequence>(
+                                  py::reinterpret_borrow<py::object>(
+                                      segdata[k]))) {
+                             auto row = py::reinterpret_borrow<py::sequence>(
+                                 py::reinterpret_borrow<py::object>(item));
+                             sp.push_back({row[0].cast<float>(),
+                                           row[1].cast<float>(),
+                                           row[2].cast<float>()});
+                         }
+                         return sp;
+                     };
+                     auto sc = plot::Colormap::segmented(
+                         name, chan("red"), chan("green"), chan("blue"),
+                         size_t(N));
+                     if (gamma != 1.0f)
+                         for (auto& s : sc.stops) {
+                             s.r = std::pow(s.r, gamma);
+                             s.g = std::pow(s.g, gamma);
+                             s.b = std::pow(s.b, gamma);
+                         }
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(std::move(sc), true)};
+               },
+               py::arg("name"), py::arg("segmentdata"),
+               py::arg("N") = 256, py::arg("gamma") = 1.0f);
+        // mpl LinearSegmentedColormap.from_list(name, colors, N=256,
+        // gamma=1.0) — colors: list of color specs, a colormap name,
+        // or a Colormap object; resampled to N evenly spaced stops.
+        cm.def("_lsc_from_list",
+               [](const std::string& name, const py::object& colors,
+                  const py::object& N, float gamma) {
+                     std::vector<plot::Color> cs;
+                     if (py::isinstance<PyColormap>(colors) ||
+                         py::isinstance<py::str>(colors)) {
+                         const plot::Colormap& src =
+                             py::isinstance<PyColormap>(colors)
+                                 ? *colors.cast<PyColormap>().cm
+                                 : plot::Colormap::byName(
+                                       colors.cast<std::string>());
+                         int n = N.is_none() ? 256 : N.cast<int>();
+                         cs.reserve(size_t(n));
+                         for (int i = 0; i < n; ++i)
+                             cs.push_back(src.sample(
+                                 n > 1 ? float(i) / float(n - 1) : 0.0f));
+                     } else {
+                         std::vector<plot::Color> base;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(colors))
+                             base.push_back(parseColor(
+                                 py::reinterpret_borrow<py::object>(item)));
+                         if (base.empty())
+                             throw std::invalid_argument(
+                                 "colors list is empty");
+                         int n = N.is_none() ? int(base.size())
+                                             : N.cast<int>();
+                         cs.reserve(size_t(n));
+                         for (int i = 0; i < n; ++i) {
+                             float t =
+                                 n > 1 ? float(i) / float(n - 1) : 0.0f;
+                             float pos = t * float(base.size() - 1);
+                             size_t lo = size_t(pos);
+                             size_t hi =
+                                 std::min(lo + 1, base.size() - 1);
+                             float f = pos - float(lo);
+                             auto& A = base[lo];
+                             auto& B = base[hi];
+                             cs.push_back(plot::Color::fromRgba8(
+                                 uint8_t((1 - f) * A.r * 255 +
+                                         f * B.r * 255 + 0.5f),
+                                 uint8_t((1 - f) * A.g * 255 +
+                                         f * B.g * 255 + 0.5f),
+                                 uint8_t((1 - f) * A.b * 255 +
+                                         f * B.b * 255 + 0.5f),
+                                 uint8_t((1 - f) * A.a * 255 +
+                                         f * B.a * 255 + 0.5f)));
+                         }
+                     }
+                     plot::Colormap sc;
+                     sc.name = name;
+                     sc.stops = std::move(cs);
+                     if (gamma != 1.0f)
+                         for (auto& s : sc.stops) {
+                             s.r = std::pow(s.r, gamma);
+                             s.g = std::pow(s.g, gamma);
+                             s.b = std::pow(s.b, gamma);
+                         }
+                     return PyColormap{
+                         &plot::Colormap::registerCmap(std::move(sc), true)};
+               },
+               py::arg("name"), py::arg("colors"),
+               py::arg("N") = py::none(), py::arg("gamma") = 1.0f);
+        // mpl exposes ListedColormap/LinearSegmentedColormap as classes
+        // with classmethods (from_list). Bind real Python classes whose
+        // __new__ returns the bound Colormap object.
+        py::exec(R"PY(
+class ListedColormap:
+    def __new__(cls, colors, name='from_list', N=None):
+        return _lc_ctor(colors, name, N)
+
+class LinearSegmentedColormap:
+    def __new__(cls, name, segmentdata, N=256, gamma=1.0):
+        return _lsc_ctor(name, segmentdata, N, gamma)
+    @classmethod
+    def from_list(cls, name, colors, N=None, gamma=1.0):
+        return _lsc_from_list(name, colors, N, gamma)
+)PY",
+                 cm.attr("__dict__"));
+    }
+
+    // ── mpl matplotlib.cm ────────────────────────────────────────────
+    // get_cmap / register_cmap / ScalarMappable / colormaps registry.
+    {
+        auto cmm = m.def_submodule("cm");
+        cmm.attr("LUTSIZE") = 256;
+        cmm.def("get_cmap",
+                [](const py::object& name) {
+                    if (name.is_none())
+                        return PyColormap{&plot::colormaps::viridis()};
+                    if (py::isinstance<PyColormap>(name))
+                        return name.cast<PyColormap>();
+                    return PyColormap{&plot::Colormap::byName(
+                        name.cast<std::string>())};
+                },
+                py::arg("name") = py::none());
+        // mpl cm.register_cmap(name=None, cmap=None, *,
+        //                      override_builtin=False). `cmap` accepts a
+        // Colormap object; `name` defaults to the colormap's own name.
+        cmm.def("register_cmap",
+                [](const py::object& name, const py::object& cmap,
+                   bool override_builtin) {
+                    if (cmap.is_none() ||
+                        !py::isinstance<PyColormap>(cmap))
+                        throw std::invalid_argument(
+                            "register_cmap needs a Colormap");
+                    auto cp = *cmap.cast<PyColormap>().cm;
+                    if (!name.is_none()) cp.name = name.cast<std::string>();
+                    plot::Colormap::registerCmap(std::move(cp),
+                                                 override_builtin);
+                },
+                py::arg("name") = py::none(), py::arg("cmap") = py::none(),
+                py::arg("override_builtin") = false);
+        cmm.def("colormaps", [] { return plot::Colormap::availableNames(); });
+
+        py::class_<PyScalarMappable>(cmm, "ScalarMappable")
+            .def(py::init([](const py::object& norm,
+                             const py::object& cmap) {
+                     PyScalarMappable sm;
+                     if (!norm.is_none())
+                         sm.norm = normArg(norm);
+                     sm.cm = &cmapArg(cmap);
+                     return sm;
+                 }),
+                 py::arg("norm") = py::none(), py::arg("cmap") = py::none())
+            .def("set_array",
+                 [](PyScalarMappable& sm, const py::object& a) {
+                     sm.arr = flat2d(a).first;
+                 },
+                 py::arg("A"))
+            .def("get_array",
+                 [](const PyScalarMappable& sm) {
+                     return sm.arr.empty() ? py::none()
+                                           : py::cast(sm.arr);
+                 })
+            .def("set_clim",
+                 [](PyScalarMappable& sm, const py::object& vmin,
+                    const py::object& vmax) {
+                     sm.norm->setVmin(vmin.is_none() ? std::nanf("")
+                                                   : vmin.cast<float>());
+                     sm.norm->setVmax(vmax.is_none() ? std::nanf("")
+                                                   : vmax.cast<float>());
+                 },
+                 py::arg("vmin") = py::none(), py::arg("vmax") = py::none())
+            .def("get_clim",
+                 [](const PyScalarMappable& sm) {
+                     return py::make_tuple(sm.norm->vmin(),
+                                           sm.norm->vmax());
+                 })
+            .def("set_norm",
+                 [](PyScalarMappable& sm, const py::object& n) {
+                     sm.norm = normArg(n);
+                 })
+            .def("get_norm",
+                 [](const PyScalarMappable& sm) { return sm.norm; })
+            .def("set_cmap",
+                 [](PyScalarMappable& sm, const py::object& c) {
+                     sm.cm = &cmapArg(c);
+                 })
+            .def("get_cmap",
+                 [](const PyScalarMappable& sm) {
+                     return PyColormap{sm.cm};
+                 })
+            // mpl ScalarMappable.to_rgba(x, alpha=None, bytes=False,
+            // norm=True) — map data through norm+cmap.
+            .def("to_rgba",
+                 [](PyScalarMappable& sm, const py::object& x,
+                    const py::object& alpha, bool bytes,
+                    bool norm) -> py::object {
+                     sm.norm->autoscale(sm.arr);
+                     auto map1 = [&](float v) {
+                         auto c = sm.cm->sample(norm ? (*sm.norm)(v) : v);
+                         if (!alpha.is_none()) c.a = alpha.cast<float>();
+                         if (bytes) {
+                             auto to8 = [](float f) {
+                                 return int(std::clamp(f, 0.0f, 1.0f) *
+                                            255.0f + 0.5f);
+                             };
+                             return py::make_tuple(to8(c.r), to8(c.g),
+                                                   to8(c.b), to8(c.a));
+                         }
+                         return py::make_tuple(c.r, c.g, c.b, c.a);
+                     };
+                     if (py::isinstance<py::sequence>(x) &&
+                         !py::isinstance<py::str>(x)) {
+                         py::list out;
+                         for (auto item :
+                              py::reinterpret_borrow<py::sequence>(x))
+                             out.append(map1(
+                                 py::reinterpret_borrow<py::object>(item)
+                                     .cast<float>()));
+                         return std::move(out);
+                     }
+                     return map1(x.cast<float>());
+                 },
+                 py::arg("x"), py::arg("alpha") = py::none(),
+                 py::arg("bytes") = false, py::arg("norm") = true)
+            .def("autoscale",
+                 [](PyScalarMappable& sm) { sm.norm->autoscaleForce(sm.arr); })
+            .def("autoscale_None",
+                 [](PyScalarMappable& sm) { sm.norm->autoscale(sm.arr); })
+            // mpl ScalarMappable.norm/.cmap properties.
+            .def_property("norm",
+                 [](const PyScalarMappable& sm) { return sm.norm; },
+                 [](PyScalarMappable& sm, const py::object& n) {
+                     sm.norm = normArg(n);
+                 })
+            .def_property("cmap",
+                 [](const PyScalarMappable& sm) {
+                     return PyColormap{sm.cm};
+                 },
+                 [](PyScalarMappable& sm, const py::object& c) {
+                     sm.cm = &cmapArg(c);
+                 });
+    }
+
+    // plt-level colormap helpers (mpl plt.get_cmap / plt.colormaps).
+    m.def("get_cmap",
+          [m](const py::object& name) {
+              return m.attr("cm").attr("get_cmap")(name);
+          },
+          py::arg("name") = py::none());
+    m.def("register_cmap",
+          [m](const py::object& name, const py::object& cmap,
+              bool override_builtin) {
+              m.attr("cm").attr("register_cmap")(
+                  name, cmap, override_builtin);
+          },
+          py::arg("name") = py::none(), py::arg("cmap") = py::none(),
+          py::arg("override_builtin") = false);
+    m.def("colormaps",
+          [] { return plot::Colormap::availableNames(); });
+
     py::class_<plot::Path>(m, "Path")
         .def(py::init([](const std::vector<std::pair<float,float>>& verts,
                          const py::object& codes) {
@@ -1684,6 +10031,8 @@ PYBIND11_MODULE(volcanoplot, m) {
         pc.attr("CURVE4")   = py::int_((int)plot::Path::Curve4);
         pc.attr("CLOSEPOLY") = py::int_((int)plot::Path::ClosePoly);
     }
+    // mpl re-exports Path inside matplotlib.transforms.
+    m.attr("transforms").attr("Path") = m.attr("Path");
 
     // ── mpl Patch ────────────────────────────────────────────────
     py::class_<PyPatch>(m, "Patch")
@@ -1732,20 +10081,484 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("set_label",
              [](PyPatch& p, const std::string& s) {
                  if (p.coll) p.coll->label_ = s; p.touch();
-             }, py::arg("label"));
+             }, py::arg("label"))
+        .def("remove", [](PyPatch& p) {
+                 // mpl: the patch is its own artist — our add_patch
+                 // wraps it in a one-element PatchCollection.
+                 if (auto o = detachArtist(*p.owner, p.coll))
+                     p.ownedColl = std::move(o);
+                 // `live`/`coll` stay valid — the detached collection is
+                 // owned by the handle (mpl artists outlive remove()).
+             });
 
     // ── mpl Collection ───────────────────────────────────────────
     py::class_<PyColl>(m, "Collection")
         .def("set_label",
              [](PyColl& c, const std::string& s) {
                  c.tgt().label_ = s; c.touch();
-             }, py::arg("label"));
+             }, py::arg("label"))
+        .def("remove", [](PyColl& c) {
+                 if (!c.live) return;
+                 if (auto o = detachArtist(*c.owner, c.live)) {
+                     c.ownedPlot = std::move(o);
+                     // `live` keeps pointing at the detached object
+                     // (mpl artists stay usable after remove()).
+                     c.ax = nullptr;
+                 }
+             });
 
     // mpl BarContainer — return value of ax.bar/barh.
+    // mpl matplotlib.table.Table artist (ax.table result).
+    py::class_<PyTable>(m, "Table")
+        .def("remove", [](PyTable& t) {
+            if (t.owned) return;
+            if (auto o = detachArtist(*t.owner, t.plot)) t.owned = std::move(o);
+        })
+        .def("get_visible",
+             [](const PyTable& t) { return t.plot->visible; })
+        .def("set_visible",
+             [](PyTable& t, bool v) {
+                 t.plot->visible = v; t.plot->touch();
+             },
+             py::arg("b"))
+        .def_property_readonly("figure",
+             [](const PyTable& t) { return t.owner; });
+
+    // mpl cbook.GrouperView (get_shared_x_axes/get_shared_y_axes).
+    py::class_<PyGrouperView>(m, "GrouperView")
+        .def("joined",
+             [](const PyGrouperView& g, PyAxes& a, PyAxes& b) {
+                 auto grp = a.ax == g.ax ? g.group()
+                          : b.ax == g.ax ? (g.xaxis ? b.ax->sharedX()
+                                                    : b.ax->sharedY())
+                                         : g.group();
+                 auto isIn = [&](plot::Axes* t) {
+                     return t == g.ax ||
+                            std::ranges::find(grp, t) != grp.end();
+                 };
+                 return isIn(a.ax) && isIn(b.ax);
+             },
+             py::arg("a"), py::arg("b"))
+        .def("get_siblings",
+             [](const PyGrouperView& g, const PyAxes& a) {
+                 py::list out;
+                 out.append(py::cast(PyAxes{g.owner, g.ax}));
+                 for (auto* s : g.group())
+                     out.append(py::cast(PyAxes{g.owner, s}));
+                 return out;
+             },
+             py::arg("a"))
+        .def("__iter__",
+             [](const PyGrouperView& g) {
+                 py::list out;
+                 out.append(py::cast(PyAxes{g.owner, g.ax}));
+                 for (auto* s : g.group())
+                     out.append(py::cast(PyAxes{g.owner, s}));
+                 return py::iter(out);
+             });
+
+    // mpl artist._XYPair (ax.sticky_edges).
+    py::class_<PyStickyEdges>(m, "_XYPair")
+        .def_property("x",
+             [](const PyStickyEdges& s) {
+                 return py::cast(s.e->x);
+             },
+             [](PyStickyEdges& s, const py::object& v) {
+                 s.e->x = toFloats(v);
+             })
+        .def_property("y",
+             [](const PyStickyEdges& s) {
+                 return py::cast(s.e->y);
+             },
+             [](PyStickyEdges& s, const py::object& v) {
+                 s.e->y = toFloats(v);
+             });
+
+    // mpl container.BarContainer — return value of ax.bar/barh.
+    // A tuple-like container of per-bar patch artists.
     py::class_<PyBarContainer>(m, "BarContainer")
-        .def_property_readonly("patches", [](const PyBarContainer&) {
-            return py::list();
-        });
+        .def_property_readonly("patches",
+             [](PyBarContainer& b) {
+                 py::list out;
+                 size_t n = b.x.size();
+                 for (size_t i = 0; i < n; ++i)
+                     out.append(py::cast(
+                         channelArtist(b.owner, b.ax, b.plot,
+                                       std::format("bar:{}", i))));
+                 return out;
+             })
+        .def_property_readonly("datavalues",
+             [](const PyBarContainer& b) { return py::cast(b.heights); })
+        .def_property_readonly("orientation",
+             [](const PyBarContainer& b) {
+                 return b.horizontal ? "horizontal" : "vertical";
+             })
+        .def_readonly("errorbar", &PyBarContainer::errorbar_)
+        .def("get_children",
+             [](const py::object& self) {
+                 return self.attr("patches");
+             })
+        .def("remove", [](PyBarContainer& b) {
+                 if (auto o = detachArtist(*b.owner, b.plot))
+                     b.owned = std::move(o);
+             })
+        .def("__len__", [](const PyBarContainer& b) { return b.x.size(); })
+        .def("__iter__",
+             [](const py::object& self) {
+                 return py::iter(self.attr("patches"));
+             })
+        .def("__getitem__",
+             [](const py::object& self, const py::object& i) {
+                 return self.attr("patches").attr("__getitem__")(i);
+             })
+        .def("count",
+             [](const py::object& self, const py::object& v) {
+                 return self.attr("patches").attr("count")(v);
+             },
+             py::arg("value"))
+        .def("index",
+             [](const py::object& self, const py::object& v) {
+                 return self.attr("patches").attr("index")(v);
+             },
+             py::arg("value"))
+        .def("__repr__",
+             [](const PyBarContainer& b) {
+                 return std::format(
+                     "<BarContainer object of {} artists>",
+                     b.x.size());
+             });
+
+    // mpl container.ErrorbarContainer — tuple (data_line, caplines,
+    // barlinecols) of channel artists.
+    py::class_<PyErrorbarContainer>(m, "ErrorbarContainer")
+        .def_property_readonly("lines",
+             [](PyErrorbarContainer& c) {
+                 // mpl: (data_line, caplines, barlinecols); caplines
+                 // gets 2 entries per error direction when caps are
+                 // drawn, barlinecols 1 per direction.
+                 py::list caps, cols;
+                 auto mk = [&](const char* ch) {
+                     return py::cast(
+                         channelArtist(c.owner, c.ax, c.plot, ch));
+                 };
+                 py::object data = mk("data_line");
+                 if (c.plot->config().drawCaps) {
+                     if (c.hasXerr) {
+                         caps.append(mk("caplines"));
+                         caps.append(mk("caplines"));
+                     }
+                     if (c.hasYerr) {
+                         caps.append(mk("caplines"));
+                         caps.append(mk("caplines"));
+                     }
+                 }
+                 if (c.hasXerr) cols.append(mk("barlinecols"));
+                 if (c.hasYerr) cols.append(mk("barlinecols"));
+                 return py::make_tuple(data, py::tuple(caps),
+                                       py::tuple(cols));
+             })
+        .def_readonly("has_xerr", &PyErrorbarContainer::hasXerr)
+        .def_readonly("has_yerr", &PyErrorbarContainer::hasYerr)
+        .def("get_children",
+             [](const py::object& self) {
+                 // mpl flattens the lines tuple.
+                 py::list out;
+                 for (auto item : self.attr("lines")) {
+                     auto o = py::reinterpret_borrow<py::object>(item);
+                     if (py::isinstance<py::tuple>(o))
+                         for (auto sub : o)
+                             out.append(
+                                 py::reinterpret_borrow<py::object>(
+                                     sub));
+                     else
+                         out.append(o);
+                 }
+                 return out;
+             })
+        .def("remove", [](PyErrorbarContainer& c) {
+                 if (auto o = detachArtist(*c.owner, c.plot))
+                     c.owned = std::move(o);
+             })
+        .def("__len__", [](const PyErrorbarContainer&) { return 3; })
+        .def("__iter__",
+             [](const py::object& self) {
+                 return py::iter(self.attr("lines"));
+             })
+        .def("__getitem__",
+             [](const py::object& self, const py::object& i) {
+                 return self.attr("lines").attr("__getitem__")(i);
+             })
+        .def("__repr__",
+             [](const PyErrorbarContainer&) {
+                 // mpl repr uses len(container) == len(lines) == 3.
+                 return std::string("<ErrorbarContainer object of 3 artists>");
+             });
+
+    // mpl container.StemContainer — tuple (markerline, stemlines,
+    // baseline).
+    py::class_<PyStemContainer>(m, "StemContainer")
+        .def_property_readonly("markerline",
+             [](PyStemContainer& c) {
+                 return py::cast(channelArtist(
+                     c.owner, c.ax, c.plot, "markerline"));
+             })
+        .def_property_readonly("stemlines",
+             [](PyStemContainer& c) {
+                 return py::cast(channelArtist(
+                     c.owner, c.ax, c.plot, "stemlines"));
+             })
+        .def_property_readonly("baseline",
+             [](PyStemContainer& c) {
+                 return py::cast(channelArtist(
+                     c.owner, c.ax, c.plot, "baseline"));
+             })
+        .def("get_children",
+             [](const py::object& self) {
+                 py::list out;
+                 for (const char* n :
+                      {"markerline", "stemlines", "baseline"})
+                     out.append(self.attr(n));
+                 return out;
+             })
+        .def("remove", [](PyStemContainer& c) {
+                 if (auto o = detachArtist(*c.owner, c.plot))
+                     c.owned = std::move(o);
+             })
+        .def("__len__", [](const PyStemContainer&) { return 3; })
+        .def("__iter__",
+             [](const py::object& self) {
+                 return py::iter(self.attr("get_children")());
+             })
+        .def("__getitem__",
+             [](const py::object& self, const py::object& i) {
+                 return self.attr("get_children")()
+                     .attr("__getitem__")(i);
+             })
+        .def("__repr__",
+             [](const PyStemContainer&) {
+                 return "<StemContainer object of 3 artists>";
+             });
+
+    // mpl collections.EventCollection — one per eventplot row.
+    py::class_<PyEventCollection>(m, "EventCollection")
+        .def("get_positions",
+             [](const PyEventCollection& e) {
+                 return py::cast(e.plot->positions(e.row));
+             })
+        .def("set_positions",
+             [](PyEventCollection& e, const py::object& pos) {
+                 e.plot->setPositions(e.row, toFloats(pos));
+             },
+             py::arg("pos"))
+        .def("add_positions",
+             [](PyEventCollection& e, const py::object& pos) {
+                 e.plot->appendPositions(e.row, toFloats(pos));
+             },
+             py::arg("pos"))
+        .def("append_positions",
+             [](PyEventCollection& e, const py::object& pos) {
+                 e.plot->appendPositions(e.row, toFloats(pos));
+             },
+             py::arg("pos"))
+        .def("extend_positions",
+             [](PyEventCollection& e, const py::object& pos) {
+                 e.plot->appendPositions(e.row, toFloats(pos));
+             },
+             py::arg("pos"))
+        .def("get_orientation",
+             [](const PyEventCollection& e) {
+                 return e.plot->orientation;
+             })
+        .def("set_orientation",
+             [](PyEventCollection& e, const std::string& o) {
+                 if (o != "horizontal" && o != "vertical")
+                     throw std::invalid_argument(
+                         "orientation must be 'horizontal' or "
+                         "'vertical'");
+                 e.plot->orientation = o;
+                 e.plot->touch();
+             },
+             py::arg("orientation"))
+        .def("switch_orientation",
+             [](PyEventCollection& e) {
+                 e.plot->orientation =
+                     e.plot->orientation == "horizontal" ? "vertical"
+                                                         : "horizontal";
+                 e.plot->touch();
+             })
+        .def("is_horizontal",
+             [](const PyEventCollection& e) {
+                 return e.plot->orientation == "horizontal";
+             })
+        .def("get_color",
+             [](const PyEventCollection& e) -> py::object {
+                 if (e.row < e.plot->colors.size())
+                     return colorToPy(e.plot->colors[e.row]);
+                 return colorToPy(e.plot->color);
+             })
+        .def("set_color",
+             [](PyEventCollection& e, const py::object& c) {
+                 auto col = parseColor(c);
+                 if (e.plot->colors.size() < e.plot->rowCount())
+                     e.plot->colors.assign(e.plot->rowCount(),
+                                           e.plot->color);
+                 e.plot->colors[e.row] = col;
+                 e.plot->touch();
+             },
+             py::arg("color"))
+        .def("get_lineoffset",
+             [](const PyEventCollection& e) {
+                 return e.row < e.plot->lineoffsets.size()
+                            ? e.plot->lineoffsets[e.row]
+                            : float(e.row);
+             })
+        .def("set_lineoffset",
+             [](PyEventCollection& e, float off) {
+                 if (e.plot->lineoffsets.size() < e.plot->rowCount()) {
+                     e.plot->lineoffsets.resize(e.plot->rowCount());
+                     for (size_t i = 0; i < e.plot->rowCount(); ++i)
+                         if (e.plot->lineoffsets[i] == 0.0f &&
+                             i != 0)
+                             e.plot->lineoffsets[i] = float(i);
+                 }
+                 e.plot->lineoffsets[e.row] = off;
+                 e.plot->touch();
+             },
+             py::arg("offset"))
+        .def("get_linelength",
+             [](const PyEventCollection& e) {
+                 return e.row < e.plot->linelengths.size()
+                            ? e.plot->linelengths[e.row]
+                            : 1.0f;
+             })
+        .def("set_linelength",
+             [](PyEventCollection& e, float len) {
+                 if (e.plot->linelengths.size() < e.plot->rowCount())
+                     e.plot->linelengths.assign(e.plot->rowCount(),
+                                                1.0f);
+                 e.plot->linelengths[e.row] = len;
+                 e.plot->touch();
+             },
+             py::arg("linelength"))
+        .def("get_linewidth",
+             [](const PyEventCollection& e) {
+                 return e.row < e.plot->linewidths.size()
+                            ? e.plot->linewidths[e.row]
+                            : e.plot->lineWidth;
+             })
+        .def("set_linewidth",
+             [](PyEventCollection& e, float w) {
+                 if (e.plot->linewidths.size() < e.plot->rowCount())
+                     e.plot->linewidths.assign(e.plot->rowCount(),
+                                              e.plot->lineWidth);
+                 e.plot->linewidths[e.row] = w;
+                 e.plot->touch();
+             },
+             py::arg("linewidth"))
+        .def("get_segments",
+             [](const PyEventCollection& e) {
+                 // mpl EventCollection.get_segments — [[x0,y0],[x1,y1]]
+                 // pairs per event.
+                 py::list out;
+                 float off = e.row < e.plot->lineoffsets.size()
+                                 ? e.plot->lineoffsets[e.row]
+                                 : float(e.row);
+                 float half = (e.row < e.plot->linelengths.size()
+                                   ? e.plot->linelengths[e.row]
+                                   : 1.0f) *
+                              0.5f;
+                 bool horiz = e.plot->orientation == "horizontal";
+                 for (float p : e.plot->positions(e.row))
+                     out.append(horiz ? py::make_tuple(
+                                            py::make_tuple(p,
+                                                           off - half),
+                                            py::make_tuple(p,
+                                                           off + half))
+                                      : py::make_tuple(
+                                            py::make_tuple(off - half,
+                                                           p),
+                                            py::make_tuple(off + half,
+                                                           p)));
+                 return out;
+             })
+        .def("remove", [](PyEventCollection& e) {
+                 // mpl removes the whole collection; hide this row's
+                 // events by clearing its positions.
+                 e.plot->setPositions(e.row, {});
+             });
+
+    // mpl collections.QuadMesh — pcolormesh/pcolor artist.
+    py::class_<PyQuadMesh>(m, "QuadMesh")
+        .def("get_coordinates",
+             [](const PyQuadMesh& q) {
+                 // mpl returns an (nrows+1, ncols+1, 2) array of mesh
+                 // corner coordinates for rectilinear pcolormesh.
+                 py::list rows;
+                 for (size_t j = 0; j < q.plot->ys().size(); ++j) {
+                     py::list row;
+                     for (size_t i = 0; i < q.plot->xs().size(); ++i)
+                         row.append(py::make_tuple(q.plot->xs()[i],
+                                                   q.plot->ys()[j]));
+                     rows.append(row);
+                 }
+                 return rows;
+             })
+        .def("get_array",
+             [](const PyQuadMesh& q) {
+                 // mpl QuadMesh._A keeps the C array's 2D shape.
+                 const auto& a = q.plot->array();
+                 const size_t nc = q.plot->xs().size() - 1,
+                              nr = q.plot->ys().size() - 1;
+                 if (nc > 0 && nr > 0 && nr * nc == a.size()) {
+                     py::list rows;
+                     for (size_t j = 0; j < nr; ++j)
+                         rows.append(py::cast(std::vector<float>(
+                             a.begin() + j * nc, a.begin() + (j + 1) * nc)));
+                     return py::object(rows);
+                 }
+                 return py::cast(a);
+             })
+        .def("set_array",
+             [](PyQuadMesh& q, const py::object& a) {
+                 // mpl accepts a 2D array matching the mesh shape.
+                 if (!a.is_none() && py::isinstance<py::sequence>(a) &&
+                     py::len(a) > 0 &&
+                     (py::isinstance<py::sequence>(a[0]) ||
+                      py::isinstance<py::array>(a[0]))) {
+                     std::vector<float> flat;
+                     for (const auto& row : toRows(a))
+                         flat.insert(flat.end(), row.begin(), row.end());
+                     q.plot->setArray(std::move(flat));
+                 } else {
+                     q.plot->setArray(toFloats(a));
+                 }
+                 q.plot->touch();
+             },
+             py::arg("A"))
+        .def("set_clim",
+             [](PyQuadMesh& q, const py::object& vmin,
+                const py::object& vmax) {
+                 q.plot->setClim(
+                     vmin.is_none()
+                         ? std::nullopt
+                         : std::optional<float>(vmin.cast<float>()),
+                     vmax.is_none()
+                         ? std::nullopt
+                         : std::optional<float>(vmax.cast<float>()));
+                 q.plot->touch();
+             },
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none())
+        .def("set_visible",
+             [](PyQuadMesh& q, bool v) {
+                 q.plot->visible = v;
+                 q.plot->touch();
+             })
+        .def("get_visible",
+             [](const PyQuadMesh& q) { return q.plot->visible; })
+        .def("remove", [](PyQuadMesh& q) {
+                 if (auto o = detachArtist(*q.owner, q.plot))
+                     q.owned = std::move(o);
+             });
 
     // mpl Spine — visibility proxy for ax.spines['top'].
     py::class_<PySpine>(m, "Spine")
@@ -1756,12 +10569,1244 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("visible"))
         .def("get_visible",
              [](const PySpine& s) {
-                 const auto& sp = s.ax->spines();
-                 if (s.side == "left") return sp.left;
-                 if (s.side == "right") return sp.right;
-                 if (s.side == "bottom") return sp.bottom;
-                 return sp.top;
+                 return s.ax->spines().side(s.side).visible;
+             })
+        // mpl Spine.set_position(('data'|'axes'|'outward', amount))
+        // or the 'center'/'zero' shortcuts.
+        .def("set_position",
+             [](PySpine& s, const py::object& pos) {
+                 auto& sp = s.ax->spine(s.side);
+                 auto setMode = [&](plot::Axes::SpineSpec::PosMode m,
+                                    float amt) {
+                     sp.posMode = m; sp.posAmount = amt;
+                     sp.positionSet = true; s.ax->touch();
+                 };
+                 if (py::isinstance<py::str>(pos)) {
+                     auto str = pos.cast<std::string>();
+                     if (str == "center")
+                         setMode(plot::Axes::SpineSpec::PosMode::Axes,
+                                 0.5f);
+                     else if (str == "zero")
+                         setMode(plot::Axes::SpineSpec::PosMode::Data,
+                                 0.0f);
+                     else
+                         throw std::invalid_argument(
+                             "unrecognized spine position '" + str + "'");
+                     return;
+                 }
+                 auto t = pos.cast<py::tuple>();
+                 if (t.size() != 2)
+                     throw std::invalid_argument(
+                         "spine position must be (mode, amount)");
+                 auto mode = t[0].cast<std::string>();
+                 float amt = t[1].cast<float>();
+                 if (mode == "data")
+                     setMode(plot::Axes::SpineSpec::PosMode::Data, amt);
+                 else if (mode == "axes")
+                     setMode(plot::Axes::SpineSpec::PosMode::Axes, amt);
+                 else if (mode == "outward")
+                     setMode(plot::Axes::SpineSpec::PosMode::Outward,
+                             amt);
+                 else
+                     throw std::invalid_argument(
+                         "unrecognized spine position mode '" + mode +
+                         "'");
+             },
+             py::arg("position"))
+        .def("get_position",
+             [](const PySpine& s) {
+                 const auto& sp = s.ax->spines().side(s.side);
+                 if (!sp.positionSet) return py::make_tuple("outward", 0.0f);
+                 using M = plot::Axes::SpineSpec::PosMode;
+                 const char* m = sp.posMode == M::Data ? "data"
+                               : sp.posMode == M::Axes ? "axes" : "outward";
+                 return py::make_tuple(m, sp.posAmount);
+             })
+        .def("set_bounds",
+             [](PySpine& s, const py::object& lo, const py::object& hi) {
+                 auto& sp = s.ax->spine(s.side);
+                 if (lo.is_none() && hi.is_none()) {
+                     sp.bounds.reset();
+                 } else {
+                     sp.bounds = {lo.cast<float>(), hi.cast<float>()};
+                 }
+                 s.ax->touch();
+             },
+             py::arg("low"), py::arg("high"))
+        .def("get_bounds",
+             [](const PySpine& s) {
+                 const auto& sp = s.ax->spines().side(s.side);
+                 if (!sp.bounds) return py::make_tuple(py::none(), py::none());
+                 return py::make_tuple(sp.bounds->first, sp.bounds->second);
+             })
+        .def("set_color",
+             [](PySpine& s, const py::object& c) {
+                 s.ax->spine(s.side).color = parseColor(c);
+                 s.ax->touch();
+             })
+        .def("get_color",
+             [](const PySpine& s) {
+                 const auto& sp = s.ax->spines().side(s.side);
+                 return colorToPy(sp.color.value_or(
+                     s.ax->style().xAxis.color));
+             })
+        .def("set_linewidth",
+             [](PySpine& s, float w) {
+                 s.ax->spine(s.side).lineWidth = w; s.ax->touch();
+             })
+        .def("get_linewidth",
+             [](const PySpine& s) {
+                 return s.ax->spines().side(s.side).lineWidth.value_or(
+                     s.ax->style().xAxis.lineWidth);
+             })
+        .def("set_linestyle",
+             [](PySpine& s, const std::string& ls) {
+                 auto v = plot::lineStyleFromString(ls);
+                 if (!v) throw std::invalid_argument("unrecognized linestyle");
+                 s.ax->spine(s.side).lineStyle = *v;
+                 s.ax->spine(s.side).dashes.clear();
+                 s.ax->touch();
+             })
+        .def("set_dashes",
+             [](PySpine& s, const py::object& seq) {
+                 auto& sp = s.ax->spine(s.side);
+                 sp.dashes.clear();
+                 for (auto d : seq.cast<py::sequence>())
+                     sp.dashes.push_back(d.cast<float>());
+                 s.ax->touch();
              });
+
+    // mpl Text artist (ax.text result; ax.texts children).
+    py::class_<PyText>(m, "Text")
+        .def("set_text",
+             [](PyText& t, const std::string& s) {
+                 t.t->text = s; t.touch();
+             })
+        .def("get_text", [](const PyText& t) { return t.t->text; })
+        .def("set_position",
+             [](PyText& t, float x, float y) {
+                 t.t->x = x; t.t->y = y; t.touch();
+             })
+        .def("get_position",
+             [](const PyText& t) {
+                 return py::make_tuple(t.t->x, t.t->y);
+             })
+        .def("set_color",
+             [](PyText& t, const py::object& c) {
+                 t.t->color = parseColor(c); t.touch();
+             })
+        .def("get_color",
+             [](const PyText& t) { return colorToPy(t.t->color); })
+        .def("set_fontsize",
+             [](PyText& t, const py::object& pt) {
+                 float sz = normSize(pt);
+                 t.t->font.size = sz;
+                 t.t->fontSize = sz; t.t->font.size = sz;
+                 t.touch();
+             })
+        .def("get_fontsize",
+             [](const PyText& t) { return t.t->fontSize; })
+        .def("set_rotation",
+             [](PyText& t, float deg) {
+                 t.t->rotation = deg * float(M_PI) / 180.0f; t.touch();
+             })
+        .def("get_rotation",
+             [](const PyText& t) {
+                 return t.t->rotation * 180.0f / float(M_PI);
+             })
+        .def("set_visible",
+             [](PyText& t, bool v) { t.t->visible = v; t.touch(); })
+        .def("get_visible",
+             [](const PyText& t) { return t.t->visible; })
+        // mpl Text.set_path_effects / set_transform.
+        // mpl Text font setters (all the font* family).
+        .def("set_fontproperties",
+             [](PyText& t, const py::object& fp) {
+                 applyFontPropertiesArg(t.t->font, fp);
+                 t.t->fontSize = t.t->font.size;
+                 t.touch();
+             },
+             py::arg("fontproperties"))
+        .def("get_fontproperties",
+             [](PyText& t) {
+                 auto p = std::make_unique<PyFontProps>();
+                 p->family = {t.t->font.family};
+                 p->style = t.t->font.style;
+                 p->variant = t.t->font.variant;
+                 p->weight = py::str(t.t->font.weight);
+                 p->stretch = py::str(t.t->font.stretch);
+                 p->size = t.t->font.size;
+                 p->file = t.t->font.file;
+                 return p;
+             })
+        .def("set_fontfamily",
+             [](PyText& t, const py::object& f) {
+                 if (py::isinstance<py::str>(f))
+                     t.t->font.family = f.cast<std::string>();
+                 else {
+                     auto seq = f.cast<std::vector<std::string>>();
+                     if (!seq.empty()) t.t->font.family = seq.front();
+                 }
+                 t.touch();
+             },
+             py::arg("fontfamily"))
+        .def("get_fontfamily",
+             [](const PyText& t) {
+                 return std::vector<std::string>{t.t->font.family};
+             })
+        .def("set_name",
+             [](PyText& t, const std::string& f) {
+                 t.t->font.family = f; t.touch();
+             })
+        .def("set_fontname",
+             [](PyText& t, const std::string& f) {
+                 t.t->font.family = f; t.touch();
+             })
+        .def("get_fontname",
+             [](const PyText& t) { return t.t->font.family; })
+        .def("get_name",
+             [](const PyText& t) { return t.t->font.family; })
+        .def("set_fontstyle",
+             [](PyText& t, const std::string& s) {
+                 t.t->font.style = s; t.touch();
+             })
+        .def("get_fontstyle",
+             [](const PyText& t) { return t.t->font.style; })
+        .def("set_fontvariant",
+             [](PyText& t, const std::string& s) {
+                 t.t->font.variant = s; t.touch();
+             })
+        .def("get_fontvariant",
+             [](const PyText& t) { return t.t->font.variant; })
+        .def("set_fontweight",
+             [](PyText& t, const py::object& w) {
+                 if (py::isinstance<py::str>(w))
+                     t.t->font.weight = w.cast<std::string>();
+                 else
+                     t.t->font.weight =
+                         w.cast<int>() >= 600 ? "bold" : "normal";
+                 t.touch();
+             })
+        .def("get_fontweight",
+             [](const PyText& t) { return t.t->font.weight; })
+        .def("set_fontstretch",
+             [](PyText& t, const py::object& s) {
+                 t.t->font.stretch = py::isinstance<py::str>(s)
+                     ? s.cast<std::string>()
+                     : std::to_string(s.cast<int>());
+                 t.touch();
+             })
+        .def("get_fontstretch",
+             [](const PyText& t) { return t.t->font.stretch; })
+        .def("set_math_fontfamily",
+             [](PyText& t, const std::string& f) {
+                 // stored for parity; mathtext fontset is figure-level
+                 (void)f; t.touch();
+             })
+        .def("get_math_fontfamily",
+             [](const PyText&) { return "dejavusans"; })
+        // mpl Text: usetex/wrap/rotation_mode/linespacing/
+        // multialignment/backgroundcolor round-trip state.
+        .def("set_usetex",
+             [](PyText& t, const py::object& v) {
+                 t.t->usetex = !v.is_none() && v.cast<bool>();
+                 t.touch();
+             },
+             py::arg("usetex"))
+        .def("get_usetex",
+             [](const PyText& t) { return t.t->usetex; })
+        .def("set_wrap",
+             [](PyText& t, bool v) { t.t->wrap = v; t.touch(); },
+             py::arg("wrap"))
+        .def("get_wrap",
+             [](const PyText& t) { return t.t->wrap; })
+        .def("set_rotation_mode",
+             [](PyText& t, const py::object& m) {
+                 std::string v = m.is_none()
+                                     ? "default"
+                                     : m.cast<std::string>();
+                 if (v != "default" && v != "anchor")
+                     throw py::value_error(
+                         "rotation_mode must be 'default' or 'anchor'");
+                 t.t->rotationMode = v; t.touch();
+             },
+             py::arg("m"))
+        .def("get_rotation_mode",
+             [](const PyText& t) { return t.t->rotationMode; })
+        .def("set_linespacing",
+             [](PyText& t, float s) {
+                 t.t->lineSpacing = s; t.touch();
+             },
+             py::arg("spacing"))
+        .def("get_linespacing",
+             [](const PyText& t) { return t.t->lineSpacing; })
+        .def("set_multialignment",
+             [](PyText& t, const std::string& a) {
+                 t.t->multiAlign = parseHAlign(a); t.touch();
+             },
+             py::arg("align"))
+        .def("set_ma",
+             [](PyText& t, const std::string& a) {
+                 t.t->multiAlign = parseHAlign(a); t.touch();
+             },
+             py::arg("align"))
+        .def("get_multialignment",
+             [](const PyText& t) {
+                 if (t.t->multiAlign)
+                     return halignName(*t.t->multiAlign);
+                 return halignName(t.t->halign);
+             })
+        .def("set_backgroundcolor",
+             [](PyText& t, const py::object& c) {
+                 // mpl: backgroundcolor creates/updates the bbox
+                 // facecolor (edgecolor defaults to the face).
+                 t.t->backgroundColor = parseColor(c);
+                 if (!t.t->hasBbox) {
+                     t.t->hasBbox = true;
+                     t.t->bboxFaceColor = t.t->backgroundColor;
+                     t.t->bboxEdgeColor = t.t->backgroundColor;
+                 } else {
+                     t.t->bboxFaceColor = t.t->backgroundColor;
+                 }
+                 t.touch();
+             },
+             py::arg("color"))
+        .def("set_antialiased",
+             [](PyText&, bool) { /* AA is always on in Vulkan */ })
+        .def("get_antialiased", [](const PyText&) { return true; })
+        .def("set_parse_math",
+             [](PyText&, bool) { /* mathtext always parsed */ })
+        .def("get_parse_math", [](const PyText&) { return true; })
+        .def("set_path_effects",
+             [](PyText& t, const py::object& e) {
+                 t.t->pathEffects = toPathEffects(e); t.touch();
+             })
+        .def("get_path_effects",
+             [](const PyText& t) {
+                 return py::cast(t.t->pathEffects);
+             })
+        .def("set_transform",
+             [](PyText& t, std::shared_ptr<plot::Transform> tr) {
+                 t.t->transform = std::move(tr); t.touch();
+             },
+             py::arg("t"))
+        .def("get_transform",
+             [](const PyText& t) {
+                 return py::cast(t.t->transform,
+                                 py::return_value_policy::reference);
+             })
+        // mpl Text.set_bbox / get_bbox_patch — dict or None.
+        .def("set_bbox",
+             [](PyText& t, const py::object& bbox) {
+                 applyTextBbox(bbox, *t.t,
+                               t.owner->fig().style().dpi);
+                 t.touch();
+             },
+             py::arg("bbox"))
+        .def("get_bbox",
+             [](const PyText& t) {
+                 // mpl has get_bbox_patch (the FancyBboxPatch). We
+                 // expose the effective props as a dict, or None.
+                 if (!t.t->hasBbox) return py::object(py::none());
+                 py::dict d;
+                 d["facecolor"] = colorToPy(t.t->bboxFaceColor);
+                 d["edgecolor"] = colorToPy(t.t->bboxEdgeColor);
+                 d["linewidth"] = t.t->bboxEdgeWidth;
+                 d["pad"] = t.t->bboxPadding;
+                 return py::object(std::move(d));
+             })
+        .def("get_bbox_patch",
+             [](const PyText& t) {
+                 // Truthy when a bbox patch exists (mpl returns the
+                 // FancyBboxPatch itself; the dict carries the state).
+                 if (!t.t->hasBbox) return py::object(py::none());
+                 py::dict d;
+                 d["boxstyle"] = t.t->boxStyle ? "custom" : "square";
+                 return py::object(std::move(d));
+             })
+        .def("remove",
+             [](PyText& t) {
+                 // mpl Artist.remove() — detached texts drop out of
+                 // ax.texts and are never drawn (slot kept so handles
+                 // don't dangle).
+                 t.t->detached = true; t.t->visible = false;
+                 t.touch();
+             });
+
+    // mpl ax.title — Text artist over the axes TitleStyle.
+    py::class_<PyTitle>(m, "TitleText")
+        .def("get_text",
+             [](const PyTitle& t) { return t.text(); })
+        .def("set_text",
+             [](PyTitle& t, const std::string& s) {
+                 t.setText(s); t.touch();
+             })
+        .def("get_color",
+             [](const PyTitle& t) { return colorToPy(t.color()); })
+        .def("set_color",
+             [](PyTitle& t, const py::object& c) {
+                 t.color() = parseColor(c); t.touch();
+             })
+        .def("get_fontsize",
+             [](const PyTitle& t) { return t.font().size; })
+        .def("set_fontsize",
+             [](PyTitle& t, const py::object& s) {
+                 t.font().size = normSize(s); t.touch();
+             })
+        .def("get_fontfamily",
+             [](const PyTitle& t) {
+                 return std::vector<std::string>{t.font().family};
+             })
+        .def("set_fontfamily",
+             [](PyTitle& t, const py::object& f) {
+                 if (py::isinstance<py::str>(f))
+                     t.font().family = f.cast<std::string>();
+                 else {
+                     auto seq = f.cast<std::vector<std::string>>();
+                     if (!seq.empty()) t.font().family = seq.front();
+                 }
+                 t.touch();
+             },
+             py::arg("fontfamily"))
+        .def("get_fontstyle",
+             [](const PyTitle& t) { return t.font().style; })
+        .def("set_fontstyle",
+             [](PyTitle& t, const std::string& s) {
+                 t.font().style = s; t.touch();
+             })
+        .def("get_fontweight",
+             [](const PyTitle& t) { return t.font().weight; })
+        .def("set_fontweight",
+             [](PyTitle& t, const py::object& w) {
+                 if (py::isinstance<py::str>(w))
+                     t.font().weight = w.cast<std::string>();
+                 else
+                     t.font().weight =
+                         w.cast<int>() >= 600 ? "bold" : "normal";
+                 t.touch();
+             })
+        .def("get_fontvariant",
+             [](const PyTitle& t) { return t.font().variant; })
+        .def("get_fontstretch",
+             [](const PyTitle& t) { return t.font().stretch; })
+        .def("set_fontproperties",
+             [](PyTitle& t, const py::object& fp) {
+                 applyFontPropertiesArg(t.font(), fp); t.touch();
+             },
+             py::arg("fontproperties"))
+        .def("get_fontproperties",
+             [](const PyTitle& t) {
+                 auto p = std::make_unique<PyFontProps>();
+                 auto& f = t.font();
+                 p->family = {f.family}; p->style = f.style;
+                 p->variant = f.variant; p->weight = py::str(f.weight);
+                 p->stretch = py::str(f.stretch); p->size = f.size;
+                 p->file = f.file;
+                 return p;
+             })
+        .def("get_position",
+             [](const PyTitle& t) {
+                 using W = PyTitle::Which;
+                 if (t.which == W::SupX) return std::pair{0.5f, 0.01f};
+                 if (t.which == W::SupY) return std::pair{0.02f, 0.5f};
+                 return std::pair{0.5f, t.ax ? 1.0f : 0.98f};
+             })
+        .def("get_visible", [](const PyTitle&) { return true; })
+        .def("set_visible", [](PyTitle& t, bool) { t.touch(); })
+        .def_property_readonly("axes",
+             [](const PyTitle& t) {
+                 return t.ax ? py::cast(PyAxes{t.owner, t.ax, nullptr})
+                             : py::object(py::none());
+             })
+        .def("get_figure", [](const PyTitle& t) { return t.owner; });
+
+    // mpl Annotation — Text subclass returned by ax.annotate. Shares
+    // the text/font accessor surface; adds arrow/xy introspection.
+    py::class_<PyAnnotation>(m, "Annotation")
+        .def("get_text",
+             [](const PyAnnotation& a) { return a.an->text; })
+        .def("set_text",
+             [](PyAnnotation& a, const std::string& s) {
+                 a.an->text = s; a.touch();
+             })
+        .def("get_color",
+             [](const PyAnnotation& a) { return colorToPy(a.an->color); })
+        .def("set_color",
+             [](PyAnnotation& a, const py::object& c) {
+                 a.an->color = parseColor(c); a.touch();
+             })
+        .def("get_fontsize",
+             [](const PyAnnotation& a) { return a.an->fontSize; })
+        .def("set_fontsize",
+             [](PyAnnotation& a, const py::object& s) {
+                 float sz = normSize(s);
+                 a.an->font.size = sz; a.an->fontSize = sz;
+                 a.touch();
+             })
+        .def("get_fontfamily",
+             [](const PyAnnotation& a) {
+                 return std::vector<std::string>{a.an->font.family};
+             })
+        .def("get_fontstyle",
+             [](const PyAnnotation& a) { return a.an->font.style; })
+        .def("get_fontweight",
+             [](const PyAnnotation& a) { return a.an->font.weight; })
+        .def("get_fontvariant",
+             [](const PyAnnotation& a) { return a.an->font.variant; })
+        .def("get_fontstretch",
+             [](const PyAnnotation& a) { return a.an->font.stretch; })
+        .def("set_fontproperties",
+             [](PyAnnotation& a, const py::object& fp) {
+                 applyFontPropertiesArg(a.an->font, fp);
+                 a.an->fontSize = a.an->font.size;
+                 a.touch();
+             },
+             py::arg("fontproperties"))
+        .def("get_fontproperties",
+             [](const PyAnnotation& a) {
+                 auto p = std::make_unique<PyFontProps>();
+                 p->family = {a.an->font.family};
+                 p->style = a.an->font.style;
+                 p->variant = a.an->font.variant;
+                 p->weight = py::str(a.an->font.weight);
+                 p->stretch = py::str(a.an->font.stretch);
+                 p->size = a.an->font.size;
+                 p->file = a.an->font.file;
+                 return p;
+             })
+        .def("set_fontfamily",
+             [](PyAnnotation& a, const py::object& f) {
+                 if (py::isinstance<py::str>(f))
+                     a.an->font.family = f.cast<std::string>();
+                 else {
+                     auto seq = f.cast<std::vector<std::string>>();
+                     if (!seq.empty()) a.an->font.family = seq.front();
+                 }
+                 a.touch();
+             },
+             py::arg("fontfamily"))
+        .def("set_fontstyle",
+             [](PyAnnotation& a, const std::string& s) {
+                 a.an->font.style = s; a.touch();
+             })
+        .def("set_fontweight",
+             [](PyAnnotation& a, const py::object& w) {
+                 if (py::isinstance<py::str>(w))
+                     a.an->font.weight = w.cast<std::string>();
+                 else
+                     a.an->font.weight =
+                         w.cast<int>() >= 600 ? "bold" : "normal";
+                 a.touch();
+             })
+        .def("get_usetex",
+             [](const PyAnnotation& a) { return a.an->usetex; })
+        .def("set_usetex",
+             [](PyAnnotation& a, const py::object& v) {
+                 a.an->usetex = !v.is_none() && v.cast<bool>();
+                 a.touch();
+             })
+        .def("get_wrap",
+             [](const PyAnnotation& a) { return a.an->wrap; })
+        .def("set_wrap",
+             [](PyAnnotation& a, bool v) { a.an->wrap = v; a.touch(); })
+        .def("get_rotation_mode",
+             [](const PyAnnotation& a) { return a.an->rotationMode; })
+        .def("set_rotation_mode",
+             [](PyAnnotation& a, const py::object& m) {
+                 a.an->rotationMode =
+                     m.is_none() ? "default" : m.cast<std::string>();
+                 a.touch();
+             })
+        .def("get_linespacing",
+             [](const PyAnnotation& a) { return a.an->lineSpacing; })
+        .def("set_linespacing",
+             [](PyAnnotation& a, float s) {
+                 a.an->lineSpacing = s; a.touch();
+             })
+        .def("set_backgroundcolor",
+             [](PyAnnotation& a, const py::object& c) {
+                 a.an->backgroundColor = parseColor(c);
+                 a.touch();
+             })
+        .def("get_visible",
+             [](const PyAnnotation& a) { return !a.an->detached; })
+        .def("set_visible",
+             [](PyAnnotation& a, bool v) {
+                 a.an->detached = !v; a.touch();
+             })
+        // mpl Annotation.xyann / xy / annocoords introspection.
+        .def_property_readonly("xyann",
+             [](const PyAnnotation& a) {
+                 return std::pair{a.an->xyText[0], a.an->xyText[1]};
+             })
+        .def_property_readonly("xy",
+             [](const PyAnnotation& a) {
+                 return std::pair{a.an->xy[0], a.an->xy[1]};
+             })
+        .def("remove",
+             [](PyAnnotation& a) {
+                 a.an->detached = true; a.touch();
+             });
+
+    // mpl Quiver artist — reference handle for ax.quiverkey.
+    py::class_<PyQuiver>(m, "Quiver")
+        .def("set_visible",
+             [](PyQuiver& q, bool v) {
+                 q.quiver->visible = v; q.quiver->touch();
+             })
+        .def("get_visible",
+             [](const PyQuiver& q) { return q.quiver->visible; })
+        .def("set_zorder",
+             [](PyQuiver& q, float z) {
+                 q.quiver->zorder = z; q.quiver->touch();
+             })
+        .def("get_zorder",
+             [](const PyQuiver& q) { return q.quiver->zorder; })
+        .def("remove", [](PyQuiver& q) {
+                 if (auto o = detachArtist(*q.owner, q.quiver))
+                     q.owned = std::move(o);
+             });
+
+    // mpl generic Artist — introspection fallback handle.
+    py::class_<PyArtist>(m, "Artist")
+        .def("set_visible",
+             [](PyArtist& a, bool v) {
+                 a.artist->visible = v; a.artist->touch();
+             })
+        .def("get_visible",
+             [](const PyArtist& a) { return a.artist->visible; })
+        .def("set_zorder",
+             [](PyArtist& a, float z) {
+                 a.artist->zorder = z; a.artist->touch();
+             })
+        .def("get_zorder",
+             [](const PyArtist& a) { return a.artist->zorder; })
+        .def("set_clip_on",
+             [](PyArtist& a, bool v) {
+                 a.artist->clipOn = v; a.artist->touch();
+             })
+        .def("get_clip_on",
+             [](const PyArtist& a) { return a.artist->clipOn; })
+        .def("get_label",
+             [](const PyArtist& a) { return a.artist->label(); })
+        .def("remove", [](PyArtist& a) {
+                 if (!a.channel.empty()) {
+                     channelRemove(a);
+                     return;
+                 }
+                 if (auto o = detachArtist(*a.owner, a.artist))
+                     a.owned = std::move(o);
+             })
+        // ── Channel-artist style routing (container children) ──
+        .def("set_color",
+             [](PyArtist& a, const py::object& c) {
+                 if (auto* col = channelColor(a)) {
+                     *col = parseColor(c);
+                     a.artist->touch();
+                     return;
+                 }
+                 a.props_["color"] = c;
+             },
+             py::arg("color"))
+        .def("get_color",
+             [](PyArtist& a) -> py::object {
+                 if (auto* col = channelColor(a))
+                     return colorToPy(*col);
+                 if (a.props_.contains("color"))
+                     return a.props_["color"];
+                 return py::none();
+             })
+        .def("set_linewidth",
+             [](PyArtist& a, float w) {
+                 if (auto* lw = channelWidth(a)) {
+                     *lw = w * pt2px(*a.ax);
+                     a.artist->touch();
+                     return;
+                 }
+                 a.props_["linewidth"] = py::float_(w);
+             },
+             py::arg("linewidth"))
+        .def("get_linewidth",
+             [](PyArtist& a) -> py::object {
+                 if (auto* lw = channelWidth(a))
+                     return py::float_(*lw / pt2px(*a.ax));
+                 if (a.props_.contains("linewidth"))
+                     return a.props_["linewidth"];
+                 return py::none();
+             })
+        .def("set_linestyle",
+             [](PyArtist& a, const py::object& ls) {
+                 // Channels store the linestyle request; native dash
+                 // support varies by channel.
+                 a.props_["linestyle"] = ls;
+             },
+             py::arg("linestyle"))
+        .def("get_linestyle",
+             [](const PyArtist& a) -> py::object {
+                 if (a.props_.contains("linestyle"))
+                     return a.props_["linestyle"];
+                 return py::str("-");
+             })
+        .def("set_ls",
+             [](PyArtist& a, const py::object& ls) {
+                 a.props_["linestyle"] = ls;
+             },
+             py::arg("ls"))
+        .def("set_marker",
+             [](PyArtist& a, const py::object& m) {
+                 a.props_["marker"] = m;
+             },
+             py::arg("marker"))
+        .def("set_markersize",
+             [](PyArtist& a, float s) {
+                 if (auto* p =
+                         dynamic_cast<plot::ErrorbarPlot*>(a.artist))
+                     p->config().markerSize = s * pt2px(*a.ax);
+                 else if (auto* p =
+                              dynamic_cast<plot::StemPlot*>(a.artist))
+                     p->config().markerSize = s * pt2px(*a.ax);
+                 a.artist->touch();
+             },
+             py::arg("markersize"))
+        .def("get_xdata",
+             [](const PyArtist& a) -> py::object {
+                 if (auto* p =
+                         dynamic_cast<plot::ErrorbarPlot*>(a.artist))
+                     return py::cast(p->xs());
+                 if (auto* p =
+                         dynamic_cast<plot::StemPlot*>(a.artist))
+                     return py::cast(p->xs());
+                 return py::none();
+             })
+        .def("get_ydata",
+             [](const PyArtist& a) -> py::object {
+                 if (auto* p =
+                         dynamic_cast<plot::ErrorbarPlot*>(a.artist))
+                     return py::cast(p->ys());
+                 if (auto* p =
+                         dynamic_cast<plot::StemPlot*>(a.artist))
+                     return py::cast(p->ys());
+                 return py::none();
+             });
+
+    // mpl AxesImage — imshow/pcolorfast result.
+    py::class_<PyImage> imgCls(m, "AxesImage");
+    imgCls
+        .def("set_visible",
+             [](PyImage& i, bool v) {
+                 i.img->visible = v; i.img->touch();
+             })
+        .def("get_visible",
+             [](const PyImage& i) { return i.img->visible; })
+        .def("set_zorder",
+             [](PyImage& i, float z) {
+                 i.img->zorder = z; i.img->touch();
+             })
+        .def("get_zorder",
+             [](const PyImage& i) { return i.img->zorder; })
+        .def("set_alpha",
+             [](PyImage& i, float a) {
+                 if (auto* h =
+                         dynamic_cast<plot::HeatmapPlot*>(i.img))
+                     h->setAlpha(a);
+             },
+             py::arg("alpha"))
+        .def("remove", [](PyImage& i) {
+                 if (auto o = detachArtist(*i.owner, i.img))
+                     i.owned = std::move(o);
+             })
+        // mpl AxesImage.axes/.figure + extent introspection.
+        .def_property_readonly("axes",
+             [](const PyImage& i) {
+                 return i.img->owner()
+                            ? PyAxes{i.owner, i.img->owner(), nullptr}
+                            : py::cast<PyAxes>(py::none());
+             })
+        .def("get_figure",
+             [](const PyImage& i) { return i.owner; })
+        .def_property_readonly("figure",
+             [](const PyImage& i) { return i.owner; })
+        .def("get_size",
+             [](const PyImage& i) {
+                 // mpl AxesImage.get_size() → (rows, cols).
+                 if (auto* h =
+                         dynamic_cast<plot::HeatmapPlot*>(i.img)) {
+                     auto [w, hh] = h->dims();
+                     return py::make_tuple(hh, w);
+                 }
+                 return py::make_tuple(0, 0);
+             })
+        .def("get_extent",
+             [](const PyImage& i) {
+                 // mpl: (left, right, bottom, top) — stored verbatim,
+                 // so origin='upper' reports the y range reversed.
+                 if (auto* h =
+                         dynamic_cast<plot::HeatmapPlot*>(i.img)) {
+                     auto& g = h->grid();
+                     return py::make_tuple(g.xRange.min, g.xRange.max,
+                                           g.yRange.min, g.yRange.max);
+                 }
+                 return py::make_tuple(0.0f, 1.0f, 0.0f, 1.0f);
+             });
+    mappableDefs(imgCls,
+                 [](const PyImage& i) -> plot::IPlot* { return i.img; });
+
+    // mpl InsetIndicator — ax.indicate_inset(_zoom) result.
+    py::class_<PyInsetIndicator>(m, "InsetIndicator")
+        .def("set_edgecolor",
+             [](PyInsetIndicator& i, const py::object& c) {
+                 i.ind->edgeColor = parseColor(c);
+             })
+        .def("set_alpha",
+             [](PyInsetIndicator& i, float a) { i.ind->alpha = a; });
+
+    // mpl colorbar.Colorbar — fig.colorbar result.
+    py::class_<PyColorbar>(m, "Colorbar")
+        .def_property_readonly("mappable",
+                               [](PyColorbar& c) { return c.mappable; })
+        .def_property_readonly("ax",
+                               [](PyColorbar& c) {
+                                   return PyAxes{c.owner, c.ax};
+                               })
+        .def_property_readonly("orientation",
+                               [](PyColorbar& c) {
+                                   return c.cbs().orientation;
+                               })
+        .def("set_label",
+             [](PyColorbar& c, const std::string& l) {
+                 c.cbs().label = l;
+                 c.touch();
+             })
+        .def("set_ticks",
+             [](PyColorbar& c, const py::object& ticks,
+                bool updateTicks, bool minor) {
+                 (void)updateTicks;
+                 c.cbs().ticks = toFloats(ticks);
+                 if (minor) c.cbs().minorTicksOn = true;
+                 c.touch();
+             },
+             py::arg("ticks"), py::arg("update_ticks") = true,
+             py::arg("minor") = false,
+             "mpl Colorbar.set_ticks — explicit major tick values.")
+        .def("set_ticklabels",
+             [](PyColorbar& c, const py::object& labels) {
+                 auto& tl = c.cbs().tickLabels;
+                 tl.clear();
+                 for (auto item : py::reinterpret_borrow<py::sequence>(labels))
+                     tl.push_back(py::str(item).cast<std::string>());
+                 c.touch();
+             },
+             py::arg("ticklabels"),
+             "mpl Colorbar.set_ticklabels — positional labels.")
+        .def("get_ticks",
+             [](PyColorbar& c) {
+                 return py::cast(c.cbs().ticks);
+             })
+        .def("minorticks_on",
+             [](PyColorbar& c) {
+                 c.cbs().minorTicksOn = true;
+                 c.touch();
+             })
+        .def("minorticks_off",
+             [](PyColorbar& c) {
+                 c.cbs().minorTicksOn = false;
+                 c.touch();
+             })
+        .def("remove",
+             [](PyColorbar& c) {
+                 c.cbs().visible = false;
+                 c.touch();
+             },
+             "Hide the colorbar (mpl Colorbar.remove).");
+
+    // mpl Legend artist (ax.legend/fig.legend result). Mutations go to
+    // the owning axes'/figure's LegendStyle.
+    // mpl gridspec.GridSpec — constructible, indexable (gs[i, j],
+    // gs[:, 0]), with geometry + spacing params.
+    py::class_<PyGridSpec, std::shared_ptr<PyGridSpec>> gridSpecCls(
+        m, "GridSpec");
+    gridSpecCls
+        .def(py::init([](uint32_t nrows, uint32_t ncols,
+                         const py::object& left, const py::object& right,
+                         const py::object& bottom, const py::object& top,
+                         const py::object& wspace, const py::object& hspace,
+                         const py::object& width_ratios,
+                         const py::object& height_ratios,
+                         const py::object& figure) {
+                 auto g = std::make_shared<plot::GridSpec>(nrows, ncols);
+                 auto setF = [](const py::object& v, float& f) {
+                     if (!v.is_none()) f = v.cast<float>();
+                 };
+                 setF(left, g->left); setF(right, g->right);
+                 setF(bottom, g->bottom); setF(top, g->top);
+                 setF(wspace, g->wspace); setF(hspace, g->hspace);
+                 if (!width_ratios.is_none())
+                     g->widthRatios = toFloats(width_ratios);
+                 if (!height_ratios.is_none())
+                     g->heightRatios = toFloats(height_ratios);
+                 std::shared_ptr<PyFigure> owner;
+                 if (!figure.is_none())
+                     owner = figure.cast<std::shared_ptr<PyFigure>>();
+                 return std::make_shared<PyGridSpec>(
+                     PyGridSpec{owner, g, nullptr});
+             }),
+             py::arg("nrows"), py::arg("ncols"),
+             py::arg("left") = py::none(), py::arg("right") = py::none(),
+             py::arg("bottom") = py::none(), py::arg("top") = py::none(),
+             py::arg("wspace") = py::none(), py::arg("hspace") = py::none(),
+             py::arg("width_ratios") = py::none(),
+             py::arg("height_ratios") = py::none(),
+             py::arg("figure") = py::none())
+        .def_property_readonly("nrows",
+            [](const PyGridSpec& g) { return g.g->rows(); })
+        .def_property_readonly("ncols",
+            [](const PyGridSpec& g) { return g.g->cols(); })
+        .def("__len__",
+             [](const PyGridSpec& g) { return g.g->rows() * g.g->cols(); })
+        .def("get_geometry",
+             [](const PyGridSpec& g) {
+                 return py::make_tuple(g.g->rows(), g.g->cols());
+             })
+        .def("get_subplot_params",
+             [](const PyGridSpec&, const py::object&) {
+                 return py::object(py::none());
+             },
+             py::arg("figure") = py::none())
+        .def_property_readonly("figure",
+             [](const PyGridSpec& g) -> py::object {
+                 return g.owner ? py::cast(g.owner) : py::none();
+             })
+        // mpl gs[i] / gs[i, j] / gs[slice, slice] — slices select spans.
+        .def("__getitem__",
+             [](const std::shared_ptr<PyGridSpec>& g,
+                const py::object& key) {
+                 auto normIdx = [](const py::object& k, uint32_t size,
+                                   bool isAxis)
+                     -> std::pair<uint32_t, uint32_t> {
+                     if (py::isinstance<py::slice>(k)) {
+                         auto sl = k.cast<py::slice>();
+                         size_t start, stop, step, len;
+                         if (!sl.compute(size, &start, &stop, &step, &len))
+                             throw py::error_already_set();
+                         if (len == 0)
+                             throw py::index_error(
+                                 "GridSpec slice would result in no "
+                                 "space allocated for subplot");
+                         return {uint32_t(start), uint32_t(stop - 1)};
+                     }
+                     int i = k.cast<int>();
+                     if (i < 0) i += int(size);
+                     if (i < 0 || i >= int(size)) {
+                         if (isAxis)
+                             throw py::index_error("subplot index out of "
+                                                   "bounds");
+                         throw py::index_error("index out of bounds for "
+                                               "GridSpec");
+                     }
+                     return {uint32_t(i), uint32_t(i)};
+                 };
+                 uint32_t r0, r1, c0, c1;
+                 if (py::isinstance<py::tuple>(key)) {
+                     auto t = key.cast<py::tuple>();
+                     if (t.size() != 2)
+                         throw py::value_error(
+                             "Unrecognized subplot spec");
+                     auto rr = normIdx(py::reinterpret_borrow<py::object>(
+                                           t[0]),
+                                       g->g->rows(), true);
+                     auto cc = normIdx(py::reinterpret_borrow<py::object>(
+                                           t[1]),
+                                       g->g->cols(), true);
+                     r0 = rr.first; r1 = rr.second;
+                     c0 = cc.first; c1 = cc.second;
+                 } else {
+                     // Flat index: row-major over rows*cols.
+                     auto flat = normIdx(key, g->g->rows() * g->g->cols(),
+                                         false);
+                     r0 = flat.first / g->g->cols();
+                     c0 = flat.first % g->g->cols();
+                     r1 = flat.second / g->g->cols();
+                     c1 = flat.second % g->g->cols();
+                 }
+                 plot::SubplotSpec s{g->g.get(), r0, c0,
+                                   r1 - r0 + 1, c1 - c0 + 1};
+                 return PySubplotSpec{g->owner, s, g};
+             })
+        .def("subplotspec",
+             [](const std::shared_ptr<PyGridSpec>& g, uint32_t row,
+                uint32_t col, uint32_t rowspan, uint32_t colspan) {
+                 return PySubplotSpec{
+                     g->owner,
+                     g->g->at(row, col, rowspan, colspan), g};
+             },
+             py::arg("row"), py::arg("col"), py::arg("rowspan") = 1,
+             py::arg("colspan") = 1)
+        .def("get_width_ratios",
+             [](const PyGridSpec& g) { return py::cast(g.g->widthRatios); })
+        .def("get_height_ratios",
+             [](const PyGridSpec& g) { return py::cast(g.g->heightRatios); })
+        .def("set_width_ratios",
+             [](PyGridSpec& g, const py::object& v) {
+                 g.g->widthRatios = v.is_none()
+                     ? std::vector<float>{} : toFloats(v);
+                 if (g.owner) g.owner->fig().markStale();
+             },
+             py::arg("width_ratios"))
+        .def("set_height_ratios",
+             [](PyGridSpec& g, const py::object& v) {
+                 g.g->heightRatios = v.is_none()
+                     ? std::vector<float>{} : toFloats(v);
+                 if (g.owner) g.owner->fig().markStale();
+             },
+             py::arg("height_ratios"))
+        .def("update",
+             [](PyGridSpec& g, const py::kwargs& kw) {
+                 auto set = [&](const char* k, float& f) {
+                     if (kw && kw.contains(k) && !kw[k].is_none())
+                         f = kw[k].cast<float>();
+                 };
+                 set("left", g.g->left); set("right", g.g->right);
+                 set("bottom", g.g->bottom); set("top", g.g->top);
+                 set("wspace", g.g->wspace); set("hspace", g.g->hspace);
+                 if (g.owner) g.owner->fig().markStale();
+             })
+        // mpl gs.get_grid_positions(fig) → (bottoms, tops, lefts, rights)
+        // in figure fractions.
+        .def("get_grid_positions",
+             [](PyGridSpec& g, const py::object& fig) -> py::object {
+                 (void)fig;
+                 // Resolve in a unit region: figure fractions.
+                 plot::Rect2D unit{0, 0, 1000, 1000};
+                 py::list bottoms, tops, lefts, rights;
+                 for (uint32_t r = 0; r < g.g->rows(); ++r) {
+                     auto rect = g.g->cellRect(
+                         unit, {g.g.get(), r, 0, 1, g.g->cols()});
+                     // pixel → figure fraction (y flipped: y0 is top).
+                     tops.append(1.0 - rect.y / 1000.0);
+                     bottoms.append(
+                         1.0 - (rect.y + rect.height) / 1000.0);
+                 }
+                 for (uint32_t c = 0; c < g.g->cols(); ++c) {
+                     auto rect = g.g->cellRect(
+                         unit, {g.g.get(), 0, c, g.g->rows(), 1});
+                     lefts.append(rect.x / 1000.0);
+                     rights.append((rect.x + rect.width) / 1000.0);
+                 }
+                 return py::make_tuple(bottoms, tops, lefts, rights);
+             },
+             py::arg("fig") = py::none())
+        .def("locally_modified_subplot_params", [] { return false; })
+        .def("tight_layout", [](const PyGridSpec&, const py::object&) {},
+             py::arg("figure"));
+    py::class_<PySubplotParams>(m, "SubplotParams")
+        .def_property("left",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().left; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().left = v;
+                 p.owner->fig().markStale(); })
+        .def_property("right",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().right; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().right = v;
+                 p.owner->fig().markStale(); })
+        .def_property("bottom",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().bottom; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().bottom = v;
+                 p.owner->fig().markStale(); })
+        .def_property("top",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().top; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().top = v;
+                 p.owner->fig().markStale(); })
+        .def_property("wspace",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().wspace; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().wspace = v;
+                 p.owner->fig().markStale(); })
+        .def_property("hspace",
+             [](const PySubplotParams& p) {
+                 return p.owner->fig().grid().hspace; },
+             [](PySubplotParams& p, float v) {
+                 p.owner->fig().grid().hspace = v;
+                 p.owner->fig().markStale(); })
+        .def("update",
+             [](PySubplotParams& p, const py::kwargs& kw) {
+                 auto& g = p.owner->fig().grid();
+                 auto set = [&](const char* k, float& f) {
+                     if (kw && kw.contains(k) && !kw[k].is_none())
+                         f = kw[k].cast<float>();
+                 };
+                 set("left", g.left); set("right", g.right);
+                 set("bottom", g.bottom); set("top", g.top);
+                 set("wspace", g.wspace); set("hspace", g.hspace);
+                 p.owner->fig().markStale();
+             });
+    py::class_<PySubplotSpec>(m, "SubplotSpec")
+        .def("get_gridspec",
+             [](const PySubplotSpec& s) {
+                 return s.gs ? *s.gs
+                     : PyGridSpec{s.owner, gridRef(s.owner, s.spec.grid),
+                                  nullptr};
+             })
+        .def("get_geometry",
+             [](const PySubplotSpec& s) {
+                 // mpl: (n_rows, n_cols, num1, num2) — 0-based,
+                 // num2 inclusive.
+                 uint32_t nc = s.spec.grid ? s.spec.grid->cols() : 1;
+                 uint32_t num1 = s.spec.row * nc + s.spec.col;
+                 uint32_t num2 = (s.spec.row + s.spec.rowSpan - 1) * nc +
+                                 s.spec.col + s.spec.colSpan - 1;
+                 return py::make_tuple(
+                     s.spec.grid ? s.spec.grid->rows() : 1, nc,
+                     num1, num2);
+             })
+        .def_property_readonly("num1",
+             [](const PySubplotSpec& s) {
+                 uint32_t nc = s.spec.grid ? s.spec.grid->cols() : 1;
+                 return s.spec.row * nc + s.spec.col;
+             })
+        .def_property_readonly("num2",
+             [](const PySubplotSpec& s) {
+                 uint32_t nc = s.spec.grid ? s.spec.grid->cols() : 1;
+                 return (s.spec.row + s.spec.rowSpan - 1) * nc +
+                        s.spec.col + s.spec.colSpan - 1;
+             })
+        .def_property_readonly("rowspan",
+             [](const PySubplotSpec& s) {
+                 // mpl returns a `range` over the rows spanned.
+                 return py::module_::import("builtins")
+                     .attr("range")(s.spec.row,
+                                    s.spec.row + s.spec.rowSpan);
+             })
+        .def_property_readonly("colspan",
+             [](const PySubplotSpec& s) {
+                 return py::module_::import("builtins")
+                     .attr("range")(s.spec.col,
+                                    s.spec.col + s.spec.colSpan);
+             })
+        .def("is_first_row",
+             [](const PySubplotSpec& s) { return s.spec.row == 0; })
+        .def("is_first_col",
+             [](const PySubplotSpec& s) { return s.spec.col == 0; })
+        .def("is_last_row",
+             [](const PySubplotSpec& s) {
+                 return s.spec.grid &&
+                        s.spec.row + s.spec.rowSpan ==
+                            s.spec.grid->rows();
+             })
+        .def("is_last_col",
+             [](const PySubplotSpec& s) {
+                 return s.spec.grid &&
+                        s.spec.col + s.spec.colSpan ==
+                            s.spec.grid->cols();
+             })
+        .def("get_topmost_subplotspec",
+             [](const PySubplotSpec& s) { return s; })
+        // mpl SubplotSpec.subgridspec — a nested GridSpec in this cell.
+        .def("subgridspec",
+             [](const PySubplotSpec& s, uint32_t nrows, uint32_t ncols,
+                const py::kwargs& kw) {
+                 auto nested = s.spec.nested(nrows, ncols);
+                 auto applyKw = [&](plot::GridSpec& g) {
+                     auto setF = [&](const char* k, float& f) {
+                         if (kw && kw.contains(k) && !kw[k].is_none())
+                             f = kw[k].cast<float>();
+                     };
+                     setF("left", g.left); setF("right", g.right);
+                     setF("bottom", g.bottom); setF("top", g.top);
+                     setF("wspace", g.wspace); setF("hspace", g.hspace);
+                     if (kw && kw.contains("width_ratios") &&
+                         !kw["width_ratios"].is_none())
+                         g.widthRatios = toFloats(kw["width_ratios"]);
+                     if (kw && kw.contains("height_ratios") &&
+                         !kw["height_ratios"].is_none())
+                         g.heightRatios = toFloats(kw["height_ratios"]);
+                 };
+                 applyKw(*nested);
+                 // s.gs transitively keeps the whole parent chain alive.
+                 return PyGridSpec{s.owner, std::move(nested), s.gs};
+             },
+             py::arg("nrows"), py::arg("ncols"));
+    py::class_<PyLegend>(m, "Legend")
+        .def("set_visible",
+             [](PyLegend& l, bool v) { l.ls().visible = v; l.touch(); })
+        .def("get_visible",
+             [](const PyLegend& l) {
+                 return const_cast<PyLegend&>(l).ls().visible;
+             })
+        .def("remove",
+             [](PyLegend& l) { l.ls().visible = false; l.touch(); })
+        .def("set_draggable",
+             [](PyLegend& l, bool state) {
+                 l.ls().draggable = state; l.touch();
+             },
+             py::arg("state") = true,
+             "mpl Legend.set_draggable / draggable().")
+        .def("draggable",
+             [](PyLegend& l, bool state) {
+                 l.ls().draggable = state; l.touch();
+             },
+             py::arg("state") = true)
+        .def("get_draggable",
+             [](PyLegend& l) { return l.ls().draggable; })
+        .def("set_title",
+             [](PyLegend& l, const std::string& t) {
+                 l.ls().title = t; l.touch();
+             },
+             py::arg("title"))
+        .def("get_title",
+             [](PyLegend& l) { return l.ls().title; })
+        .def("get_texts",
+             [](PyLegend& l) {
+                 // mpl legend.get_texts() → label strings (Text artists
+                 // are transient here — expose the resolved labels).
+                 py::list out;
+                 auto& ls = l.ls();
+                 if (ls.explicitHandles)
+                     for (auto& h : *ls.explicitHandles)
+                         out.append(h.label);
+                 else if (l.ax)
+                     for (auto& p : l.ax->plots())
+                         for (auto& h : p->legendEntries())
+                             out.append(h.label);
+                 for (size_t i = 0;
+                      i < ls.explicitLabels.size() && i < py::len(out); ++i)
+                     out[i] = py::str(ls.explicitLabels[i]);
+                 return out;
+             })
+        .def("set_loc",
+             [](PyLegend& l, const py::object& loc) {
+                 if (py::isinstance<py::int_>(loc))
+                     l.ls().location = std::to_string(loc.cast<int>());
+                 else
+                     l.ls().location = loc.cast<std::string>();
+                 l.touch();
+             },
+             py::arg("loc"))
+        .def("get_loc",
+             [](PyLegend& l) { return l.ls().location; })
+        .def("set_bbox_to_anchor",
+             [](PyLegend& l, const py::object& bbox) {
+                 auto& ls = l.ls();
+                 if (bbox.is_none()) {
+                     ls.anchorX = ls.anchorY = ls.anchorW = ls.anchorH =
+                         -1.0f;
+                 } else {
+                     auto t = bbox.cast<std::vector<float>>();
+                     ls.anchorX = t[0]; ls.anchorY = t[1];
+                     if (t.size() >= 4) {
+                         ls.anchorW = t[2]; ls.anchorH = t[3];
+                     }
+                 }
+                 l.touch();
+             },
+             py::arg("bbox"));
 
     // mpl cycler.Cycler — buildable via vp.cycler(...) or
     // vp.cycler('color', [...]); supports + (concat) and * (outer product).
@@ -1956,6 +12001,18 @@ PYBIND11_MODULE(volcanoplot, m) {
             return pc;
         },
         py::arg("radii"), py::arg("offsets"));
+    // mpl exposes the concrete collection classes under
+    // matplotlib.collections.
+    colls.attr("EventCollection") = m.attr("EventCollection");
+    colls.attr("QuadMesh") = m.attr("QuadMesh");
+    colls.attr("Collection") = m.attr("Collection");
+    colls.attr("PathCollection") = m.attr("PathCollection");
+
+    // mpl matplotlib.container — tuple-like artist containers.
+    auto contMod = m.def_submodule("container");
+    contMod.attr("BarContainer") = m.attr("BarContainer");
+    contMod.attr("ErrorbarContainer") = m.attr("ErrorbarContainer");
+    contMod.attr("StemContainer") = m.attr("StemContainer");
 
     // ── mpl canvas Event (MouseEvent/KeyEvent fields) ────────────
     py::class_<plot::Event>(m, "Event")
@@ -1979,7 +12036,7 @@ PYBIND11_MODULE(volcanoplot, m) {
     py::class_<PyCanvas>(m, "Canvas")
         .def("mpl_connect",
              [](PyCanvas& c, const std::string& name, py::function cb) {
-                 return c.owner->figure_.canvas().connect(
+                 return c.owner->fig().canvas().connect(
                      name, [cb](const plot::Event& e) {
                          py::gil_scoped_acquire gil;
                          cb(e);
@@ -1988,7 +12045,7 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("name"), py::arg("func"))
         .def("mpl_disconnect",
              [](PyCanvas& c, int cid) {
-                 c.owner->figure_.canvas().disconnect(cid);
+                 c.owner->fig().canvas().disconnect(cid);
              },
              py::arg("cid"))
         /// Headless testing hook: synthesize and dispatch a raw event
@@ -2023,8 +12080,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  e.type = it->second;
                  e.x = x; e.y = y; e.button = button;
                  e.key = key; e.step = step;
-                 c.owner->figure_.layout(figExtentPx(c.owner));
-                 c.owner->figure_.dispatch(e);
+                 c.owner->fig().layout(figExtentPx(c.owner));
+                 c.owner->fig().dispatch(e);
              },
              py::arg("name"), py::arg("x") = 0.0f, py::arg("y") = 0.0f,
              py::arg("button") = 0, py::arg("key") = "",
@@ -2035,7 +12092,7 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("set_active",
              [](PyWidget& w, bool a) {
                  w.w->active = a;
-                 w.owner->figure_.markStale();
+                 w.owner->fig().markStale();
              },
              py::arg("active"))
         .def_property_readonly("active",
@@ -2074,7 +12131,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                                  r->setActive(int(i));
                      } else r->setActive(v.cast<int>());
                  }
-                 w.owner->figure_.markStale();
+                 w.owner->fig().markStale();
              },
              py::arg("val"))
         /// mpl CheckButtons.set_active(i) / RadioButtons.set_active(i) —
@@ -2099,7 +12156,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                  } else throw std::invalid_argument(
                      "set_active is only valid on CheckButtons/"
                      "RadioButtons");
-                 w.owner->figure_.markStale();
+                 w.owner->fig().markStale();
              },
              py::arg("index"))
         /// mpl Slider.on_changed — fires on drag/set_val.
@@ -2189,7 +12246,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                float valmax, const py::object& valinit,
                const py::object& valstep) {
                 auto r = axesRectPx(a);
-                auto* s = a.owner->figure_.addWidget<plot::Slider>(
+                auto* s = a.owner->fig().addWidget<plot::Slider>(
                     r, label, valmin, valmax);
                 if (!valinit.is_none()) s->setVal(valinit.cast<float>());
                 if (!valstep.is_none()) s->valstep = valstep.cast<float>();
@@ -2204,7 +12261,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             [](PyAxes& a, const std::string& label, float valmin,
                float valmax, std::pair<float,float> valinit) {
                 auto r = axesRectPx(a);
-                auto* s = a.owner->figure_.addWidget<plot::RangeSlider>(
+                auto* s = a.owner->fig().addWidget<plot::RangeSlider>(
                     r, label, valmin, valmax, valinit.first,
                     valinit.second);
                 PyWidget w;
@@ -2216,7 +12273,7 @@ PYBIND11_MODULE(volcanoplot, m) {
         wm.def("Button",
             [](PyAxes& a, const std::string& label) {
                 auto r = axesRectPx(a);
-                auto* b = a.owner->figure_.addWidget<plot::Button>(r,
+                auto* b = a.owner->fig().addWidget<plot::Button>(r,
                                                                    label);
                 PyWidget w;
                 w.owner = a.owner; w.w = b; w.ax = a;
@@ -2231,7 +12288,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                 if (!actives.is_none())
                     checked = actives.cast<std::vector<bool>>();
                 auto* c =
-                    a.owner->figure_.addWidget<plot::CheckButtons>(
+                    a.owner->fig().addWidget<plot::CheckButtons>(
                         r, labels, std::move(checked));
                 PyWidget w;
                 w.owner = a.owner; w.w = c; w.ax = a;
@@ -2245,7 +12302,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                int active) {
                 auto r = axesRectPx(a);
                 auto* rb =
-                    a.owner->figure_.addWidget<plot::RadioButtons>(
+                    a.owner->fig().addWidget<plot::RadioButtons>(
                         r, labels, active);
                 PyWidget w;
                 w.owner = a.owner; w.w = rb; w.ax = a;
@@ -2257,7 +12314,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             [](PyAxes& a, const std::string& label,
                const std::string& initial) {
                 auto r = axesRectPx(a);
-                auto* t = a.owner->figure_.addWidget<plot::TextBox>(
+                auto* t = a.owner->fig().addWidget<plot::TextBox>(
                     r, label, initial);
                 PyWidget w;
                 w.owner = a.owner; w.w = t; w.ax = a;
@@ -2267,9 +12324,9 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("initial") = "");
         wm.def("Cursor",
             [](PyAxes& a, const py::object& color, float linewidth) {
-                auto* c = a.owner->figure_.addWidget<plot::Cursor>(a.ax);
+                auto* c = a.owner->fig().addWidget<plot::Cursor>(a.ax);
                 if (auto cc = parseColor(color); cc.a > 0) c->color = cc;
-                if (linewidth > 0) c->lineWidth = linewidth;
+                if (linewidth > 0) c->lineWidth = linewidth * pt2px(*a.ax);
                 PyWidget w;
                 w.owner = a.owner; w.w = c; w.ax = a;
                 return w;
@@ -2282,7 +12339,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                 std::vector<plot::Axes*> as;
                 for (auto& a : axes) as.push_back(a.ax);
                 auto* c =
-                    f->figure_.addWidget<plot::MultiCursor>(
+                    f->fig().addWidget<plot::MultiCursor>(
                         std::move(as));
                 if (auto cc = parseColor(color); cc.a > 0) c->color = cc;
                 PyWidget w;
@@ -2295,7 +12352,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             [](PyAxes& a, py::function onselect,
                const std::string& direction) {
                 auto* s =
-                    a.owner->figure_.addWidget<plot::SpanSelector>(
+                    a.owner->fig().addWidget<plot::SpanSelector>(
                         a.ax, direction);
                 s->onSelect = [onselect](float lo, float hi) {
                     py::gil_scoped_acquire gil; onselect(lo, hi);
@@ -2309,7 +12366,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("direction") = "x");
         wm.def("RectangleSelector",
             [](PyAxes& a, py::function onselect) {
-                auto* s = a.owner->figure_.addWidget<
+                auto* s = a.owner->fig().addWidget<
                     plot::RectangleSelector>(a.ax);
                 s->onSelect = [onselect](float x0, float y0, float x1,
                                          float y1) {
@@ -2324,7 +12381,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("ax"), py::arg("onselect"));
         wm.def("EllipseSelector",
             [](PyAxes& a, py::function onselect) {
-                auto* s = a.owner->figure_.addWidget<
+                auto* s = a.owner->fig().addWidget<
                     plot::EllipseSelector>(a.ax);
                 s->onSelect = [onselect](float x0, float y0, float x1,
                                          float y1) {
@@ -2339,7 +12396,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("ax"), py::arg("onselect"));
         wm.def("PolygonSelector",
             [](PyAxes& a, py::function onselect) {
-                auto* s = a.owner->figure_.addWidget<
+                auto* s = a.owner->fig().addWidget<
                     plot::PolygonSelector>(a.ax);
                 s->onSelect = [onselect](std::span<const plot::Point2D> v) {
                     py::gil_scoped_acquire gil;
@@ -2355,7 +12412,7 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("ax"), py::arg("onselect"));
         wm.def("LassoSelector",
             [](PyAxes& a, py::function onselect) {
-                auto* s = a.owner->figure_.addWidget<
+                auto* s = a.owner->fig().addWidget<
                     plot::LassoSelector>(a.ax);
                 s->onSelect = [onselect](std::span<const plot::Point2D> v) {
                     py::gil_scoped_acquire gil;
@@ -2371,8 +12428,8 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("ax"), py::arg("onselect"));
         wm.def("SubplotTool",
             [](std::shared_ptr<PyFigure> f) {
-                auto* t = f->figure_.addWidget<plot::SubplotTool>(
-                    &f->figure_);
+                auto* t = f->fig().addWidget<plot::SubplotTool>(
+                    &f->fig());
                 PyWidget w;
                 w.owner = f; w.w = t;
                 return w;
@@ -2380,34 +12437,474 @@ PYBIND11_MODULE(volcanoplot, m) {
             py::arg("fig"));
     }
 
+    // mpl Axes.set(**kwargs) — generic property dispatch shared by
+    // Axes.set and the module-level vp.setp().
+    auto axesSetProp = [](PyAxes& a, const std::string& k,
+                          const py::object& v) {
+        auto pair = [&](float& lo, float& hi) {
+            auto t = v.cast<py::sequence>();
+            if (t.size() != 2)
+                throw std::invalid_argument(k + " expects (lo, hi)");
+            lo = t[0].cast<float>(); hi = t[1].cast<float>();
+        };
+        if (k == "xlim" || k == "xbound") {
+            float lo, hi; pair(lo, hi); a.ax->setXlim(lo, hi);
+        } else if (k == "ylim" || k == "ybound") {
+            float lo, hi; pair(lo, hi); a.ax->setYlim(lo, hi);
+        } else if (k == "xlabel") {
+            a.ax->style().xAxis.label = v.cast<std::string>();
+            a.ax->touch();
+        } else if (k == "ylabel") {
+            a.ax->style().yAxis.label = v.cast<std::string>();
+            a.ax->touch();
+        } else if (k == "title") {
+            a.ax->setTitle(v.cast<std::string>());
+        } else if (k == "xscale") {
+            a.ax->setXscale(v.cast<std::string>());
+        } else if (k == "yscale") {
+            a.ax->setYscale(v.cast<std::string>());
+        } else if (k == "aspect") {
+            if (py::isinstance<py::str>(v)) {
+                auto s = v.cast<std::string>();
+                a.ax->setAspect(s == "equal" ? plot::AspectMode::Equal
+                                             : plot::AspectMode::Auto);
+            } else {
+                a.ax->setAspect(v.cast<float>() == 1.0f
+                                    ? plot::AspectMode::Equal
+                                    : plot::AspectMode::Auto);
+            }
+        } else if (k == "autoscalex_on") {
+            a.ax->setAutoscalexOn(v.cast<bool>());
+        } else if (k == "autoscaley_on") {
+            a.ax->setAutoscaleyOn(v.cast<bool>());
+        } else if (k == "xmargin") {
+            a.ax->margins(v.cast<float>(), -1.0f);
+        } else if (k == "ymargin") {
+            a.ax->margins(-1.0f, v.cast<float>());
+        } else if (k == "xticks") {
+            a.ax->setXLocator(std::make_shared<plot::FixedLocator>(
+                toFloats(v)));
+        } else if (k == "yticks") {
+            a.ax->setYLocator(std::make_shared<plot::FixedLocator>(
+                toFloats(v)));
+        } else if (k == "xticklabels") {
+            std::vector<std::string> ls;
+            for (auto s : v.cast<py::sequence>())
+                ls.push_back(s.cast<std::string>());
+            a.ax->setXFormatter(
+                std::make_shared<plot::FixedFormatter>(std::move(ls)));
+        } else if (k == "yticklabels") {
+            std::vector<std::string> ls;
+            for (auto s : v.cast<py::sequence>())
+                ls.push_back(s.cast<std::string>());
+            a.ax->setYFormatter(
+                std::make_shared<plot::FixedFormatter>(std::move(ls)));
+        } else if (k == "frame_on") {
+            a.ax->setFrameOn(v.cast<bool>());
+        } else if (k == "axison") {
+            a.ax->setAxisOn(v.cast<bool>());
+        } else if (k == "axisbelow") {
+            a.ax->style().axisBelow = v.cast<bool>();
+            a.ax->touch();
+        } else {
+            throw py::attribute_error(
+                "Axes has no property '" + k + "'");
+        }
+    };
+
+    // mpl ContourSet — returned by contour/contourf, accepted by clabel.
+    py::class_<PyContourSet>(m, "ContourSet")
+        .def("remove", [](PyContourSet& cs) {
+                 if (cs.cs && cs.ax) {
+                     for (auto& p : cs.ax->plots())
+                         if (p.get() == cs.cs) { cs.owned = p; }
+                     cs.ax->removePlot(cs.cs);
+                     cs.cs = nullptr;
+                     cs.ax->touch();
+                 }
+             })
+        .def("get_figure",
+             [](PyContourSet& cs) { return cs.owner; })
+        .def("get_axes",
+             [](PyContourSet& cs) { return PyAxes{cs.owner, cs.ax}; })
+        .def_property_readonly("levels",
+             [](const PyContourSet& cs) {
+                 auto* c = const_cast<PyContourSet&>(cs).cfg();
+                 return c ? py::cast(c->levels) : py::object(py::none());
+             })
+        .def("get_label",
+             [](const PyContourSet& cs) {
+                 return cs.cs ? cs.cs->label() : std::string();
+             })
+        .def("set_label",
+             [](PyContourSet& cs, const std::string& s) {
+                 if (auto* p = dynamic_cast<plot::ContourPlot*>(cs.cs))
+                     p->setLabel(s);
+                 else if (auto* p =
+                              dynamic_cast<plot::ContourfPlot*>(cs.cs))
+                     p->setLabel(s);
+                 cs.touch();
+             },
+             py::arg("s"));
+
+    // ── mpl matplotlib.tri submodule ────────────────────────────────
+    auto triMod = m.def_submodule("tri");
+    py::class_<PyTriangulation, std::shared_ptr<PyTriangulation>>(
+        triMod, "Triangulation")
+        .def(py::init([](const py::object& x, const py::object& y,
+                         const py::object& triangles,
+                         const py::object& mask) {
+                 auto t = std::make_shared<PyTriangulation>();
+                 t->x = toFloats(x);
+                 t->y = toFloats(y);
+                 if (t->x.size() != t->y.size())
+                     throw std::invalid_argument(
+                         "x and y must be equal-length sequences");
+                 if (triangles.is_none()) {
+                     std::vector<plot::Point2D> pts;
+                     pts.reserve(t->x.size());
+                     for (size_t i = 0; i < t->x.size(); ++i)
+                         pts.push_back({t->x[i], t->y[i]});
+                     t->tris = plot::delaunay(pts);
+                     t->isDelaunay = true;
+                 } else {
+                     t->tris = toTriangles(triangles);
+                     for (auto& tri : t->tris)
+                         if (tri.a >= t->x.size() ||
+                             tri.b >= t->x.size() ||
+                             tri.c >= t->x.size())
+                             throw std::invalid_argument(
+                                 "triangle indices out of range");
+                 }
+                 if (!mask.is_none()) {
+                     for (auto m : mask)
+                         t->mask.push_back(
+                             py::cast<bool>(
+                                 py::reinterpret_borrow<py::object>(m)));
+                     if (t->mask.size() != t->tris.size())
+                         throw std::invalid_argument(
+                             "mask array must have same length as "
+                             "triangles array");
+                 }
+                 return t;
+             }),
+             py::arg("x"), py::arg("y"),
+             py::arg("triangles") = py::none(),
+             py::arg("mask") = py::none())
+        .def_property_readonly(
+            "x", [](const PyTriangulation& t) { return t.x; })
+        .def_property_readonly(
+            "y", [](const PyTriangulation& t) { return t.y; })
+        .def_property_readonly(
+            "triangles",
+            [](const PyTriangulation& t) {
+                std::vector<std::array<uint32_t, 3>> out;
+                out.reserve(t.tris.size());
+                for (auto& tri : t.tris)
+                    out.push_back({tri.a, tri.b, tri.c});
+                return out;
+            })
+        .def_property_readonly(
+            "mask",
+            [](const PyTriangulation& t) -> py::object {
+                if (t.mask.empty()) return py::none();
+                std::vector<bool> m(t.mask.begin(), t.mask.end());
+                return py::cast(m);
+            })
+        .def_readonly("is_delaunay", &PyTriangulation::isDelaunay)
+        .def("get_masked_triangles",
+             [](const PyTriangulation& t) {
+                 auto ts = t.maskedTris();
+                 std::vector<std::array<uint32_t, 3>> out;
+                 out.reserve(ts.size());
+                 for (auto& tri : ts)
+                     out.push_back({tri.a, tri.b, tri.c});
+                 return out;
+             })
+        .def("set_mask",
+             [](PyTriangulation& t, const py::object& mask) {
+                 if (mask.is_none()) {
+                     t.mask.clear();
+                     return;
+                 }
+                 std::vector<char> m;
+                 for (auto v : mask)
+                     m.push_back(py::cast<bool>(
+                         py::reinterpret_borrow<py::object>(v)));
+                 if (m.size() != t.tris.size())
+                     throw std::invalid_argument(
+                         "mask array must have same length as "
+                         "triangles array");
+                 t.mask = std::move(m);
+             },
+             py::arg("mask"))
+        .def_property_readonly("edges", &PyTriangulation::edges)
+        .def_property_readonly(
+            "neighbors",
+            [](const PyTriangulation& t) {
+                std::vector<std::array<int32_t, 3>> out;
+                for (auto& n : t.neighbors())
+                    out.push_back({n[0], n[1], n[2]});
+                return out;
+            })
+        .def("get_trifinder",
+             [](std::shared_ptr<PyTriangulation> t) {
+                 return std::make_shared<PyTrapezoidMapTriFinder>(
+                     PyTrapezoidMapTriFinder{t});
+             })
+        .def("calculate_plane_coefficients",
+             [](const PyTriangulation& t, const py::object& z) {
+                 auto zv = toFloats(z);
+                 PyLinearTriInterpolator interp{
+                     std::make_shared<PyTriangulation>(t), zv};
+                 auto ts = t.maskedTris();
+                 std::vector<std::array<float, 3>> out(ts.size());
+                 for (size_t i = 0; i < ts.size(); ++i) {
+                     auto [a, b, c] = interp.plane(i);
+                     out[i] = {a, b, c};
+                 }
+                 return out;
+             },
+             py::arg("z"))
+        .def("__repr__",
+             [](const PyTriangulation& t) {
+                 return std::format(
+                     "<volcanoplot.tri.Triangulation with {} points "
+                     "and {} triangles>",
+                     t.x.size(), t.tris.size());
+             });
+    py::class_<PyTrapezoidMapTriFinder,
+               std::shared_ptr<PyTrapezoidMapTriFinder>>(
+        triMod, "TrapezoidMapTriFinder")
+        .def(py::init([](std::shared_ptr<PyTriangulation> t) {
+                 return std::make_shared<PyTrapezoidMapTriFinder>(
+                     PyTrapezoidMapTriFinder{t});
+             }),
+             py::arg("triangulation"))
+        .def("__call__",
+             [](const PyTrapezoidMapTriFinder& f, float x, float y) {
+                 return f.tri->find(x, y);
+             },
+             py::arg("x"), py::arg("y"));
+    triMod.attr("TriFinder") = triMod.attr("TrapezoidMapTriFinder");
+    py::class_<PyLinearTriInterpolator,
+               std::shared_ptr<PyLinearTriInterpolator>>(
+        triMod, "LinearTriInterpolator")
+        .def(py::init([](std::shared_ptr<PyTriangulation> t,
+                         const py::object& z) {
+                 auto zv = toFloats(z);
+                 if (zv.size() != t->x.size())
+                     throw std::invalid_argument(
+                         "triangulation and z arrays should be of "
+                         "same length");
+                 return std::make_shared<PyLinearTriInterpolator>(
+                     PyLinearTriInterpolator{t, std::move(zv)});
+             }),
+             py::arg("triangulation"), py::arg("z"))
+        .def("__call__",
+             [](const PyLinearTriInterpolator& i, const py::object& x,
+                const py::object& y) {
+                 auto xv = toFloats(x), yv = toFloats(y);
+                 if (xv.size() != yv.size())
+                     throw std::invalid_argument(
+                         "x and y must be equal-length sequences");
+                 std::vector<float> out(xv.size());
+                 for (size_t k = 0; k < xv.size(); ++k) {
+                     int ti = i.tri->find(xv[k], yv[k]);
+                     if (ti < 0) {
+                         out[k] = std::numeric_limits<float>::quiet_NaN();
+                         continue;
+                     }
+                     auto [a, b, c] = i.plane(size_t(ti));
+                     out[k] = a * xv[k] + b * yv[k] + c;
+                 }
+                 return out;
+             },
+             py::arg("x"), py::arg("y"))
+        .def("gradient",
+             [](const PyLinearTriInterpolator& i, const py::object& x,
+                const py::object& y) {
+                 auto xv = toFloats(x), yv = toFloats(y);
+                 std::vector<float> gx(xv.size()), gy(xv.size());
+                 for (size_t k = 0; k < xv.size(); ++k) {
+                     int ti = i.tri->find(xv[k], yv[k]);
+                     if (ti < 0) {
+                         gx[k] = gy[k] =
+                             std::numeric_limits<float>::quiet_NaN();
+                         continue;
+                     }
+                     auto [a, b, c] = i.plane(size_t(ti));
+                     (void)c;
+                     gx[k] = a;
+                     gy[k] = b;
+                 }
+                 return std::make_tuple(gx, gy);
+             },
+             py::arg("x"), py::arg("y"));
+    // mpl CubicTriInterpolator — approximated with linear barycentric
+    // interpolation (same constructor/__call__/gradient surface).
+    triMod.attr("CubicTriInterpolator") =
+        triMod.attr("LinearTriInterpolator");
+    py::class_<PyUniformTriRefiner,
+               std::shared_ptr<PyUniformTriRefiner>>(
+        triMod, "UniformTriRefiner")
+        .def(py::init([](std::shared_ptr<PyTriangulation> t) {
+                 return std::make_shared<PyUniformTriRefiner>(
+                     PyUniformTriRefiner{t});
+             }),
+             py::arg("triangulation"))
+        .def("refine_triangulation",
+             [](const PyUniformTriRefiner& r, bool return_tri_index,
+                int subdiv) {
+                 auto [rt, ancestors] =
+                     refineTri(*r.tri, subdiv);
+                 auto out = py::make_tuple(rt);
+                 if (return_tri_index)
+                     return py::make_tuple(rt, py::cast(ancestors));
+                 return out;
+             },
+             py::arg("return_tri_index") = false,
+             py::arg("subdiv") = 3)
+        .def("refine_field",
+             [](const PyUniformTriRefiner& r, const py::object& z,
+                const py::object& triinterpolator, int subdiv) {
+                 auto zv = toFloats(z);
+                 PyLinearTriInterpolator interp{r.tri, zv};
+                 if (!triinterpolator.is_none())
+                     interp = *triinterpolator.cast<
+                         std::shared_ptr<PyLinearTriInterpolator>>();
+                 auto [rt, ancestors] = refineTri(*r.tri, subdiv);
+                 // Interpolate z at the refined nodes: `ancestors`
+                 // gives each node's containing triangle in the
+                 // original (masked) table — evaluate its plane.
+                 std::vector<float> refZ(rt->x.size());
+                 for (size_t k = 0; k < rt->x.size(); ++k) {
+                     int ti = ancestors[k];
+                     if (ti < 0) {
+                         refZ[k] =
+                             std::numeric_limits<float>::quiet_NaN();
+                         continue;
+                     }
+                     auto [a, b, c] = interp.plane(size_t(ti));
+                     refZ[k] = a * rt->x[k] + b * rt->y[k] + c;
+                 }
+                 return std::make_tuple(rt, refZ);
+             },
+             py::arg("z"), py::arg("triinterpolator") = py::none(),
+             py::arg("subdiv") = 3);
+    py::class_<PyTriAnalyzer, std::shared_ptr<PyTriAnalyzer>>(
+        triMod, "TriAnalyzer")
+        .def(py::init([](std::shared_ptr<PyTriangulation> t) {
+                 return std::make_shared<PyTriAnalyzer>(
+                     PyTriAnalyzer{t});
+             }),
+             py::arg("triangulation"))
+        .def_property_readonly("scale_factors",
+                               &PyTriAnalyzer::scaleFactors)
+        .def("circle_ratios", &PyTriAnalyzer::circleRatios,
+             py::arg("rescale") = true)
+        .def("get_flat_tri_mask",
+             [](const PyTriAnalyzer& a, float min_circle_ratio,
+                bool rescale) {
+                 auto ratios = a.circleRatios(rescale);
+                 // mpl algorithm: iteratively mask flat *border*
+                 // triangles until stable (border = triangle with a
+                 // -1 neighbor under the current mask).
+                 std::vector<char> mask =
+                     a.tri->mask.empty()
+                         ? std::vector<char>(a.tri->tris.size(), 0)
+                         : a.tri->mask;
+                 PyTriangulation work = *a.tri;
+                 for (;;) {
+                     work.mask = mask;
+                     auto nb = work.neighbors();
+                     auto ts = work.maskedTris();
+                     // neighbors() returns indices into maskedTris —
+                     // map back to unmasked indices for mask writes.
+                     std::vector<size_t> unmasked;
+                     for (size_t i = 0; i < work.tris.size(); ++i)
+                         if (!mask[i]) unmasked.push_back(i);
+                     bool changed = false;
+                     for (size_t i = 0; i < ts.size(); ++i) {
+                         bool border = nb[i][0] < 0 || nb[i][1] < 0 ||
+                                       nb[i][2] < 0;
+                         if (border &&
+                             ratios[unmasked[i]] < min_circle_ratio) {
+                             mask[unmasked[i]] = 1;
+                             changed = true;
+                         }
+                     }
+                     if (!changed) break;
+                 }
+                 std::vector<bool> out(mask.begin(), mask.end());
+                 return out;
+             },
+             py::arg("min_circle_ratio") = 0.01f,
+             py::arg("rescale") = true);
+    triMod.attr("TriRefiner") = triMod.attr("UniformTriRefiner");
+
     py::class_<PyAxes>(m, "Axes")
+        // mpl gca()/subplot() return the identical Axes object — expose
+        // pointer-identity equality and hashing so `is`-like checks work.
+        .def("__eq__",
+             [](const PyAxes& a, const py::object& other) {
+                 try {
+                     const auto* b = other.cast<const PyAxes*>();
+                     return b && b->ax == a.ax;
+                 } catch (const py::cast_error&) { return false; }
+             },
+             py::is_operator())
+        .def("__hash__", [](const PyAxes& a) {
+            return py::hash(py::cast(uintptr_t(a.ax)));
+        })
         .def("plot",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& fmt, const py::object& color,
                 float linewidth, const py::object& marker,
                 const py::object& linestyle, float markersize,
-                float alpha, const std::string& label) {
-                 // mpl plot(y), plot(y, fmt), plot(x, y), plot(x,y,fmt).
+                float alpha, const std::string& label,
+                const py::object& markevery,
+                const py::object& transform,
+                const py::object& pathEffects) {
+                 // mpl plot(...) → list[Line2D].
+                 py::list out;
+                 PyLine2D ln;
                  if (y.is_none())
-                     return axesPlot(a, implicitX(x), x, fmt, color,
-                                     linewidth, marker, linestyle,
-                                     markersize, alpha, label);
-                 if (py::isinstance<py::str>(y) && fmt.is_none())
-                     return axesPlot(a, implicitX(x), x, y, color,
-                                     linewidth, marker, linestyle,
-                                     markersize, alpha, label);
-                 return axesPlot(a, x, y, fmt, color, linewidth, marker,
-                                 linestyle, markersize, alpha, label);
+                     ln = axesPlot(a, implicitX(x), x, fmt, color,
+                                   linewidth, marker, linestyle,
+                                   markersize, alpha, label, markevery,
+                                   transform, pathEffects);
+                 else if (py::isinstance<py::str>(y) && fmt.is_none())
+                     ln = axesPlot(a, implicitX(x), x, y, color,
+                                   linewidth, marker, linestyle,
+                                   markersize, alpha, label, markevery,
+                                   transform, pathEffects);
+                 else
+                     ln = axesPlot(a, x, y, fmt, color, linewidth, marker,
+                                   linestyle, markersize, alpha, label,
+                                   markevery, transform, pathEffects);
+                 out.append(py::cast(ln));
+                 return out;
              },
              py::arg("x"), py::arg("y") = py::none(),
              py::arg("fmt") = py::none(), py::arg("color") = py::none(),
              py::arg("linewidth") = 1.5f, py::arg("marker") = py::none(),
              py::arg("linestyle") = py::none(),
              py::arg("markersize") = -1.0f, py::arg("alpha") = -1.0f,
-             py::arg("label") = "")
+             py::arg("label") = "", py::arg("markevery") = py::none(),
+             py::arg("transform") = py::none(),
+             py::arg("path_effects") = py::none())
         .def("scatter", &axesScatter,
-             py::arg("x"), py::arg("y"), py::arg("color") = py::none(),
-             py::arg("s") = 8.0f, py::arg("label") = "")
+             py::arg("x"), py::arg("y"), py::arg("s") = py::none(),
+             py::arg("c") = py::none(), py::arg("marker") = py::none(),
+             py::arg("cmap") = py::none(), py::arg("norm") = py::none(),
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+             py::arg("alpha") = py::none(),
+             py::arg("linewidths") = py::none(),
+             py::arg("edgecolors") = py::none(),
+             py::arg("color") = py::none(), py::arg("label") = "",
+             py::arg("transform") = py::none(),
+             py::arg("path_effects") = py::none())
         .def("bar",
              [](PyAxes& a, const py::object& x,
                 const py::object& h, const py::object& color,
@@ -2429,11 +12926,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  b.width = width;
                  if (auto c = parseColor(color); c.a > 0)
                      b.colors.assign(hv.size(), c);
-                 a.ax->addPlot(std::make_unique<plot::BarPlot>(std::move(b)));
                  PyBarContainer bc;
-                 bc.owner = a.owner; bc.heights = hv;
+                 bc.plot = a.ax->addPlot(
+                     std::make_unique<plot::BarPlot>(std::move(b)));
+                 bc.owner = a.owner; bc.ax = a.ax; bc.heights = hv;
                  bc.x.resize(hv.size());
                  std::iota(bc.x.begin(), bc.x.end(), 0.0f);
+                 a.owner->containers_[a.ax].append(py::cast(bc));
                  return bc;
              },
              py::arg("x"), py::arg("height"), py::arg("color") = py::none(),
@@ -2459,23 +12958,82 @@ PYBIND11_MODULE(volcanoplot, m) {
                  b.width = height;
                  if (auto c = parseColor(color); c.a > 0)
                      b.colors.assign(wv.size(), c);
-                 a.ax->addPlot(std::make_unique<plot::BarPlot>(std::move(b)));
                  PyBarContainer bc;
-                 bc.owner = a.owner; bc.heights = wv;
+                 bc.plot = a.ax->addPlot(
+                     std::make_unique<plot::BarPlot>(std::move(b)));
+                 bc.owner = a.owner; bc.ax = a.ax; bc.heights = wv;
                  bc.horizontal = true;
                  bc.x.resize(wv.size());
                  std::iota(bc.x.begin(), bc.x.end(), 0.0f);
+                 a.owner->containers_[a.ax].append(py::cast(bc));
                  return bc;
              },
              py::arg("y"), py::arg("width"), py::arg("color") = py::none(),
              py::arg("height") = 0.8f, py::arg("label") = "")
         .def("imshow",
              [](PyAxes& a, const py::object& values,
-                const std::string& cmapName) {
-                 a.ax->addPlot(std::make_unique<plot::HeatmapPlot>(
-                     toGrid2D(values), cmapByName(cmapName)));
+                const py::object& cmap,
+                const std::string& interpolation,
+                const std::string& aspect, const std::string& origin,
+                const py::object& norm, const py::object& vmin,
+                const py::object& vmax, const py::object& alpha,
+                const py::object& extent, const py::object& resample,
+                const py::object& filternorm,
+                const py::object& interpolation_stage,
+                const py::object& url) {
+                 auto grid = toGrid2D(values);
+                 if (extent.is_none()) {
+                     // mpl default extent: pixel centers at integer
+                     // coords — (-0.5, w-0.5, h-0.5, -0.5) for
+                     // origin='upper' (y verbatim, inverted axis).
+                     grid.xRange = {-0.5f, float(grid.width) - 0.5f};
+                     grid.yRange =
+                         origin == "lower"
+                             ? plot::Range{-0.5f, float(grid.height) - 0.5f}
+                             : plot::Range{float(grid.height) - 0.5f, -0.5f};
+                 } else {
+                     // mpl extent=(left, right, bottom, top) — the data
+                     // coordinates of the image corners.
+                     auto e = extent.cast<py::sequence>();
+                     if (py::len(e) != 4)
+                         throw py::value_error(
+                             "extent must be (left, right, bottom, top)");
+                     grid.xRange = {e[0].cast<float>(),
+                                    e[1].cast<float>()};
+                     grid.yRange = {e[2].cast<float>(),
+                                    e[3].cast<float>()};
+                 }
+                 auto& h = a.ax->imshow(std::move(grid),
+                                        cmapArg(cmap),
+                                        interpolation, aspect, origin);
+                 if (auto n = normArg(norm); n) h.setNorm(std::move(n));
+                 if (!vmin.is_none() || !vmax.is_none())
+                     h.setClim(
+                         vmin.is_none() ? std::optional<float>{}
+                                        : std::optional{vmin.cast<float>()},
+                         vmax.is_none() ? std::optional<float>{}
+                                        : std::optional{vmax.cast<float>()});
+                 if (!alpha.is_none()) h.setAlpha(alpha.cast<float>());
+                 // resample/filternorm/interpolation_stage/url accepted
+                 // for signature parity (interpolation selects the
+                 // sampler directly).
+                 // mpl imshow → set_extent → update_datalim + the
+                 // autoscale flag makes viewLim track dataLim eagerly.
+                 a.ax->autoscaleView();
+                 auto im = py::cast(PyImage{a.owner, a.ax, &h});
+                 a.owner->currentMappable_[a.ax] = im;
+                 return im;
              },
-             py::arg("values"), py::arg("cmap") = "viridis")
+             py::arg("values"), py::arg("cmap") = py::none(),
+             py::arg("interpolation") = "nearest",
+             py::arg("aspect") = "equal", py::arg("origin") = "upper",
+             py::arg("norm") = py::none(), py::arg("vmin") = py::none(),
+             py::arg("vmax") = py::none(), py::arg("alpha") = py::none(),
+             py::arg("extent") = py::none(),
+             py::arg("resample") = py::none(),
+             py::arg("filternorm") = py::none(),
+             py::arg("interpolation_stage") = py::none(),
+             py::arg("url") = py::none())
         .def("hist",
              [](PyAxes& a, const py::object& samples, int bins,
                 const py::object& color, const std::string& label) {
@@ -2484,6 +13042,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.binCount = bins;
                  cfg.label = label;
                  if (auto c = parseColor(color); c.a > 0) cfg.color = c;
+                 plot::HistPlot* hp;
                  if (py::isinstance<py::sequence>(samples)
                      && py::len(samples) > 0
                      && py::isinstance<py::sequence>(samples.attr("__getitem__")(0))) {
@@ -2491,43 +13050,126 @@ PYBIND11_MODULE(volcanoplot, m) {
                      std::vector<std::vector<float>> ds;
                      for (auto item : py::reinterpret_borrow<py::sequence>(samples))
                          ds.push_back(toFloats(py::reinterpret_borrow<py::object>(item)));
-                     a.ax->addPlot(std::make_unique<plot::HistPlot>(std::move(ds), cfg));
+                     hp = static_cast<plot::HistPlot*>(a.ax->addPlot(
+                         std::make_unique<plot::HistPlot>(
+                             std::move(ds), cfg)));
                  } else {
-                     a.ax->addPlot(std::make_unique<plot::HistPlot>(toFloats(samples), cfg));
+                     hp = static_cast<plot::HistPlot*>(a.ax->addPlot(
+                         std::make_unique<plot::HistPlot>(
+                             toFloats(samples), cfg)));
                  }
+                 // mpl returns (n, bins, patches) — eagerly computed.
+                 hp->ensureComputed();
+                 PyBarContainer bc;
+                 bc.owner = a.owner;
+                 bc.ax = a.ax;
+                 bc.plot = hp;
+                 bc.heights = hp->binHeights();
+                 const auto& all = hp->binHeightsAll();
+                 py::object n =
+                     all.size() == 1
+                         ? py::cast(all.front())
+                         : py::cast(all);
+                 return py::make_tuple(n, py::cast(hp->binEdges()),
+                                       py::cast(bc));
              },
              py::arg("samples"), py::arg("bins") = 10,
              py::arg("color") = py::none(), py::arg("label") = "")
         .def("errorbar",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& yerr, const py::object& xerr,
-                const py::object& color, const std::string& label) {
+                const std::string& fmt, const py::object& color,
+                const std::string& label,
+                const py::object& ecolor, const py::object& elinewidth,
+                const py::object& capsize) {
                  auto xv = toFloats(x), yv = toFloats(y);
+                 const float p2x = pt2px(*a.ax);
                  plot::ErrorbarConfig cfg;
                  cfg.label = label;
+                 // mpl defaults in points: lw=1.5, elinewidth→lw,
+                 // markersize=6.
+                 cfg.lineWidth = 1.5f * p2x;
+                 cfg.errorbarWidth = 1.5f * p2x;
+                 cfg.markerSize = 6.0f * p2x;
+                 // mpl fmt='' → line + error bars, no markers. Reuse
+                 // the plot() fmt parser on a temp Series2D.
+                 cfg.drawMarker = false;
+                 cfg.drawLine = true;
+                 if (!fmt.empty()) {
+                     plot::Series2D fs;
+                     applyFmt(fs, fmt);
+                     cfg.drawMarker =
+                         fs.marker != plot::MarkerStyle::None;
+                     cfg.drawLine =
+                         fs.lineStyle != plot::LineStyle::None;
+                     if (fs.color.a > 0)
+                         cfg.color = cfg.markerColor = fs.color;
+                 }
                  if (!yerr.is_none()) cfg.yerr = toFloats(yerr);
                  if (!xerr.is_none()) cfg.xerr = toFloats(xerr);
-                 if (auto c = parseColor(color); c.a > 0) cfg.color = c;
-                 a.ax->addPlot(std::make_unique<plot::ErrorbarPlot>(
-                     std::move(xv), std::move(yv), std::move(cfg)));
+                 if (auto c = parseColor(color); c.a > 0) {
+                     cfg.color = c;
+                     cfg.markerColor = c;
+                 }
+                 // mpl ecolor=None falls back to the line color.
+                 cfg.errorbarColor =
+                     ecolor.is_none() ? cfg.color
+                                      : parseColor(ecolor);
+                 if (!elinewidth.is_none())
+                     cfg.errorbarWidth = elinewidth.cast<float>() * p2x;
+                 if (!capsize.is_none()) {
+                     cfg.capSize = capsize.cast<float>() * p2x;
+                     cfg.drawCaps = cfg.capSize > 0;
+                 }
+                 const bool hasXerr =
+                     !cfg.xerr.empty() || !cfg.xerrLower.empty();
+                 const bool hasYerr =
+                     !cfg.yerr.empty() || !cfg.yerrLower.empty();
+                 auto* p = static_cast<plot::ErrorbarPlot*>(
+                     a.ax->addPlot(
+                         std::make_unique<plot::ErrorbarPlot>(
+                             std::move(xv), std::move(yv),
+                             std::move(cfg))));
+                 // mpl returns an ErrorbarContainer.
+                 PyErrorbarContainer c{a.owner, a.ax, p, nullptr,
+                                       hasXerr, hasYerr};
+                 return py::cast(c);
              },
              py::arg("x"), py::arg("y"),
              py::arg("yerr") = py::none(), py::arg("xerr") = py::none(),
-             py::arg("color") = py::none(), py::arg("label") = "")
+             py::arg("fmt") = "",
+             py::arg("color") = py::none(), py::arg("label") = "",
+             py::arg("ecolor") = py::none(),
+             py::arg("elinewidth") = py::none(),
+             py::arg("capsize") = py::none())
         .def("stem",
              [](PyAxes& a, const py::object& x, const py::object& y,
-                const py::object& color, const std::string& label) {
+                const py::object& color, const std::string& label,
+                const py::object& bottom) {
                  auto xv = toFloats(x), yv = toFloats(y);
+                 const float p2x = pt2px(*a.ax);
                  plot::StemConfig cfg;
                  cfg.label = label;
+                 // mpl defaults: stemlines/baseline lw = lines.linewidth
+                 // (1.5pt), markerfmt='o' at lines.markersize (6pt).
+                 cfg.lineWidth = 1.5f * p2x;
+                 cfg.baselineWidth = 1.5f * p2x;
+                 cfg.markerSize = 6.0f * p2x;
+                 if (!bottom.is_none())
+                     cfg.baseline = bottom.cast<float>();
                  if (auto c = parseColor(color); c.a > 0) {
                      cfg.lineColor = c; cfg.markerColor = c;
                  }
-                 a.ax->addPlot(std::make_unique<plot::StemPlot>(
-                     std::move(xv), std::move(yv), cfg));
+                 auto* p = static_cast<plot::StemPlot*>(
+                     a.ax->addPlot(
+                         std::make_unique<plot::StemPlot>(
+                             std::move(xv), std::move(yv), cfg)));
+                 // mpl returns a StemContainer.
+                 return py::cast(
+                     PyStemContainer{a.owner, a.ax, p});
              },
              py::arg("x"), py::arg("y"), py::arg("color") = py::none(),
-             py::arg("label") = "")
+             py::arg("label") = "", py::arg("bottom") = py::none())
         .def("step",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const std::string& where, const py::object& color,
@@ -2541,28 +13183,45 @@ PYBIND11_MODULE(volcanoplot, m) {
                      std::move(xv), std::move(yv), w,
                      c.a > 0 ? c : plot::Color::blue());
                  p->setLabel(label);
-                 a.ax->addPlot(std::move(p));
+                 auto* raw = a.ax->addPlot(std::move(p));
+                 py::list out;
+                 out.append(wrapArtist(a.owner, a.ax, raw));
+                 return out;
              },
              py::arg("x"), py::arg("y"), py::arg("where") = "pre",
              py::arg("color") = py::none(), py::arg("label") = "")
         .def("fill_between",
              [](PyAxes& a, const py::object& x, const py::object& y1,
-                const py::object& y2, const py::object& color) {
+                const py::object& y2, const py::object& where,
+                bool interpolate, const py::object& color) {
                  auto c = parseColor(color);
                  if (c.a == 0) c = plot::Color::fromRgba8(31, 119, 180, 128);
+                 auto xv = toFloats(x);
+                 auto y1v = toFloatList(y1);
+                 if (y1v.size() == 1) y1v.assign(xv.size(), y1v[0]);
+                 std::unique_ptr<plot::FillBetweenPlot> p;
                  if (y2.is_none())
-                     a.ax->addPlot(std::make_unique<plot::FillBetweenPlot>(
-                         toFloats(x), toFloats(y1), c));
-                 else
-                     a.ax->addPlot(std::make_unique<plot::FillBetweenPlot>(
-                         toFloats(x), toFloats(y1), toFloats(y2), c));
+                     p = std::make_unique<plot::FillBetweenPlot>(
+                         std::move(xv), std::move(y1v), c);
+                 else {
+                     auto y2v = toFloatList(y2);  // mpl broadcasts scalars
+                     if (y2v.size() == 1) y2v.assign(xv.size(), y2v[0]);
+                     p = std::make_unique<plot::FillBetweenPlot>(
+                         std::move(xv), std::move(y1v), std::move(y2v), c);
+                 }
+                 if (!where.is_none())
+                     p->setWhere(where.cast<std::vector<bool>>(),
+                                 interpolate);
+                 auto* raw = a.ax->addPlot(std::move(p));
+                 return wrapArtist(a.owner, a.ax, raw);
              },
              py::arg("x"), py::arg("y1"), py::arg("y2") = py::none(),
+             py::arg("where") = py::none(), py::arg("interpolate") = false,
              py::arg("color") = py::none())
         .def("contour",
              [](PyAxes& a, const py::object& values,
                 const py::object& levels, const std::string& cmapName,
-                bool clabel) {
+                bool clabel) -> PyContourSet {
                  plot::ContourConfig cfg;
                  cfg.cmap = &cmapByName(cmapName);
                  cfg.clabel = clabel;
@@ -2570,25 +13229,162 @@ PYBIND11_MODULE(volcanoplot, m) {
                      cfg.numLevels = levels.cast<int>();
                  else if (!levels.is_none())
                      cfg.levels = toFloats(levels);
-                 a.ax->addPlot(std::make_unique<plot::ContourPlot>(
-                     toGrid2D(values), std::move(cfg)));
+                 auto* p = a.ax->addPlot(
+                     std::make_shared<plot::ContourPlot>(
+                         toGrid2D(values), std::move(cfg)));
+                 return {a.owner, a.ax, p, {}};
              },
              py::arg("values"), py::arg("levels") = py::none(),
              py::arg("cmap") = "viridis", py::arg("clabel") = false)
         .def("contourf",
              [](PyAxes& a, const py::object& values,
-                const py::object& levels, const std::string& cmapName) {
+                const py::object& levels, const std::string& cmapName)
+                 -> PyContourSet {
                  plot::ContourConfig cfg;
                  cfg.cmap = &cmapByName(cmapName);
                  if (py::isinstance<py::int_>(levels))
                      cfg.numLevels = levels.cast<int>();
                  else if (!levels.is_none())
                      cfg.levels = toFloats(levels);
-                 a.ax->addPlot(std::make_unique<plot::ContourfPlot>(
-                     toGrid2D(values), std::move(cfg)));
+                 auto* p = a.ax->addPlot(
+                     std::make_shared<plot::ContourfPlot>(
+                         toGrid2D(values), std::move(cfg)));
+                 return {a.owner, a.ax, p, {}};
              },
              py::arg("values"), py::arg("levels") = py::none(),
              py::arg("cmap") = "viridis")
+        // mpl ax.clabel(CS, levels=None, fontsize=None, colors=None):
+        // turn on level labels for a ContourSet.
+        .def("clabel",
+             [](PyAxes& a, PyContourSet& cs, const py::object& levels,
+                const py::object& colors) {
+                 auto* c = cs.cfg();
+                 if (!c)
+                     throw std::invalid_argument(
+                         "clabel expects a contour/contourf result");
+                 c->clabel = true;
+                 if (!levels.is_none())
+                     c->clabelLevels = toFloats(levels);
+                 if (!colors.is_none())
+                     c->clabelColor = parseColor(colors);
+                 cs.touch();
+                 // mpl returns the list of Text label artists; the
+                 // labels are laid out lazily at draw time.
+                 return py::list();
+             },
+             py::arg("CS"), py::arg("levels") = py::none(),
+             py::arg("colors") = py::none(),
+             "mpl ax.clabel(CS) — label a ContourSet's levels.")
+        // mpl ax.fill(*args): x,y[,fmt] groups → closed polygons.
+        .def("fill",
+             [](PyAxes& a, const py::args& args,
+                const py::object& color) {
+                 py::list out;
+                 size_t i = 0;
+                 while (i + 1 < args.size()) {
+                     plot::Series2D s;
+                     auto xs = toFloats(
+                         py::reinterpret_borrow<py::object>(args[i]));
+                     auto ys = toFloats(
+                         py::reinterpret_borrow<py::object>(args[i + 1]));
+                     for (size_t k = 0; k < std::min(xs.size(), ys.size());
+                          ++k)
+                         s.points.push_back({xs[k], ys[k]});
+                     i += 2;
+                     if (i < args.size() &&
+                         py::isinstance<py::str>(args[i])) {
+                         applyFmt(s, py::cast<std::string>(
+                                 py::reinterpret_borrow<py::object>(
+                                     args[i])));
+                         i++;
+                     }
+                     if (!color.is_none()) s.color = parseColor(color);
+                     auto* p = a.ax->addPlot(
+                         std::make_shared<plot::FillPlot>(std::move(s)));
+                     out.append(py::cast(PyArtist{a.owner, a.ax, p, {}}));
+                 }
+                 return out;
+             },
+             py::arg("color") = py::none(),
+             "mpl ax.fill(x, y, [fmt], ...) — closed polygons.")
+        // mpl ax.arrow(x, y, dx, dy): a FancyArrow. Implemented via the
+        // annotation-arrow machinery (equivalent rendering).
+        .def("arrow",
+             [](PyAxes& a, float x, float y, float dx, float dy,
+                const py::object& color, float width,
+                float headWidth, float headLength) {
+                 auto* ann = a.ax->annotate(x + dx, y + dy, x, y, "");
+                 ann->arrowStyle = plot::ArrowStyle::Arrow;
+                 if (!color.is_none()) ann->arrowColor = parseColor(color);
+                 if (headWidth > 0 || headLength > 0)
+                     ann->arrowHeadSize =
+                         headLength > 0 ? headLength : headWidth;
+                 if (width > 0) ann->arrowWidth = width;
+                 return py::cast(PyAnnotation{a.owner, a.ax, ann});
+             },
+             py::arg("x"), py::arg("y"), py::arg("dx"), py::arg("dy"),
+             py::arg("color") = py::none(), py::arg("width") = 0.0f,
+             py::arg("head_width") = 0.0f, py::arg("head_length") = 0.0f,
+             "mpl ax.arrow(x, y, dx, dy) — draw an arrow.")
+        // mpl ax.clim / plt.clim — set the color limits of the current
+        // (last added) scalar-mappable image.
+        .def("clim",
+             [](PyAxes& a, const py::object& vmin,
+                const py::object& vmax) {
+                 for (auto& p : a.ax->plots() | std::views::reverse) {
+                     if (auto* hm =
+                             dynamic_cast<plot::HeatmapPlot*>(p.get())) {
+                         auto n = hm->norm();
+                         if (!n) {
+                             n = std::make_shared<plot::NormalizeLinear>();
+                             hm->setNorm(n);
+                         }
+                         if (!vmin.is_none())
+                             n->setVmin(vmin.cast<float>());
+                         if (!vmax.is_none())
+                             n->setVmax(vmax.cast<float>());
+                         a.ax->touch();
+                         return;
+                     }
+                 }
+                 throw std::runtime_error(
+                     "clim: no scalar-mappable image on the axes");
+             },
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+             "mpl ax.clim(vmin, vmax).")
+        // mpl ax.rgrids/set_rgrids (polar).
+        .def("rgrids",
+             [](PyAxes& a, const py::object& radii,
+                const py::object& angle) {
+                 if (!radii.is_none())
+                     a.ax->setRgrids(toFloats(radii));
+                 if (!angle.is_none())
+                     a.ax->setRlabelPosition(angle.cast<float>());
+                 return py::cast(a.ax->rgrids());
+             },
+             py::arg("radii") = py::none(), py::arg("angle") = py::none())
+        .def("set_rgrids",
+             [](PyAxes& a, const py::object& radii,
+                const py::object& angle) {
+                 if (!radii.is_none())
+                     a.ax->setRgrids(toFloats(radii));
+                 if (!angle.is_none())
+                     a.ax->setRlabelPosition(angle.cast<float>());
+             },
+             py::arg("radii"), py::arg("angle") = py::none())
+        .def("thetagrids",
+             [](PyAxes& a, const py::object& angles) {
+                 if (!angles.is_none())
+                     a.ax->setThetagrids(toFloats(angles));
+                 return py::cast(a.ax->thetagrids());
+             },
+             py::arg("angles") = py::none())
+        .def("set_thetagrids",
+             [](PyAxes& a, const py::object& angles) {
+                 if (!angles.is_none())
+                     a.ax->setThetagrids(toFloats(angles));
+             },
+             py::arg("angles"))
         .def("boxplot",
              [](PyAxes& a, const py::object& groups,
                 const py::object& labels) {
@@ -2598,7 +13394,20 @@ PYBIND11_MODULE(volcanoplot, m) {
                      ds.push_back(toFloats(py::reinterpret_borrow<py::object>(item)));
                  if (!labels.is_none())
                      cfg.labels = labels.cast<std::vector<std::string>>();
-                 a.ax->addPlot(std::make_unique<plot::BoxPlot>(std::move(ds), cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::BoxPlot>(std::move(ds), cfg));
+                 // mpl returns a dict of component artist lists.
+                 auto h = wrapArtist(a.owner, a.ax, p);
+                 py::dict d;
+                 py::list one; one.append(h);
+                 py::list empty;
+                 d["boxes"] = one;
+                 d["whiskers"] = empty;
+                 d["caps"] = empty;
+                 d["medians"] = one;
+                 d["fliers"] = empty;
+                 d["means"] = empty;
+                 return d;
              },
              py::arg("groups"), py::arg("labels") = py::none())
         .def("bxp",
@@ -2641,7 +13450,18 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.shownotches = shownotches;
                  cfg.patchArtist = patch_artist;
                  cfg.manageTicks = manage_ticks;
-                 a.ax->bxp(std::move(v), std::move(cfg));
+                 auto& bp = a.ax->bxp(std::move(v), std::move(cfg));
+                 auto h = wrapArtist(a.owner, a.ax, &bp);
+                 py::dict d;
+                 py::list one; one.append(h);
+                 py::list empty;
+                 d["boxes"] = one;
+                 d["whiskers"] = empty;
+                 d["caps"] = empty;
+                 d["medians"] = one;
+                 d["fliers"] = empty;
+                 d["means"] = empty;
+                 return d;
              },
              py::arg("stats"), py::arg("positions") = py::none(),
              py::arg("widths") = py::none(), py::arg("showbox") = true,
@@ -2650,33 +13470,83 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("shownotches") = false, py::arg("patch_artist") = false,
              py::arg("manage_ticks") = true)
         .def("pcolormesh",
-             [](PyAxes& a, const py::object& values,
-                const std::string& cmapName, const std::string& shading) {
-                 auto g = toGrid2D(values);
-                 // Flat shading on a unit grid: edges 0..W, 0..H.
-                 std::vector<float> x(g.width + 1), y(g.height + 1);
-                 for (uint32_t i = 0; i <= g.width; ++i) x[i] = float(i);
-                 for (uint32_t j = 0; j <= g.height; ++j) y[j] = float(j);
+             [](PyAxes& a, const py::args& args,
+                const py::object& cmap, const std::string& shading,
+                const py::object& norm, const py::object& vmin,
+                const py::object& vmax) {
+                 // mpl pcolormesh([X, Y,] C).
+                 std::vector<float> x, y, vals;
+                 uint32_t gw, gh;
+                 if (args.size() == 1) {
+                     auto g = toGrid2D(args[0].cast<py::object>());
+                     x.resize(g.width + 1);
+                     y.resize(g.height + 1);
+                     for (uint32_t i = 0; i <= g.width; ++i)
+                         x[i] = float(i);
+                     for (uint32_t j = 0; j <= g.height; ++j)
+                         y[j] = float(j);
+                     vals = std::move(g.values);
+                     gw = g.width; gh = g.height;
+                 } else if (args.size() == 3) {
+                     x = toFloats(args[0].cast<py::object>());
+                     y = toFloats(args[1].cast<py::object>());
+                     auto g = toGrid2D(args[2].cast<py::object>());
+                     vals = std::move(g.values);
+                     gw = g.width; gh = g.height;
+                     if (x.size() != gw + 1 || y.size() != gh + 1)
+                         throw std::invalid_argument(
+                             "pcolormesh: X/Y must be edge arrays of "
+                             "len ncols+1/nrows+1");
+                 } else {
+                     throw std::invalid_argument(
+                         "pcolormesh takes (C) or (X, Y, C)");
+                 }
                  plot::PcolormeshConfig cfg;
-                 cfg.cmap = &cmapByName(cmapName);
+                 cfg.cmap = &cmapArg(cmap);
+                 if (auto n = normArg(norm); n) cfg.norm = std::move(n);
+                 if (!vmin.is_none())
+                     cfg.valueRange.min = vmin.cast<float>();
+                 if (!vmax.is_none())
+                     cfg.valueRange.max = vmax.cast<float>();
                  if (shading == "gouraud") cfg.shading = plot::PcmShading::Gouraud;
-                 a.ax->addPlot(std::make_unique<plot::PcolormeshPlot>(
-                     std::move(x), std::move(y), std::move(g.values),
-                     g.width, g.height, std::move(cfg)));
+                 auto* p = static_cast<plot::PcolormeshPlot*>(
+                     a.ax->addPlot(
+                         std::make_unique<plot::PcolormeshPlot>(
+                             std::move(x), std::move(y),
+                             std::move(vals), gw, gh,
+                             std::move(cfg))));
+                 // mpl returns a QuadMesh.
+                 return py::cast(PyQuadMesh{a.owner, a.ax, p});
              },
-             py::arg("values"), py::arg("cmap") = "viridis",
-             py::arg("shading") = "flat")
+             py::arg("cmap") = py::none(),
+             py::arg("shading") = "flat", py::arg("norm") = py::none(),
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none())
         .def("set_xlim", [](PyAxes& a, float lo, float hi) { a.ax->setXlim(lo, hi); })
         .def("set_ylim", [](PyAxes& a, float lo, float hi) { a.ax->setYlim(lo, hi); })
         .def("set_xscale", [](PyAxes& a, std::string s) { a.ax->setXscale(s); })
         .def("set_yscale", [](PyAxes& a, std::string s) { a.ax->setYscale(s); })
-        .def("set_xlabel", [](PyAxes& a, std::string s) {
+        .def("set_xlabel",
+             [](PyAxes& a, std::string s, const py::kwargs& kw) {
                  a.ax->style().xAxis.label = std::move(s);
-             })
-        .def("set_ylabel", [](PyAxes& a, std::string s) {
+                 applyFontKwargs(a.ax->style().xAxis.labelFont, kw);
+             },
+             py::arg("xlabel"))
+        .def("set_ylabel",
+             [](PyAxes& a, std::string s, const py::kwargs& kw) {
                  a.ax->style().yAxis.label = std::move(s);
-             })
-        .def("set_title", [](PyAxes& a, std::string s) { a.ax->setTitle(std::move(s)); })
+                 applyFontKwargs(a.ax->style().yAxis.labelFont, kw);
+             },
+             py::arg("ylabel"))
+        .def("set_title",
+             [](PyAxes& a, std::string s, const py::kwargs& kw) {
+                 a.ax->setTitle(std::move(s));
+                 applyFontKwargs(a.ax->style().title.font, kw);
+                 return PyTitle{a.owner, a.ax};
+             },
+             py::arg("label"))
+        .def_property_readonly("title",
+             [](PyAxes& a) { return PyTitle{a.owner, a.ax}; },
+             "mpl ax.title — the title Text artist.")
         .def_property_readonly(
             "xaxis",
             [](PyAxes& a) { return PyAxis{a.owner, a.ax, true}; },
@@ -2685,6 +13555,32 @@ PYBIND11_MODULE(volcanoplot, m) {
             "yaxis",
             [](PyAxes& a) { return PyAxis{a.owner, a.ax, false}; },
             "mpl ax.yaxis — locator/formatter accessors.")
+        .def("get_xaxis",
+             [](PyAxes& a) { return PyAxis{a.owner, a.ax, true}; },
+             "mpl Axes.get_xaxis → the XAxis instance.")
+        .def("get_yaxis",
+             [](PyAxes& a) { return PyAxis{a.owner, a.ax, false}; },
+             "mpl Axes.get_yaxis → the YAxis instance.")
+        // mpl set_xaxis/set_yaxis swap the axis object; we keep the
+        // per-axis config on the Axes so this is a no-op placeholder
+        // for API compatibility.
+        .def("set_xaxis", [](PyAxes&, const py::object&) {})
+        .def("set_yaxis", [](PyAxes&, const py::object&) {})
+        // mpl bound transforms: transData / transAxes. The aliasing
+        // shared_ptr keeps both the transform node and the owning
+        // figure alive.
+        .def_property_readonly("transData",
+            [](PyAxes& a) {
+                auto t = plot::transData(*a.ax);
+                return std::shared_ptr<plot::Transform>(
+                    t.get(), [t, o = a.owner](plot::Transform*) {});
+            })
+        .def_property_readonly("transAxes",
+            [](PyAxes& a) {
+                auto t = plot::transAxes(*a.ax);
+                return std::shared_ptr<plot::Transform>(
+                    t.get(), [t, o = a.owner](plot::Transform*) {});
+            })
         .def("grid",
              [](PyAxes& a, bool on, const std::string& which,
                 const std::string& axis) {
@@ -2693,60 +13589,47 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("on") = true, py::arg("which") = "major",
              py::arg("axis") = "both")
         .def("legend",
-             [](PyAxes& a, const py::object& loc, int ncols,
-                const std::string& title, float fontsize,
-                const py::object& frameon, const py::object& fancybox,
-                const py::object& shadow, float framealpha) {
+             [](PyAxes& a, py::args args, py::kwargs kw) {
                  auto& ls = a.ax->legend();
-                 if (!loc.is_none()) ls.location = loc.cast<std::string>();
-                 ls.ncols = ncols;
-                 ls.title = title;
-                 if (fontsize > 0.0f) ls.font.size = fontsize;
-                 if (!frameon.is_none()) ls.frameOn = frameon.cast<bool>();
-                 if (!fancybox.is_none()) ls.fancyBox = fancybox.cast<bool>();
-                 if (!shadow.is_none()) ls.shadow = shadow.cast<bool>();
-                 if (framealpha >= 0.0f) ls.frameAlpha = framealpha;
-             },
-             py::arg("loc") = py::none(), py::arg("ncols") = 1,
-             py::arg("title") = "", py::arg("fontsize") = -1.0f,
-             py::arg("frameon") = py::none(),
-             py::arg("fancybox") = py::none(),
-             py::arg("shadow") = py::none(),
-             py::arg("framealpha") = -1.0f)
+                 py::dict kwd = kw ? py::dict(kw) : py::dict();
+                 // mpl positional forms: legend(labels),
+                 // legend(handles, labels).
+                 if (args.size() >= 1 && !kwd.contains("handles") &&
+                     !kwd.contains("labels")) {
+                     auto v = py::reinterpret_borrow<py::object>(args[0]);
+                     bool labelsForm = py::isinstance<py::sequence>(v) &&
+                         !py::isinstance<py::str>(v);
+                     if (labelsForm && py::len(v) > 0) {
+                         auto first = py::reinterpret_borrow<py::object>(
+                             v[py::int_(0)]);
+                         labelsForm = py::isinstance<py::str>(first);
+                     }
+                     if (labelsForm) kwd["labels"] = v;
+                     else kwd["handles"] = v;
+                 }
+                 if (args.size() >= 2 && !kwd.contains("labels"))
+                     kwd["labels"] =
+                         py::reinterpret_borrow<py::object>(args[1]);
+                 applyLegendKwargs(ls, kwd, a.ax->style().faceColor,
+                                   a.ax->style().edgeColor);
+                 return PyLegend{a.owner, a.ax};
+             })
         // ── mpl axis() / aspect / margins / inversion ──
         .def("axis",
              [](PyAxes& a, const py::object& arg) {
                  if (arg.is_none()) return;
                  if (py::isinstance<py::str>(arg)) {
                      auto s = arg.cast<std::string>();
-                     if (s == "off") {
-                         a.ax->style().xAxis.visible = false;
-                         a.ax->style().yAxis.visible = false;
-                     } else if (s == "on") {
-                         a.ax->style().xAxis.visible = true;
-                         a.ax->style().yAxis.visible = true;
-                     } else if (s == "equal" || s == "square") {
-                         a.ax->setAspect(plot::AspectMode::Equal);
-                     } else if (s == "auto") {
-                         a.ax->setAspect(plot::AspectMode::Auto);
-                     } else if (s == "scaled" || s == "image") {
-                         // equal aspect, adjustable="datalim".
-                         a.ax->setAspect(plot::AspectMode::Equal);
-                         a.ax->setAdjustable(plot::Adjustable::DataLim);
-                     } else if (s == "tight") {
-                         a.ax->margins(0.0f);
-                     } else
+                     if (!a.ax->axis(s))
                          throw std::invalid_argument(
                              "unknown axis() arg '" + s + "'");
-                     a.ax->touch();
                      return;
                  }
                  auto lims = arg.cast<std::vector<float>>();
                  if (lims.size() != 4)
                      throw std::invalid_argument(
                          "axis([xmin, xmax, ymin, ymax])");
-                 a.ax->setXlim(lims[0], lims[1]);
-                 a.ax->setYlim(lims[2], lims[3]);
+                 a.ax->axis(lims[0], lims[1], lims[2], lims[3]);
              },
              py::arg("arg") = py::none(),
              "mpl ax.axis(): 'off'/'on'/'equal'/'scaled'/'tight'/'auto' "
@@ -2766,108 +13649,1265 @@ PYBIND11_MODULE(volcanoplot, m) {
              },
              py::arg("aspect"))
         .def("margins",
-             [](PyAxes& a, float x, float y) { a.ax->margins(x, y); },
-             py::arg("x"), py::arg("y") = -1.0f)
+             [](PyAxes& a, const py::args& args,
+                const py::kwargs& kw) -> py::object {
+                 // mpl Axes.margins(*margins, x=None, y=None, tight=True).
+                 if (args.size() > 0 &&
+                     (kw.contains("x") || kw.contains("y")))
+                     throw py::type_error(
+                         "Cannot pass both positional and keyword "
+                         "arguments for x and/or y.");
+                 if (args.size() > 2)
+                     throw py::type_error(
+                         "Must pass a single positional argument for all "
+                         "margins, or one for each margin (x, y).");
+                 py::object x = py::none(), y = py::none();
+                 if (kw && kw.contains("x")) x = kw["x"];
+                 if (kw && kw.contains("y")) y = kw["y"];
+                 if (args.size() == 1) x = y = args[0];
+                 else if (args.size() == 2) { x = args[0]; y = args[1]; }
+                 if (x.is_none() && y.is_none())
+                     return py::make_tuple(a.ax->marginX(),
+                                           a.ax->marginY());
+                 if (!x.is_none()) a.ax->setXMargin(x.cast<float>());
+                 if (!y.is_none()) a.ax->setYMargin(y.cast<float>());
+                 return py::none();
+             })
         .def("invert_xaxis", [](PyAxes& a) { a.ax->invertXAxis(); })
         .def("invert_yaxis", [](PyAxes& a) { a.ax->invertYAxis(); })
-        .def("set_axis_off",
-             [](PyAxes& a) {
-                 a.ax->style().xAxis.visible = false;
-                 a.ax->style().yAxis.visible = false;
-                 a.ax->touch();
+        .def("set_axis_off", [](PyAxes& a) { a.ax->setAxisOff(); })
+        .def("set_axis_on", [](PyAxes& a) { a.ax->setAxisOn(true); })
+        .def("set_frame_on",
+             [](PyAxes& a, bool on) { a.ax->setFrameOn(on); })
+        .def("get_frame_on",
+             [](PyAxes& a) { return a.ax->frameOn(); })
+        // mpl `ax.remove()` — detach the axes from the figure; the
+        // handle stays usable (the axes lives on in `owned`).
+        .def("remove", [](PyAxes& a) {
+                 if (a.owned) return;
+                 if (auto o = a.owner->fig().removeAxes(a.ax))
+                     a.owned = std::move(o);
              })
-        .def("set_axis_on",
-             [](PyAxes& a) {
-                 a.ax->style().xAxis.visible = true;
-                 a.ax->style().yAxis.visible = true;
-                 a.ax->touch();
+        .def("label_outer",
+             [](PyAxes& a, bool removeInnerTicks) {
+                 a.ax->labelOuter(removeInnerTicks);
+             },
+             py::arg("remove_inner_ticks") = false)
+        .def("set_xbound",
+             [](PyAxes& a, const py::object& lower, const py::object& upper) {
+                 if (!lower.is_none() && !upper.is_none()) {
+                     a.ax->setXbound(lower.cast<float>(),
+                                     upper.cast<float>());
+                     return;
+                 }
+                 if (lower.is_none() && upper.is_none()) {
+                     // mpl set_xbound() form: a (lower, upper) seq is
+                     // also legal — handled by callers passing kwargs.
+                     return;
+                 }
+                 a.ax->setXbound(
+                     lower.is_none() ? std::optional<float>{}
+                                     : std::optional<float>(lower.cast<float>()),
+                     upper.is_none() ? std::optional<float>{}
+                                     : std::optional<float>(upper.cast<float>()));
+             },
+             py::arg("lower") = py::none(), py::arg("upper") = py::none())
+        .def("set_ybound",
+             [](PyAxes& a, const py::object& lower, const py::object& upper) {
+                 a.ax->setYbound(
+                     lower.is_none() ? std::optional<float>{}
+                                     : std::optional<float>(lower.cast<float>()),
+                     upper.is_none() ? std::optional<float>{}
+                                     : std::optional<float>(upper.cast<float>()));
+             },
+             py::arg("lower") = py::none(), py::arg("upper") = py::none())
+        .def("locator_params",
+             [](PyAxes& a, const std::string& axis,
+                const py::object& nbins, const py::object& steps,
+                const py::object& integer, const py::object& symmetric,
+                const py::object& prune, const py::object& minNTicks,
+                bool tight) {
+                 plot::LocatorParams p;
+                 if (!nbins.is_none()) p.nbins = nbins.cast<int>();
+                 if (!steps.is_none()) p.steps = toFloats(steps);
+                 if (!integer.is_none()) p.integer = integer.cast<bool>();
+                 if (!symmetric.is_none())
+                     p.symmetric = symmetric.cast<bool>();
+                 if (!prune.is_none())
+                     p.prune = prune.cast<std::string>();
+                 if (!minNTicks.is_none())
+                     p.minNTicks = minNTicks.cast<int>();
+                 p.tight = tight;
+                 a.ax->locatorParams(axis, p);
+             },
+             py::arg("axis") = "both", py::arg("nbins") = py::none(),
+             py::arg("steps") = py::none(), py::arg("integer") = py::none(),
+             py::arg("symmetric") = py::none(), py::arg("prune") = py::none(),
+             py::arg("min_n_ticks") = py::none(), py::arg("tight") = false)
+        // ── mpl Axes getters ──
+        .def("get_xlim",
+             [](const PyAxes& a) {
+                 auto r = a.ax->viewport().x;
+                 return py::make_tuple(r.min, r.max);
              })
+        .def("get_ylim",
+             [](const PyAxes& a) {
+                 auto r = a.ax->viewport().y;
+                 return py::make_tuple(r.min, r.max);
+             })
+        .def("get_zlim",
+             [](const PyAxes& a) {
+                 auto r = a.ax->viewport().z;
+                 return py::make_tuple(r.min, r.max);
+             })
+        .def("get_xbound",
+             [](const PyAxes& a) {
+                 auto r = a.ax->viewport().x;
+                 return py::make_tuple(std::min(r.min, r.max),
+                                       std::max(r.min, r.max));
+             })
+        .def("get_ybound",
+             [](const PyAxes& a) {
+                 auto r = a.ax->viewport().y;
+                 return py::make_tuple(std::min(r.min, r.max),
+                                       std::max(r.min, r.max));
+             })
+        .def("get_title",
+             [](const PyAxes& a) { return a.ax->style().title.text; })
+        .def("get_xlabel",
+             [](const PyAxes& a) { return a.ax->style().xAxis.label; })
+        .def("get_ylabel",
+             [](const PyAxes& a) { return a.ax->style().yAxis.label; })
+        .def("get_xticks",
+             [](const PyAxes& a) {
+                 return axisMajorTickLocs(*a.ax, true);
+             })
+        .def("get_yticks",
+             [](const PyAxes& a) {
+                 return axisMajorTickLocs(*a.ax, false);
+             })
+        // ── mpl Axes tick-label / tick-line / gridline handles ──
+        .def("get_xticklabels",
+             [](const PyAxes& a, bool minor, const py::object& which) {
+                 auto locs = axisTickLocs(*a.ax, true, minor);
+                 std::vector<PyTickLabel> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({a.owner, a.ax, true, minor,
+                                    int(i), locs[i]});
+                 return out;
+             },
+             py::arg("minor") = false, py::arg("which") = py::none())
+        .def("get_yticklabels",
+             [](const PyAxes& a, bool minor, const py::object& which) {
+                 auto locs = axisTickLocs(*a.ax, false, minor);
+                 std::vector<PyTickLabel> out;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     out.push_back({a.owner, a.ax, false, minor,
+                                    int(i), locs[i]});
+                 return out;
+             },
+             py::arg("minor") = false, py::arg("which") = py::none())
+        .def("get_xticklines",
+             [](const PyAxes& a, bool minor) {
+                 auto locs = axisTickLocs(*a.ax, true, minor);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({a.owner, a.ax, true, minor,
+                                    false, l});
+                 return out;
+             },
+             py::arg("minor") = false)
+        .def("get_yticklines",
+             [](const PyAxes& a, bool minor) {
+                 auto locs = axisTickLocs(*a.ax, false, minor);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({a.owner, a.ax, false, minor,
+                                    false, l});
+                 return out;
+             },
+             py::arg("minor") = false)
+        .def("get_xgridlines",
+             [](const PyAxes& a) {
+                 auto locs = axisTickLocs(*a.ax, true, false);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({a.owner, a.ax, true, false, true,
+                                    l});
+                 return out;
+             })
+        .def("get_ygridlines",
+             [](const PyAxes& a) {
+                 auto locs = axisTickLocs(*a.ax, false, false);
+                 std::vector<PyTickLine> out;
+                 for (float l : locs)
+                     out.push_back({a.owner, a.ax, false, false, true,
+                                    l});
+                 return out;
+             })
+        .def("get_xscale",
+             [](const PyAxes& a) {
+                 return scaleKindName(a.ax->xscale().kind);
+             })
+        .def("get_yscale",
+             [](const PyAxes& a) {
+                 return scaleKindName(a.ax->yscale().kind);
+             })
+        .def("get_aspect",
+             [](const PyAxes& a) {
+                 using AM = plot::AspectMode;
+                 return a.ax->aspect() == AM::Equal ? "equal" : "auto";
+             })
+        .def("get_position",
+             [](const PyAxes& a, const py::object&, bool) {
+                 // mpl Bbox: figure-fraction box, Y-up.
+                 ensureLayout(*a.owner);
+                 auto ext = a.owner->backend()->extent();
+                 const auto& r = a.ax->rect;
+                 float w = std::max(float(ext.width), 1.0f);
+                 float h = std::max(float(ext.height), 1.0f);
+                 double x0 = double(r.x) / w;
+                 double y0 = 1.0 - double(r.y + r.height) / h;
+                 return PyBbox{x0, y0,
+                               x0 + double(r.width) / w,
+                               y0 + double(r.height) / h};
+             },
+             py::arg("original") = py::none(),
+             py::arg("for_layout_only") = false)
+        .def("set_position",
+             [](PyAxes& a, const py::object& pos,
+                const std::string& which) {
+                 // mpl set_position(pos, which='active'): pos is a Bbox
+                 // or [x0, y0, w, h] in figure fraction.
+                 (void)which;
+                 double x0, y0, w, h;
+                 if (py::isinstance<PyBbox>(pos)) {
+                     const auto& b = pos.cast<const PyBbox&>();
+                     x0 = b.x0; y0 = b.y0;
+                     w = b.x1 - b.x0; h = b.y1 - b.y0;
+                 } else {
+                     auto v = pos.cast<std::vector<double>>();
+                     if (v.size() != 4)
+                         throw std::invalid_argument(
+                             "position must be a Bbox or [x0,y0,w,h]");
+                     x0 = v[0]; y0 = v[1]; w = v[2]; h = v[3];
+                 }
+                 a.owner->fig().setAxesFraction(
+                     a.ax, float(x0), float(y0), float(w), float(h));
+                 ensureLayout(*a.owner);
+             },
+             py::arg("pos"), py::arg("which") = "active")
+        .def("get_xmargin",
+             [](const PyAxes& a) { return a.ax->marginX(); })
+        .def("get_ymargin",
+             [](const PyAxes& a) { return a.ax->marginY(); })
+        .def("set_xmargin",
+             [](PyAxes& a, float m) { a.ax->setXMargin(m); },
+             py::arg("m"))
+        .def("set_ymargin",
+             [](PyAxes& a, float m) { a.ax->setYMargin(m); },
+             py::arg("m"))
+        // ── mpl data/view limits introspection ──
+        .def_property_readonly("dataLim",
+             [](const PyAxes& a) {
+                 auto v = a.ax->dataLim();
+                 return PyBbox{v.x.min, v.y.min, v.x.max, v.y.max};
+             })
+        .def_property_readonly("viewLim",
+             [](const PyAxes& a) {
+                 const auto& v = a.ax->viewport();
+                 return PyBbox{v.x.min, v.y.min, v.x.max, v.y.max};
+             })
+        .def("update_datalim",
+             [](PyAxes& a, const py::object& xys, bool updatex,
+                bool updatey) {
+                 std::vector<plot::Point2D> pts;
+                 for (auto item : py::reinterpret_borrow<py::sequence>(xys)) {
+                     auto p = item.cast<std::pair<double, double>>();
+                     pts.push_back({float(p.first), float(p.second)});
+                 }
+                 a.ax->updateDataLim(pts, updatex, updatey);
+             },
+             py::arg("xys"), py::arg("updatex") = true,
+             py::arg("updatey") = true)
+        .def_property("ignore_existing_data_limits",
+             [](const PyAxes& a) {
+                 return a.ax->ignoreExistingDataLimits;
+             },
+             [](PyAxes& a, bool v) {
+                 a.ax->ignoreExistingDataLimits = v;
+                 if (v) a.ax->touch();
+             })
+        .def_property_readonly("sticky_edges",
+             [](PyAxes& a) {
+                 return PyStickyEdges{
+                     a.owner,
+                     {&a.ax->stickyEdges, [](plot::StickyEdges*) {}}};
+             })
+        // ── mpl Axes bounding boxes ──
+        .def_property_readonly("bbox",
+             [](const PyAxes& a) {
+                 // mpl ax.bbox: axes rect in figure pixels (canvas Y-down).
+                 ensureLayout(*a.owner);
+                 auto ext = a.owner->backend()->extent();
+                 const auto& r = a.ax->rect;
+                 return PyBbox{double(r.x),
+                               double(ext.height) - r.y - r.height,
+                               double(r.x + r.width),
+                               double(ext.height) - r.y};
+             })
+        .def("get_window_extent",
+             [](const PyAxes& a, const py::object&) {
+                 // mpl Axes.get_window_extent — axes patch in display px.
+                 ensureLayout(*a.owner);
+                 auto ext = a.owner->backend()->extent();
+                 const auto& r = a.ax->rect;
+                 return PyBbox{double(r.x),
+                               double(ext.height) - r.y - r.height,
+                               double(r.x + r.width),
+                               double(ext.height) - r.y};
+             },
+             py::arg("renderer") = py::none())
+        .def("get_tightbbox",
+             [](const PyAxes& a, const py::object&, bool,
+                const py::object&, bool) {
+                 // mpl Axes.get_tightbbox — axes rect union the axes'
+                 // decorators (tick labels, axis labels, title).
+                 // Approximated from tick/label metrics.
+                 ensureLayout(*a.owner);
+                 auto ext = a.owner->backend()->extent();
+                 const auto& r = a.ax->rect;
+                 double dpi = a.owner->fig().style().dpi;
+                 auto pt2px = [&](double pt) { return pt * dpi / 72.0; };
+                 const auto& xs = a.ax->style().xAxis;
+                 const auto& ys = a.ax->style().yAxis;
+                 double below = 0, left = 0, above = 0, right = 0;
+                 if (a.ax->axison()) {
+                     const auto& xf = a.ax->xFurniture();
+                     const auto& yf = a.ax->yFurniture();
+                     if (xf.labelsNear)
+                         below += pt2px(xs.tickFont.size * 1.3 +
+                                        xs.ticks.majorSize +
+                                        xs.ticks.majorPad);
+                     if (xf.labelsFar)
+                         above += pt2px(xs.tickFont.size * 1.3 +
+                                        xs.ticks.majorSize +
+                                        xs.ticks.majorPad);
+                     if (yf.labelsNear)
+                         left += pt2px(ys.tickFont.size * 3.0 +
+                                       ys.ticks.majorSize +
+                                       ys.ticks.majorPad);
+                     if (yf.labelsFar)
+                         right += pt2px(ys.tickFont.size * 3.0 +
+                                        ys.ticks.majorSize +
+                                        ys.ticks.majorPad);
+                     if (!xs.label.empty())
+                         (xf.labelFar ? above : below) +=
+                             pt2px(xs.labelFont.size * 1.5 + xs.labelPad);
+                     if (!ys.label.empty())
+                         (yf.labelFar ? right : left) +=
+                             pt2px(ys.labelFont.size * 1.5 + ys.labelPad);
+                     if (!a.ax->style().title.text.empty())
+                         above += pt2px(a.ax->style().title.font.size *
+                                        1.4 + a.ax->style().title.pad);
+                 }
+                 double y0 = double(ext.height) - r.y - r.height;
+                 return PyBbox{double(r.x) - left, y0 - above,
+                               double(r.x + r.width) + right,
+                               y0 + r.height + below};
+             },
+             py::arg("renderer") = py::none(),
+             py::arg("call_axes_locator") = true,
+             py::arg("bbox_extra_artists") = py::none(),
+             py::arg("for_layout_only") = false)
+        .def("get_default_bbox_extra_artists",
+             [](const PyAxes& a) {
+                 py::list out;
+                 for (auto& t : a.ax->texts())
+                     if (!t.detached)
+                         out.append(py::cast(PyText{a.owner, a.ax, &t}));
+                 return out;
+             })
+        // ── mpl artist state on the axes ──
+        .def_property_readonly("figure",
+             [](const PyAxes& a) { return a.owner; })
+        .def_property_readonly("axes",
+             [](const PyAxes& a) { return a; })
+        .def("get_figure",
+             [](const PyAxes& a) { return a.owner; })
+        .def("set_figure",
+             [](PyAxes& a, const std::shared_ptr<PyFigure>& fig) {
+                 // mpl Artist.set_figure: move the axes to `fig`.
+                 if (a.owner.get() == fig.get()) return;
+                 auto o = a.owner->fig().removeAxes(a.ax);
+                 if (!o)
+                     throw std::runtime_error(
+                         "axes is not attached to a figure");
+                 a.ax = fig->fig().attachAxes(std::move(o));
+                 a.owner = fig;
+             },
+             py::arg("fig"))
+        .def("get_visible", [](const PyAxes& a) { return a.ax->visible(); })
+        .def("set_visible",
+             [](PyAxes& a, bool v) { a.ax->setVisible(v); },
+             py::arg("b"))
+        .def("get_zorder", [](const PyAxes& a) { return a.ax->zorder(); })
+        .def("set_zorder",
+             [](PyAxes& a, float z) { a.ax->setZorder(z); },
+             py::arg("level"))
+        .def("get_alpha",
+             [](const PyAxes& a) -> py::object {
+                 if (auto v = a.ax->alpha()) return py::float_(*v);
+                 return py::none();
+             })
+        .def("set_alpha",
+             [](PyAxes& a, const py::object& v) {
+                 a.ax->setAlpha(v.is_none()
+                                  ? std::optional<float>{}
+                                  : std::optional<float>(v.cast<float>()));
+             },
+             py::arg("alpha"))
+        .def("get_gid", [](const PyAxes& a) { return a.ax->gid(); })
+        .def("set_gid",
+             [](PyAxes& a, const std::string& g) { a.ax->setGid(g); },
+             py::arg("gid"))
+        .def("get_url", [](const PyAxes& a) { return a.ax->url(); })
+        .def("set_url",
+             [](PyAxes& a, const std::string& u) { a.ax->setUrl(u); },
+             py::arg("url"))
+        .def("get_snap",
+             [](const PyAxes& a) -> py::object {
+                 if (auto v = a.ax->snap()) return py::bool_(*v);
+                 return py::none();
+             })
+        .def("set_snap",
+             [](PyAxes& a, const py::object& v) {
+                 a.ax->setSnap(v.is_none()
+                                   ? std::optional<bool>{}
+                                   : std::optional<bool>(v.cast<bool>()));
+             },
+             py::arg("snap"))
+        .def("get_rasterized",
+             [](const PyAxes& a) { return a.ax->rasterized(); })
+        .def("set_rasterized",
+             [](PyAxes& a, bool v) { a.ax->setRasterized(v); },
+             py::arg("rasterized"))
+        .def("get_animated",
+             [](const PyAxes& a) { return a.ax->animated(); })
+        .def("set_animated",
+             [](PyAxes& a, bool v) { a.ax->setAnimated(v); },
+             py::arg("b"))
+        .def_property_readonly("mouseover",
+             [](const PyAxes& a) { return a.ax->mouseover(); })
+        .def("set_mouseover",
+             [](PyAxes& a, bool v) { a.ax->setMouseover(v); },
+             py::arg("b"))
+        .def("get_picker",
+             [](const PyAxes& a) -> py::object {
+                 if (auto v = a.ax->picker()) return py::float_(*v);
+                 return py::none();
+             })
+        .def("set_picker",
+             [](PyAxes& a, const py::object& p) {
+                 if (p.is_none()) {
+                     a.ax->setPicker(std::nullopt);
+                 } else if (py::isinstance<py::bool_>(p)) {
+                     a.ax->setPicker(p.cast<bool>()
+                                         ? std::optional<float>(0.0f)
+                                         : std::optional<float>{});
+                 } else {
+                     a.ax->setPicker(float(p.cast<double>()));
+                 }
+             },
+             py::arg("p"))
+        .def("pickable", [](const PyAxes& a) { return a.ax->pickable(); })
+        .def("get_pickradius",
+             [](const PyAxes& a) { return a.ax->pickradius(); })
+        .def("set_pickradius",
+             [](PyAxes& a, float r) { a.ax->setPickradius(r); },
+             py::arg("pickradius"))
+        // ── mpl navigation / layout bookkeeping ──
+        .def_property_readonly("axison",
+             [](const PyAxes& a) { return a.ax->axison(); })
+        .def("set_axisbelow",
+             [](PyAxes& a, const py::object& v) {
+                 // mpl accepts True/False/'line' ('line' == True).
+                 bool on = py::isinstance<py::str>(v)
+                               ? v.cast<std::string>() == "line"
+                               : v.cast<bool>();
+                 a.ax->style().axisBelow = on;
+                 a.ax->touch();
+             },
+             py::arg("b"))
+        .def("get_axisbelow",
+             [](const PyAxes& a) { return a.ax->style().axisBelow; })
+        .def("set_navigate",
+             [](PyAxes& a, bool v) { a.ax->setNavigate(v); },
+             py::arg("b"))
+        .def("get_navigate",
+             [](const PyAxes& a) { return a.ax->navigate(); })
+        .def("set_navigate_mode",
+             [](PyAxes& a, const py::object& m) {
+                 a.ax->setNavigateMode(
+                     m.is_none() ? "" : m.cast<std::string>());
+             },
+             py::arg("mode"))
+        .def("get_navigate_mode",
+             [](const PyAxes& a) -> py::object {
+                 const auto& m = a.ax->navigateMode();
+                 if (m.empty()) return py::object(py::none());
+                 return py::cast(m);
+             })
+        .def("set_in_layout",
+             [](PyAxes& a, bool v) { a.ax->setInLayout(v); },
+             py::arg("in_layout"))
+        .def("get_in_layout",
+             [](const PyAxes& a) { return a.ax->inLayout(); })
+        .def("can_zoom", [](const PyAxes&) { return true; })
+        .def("can_pan", [](const PyAxes&) { return true; })
+        // ── mpl hit-testing ──
+        .def("contains_point",
+             [](const PyAxes& a, const py::object& pt) {
+                 ensureLayout(*a.owner);
+                 auto p = pt.cast<std::pair<double, double>>();
+                 return a.ax->containsPoint(
+                     {float(p.first), float(p.second)});
+             },
+             py::arg("point"))
+        .def("contains",
+             [](const PyAxes& a, const py::object& mouseevent) {
+                 // mpl MouseEvent has .x/.y in display px.
+                 ensureLayout(*a.owner);
+                 float x = float(mouseevent.attr("x").cast<double>());
+                 float y = float(mouseevent.attr("y").cast<double>());
+                 return py::make_tuple(a.ax->contains({x, y}),
+                                       py::dict());
+             },
+             py::arg("mouseevent"))
+        .def("in_axes",
+             [](const PyAxes& a, const py::object& mouseevent) {
+                 ensureLayout(*a.owner);
+                 float x = float(mouseevent.attr("x").cast<double>());
+                 float y = float(mouseevent.attr("y").cast<double>());
+                 return a.ax->containsPoint({x, y});
+             },
+             py::arg("mouseevent"))
+        .def("hitlist",
+             [](const PyAxes& a, const py::object& mouseevent) {
+                 // mpl Axes.hitlist — artists under the pointer.
+                 ensureLayout(*a.owner);
+                 float x = float(mouseevent.attr("x").cast<double>());
+                 float y = float(mouseevent.attr("y").cast<double>());
+                 auto frac = a.ax->canvasToFraction({x, y});
+                 auto data = a.ax->fractionToData(frac);
+                 py::list out;
+                 for (auto* p : a.ax->pick(data))
+                     out.append(wrapArtist(a.owner, a.ax,
+                                           const_cast<plot::IPlot*>(p)));
+                 return out;
+             },
+             py::arg("mouseevent"))
+        // ── mpl aspect/box geometry ──
+        .def("get_adjustable",
+             [](const PyAxes& a) {
+                 return a.ax->adjustable() == plot::Adjustable::Box
+                            ? "box" : "datalim";
+             })
+        .def("set_adjustable",
+             [](PyAxes& a, const std::string& adj) {
+                 if (adj != "box" && adj != "datalim")
+                     throw std::invalid_argument(
+                         "adjustable must be 'box' or 'datalim'");
+                 a.ax->setAdjustable(adj == "box" ? plot::Adjustable::Box
+                                                  : plot::Adjustable::DataLim);
+             },
+             py::arg("adjustable"))
+        .def("get_anchor", [](const PyAxes& a) {
+            if (!a.ax->anchorName().empty()) return a.ax->anchorName();
+            return std::string("C");
+        })
+        .def("set_anchor",
+             [](PyAxes& a, const py::object& anchor) {
+                 static const std::unordered_map<
+                     std::string, std::pair<float, float>> m = {
+                     {"C", {0.5f, 0.5f}}, {"SW", {0, 0}},
+                     {"S", {0.5f, 0}}, {"SE", {1, 0}}, {"E", {1, 0.5f}},
+                     {"NE", {1, 1}}, {"N", {0.5f, 1}}, {"NW", {0, 1}},
+                     {"W", {0, 0.5f}}};
+                 if (py::isinstance<py::str>(anchor)) {
+                     auto s = anchor.cast<std::string>();
+                     auto it = m.find(s);
+                     if (it == m.end())
+                         throw std::invalid_argument("Bad anchor " + s);
+                     a.ax->setAnchor(it->second.first, it->second.second,
+                                     s);
+                 } else {
+                     auto p = anchor.cast<std::pair<float, float>>();
+                     a.ax->setAnchor(p.first, p.second, "");
+                 }
+             },
+             py::arg("anchor"))
+        .def("get_box_aspect",
+             [](const PyAxes& a) -> py::object {
+                 if (auto v = a.ax->boxAspect()) return py::float_(*v);
+                 return py::none();
+             })
+        .def("set_box_aspect",
+             [](PyAxes& a, const py::object& aspect) {
+                 a.ax->setBoxAspect(
+                     aspect.is_none()
+                         ? std::optional<float>{}
+                         : std::optional<float>(aspect.cast<float>()));
+             },
+             py::arg("aspect") = py::none())
+        .def("apply_aspect",
+             [](PyAxes& a, const py::object&) {
+                 a.ax->applyAspect();
+             },
+             py::arg("position") = py::none())
+        .def("get_data_ratio",
+             [](const PyAxes& a) { return a.ax->dataRatio(); })
+        .def("get_data_ratio_log",
+             [](const PyAxes& a) { return a.ax->dataRatioLog(); })
+        // ── mpl shared-axis introspection ──
+        .def("get_shared_x_axes",
+             [](const PyAxes& a) {
+                 return PyGrouperView{a.owner, a.ax, true};
+             })
+        .def("get_shared_y_axes",
+             [](const PyAxes& a) {
+                 return PyGrouperView{a.owner, a.ax, false};
+             })
+        // ── mpl axes locator bookkeeping ──
+        .def("get_axes_locator",
+             [](const PyAxes& a) -> py::object {
+                 auto it = a.owner->axesLocators_.find(a.ax);
+                 if (it == a.owner->axesLocators_.end())
+                     return py::none();
+                 return it->second;
+             })
+        .def("set_axes_locator",
+             [](PyAxes& a, const py::object& locator) {
+                 if (locator.is_none())
+                     a.owner->axesLocators_.erase(a.ax);
+                 else
+                     a.owner->axesLocators_[a.ax] = locator;
+             },
+             py::arg("locator"))
+        // ── mpl transforms convenience ──
+        .def("get_xaxis_transform",
+             [](const PyAxes& a, const py::object& which) {
+                 (void)which;
+                 return plot::blendedTransformFactory(
+                     a.ax->transData(), a.ax->transAxes());
+             },
+             py::arg("which") = "grid")
+        .def("get_yaxis_transform",
+             [](const PyAxes& a, const py::object& which) {
+                 (void)which;
+                 return plot::blendedTransformFactory(
+                     a.ax->transAxes(), a.ax->transData());
+             },
+             py::arg("which") = "grid")
+        .def("get_transform",
+             [](const PyAxes& a) { return a.ax->transData(); })
+        .def("is_transform_set", [](const PyAxes&) { return true; })
+        // ── mpl pan/zoom navigation ──
+        .def("start_pan",
+             [](PyAxes& a, float x, float y, int button) {
+                 ensureLayout(*a.owner);
+                 a.ax->startPan(x, y);
+             },
+             py::arg("x"), py::arg("y"), py::arg("button"))
+        .def("drag_pan",
+             [](PyAxes& a, int button, const py::object& key,
+                float x, float y) {
+                 a.ax->dragPan(button,
+                               key.is_none() ? "" : key.cast<std::string>(),
+                               x, y);
+             },
+             py::arg("button"), py::arg("key"), py::arg("x"), py::arg("y"))
+        .def("end_pan", [](PyAxes& a) { a.ax->endPan(); })
+        // ── mpl legend/subplotspec/data-limit introspection ──
+        .def("get_legend",
+             [](PyAxes& a) -> py::object {
+                 if (!a.ax->style().legend.visible)
+                     return py::none();
+                 return py::cast(PyLegend{a.owner, a.ax});
+             })
+        .def("get_subplotspec",
+             [](PyAxes& a) -> py::object {
+                 auto s = a.ax->subplotSpec();
+                 if (!s) return py::none();
+                 return py::cast(PySubplotSpec{
+                     a.owner, *s,
+                     s->grid
+                         ? std::make_shared<PyGridSpec>(
+                               PyGridSpec{a.owner,
+                                          gridRef(a.owner, s->grid),
+                                          nullptr})
+                         : nullptr});
+             })
+        .def("set_subplotspec",
+             [](PyAxes& a, const PySubplotSpec& s) {
+                 a.owner->fig().setAxesSubplotSpec(a.ax, s.spec);
+                 ensureLayout(*a.owner);
+             },
+             py::arg("subplotspec"))
+        .def("get_gridspec",
+             [](PyAxes& a) -> py::object {
+                 auto s = a.ax->subplotSpec();
+                 if (!s || !s->grid) return py::none();
+                 return py::cast(PyGridSpec{a.owner,
+                                            gridRef(a.owner, s->grid),
+                                            nullptr});
+             })
+        .def("get_ignore_existing_data_limits",
+             [](const PyAxes& a) {
+                 return a.ax->ignoreExistingDataLimits;
+             })
+        .def("set_ignore_existing_data_limits",
+             [](PyAxes& a, bool b) {
+                 a.ax->ignoreExistingDataLimits = b;
+             },
+             py::arg("b"))
+        // ── mpl artist containers ──
+        .def("add_line",
+             [](PyAxes& a, PyLine2D& l) -> PyLine2D {
+                 // mpl add_line: attach a (detached) Line2D to the axes.
+                 if (l.owned) {
+                     l.line = static_cast<plot::LinePlot*>(
+                         a.ax->addPlot(l.owned));
+                     l.owned.reset();
+                 } else if (l.line->owner() &&
+                            l.line->owner() != a.ax) {
+                     // mpl keeps it on the old axes too; we move it.
+                     if (auto o = l.line->owner()->removePlot(l.line)) {
+                         l.line = static_cast<plot::LinePlot*>(
+                             a.ax->addPlot(std::move(o)));
+                     }
+                 }
+                 return l;
+             },
+             py::arg("line"))
+        .def("add_collection",
+             [](PyAxes& a, const py::object& coll) -> py::object {
+                 plot::IPlot* raw = nullptr;
+                 std::shared_ptr<plot::IPlot>* owned = nullptr;
+                 if (py::isinstance<PyCollection>(coll)) {
+                     auto& c = coll.cast<PyCollection&>();
+                     raw = c.scatter; owned = &c.owned;
+                 } else if (py::isinstance<PyColl>(coll)) {
+                     auto& c = coll.cast<PyColl&>();
+                     raw = c.live; owned = &c.ownedPlot;
+                 } else if (py::isinstance<PyImage>(coll)) {
+                     auto& i = coll.cast<PyImage&>();
+                     raw = i.img; owned = &i.owned;
+                 } else {
+                     throw py::type_error(
+                         "add_collection expects a Collection artist");
+                 }
+                 if (owned && *owned) {
+                     raw = a.ax->addPlot(*owned);
+                     owned->reset();
+                 } else if (raw && raw->owner() &&
+                            raw->owner() != a.ax) {
+                     if (auto o = raw->owner()->removePlot(raw))
+                         raw = a.ax->addPlot(std::move(o));
+                 }
+                 return coll;
+             },
+             py::arg("collection"))
+        .def("add_image",
+             [](PyAxes& a, PyImage& i) -> PyImage {
+                 if (i.owned) {
+                     i.img = a.ax->addPlot(i.owned);
+                     i.owned.reset();
+                 } else if (i.img->owner() && i.img->owner() != a.ax) {
+                     if (auto o = i.img->owner()->removePlot(i.img))
+                         i.img = a.ax->addPlot(std::move(o));
+                 }
+                 return i;
+             },
+             py::arg("image"))
+        .def("add_container",
+             [](PyAxes& a, PyBarContainer& b) -> PyBarContainer {
+                 if (b.owned) {
+                     b.plot = a.ax->addPlot(b.owned);
+                     b.owned.reset();
+                 } else if (b.plot->owner() && b.plot->owner() != a.ax) {
+                     if (auto o = b.plot->owner()->removePlot(b.plot))
+                         b.plot = a.ax->addPlot(std::move(o));
+                 }
+                 a.owner->containers_[a.ax].append(py::cast(b));
+                 return b;
+             },
+             py::arg("container"))
+        .def("add_table",
+             [](PyAxes& a, PyTable& t) -> PyTable {
+                 if (t.owned) {
+                     t.plot = a.ax->addPlot(t.owned);
+                     t.owned.reset();
+                 } else if (t.plot->owner() && t.plot->owner() != a.ax) {
+                     if (auto o = t.plot->owner()->removePlot(t.plot))
+                         t.plot = a.ax->addPlot(std::move(o));
+                 }
+                 a.owner->tables_[a.ax].append(py::cast(t));
+                 return t;
+             },
+             py::arg("table"))
+        .def("add_artist",
+             [](PyAxes& a, const py::object& artist) -> py::object {
+                 // mpl Axes.add_artist — Line2D/Collection/Image/Patch/
+                 // Text all land on the artist list.
+                 if (py::isinstance<PyLine2D>(artist)) {
+                     auto& l = artist.cast<PyLine2D&>();
+                     if (l.owned) {
+                         l.line = static_cast<plot::LinePlot*>(
+                             a.ax->addPlot(l.owned));
+                         l.owned.reset();
+                     }
+                     return artist;
+                 }
+                 if (py::isinstance<PyText>(artist)) {
+                     auto& t = artist.cast<PyText&>();
+                     if (t.ax == a.ax) {
+                         t.t->detached = false;
+                         t.t->visible = true;
+                     } else {
+                         auto copy = *t.t;
+                         copy.detached = false;
+                         copy.visible = true;
+                         a.ax->texts().push_back(std::move(copy));
+                         t.ax = a.ax;
+                         t.t = &a.ax->texts().back();
+                         a.ax->touch();
+                     }
+                     return artist;
+                 }
+                 // mpl offsetbox anchored artists land on dedicated
+                 // slots (anchoredTexts / sizeBars).
+                 if (py::isinstance<PyAnchoredText>(artist)) {
+                     auto& t = artist.cast<PyAnchoredText&>();
+                     if (auto* at = t.at()) {
+                         at->detached = false;
+                     } else {
+                         plot::AnchoredText nat;
+                         nat.text = flattenOffsetbox(t.txt);
+                         nat.loc = t.loc;
+                         nat.pad = t.pad;
+                         nat.borderpad = t.borderpad;
+                         nat.frameon = t.frameon;
+                         if (auto f = offsetboxFont(t.txt)) {
+                             nat.font = *f;
+                             nat.fontSize = f->size;
+                         }
+                         a.ax->anchoredTexts().push_back(std::move(nat));
+                         t.ax = a.ax;
+                         t.index = a.ax->anchoredTexts().size() - 1;
+                         t.owner = a.owner;
+                         a.ax->touch();
+                     }
+                     return artist;
+                 }
+                 if (py::isinstance<PyAnchoredSizeBar>(artist)) {
+                     auto& h = artist.cast<PyAnchoredSizeBar&>();
+                     if (auto* sb = h.sb()) {
+                         sb->detached = false;
+                     } else {
+                         a.ax->sizeBars().push_back(h.pending);
+                         h.ax = a.ax;
+                         h.index = a.ax->sizeBars().size() - 1;
+                         h.owner = a.owner;
+                         a.ax->touch();
+                     }
+                     return artist;
+                 }
+                 if (py::isinstance<PyAnchoredOffsetbox>(artist)) {
+                     auto& b = artist.cast<PyAnchoredOffsetbox&>();
+                     if (auto* at = anchoredTextSlot(b)) {
+                         at->detached = false;
+                     } else {
+                         plot::AnchoredText nat;
+                         nat.text = flattenOffsetbox(b.child);
+                         nat.loc = b.loc;
+                         nat.pad = b.pad;
+                         nat.borderpad = b.borderpad;
+                         nat.frameon = b.frameon;
+                         if (auto f = offsetboxFont(b.child)) {
+                             nat.font = *f;
+                             nat.fontSize = f->size;
+                         }
+                         a.ax->anchoredTexts().push_back(std::move(nat));
+                         b.ax = a.ax;
+                         b.atIndex =
+                             a.ax->anchoredTexts().size() - 1;
+                         b.owner = a.owner;
+                         a.ax->touch();
+                     }
+                     return artist;
+                 }
+                 // Generic IPlot-backed artists.
+                 if (auto* p = mappableFrom(artist)) {
+                     if (p->owner() && p->owner() != a.ax) {
+                         if (auto o = p->owner()->removePlot(p))
+                             p = a.ax->addPlot(std::move(o));
+                     } else if (!p->owner()) {
+                         // detached: ownership lives on the handle
+                         if (py::isinstance<PyCollection>(artist))
+                             a.ax->addPlot(
+                                 artist.cast<PyCollection&>().owned);
+                         else if (py::isinstance<PyImage>(artist))
+                             a.ax->addPlot(artist.cast<PyImage&>().owned);
+                         else if (py::isinstance<PyArtist>(artist))
+                             a.ax->addPlot(artist.cast<PyArtist&>().owned);
+                         else if (py::isinstance<PyColl>(artist))
+                             a.ax->addPlot(
+                                 artist.cast<PyColl&>().ownedPlot);
+                     }
+                     return artist;
+                 }
+                 throw py::type_error(
+                     "add_artist expects an Artist (Line2D, Collection, "
+                     "Text, Image, ...)");
+             },
+             py::arg("artist"))
+        .def_property_readonly("containers",
+             [](PyAxes& a) {
+                 auto it = a.owner->containers_.find(a.ax);
+                 return it == a.owner->containers_.end()
+                            ? py::list() : it->second;
+             })
+        .def_property_readonly("tables",
+             [](PyAxes& a) {
+                 auto it = a.owner->tables_.find(a.ax);
+                 return it == a.owner->tables_.end()
+                            ? py::list() : it->second;
+             })
+        // ── mpl dict-style artist update ──
+        .def("properties",
+             [](const PyAxes& a) {
+                 py::dict d;
+                 d["alpha"] = a.ax->alpha() ? py::object(py::float_(*a.ax->alpha()))
+                                            : py::object(py::none());
+                 d["label"] = a.ax->label();
+                 d["visible"] = a.ax->visible();
+                 d["zorder"] = a.ax->zorder();
+                 d["animated"] = a.ax->animated();
+                 d["rasterized"] = a.ax->rasterized();
+                 d["url"] = a.ax->url();
+                 d["gid"] = a.ax->gid();
+                 return d;
+             })
+        .def("update",
+             [](PyAxes& a, const py::dict& props) {
+                 for (auto [k, v] : props) {
+                     auto key = k.cast<std::string>();
+                     if (key == "alpha")
+                         a.ax->setAlpha(v.is_none()
+                             ? std::optional<float>{}
+                             : std::optional<float>(v.cast<float>()));
+                     else if (key == "label")
+                         a.ax->setLabel(v.cast<std::string>());
+                     else if (key == "visible")
+                         a.ax->setVisible(v.cast<bool>());
+                     else if (key == "zorder")
+                         a.ax->setZorder(v.cast<float>());
+                     else if (key == "animated")
+                         a.ax->setAnimated(v.cast<bool>());
+                     else if (key == "rasterized")
+                         a.ax->setRasterized(v.cast<bool>());
+                     else if (key == "url")
+                         a.ax->setUrl(v.cast<std::string>());
+                     else if (key == "gid")
+                         a.ax->setGid(v.cast<std::string>());
+                     else
+                         throw py::attribute_error(
+                             "Axes has no property '" + key + "'");
+                 }
+             },
+             py::arg("props"))
+        .def("update_from",
+             [](PyAxes& a, const PyAxes& o) {
+                 a.ax->setAlpha(o.ax->alpha());
+                 a.ax->setLabel(o.ax->label());
+                 a.ax->setVisible(o.ax->visible());
+                 a.ax->setZorder(o.ax->zorder());
+                 a.ax->setAnimated(o.ax->animated());
+                 a.ax->setRasterized(o.ax->rasterized());
+                 a.ax->setUrl(o.ax->url());
+                 a.ax->setGid(o.ax->gid());
+             },
+             py::arg("other"))
+        .def("xaxis_inverted",
+             [](const PyAxes& a) {
+                 return a.ax->viewport().x.min > a.ax->viewport().x.max;
+             })
+        .def("yaxis_inverted",
+             [](const PyAxes& a) {
+                 return a.ax->viewport().y.min > a.ax->viewport().y.max;
+             })
+        .def("has_data",
+             [](const PyAxes& a) { return !a.ax->plots().empty(); })
+        // ── mpl autoscale API ──
+        .def("relim",
+             [](PyAxes& a, bool visibleOnly) {
+                 a.ax->relim(visibleOnly); a.ax->touch();
+             },
+             py::arg("visible_only") = false)
+        .def("autoscale_view",
+             [](PyAxes& a, const py::object& tight, bool scalex,
+                bool scaley) {
+                 a.ax->autoscaleView(
+                     tight.is_none() ? std::optional<bool>{}
+                                     : std::optional<bool>(tight.cast<bool>()),
+                     scalex, scaley);
+             },
+             py::arg("tight") = py::none(), py::arg("scalex") = true,
+             py::arg("scaley") = true)
+        .def("autoscale",
+             [](PyAxes& a, const py::object& enable,
+                const std::string& axis, const py::object& tight) {
+                 a.ax->autoscale(
+                     enable.is_none() ? std::optional<bool>{}
+                                      : std::optional<bool>(enable.cast<bool>()),
+                     axis,
+                     tight.is_none() ? std::optional<bool>{}
+                                     : std::optional<bool>(tight.cast<bool>()));
+             },
+             py::arg("enable") = true, py::arg("axis") = "both",
+             py::arg("tight") = py::none())
+        .def("set_autoscalex_on",
+             [](PyAxes& a, bool v) { a.ax->setAutoscalexOn(v); })
+        .def("set_autoscaley_on",
+             [](PyAxes& a, bool v) { a.ax->setAutoscaleyOn(v); })
+        .def("get_autoscalex_on",
+             [](const PyAxes& a) { return a.ax->getAutoscalexOn(); })
+        .def("get_autoscaley_on",
+             [](const PyAxes& a) { return a.ax->getAutoscaleyOn(); })
+        .def_property("use_sticky_edges",
+             [](const PyAxes& a) { return a.ax->useStickyEdges; },
+             [](PyAxes& a, bool v) { a.ax->useStickyEdges = v; })
+        // mpl ax.set_sketch_params(scale, length, randomness)
+        .def("set_sketch_params",
+             [](PyAxes& a, const py::object& scale,
+                const py::object& length, const py::object& randomness) {
+                 a.ax->setSketchParams(
+                     scale.is_none() ? std::optional<float>{}
+                                     : std::optional<float>(scale.cast<float>()),
+                     length.is_none() ? std::optional<float>{}
+                                      : std::optional<float>(length.cast<float>()),
+                     randomness.is_none()
+                         ? std::optional<float>{}
+                         : std::optional<float>(randomness.cast<float>()));
+             },
+             py::arg("scale") = py::none(), py::arg("length") = py::none(),
+             py::arg("randomness") = py::none())
+        // ── mpl Axes.set(**kwargs) / get(prop) ──
+        .def("set", [axesSetProp](PyAxes& a, const py::kwargs& kw) {
+                 for (auto [k, v] : kw)
+                     axesSetProp(a, k.cast<std::string>(),
+                                 py::reinterpret_borrow<py::object>(v));
+             })
+        .def("get",
+             [](PyAxes& a, const std::string& prop) {
+                 py::object self = py::cast(a);
+                 std::string getter = "get_" + prop;
+                 if (py::hasattr(self, getter.c_str()))
+                     return self.attr(getter.c_str())();
+                 throw py::attribute_error(
+                     "Axes has no property '" + prop + "'");
+             },
+             py::arg("prop"))
+        // ── mpl child introspection ──
+        .def("get_lines",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots())
+                     if (dynamic_cast<plot::LinePlot*>(p.get()))
+                         out.append(wrapArtist(a.owner, a.ax, p.get()));
+                 return out;
+             })
+        .def_property_readonly("lines",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots())
+                     if (dynamic_cast<plot::LinePlot*>(p.get()))
+                         out.append(wrapArtist(a.owner, a.ax, p.get()));
+                 return out;
+             })
+        .def_property_readonly("collections",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots()) {
+                     // PatchCollections surface via ax.patches instead.
+                     if (dynamic_cast<plot::PatchCollection*>(p.get()))
+                         continue;
+                     if (dynamic_cast<plot::ScatterPlot*>(p.get()) ||
+                         dynamic_cast<plot::Collection*>(p.get()) ||
+                         dynamic_cast<plot::PcolormeshPlot*>(p.get()))
+                         out.append(wrapArtist(a.owner, a.ax, p.get()));
+                 }
+                 return out;
+             })
+        .def_property_readonly("patches",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots())
+                     if (auto* pc =
+                             dynamic_cast<plot::PatchCollection*>(
+                                 p.get()))
+                         for (auto& patch : pc->patches)
+                             out.append(py::cast(
+                                 PyPatch{a.owner, a.ax, pc, nullptr,
+                                         plot::Patch{}, &patch}));
+                 return out;
+             })
+        .def_property_readonly("texts",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& t : a.ax->texts())
+                     if (!t.detached)
+                         out.append(
+                             py::cast(PyText{a.owner, a.ax, &t}));
+                 return out;
+             })
+        .def_property_readonly("images",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots())
+                     if (dynamic_cast<plot::HeatmapPlot*>(p.get()) ||
+                         dynamic_cast<plot::MatshowPlot*>(p.get()))
+                         out.append(
+                             py::cast(PyImage{a.owner, a.ax, p.get()}));
+                 return out;
+             })
+        .def_property_readonly("artists",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& p : a.ax->plots()) {
+                     auto* q = p.get();
+                     if (dynamic_cast<plot::LinePlot*>(q) ||
+                         dynamic_cast<plot::ScatterPlot*>(q) ||
+                         dynamic_cast<plot::HeatmapPlot*>(q) ||
+                         dynamic_cast<plot::MatshowPlot*>(q) ||
+                         dynamic_cast<plot::Collection*>(q))
+                         continue;   // covered by lines/collections/patches
+                     out.append(wrapArtist(a.owner, a.ax, q));
+                 }
+                 return out;
+             })
+        .def("get_children",
+             [](PyAxes& a) {
+                 py::list out;
+                 for (auto& t : a.ax->texts())
+                     if (!t.detached)
+                         out.append(
+                             py::cast(PyText{a.owner, a.ax, &t}));
+                 for (auto& p : a.ax->plots())
+                     out.append(wrapArtist(a.owner, a.ax, p.get()));
+                 return out;
+             })
+        .def("get_legend_handles_labels",
+             [](PyAxes& a) {
+                 py::list handles, labels;
+                 for (auto& p : a.ax->plots())
+                     for (auto& e : p->legendEntries()) {
+                         if (e.label.empty() || e.label.front() == '_')
+                             continue;  // mpl _nolegend_ convention
+                         handles.append(
+                             wrapArtist(a.owner, a.ax, p.get()));
+                         labels.append(e.label);
+                     }
+                 return py::make_tuple(handles, labels);
+             })
+        .def("findobj",
+             [](PyAxes& a, const py::object& match,
+              bool includeSelf) {
+                 py::list out;
+                 auto accept = [&](const py::object& o) {
+                     if (match.is_none()) return true;
+                     if (py::isinstance<py::type>(match))
+                         return py::isinstance(o, match);
+                     if (py::hasattr(match, "__call__"))
+                         return PyObject_IsTrue(match(o).ptr()) == 1;
+                     return false;
+                 };
+                 for (auto& t : a.ax->texts()) {
+                     if (t.detached) continue;
+                     py::object o = py::cast(PyText{a.owner, a.ax, &t});
+                     if (accept(o)) out.append(o);
+                 }
+                 for (auto& p : a.ax->plots()) {
+                     py::object o = wrapArtist(a.owner, a.ax, p.get());
+                     if (accept(o)) out.append(o);
+                 }
+                 return out;
+             },
+             py::arg("match") = py::none(),
+             py::arg("include_self") = false)
         // ── Ticks: locators, formatters, params ──
+        // mpl Axes.set_xticks(ticks, labels=None, *, minor=False,
+        // **kwargs) → xaxis.set_ticks.
         .def("set_xticks",
              [](PyAxes& a, const py::object& ticks,
-                const py::object& labels) {
-                 a.ax->setXLocator(std::make_shared<plot::FixedLocator>(
-                     toFloats(ticks)));
-                 if (!labels.is_none())
-                     a.ax->setXFormatter(
-                         std::make_shared<plot::FixedFormatter>(
-                             labels.cast<std::vector<std::string>>()));
+                const py::object& labels, bool minor,
+                const py::kwargs& kw) {
+                 axisSetTicks(*a.ax, true, ticks, labels, minor, kw);
              },
-             py::arg("ticks"), py::arg("labels") = py::none())
+             py::arg("ticks"), py::arg("labels") = py::none(),
+             py::arg("minor") = false)
         .def("set_yticks",
              [](PyAxes& a, const py::object& ticks,
-                const py::object& labels) {
-                 a.ax->setYLocator(std::make_shared<plot::FixedLocator>(
-                     toFloats(ticks)));
-                 if (!labels.is_none())
-                     a.ax->setYFormatter(
-                         std::make_shared<plot::FixedFormatter>(
-                             labels.cast<std::vector<std::string>>()));
+                const py::object& labels, bool minor,
+                const py::kwargs& kw) {
+                 axisSetTicks(*a.ax, false, ticks, labels, minor, kw);
              },
-             py::arg("ticks"), py::arg("labels") = py::none())
+             py::arg("ticks"), py::arg("labels") = py::none(),
+             py::arg("minor") = false)
+        // mpl Axes.set_xticklabels(labels, *, minor=False, fontdict=None,
+        // **kwargs).
         .def("set_xticklabels",
-             [](PyAxes& a, const std::vector<std::string>& labels) {
-                 a.ax->setXFormatter(
-                     std::make_shared<plot::FixedFormatter>(labels));
+             [](PyAxes& a, const std::vector<std::string>& labels,
+                bool minor) {
+                 if (minor) {
+                     auto& tc = a.ax->style().xAxis.ticks;
+                     tc.minorFormatter =
+                         std::make_shared<plot::FixedFormatter>(labels);
+                 } else
+                     a.ax->setXFormatter(
+                         std::make_shared<plot::FixedFormatter>(labels));
              },
-             py::arg("labels"))
+             py::arg("labels"), py::arg("minor") = false)
         .def("set_yticklabels",
-             [](PyAxes& a, const std::vector<std::string>& labels) {
-                 a.ax->setYFormatter(
-                     std::make_shared<plot::FixedFormatter>(labels));
+             [](PyAxes& a, const std::vector<std::string>& labels,
+                bool minor) {
+                 if (minor) {
+                     auto& tc = a.ax->style().yAxis.ticks;
+                     tc.minorFormatter =
+                         std::make_shared<plot::FixedFormatter>(labels);
+                 } else
+                     a.ax->setYFormatter(
+                         std::make_shared<plot::FixedFormatter>(labels));
              },
-             py::arg("labels"))
+             py::arg("labels"), py::arg("minor") = false)
+        // mpl Axes.tick_params(axis='both', which='major', reset=False,
+        // **kwargs) — full kwarg set via applyTickParams.
         .def("tick_params",
              [](PyAxes& a, const std::string& axis,
+                const std::string& which, bool reset,
                 const py::kwargs& kw) {
-                 std::string direction;
-                 float majorSize = -1, minorSize = -1,
-                       majorWidth = -1, minorWidth = -1;
-                 auto& xs = a.ax->style().xAxis;
-                 auto& ys = a.ax->style().yAxis;
-                 bool doX = axis == "x" || axis == "both";
-                 bool doY = axis == "y" || axis == "both";
-                 for (auto& [k, v] : kw) {
-                     auto key = k.cast<std::string>();
-                     if (key == "direction")
-                         direction = v.cast<std::string>();
-                     else if (key == "length")
-                         majorSize = v.cast<float>();
-                     else if (key == "minor_length")
-                         minorSize = v.cast<float>();
-                     else if (key == "width")
-                         majorWidth = v.cast<float>();
-                     else if (key == "minor_width")
-                         minorWidth = v.cast<float>();
-                     else if (key == "labelrotation") {
-                         float r = v.cast<float>() * float(M_PI) / 180.0f;
-                         if (doX) xs.tickFont.rotation = r;
-                         if (doY) ys.tickFont.rotation = r;
-                     } else if (key == "labelsize") {
-                         float s = v.cast<float>();
-                         if (doX) xs.tickFont.size = s;
-                         if (doY) ys.tickFont.size = s;
-                     } else if (key == "labelcolor" || key == "color") {
-                         auto c = parseColor(v.cast<py::object>());
-                         if (doX) xs.labelColor = c;
-                         if (doY) ys.labelColor = c;
-                     } else if (key == "labeltop")
-                         a.ax->setXTicksTop(v.cast<bool>());
-                     else if (key == "labelbottom")
-                         a.ax->setXTicksTop(!v.cast<bool>());
-                     else if (key == "labelright")
-                         a.ax->setYTicksRight(v.cast<bool>());
-                     else if (key == "labelleft")
-                         a.ax->setYTicksRight(!v.cast<bool>());
-                     else if (key == "top")
-                         a.ax->setXTickMarksTop(v.cast<bool>());
-                     else if (key == "right")
-                         a.ax->setYTickMarksRight(v.cast<bool>());
-                 }
-                 a.ax->tickParams(axis, direction, majorSize, minorSize,
-                                  majorWidth, minorWidth);
+                 if (axis != "x" && axis != "y" && axis != "both")
+                     throw std::invalid_argument(std::format(
+                         "axis must be 'x', 'y', or 'both'; got '{}'",
+                         axis));
+                 if (axis == "x" || axis == "both")
+                     applyTickParams(*a.ax, true, which, reset, kw);
+                 if (axis == "y" || axis == "both")
+                     applyTickParams(*a.ax, false, which, reset, kw);
              },
-             py::arg("axis") = "both")
+             py::arg("axis") = "both", py::arg("which") = "major",
+             py::arg("reset") = false)
         .def("ticklabel_format",
              [](PyAxes& a, const std::string& axis,
                 const std::string& style,
@@ -2904,9 +14944,12 @@ PYBIND11_MODULE(volcanoplot, m) {
                                          i < yv.size() ? yv[i] : 0.0f});
                  if (auto c = parseColor(color); c.a > 0) s.color = c;
                  applyFmt(s, fmt);
-                 a.ax->addPlot(std::make_unique<plot::LinePlot>(
-                     std::move(s)));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::LinePlot>(std::move(s)));
                  a.ax->touch();
+                 py::list out;
+                 out.append(wrapArtist(a.owner, a.ax, p));
+                 return out;
              },
              py::arg("x"), py::arg("y"), py::arg("fmt") = "o",
              py::arg("xdate") = true, py::arg("ydate") = false,
@@ -2914,12 +14957,26 @@ PYBIND11_MODULE(volcanoplot, m) {
         // ── text / annotate (mpl ax.text / ax.annotate) ──
         .def("text",
              [](PyAxes& a, float x, float y, const std::string& s,
-                const std::string& transform, const py::object& color,
+                const py::object& transform, const py::object& color,
                 float fontsize, const std::string& ha,
-                const std::string& va, float rotation) {
-                 auto* t = a.ax->text(x, y, s, toCoordSystem(transform));
+                const std::string& va, float rotation,
+                const py::object& bbox, const py::kwargs& kw) {
+                 plot::TextAnnotation* t;
+                 if (transform.is_none()) {
+                     // mpl transform=None → transData.
+                     t = a.ax->text(x, y, s, plot::CoordSystem::Data);
+                 } else if (py::isinstance<py::str>(transform)) {
+                     t = a.ax->text(x, y, s,
+                                    toCoordSystem(transform
+                                        .cast<std::string>()));
+                 } else {
+                     // mpl transform=Transform object.
+                     t = a.ax->text(x, y, s, plot::CoordSystem::Data);
+                     t->transform = transform
+                         .cast<std::shared_ptr<plot::Transform>>();
+                 }
                  if (auto c = parseColor(color); c.a > 0) t->color = c;
-                 if (fontsize > 0.0f) t->fontSize = fontsize / 16.0f;
+                 if (fontsize > 0.0f) t->fontSize = fontsize;
                  if (ha == "center") t->halign = plot::HAlign::Center;
                  else if (ha == "right") t->halign = plot::HAlign::Right;
                  else t->halign = plot::HAlign::Left;
@@ -2928,17 +14985,31 @@ PYBIND11_MODULE(volcanoplot, m) {
                  else if (va == "bottom") t->valign = plot::VAlign::Bottom;
                  if (rotation != 0.0f)
                      t->rotation = rotation * float(M_PI) / 180.0f;
+                 if (!bbox.is_none())
+                     applyTextBbox(bbox, *t,
+                                   a.owner->fig().style().dpi);
+                 applyFontKwargs(t->font, kw);
+                 applyTextKwargs(*t, kw);
+                 if (kw && (kw.contains("fontsize") ||
+                            kw.contains("size") ||
+                            kw.contains("fontproperties") ||
+                            kw.contains("font_properties")))
+                     t->fontSize = t->font.size;
+                 return PyText{a.owner, a.ax, t};
              },
              py::arg("x"), py::arg("y"), py::arg("s"),
-             py::arg("transform") = "data", py::arg("color") = py::none(),
+             py::arg("transform") = py::none(),
+             py::arg("color") = py::none(),
              py::arg("fontsize") = -1.0f, py::arg("ha") = "left",
-             py::arg("va") = "baseline", py::arg("rotation") = 0.0f)
+             py::arg("va") = "baseline", py::arg("rotation") = 0.0f,
+             py::arg("bbox") = py::none())
         .def("annotate",
              [](PyAxes& a, const std::string& s,
                 std::pair<float, float> xy,
                 const py::object& xytext, const std::string& xycoords,
                 const std::string& textcoords, const py::object& arrowprops,
-                const py::object& color, float fontsize) {
+                const py::object& color, float fontsize,
+                const py::object& bbox, const py::kwargs& kw) {
                  auto cs = toCoordSystem(xycoords);
                  plot::Annotation* an;
                  if (xytext.is_none()) {
@@ -2959,7 +15030,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                      an->xyText[0] = an->xyText[1] = 0.0f;
                  }
                  if (auto c = parseColor(color); c.a > 0) an->color = c;
-                 if (fontsize > 0.0f) an->fontSize = fontsize / 16.0f;
+                 if (fontsize > 0.0f) an->fontSize = fontsize;
                  if (!arrowprops.is_none()) {
                      auto d = py::cast<py::dict>(arrowprops);
                      if (d.contains("arrowstyle"))
@@ -2979,11 +15050,24 @@ PYBIND11_MODULE(volcanoplot, m) {
                          an->arrowWidth = d[k].cast<float>();
                      }
                  }
+                 if (!bbox.is_none())
+                     applyTextBbox(bbox, *an,
+                                   a.owner->fig().style().dpi);
+                 applyFontKwargs(an->font, kw);
+                 applyTextKwargs(*an, kw);
+                 if (kw && (kw.contains("fontsize") ||
+                            kw.contains("size") ||
+                            kw.contains("fontproperties") ||
+                            kw.contains("font_properties")))
+                     an->fontSize = an->font.size;
+                 // mpl annotate returns the Annotation artist.
+                 return PyAnnotation{a.owner, a.ax, an};
              },
              py::arg("text"), py::arg("xy"), py::arg("xytext") = py::none(),
              py::arg("xycoords") = "data", py::arg("textcoords") = "data",
              py::arg("arrowprops") = py::none(),
-             py::arg("color") = py::none(), py::arg("fontsize") = -1.0f)
+             py::arg("color") = py::none(), py::arg("fontsize") = -1.0f,
+             py::arg("bbox") = py::none())
         // ── 3D (mpl Axes3D) ──
         .def("view_init",
              [](PyAxes& a, float elev, float azim, float roll) {
@@ -3077,69 +15161,94 @@ PYBIND11_MODULE(volcanoplot, m) {
         // ── Reference lines / spans (mpl ax.axhline etc.) ──
         .def("axhline",
              [](PyAxes& a, float y, const py::object& color, float lw) {
-                 a.ax->axhline(y, lineColor(color, plot::Color::black()), lw);
+                 auto& p = a.ax->axhline(
+                     y, lineColor(color, plot::Color::black()),
+                     lw * pt2px(*a.ax));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("y") = 0.0f, py::arg("color") = py::none(),
-             py::arg("linewidth") = 1.0f)
+             py::arg("linewidth") = 1.5f)
         .def("axvline",
              [](PyAxes& a, float x, const py::object& color, float lw) {
-                 a.ax->axvline(x, lineColor(color, plot::Color::black()), lw);
+                 auto& p = a.ax->axvline(
+                     x, lineColor(color, plot::Color::black()),
+                     lw * pt2px(*a.ax));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("x") = 0.0f, py::arg("color") = py::none(),
-             py::arg("linewidth") = 1.0f)
+             py::arg("linewidth") = 1.5f)
         .def("axline",
              [](PyAxes& a, std::pair<float, float> xy1,
                 const py::object& xy2, const py::object& slope,
                 const py::object& color, float lw) {
                  auto c = lineColor(color, plot::Color::black());
+                 float lwpx = lw * pt2px(*a.ax);
+                 plot::AxLine* al;
                  if (!slope.is_none())
-                     a.ax->axline({xy1.first, xy1.second},
-                                  slope.cast<float>(), c, lw);
+                     al = &a.ax->axline({xy1.first, xy1.second},
+                                        slope.cast<float>(), c, lwpx);
                  else if (!xy2.is_none()) {
                      auto p = xy2.cast<std::pair<float, float>>();
-                     a.ax->axline({xy1.first, xy1.second},
-                                  {p.first, p.second}, c, lw);
+                     al = &a.ax->axline({xy1.first, xy1.second},
+                                        {p.first, p.second}, c, lwpx);
                  } else
                      throw std::invalid_argument(
                          "axline needs xy2 or slope=");
+                 return wrapArtist(a.owner, a.ax, al);
              },
              py::arg("xy1"), py::arg("xy2") = py::none(),
              py::arg("slope") = py::none(),
-             py::arg("color") = py::none(), py::arg("linewidth") = 1.0f)
+             py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
         .def("axhspan",
              [](PyAxes& a, float ymin, float ymax, const py::object& color) {
-                 a.ax->axhspan(ymin, ymax,
-                               lineColor(color, plot::Color::fromRgba8(200, 200, 200, 128)));
+                 auto& p = a.ax->axhspan(
+                     ymin, ymax,
+                     lineColor(color, plot::Color::fromRgba8(
+                         200, 200, 200, 128)));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("ymin"), py::arg("ymax"),
              py::arg("color") = py::none())
         .def("axvspan",
              [](PyAxes& a, float xmin, float xmax, const py::object& color) {
-                 a.ax->axvspan(xmin, xmax,
-                               lineColor(color, plot::Color::fromRgba8(200, 200, 200, 128)));
+                 auto& p = a.ax->axvspan(
+                     xmin, xmax,
+                     lineColor(color, plot::Color::fromRgba8(
+                         200, 200, 200, 128)));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("xmin"), py::arg("xmax"),
              py::arg("color") = py::none())
         .def("hlines",
              [](PyAxes& a, const py::object& y, float xmin, float xmax,
                 const py::object& color, float lw) {
-                 a.ax->hlines(toFloatList(y), xmin, xmax,
-                              lineColor(color, plot::Color::black()), lw);
+                 auto& p = a.ax->hlines(
+                     toFloatList(y), xmin, xmax,
+                     lineColor(color, plot::Color::black()),
+                     lw * pt2px(*a.ax));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("y"), py::arg("xmin"), py::arg("xmax"),
-             py::arg("color") = py::none(), py::arg("linewidth") = 1.0f)
+             py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
         .def("vlines",
              [](PyAxes& a, const py::object& x, float ymin, float ymax,
                 const py::object& color, float lw) {
-                 a.ax->vlines(toFloatList(x), ymin, ymax,
-                              lineColor(color, plot::Color::black()), lw);
+                 auto& p = a.ax->vlines(
+                     toFloatList(x), ymin, ymax,
+                     lineColor(color, plot::Color::black()),
+                     lw * pt2px(*a.ax));
+                 return wrapArtist(a.owner, a.ax, &p);
              },
              py::arg("x"), py::arg("ymin"), py::arg("ymax"),
-             py::arg("color") = py::none(), py::arg("linewidth") = 1.0f)
+             py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
         // ── Remaining mpl plot types ──
         .def("pie",
              [](PyAxes& a, const py::object& x, const py::object& labels,
                 const py::object& colors, const py::object& explode,
+                const py::object& autopct, float pctdistance,
+                const py::object& labeldistance, float startangle,
+                float radius, bool counterclock, const py::object& center,
+                bool normalize, bool rotatelabels, bool frame,
                 bool donut, float innerRadius) {
                  plot::PieData d;
                  d.values = toFloats(x);
@@ -3147,43 +15256,95 @@ PYBIND11_MODULE(volcanoplot, m) {
                      d.labels =
                          labels.cast<std::vector<std::string>>();
                  d.colors = toColors(colors, plot::Color::black());
-                 if (!explode.is_none()) {
-                     auto e = toFloatList(explode);
-                     d.explode =
-                         e.empty() ? 0.0f : *std::ranges::max_element(e);
+                 if (!explode.is_none())
+                     d.explode = toFloatList(explode);
+                 if (py::isinstance<py::str>(autopct))
+                     d.autopct = autopct.cast<std::string>();
+                 else if (!autopct.is_none()) {
+                     auto fn = autopct.cast<py::function>();
+                     d.autopctFn = [fn](double pct) {
+                         py::gil_scoped_acquire g;
+                         return fn(pct).cast<std::string>();
+                     };
                  }
+                 d.pctDistance = pctdistance;
+                 // mpl labeldistance=None → labels drawn inside wedges
+                 // are suppressed entirely.
+                 d.labelDistance =
+                     labeldistance.is_none()
+                         ? std::numeric_limits<float>::quiet_NaN()
+                         : labeldistance.cast<float>();
+                 d.startAngle = startangle;
+                 d.radius = radius;
+                 d.counterclock = counterclock;
+                 if (!center.is_none()) {
+                     auto c = toFloats(center);
+                     if (c.size() >= 2) d.center = {c[0], c[1]};
+                 }
+                 d.normalize = normalize;
+                 d.rotatelabels = rotatelabels;
+                 d.frame = frame;
                  d.donut = donut;
                  d.innerRadius = innerRadius;
-                 a.ax->addPlot(
-                     std::make_unique<plot::PiePlot>(std::move(d)));
+                 auto& p = a.ax->pie(std::move(d));
+                 // mpl returns (wedges, texts [, autotexts]).
+                 py::list wedges, texts;
+                 wedges.append(wrapArtist(a.owner, a.ax, &p));
+                 return py::make_tuple(wedges, texts);
              },
              py::arg("x"), py::arg("labels") = py::none(),
              py::arg("colors") = py::none(),
-             py::arg("explode") = py::none(), py::arg("donut") = false,
+             py::arg("explode") = py::none(),
+             py::arg("autopct") = py::none(),
+             py::arg("pctdistance") = 0.6f,
+             py::arg("labeldistance") = py::float_(1.1f),
+             py::arg("startangle") = 0.0f, py::arg("radius") = 1.0f,
+             py::arg("counterclock") = true,
+             py::arg("center") = py::none(),
+             py::arg("normalize") = true,
+             py::arg("rotatelabels") = false,
+             py::arg("frame") = false,
+             py::arg("donut") = false,
              py::arg("inner_radius") = 0.0f)
         .def("stackplot",
-             [](PyAxes& a, const py::object& x, const py::object& ys,
-                const py::object& colors, const py::object& labels) {
+             [](PyAxes& a, const py::object& x, const py::args& ys,
+                const py::object& colors, const py::object& labels,
+                const std::string& baseline) {
+                 // mpl stackplot(x, *y): each arg is a dataset —
+                 // a flat 1-D series becomes one row, a 2-D array
+                 // contributes one row per sub-array (np.row_stack).
+                 std::vector<std::vector<float>> rows;
+                 for (auto y : ys) {
+                     auto r = toRows(py::reinterpret_borrow<py::object>(y));
+                     std::move(r.begin(), r.end(), std::back_inserter(rows));
+                 }
                  std::vector<std::string> labs;
                  if (!labels.is_none())
                      labs = labels.cast<std::vector<std::string>>();
-                 a.ax->addPlot(std::make_unique<plot::StackPlot>(
-                     toFloats(x), toRows(ys),
+                 auto p = std::make_unique<plot::StackPlot>(
+                     toFloats(x), std::move(rows),
                      toColors(colors, plot::Color::black()),
-                     std::move(labs)));
+                     std::move(labs));
+                 p->setBaseline(baseline);
+                 auto* raw = a.ax->addPlot(std::move(p));
+                 py::list out;
+                 out.append(wrapArtist(a.owner, a.ax, raw));
+                 return out;
              },
-             py::arg("x"), py::arg("ys"), py::arg("colors") = py::none(),
-             py::arg("labels") = py::none())
+             py::arg("x"), py::arg("colors") = py::none(),
+             py::arg("labels") = py::none(),
+             py::arg("baseline") = "zero")
         .def("hexbin",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 int gridsize, const py::object& cmap, int mincnt) {
                  plot::HexbinConfig cfg;
                  cfg.gridsize = gridsize;
                  cfg.minCount = mincnt;
-                 if (!cmap.is_none())
-                     cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::HexbinPlot>(
-                     toFloats(x), toFloats(y), cfg));
+                 if (!cmap.is_none()) cfg.cmap = &cmapArg(cmap);
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::HexbinPlot>(
+                         toFloats(x), toFloats(y), cfg));
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("x"), py::arg("y"), py::arg("gridsize") = 50,
              py::arg("cmap") = py::none(), py::arg("mincnt") = 0)
@@ -3220,9 +15381,12 @@ PYBIND11_MODULE(volcanoplot, m) {
                      cfg.pivot = plot::QuiverConfig::Pivot::Middle;
                  else if (pivot == "tip")
                      cfg.pivot = plot::QuiverConfig::Pivot::Tip;
-                 a.ax->addPlot(std::make_unique<plot::QuiverPlot>(
-                     std::move(xv), std::move(yv), std::move(uv),
-                     std::move(vv), cfg));
+                 auto* q = a.ax->addPlot(
+                     std::make_unique<plot::QuiverPlot>(
+                         std::move(xv), std::move(yv), std::move(uv),
+                         std::move(vv), cfg));
+                 return PyQuiver{a.owner, a.ax,
+                                 static_cast<plot::QuiverPlot*>(q)};
              },
              py::arg("x"), py::arg("y"), py::arg("u"), py::arg("v"),
              py::arg("color") = py::none(), py::arg("scale") = 0.0f,
@@ -3244,10 +15408,14 @@ PYBIND11_MODULE(volcanoplot, m) {
                  plot::StreamConfig cfg;
                  cfg.density = density;
                  cfg.color = lineColor(color, plot::Color::black());
-                 cfg.lineWidth = linewidth;
+                 cfg.lineWidth = linewidth * pt2px(*a.ax);
                  cfg.arrows = arrows;
-                 a.ax->addPlot(std::make_unique<plot::StreamPlot>(
-                     std::move(gu), std::move(gv), cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::StreamPlot>(
+                         std::move(gu), std::move(gv), cfg));
+                 // mpl returns a StreamplotSet container; the single
+                 // artist handle covers .lines/.arrows access.
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("x"), py::arg("y"), py::arg("u"), py::arg("v"),
              py::arg("density") = 1.0f, py::arg("color") = py::none(),
@@ -3264,8 +15432,21 @@ PYBIND11_MODULE(volcanoplot, m) {
                      cfg.positions = toFloatList(positions);
                  if (!widths.is_none())
                      cfg.widths = toFloatList(widths);
-                 a.ax->addPlot(std::make_unique<plot::ViolinPlot>(
-                     toRows(data), cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::ViolinPlot>(
+                         toRows(data), cfg));
+                 auto h = wrapArtist(a.owner, a.ax, p);
+                 py::dict d;
+                 py::list one; one.append(h);
+                 py::list empty;
+                 d["bodies"] = one;
+                 d["cmeans"] = empty;
+                 d["cmins"] = empty;
+                 d["cmaxes"] = empty;
+                 d["cbars"] = empty;
+                 d["cmedians"] = empty;
+                 d["cquantiles"] = empty;
+                 return d;
              },
              py::arg("dataset"), py::arg("positions") = py::none(),
              py::arg("widths") = py::none(), py::arg("vert") = true,
@@ -3289,10 +15470,28 @@ PYBIND11_MODULE(volcanoplot, m) {
                          cfg.nBinsY = b[1];
                      }
                  }
-                 if (!cmap.is_none())
-                     cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::Hist2DPlot>(
-                     toFloats(x), toFloats(y), cfg));
+                 if (!cmap.is_none()) cfg.cmap = &cmapArg(cmap);
+                 auto* hp = static_cast<plot::Hist2DPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::Hist2DPlot>(
+                         toFloats(x), toFloats(y), cfg)));
+                 hp->ensureComputed();
+                 // mpl returns (h, xedges, yedges, image) — h is
+                 // the 2-D counts array (nx × ny rows).
+                 // counts_[j * nx + i] → h[i][j].
+                 py::list rows;
+                 const size_t nx = hp->xEdges().size() - 1;
+                 const size_t ny = hp->yEdges().size() - 1;
+                 const auto& cts = hp->counts();
+                 for (size_t i = 0; i < nx; ++i) {
+                     std::vector<float> row(ny);
+                     for (size_t j = 0; j < ny; ++j)
+                         row[j] = cts[j * nx + i];
+                     rows.append(py::cast(std::move(row)));
+                 }
+                 return py::make_tuple(
+                     py::cast<py::object>(rows), py::cast(hp->xEdges()),
+                     py::cast(hp->yEdges()),
+                     wrapArtist(a.owner, a.ax, hp));
              },
              py::arg("x"), py::arg("y"), py::arg("bins") = 10,
              py::arg("cmap") = py::none())
@@ -3311,6 +15510,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                      ep.linelengths = toFloatList(linelengths);
                  if (!linewidths.is_none())
                      ep.linewidths = toFloatList(linewidths);
+                 // mpl returns a list of EventCollections — one per
+                 // position row.
+                 py::list out;
+                 for (size_t i = 0; i < ep.rowCount(); ++i)
+                     out.append(py::cast(
+                         PyEventCollection{a.owner, a.ax, &ep, i}));
+                 return out;
              },
              py::arg("positions"),
              py::arg("orientation") = "horizontal",
@@ -3322,74 +15528,177 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("triplot",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& triangles, const py::object& color) {
-                 auto xv = toFloats(x), yv = toFloats(y);
+                 std::vector<float> xv, yv;
+                 std::vector<plot::Triangle> tris;
+                 py::object colorArg = color;
+                 if (auto tri = asTriangulation(x)) {
+                     // mpl triplot(triangulation, *args) — `y` slot
+                     // carries the color/format arg.
+                     xv = tri->x;
+                     yv = tri->y;
+                     tris = tri->maskedTris();
+                     if (colorArg.is_none() && !y.is_none())
+                         colorArg = y;
+                 } else {
+                     xv = toFloats(x);
+                     yv = toFloats(y);
+                     tris = toTriangles(triangles);
+                 }
                  plot::TriplotConfig cfg;
-                 cfg.color = lineColor(color, plot::Color::black());
-                 if (triangles.is_none())
-                     a.ax->addPlot(std::make_unique<plot::TriplotPlot>(
-                         std::move(xv), std::move(yv), cfg));
+                 cfg.color = lineColor(colorArg, plot::Color::black());
+                 std::unique_ptr<plot::TriplotPlot> tp;
+                 if (tris.empty())
+                     tp = std::make_unique<plot::TriplotPlot>(
+                         std::move(xv), std::move(yv), cfg);
                  else
-                     a.ax->addPlot(std::make_unique<plot::TriplotPlot>(
-                         std::move(xv), std::move(yv),
-                         toTriangles(triangles), cfg));
+                     tp = std::make_unique<plot::TriplotPlot>(
+                         std::move(xv), std::move(yv), std::move(tris),
+                         cfg);
+                 auto* raw = a.ax->addPlot(std::move(tp));
+                 auto h = wrapArtist(a.owner, a.ax, raw);
+                 return py::make_tuple(h, h);
              },
-             py::arg("x"), py::arg("y"),
+             py::arg("x"), py::arg("y") = py::none(),
              py::arg("triangles") = py::none(),
              py::arg("color") = py::none())
         .def("tripcolor",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& z, const py::object& triangles,
                 const py::object& cmap) {
-                 auto xv = toFloats(x), yv = toFloats(y);
-                 auto zv = toFloats(z);
+                 std::vector<float> xv, yv, zv;
+                 std::vector<plot::Triangle> tris;
+                 if (auto tri = asTriangulation(x)) {
+                     // mpl tripcolor(triangulation, z).
+                     xv = tri->x;
+                     yv = tri->y;
+                     tris = tri->maskedTris();
+                     zv = toFloats(y);
+                 } else {
+                     xv = toFloats(x);
+                     yv = toFloats(y);
+                     zv = toFloats(z);
+                     tris = toTriangles(triangles);
+                 }
                  plot::TripcolorConfig cfg;
                  if (!cmap.is_none())
                      cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 if (triangles.is_none())
+                 std::unique_ptr<plot::TripcolorPlot> tp;
+                 if (tris.empty()) {
                      // Per-vertex z (mpl tripcolor(x, y, z)).
-                     a.ax->addPlot(std::make_unique<plot::TripcolorPlot>(
+                     tp = std::make_unique<plot::TripcolorPlot>(
                          std::move(xv), std::move(yv), std::move(zv),
-                         cfg));
-                 else
-                     // Explicit triangulation + per-face values.
-                     a.ax->addPlot(std::make_unique<plot::TripcolorPlot>(
+                         cfg);
+                 } else {
+                     // mpl tripcolor C: per-point (len npoints → flat
+                     // shading averages per-face) or per-face (len ntri).
+                     if (zv.size() == xv.size()) {
+                         std::vector<float> fv(tris.size());
+                         for (size_t i = 0; i < tris.size(); ++i) {
+                             auto& t = tris[i];
+                             fv[i] = (zv[t.a] + zv[t.b] + zv[t.c]) /
+                                     3.0f;
+                         }
+                         zv = std::move(fv);
+                     } else if (zv.size() != tris.size()) {
+                         throw std::invalid_argument(
+                             "tripcolor: length of C must match "
+                             "either the number of points or the "
+                             "number of triangles");
+                     }
+                     tp = std::make_unique<plot::TripcolorPlot>(
                          std::move(xv), std::move(yv),
-                         toTriangles(triangles), std::move(zv), cfg));
+                         std::move(tris), std::move(zv), cfg);
+                 }
+                 return wrapArtist(a.owner, a.ax,
+                                   a.ax->addPlot(std::move(tp)));
              },
-             py::arg("x"), py::arg("y"), py::arg("z"),
+             py::arg("x"), py::arg("y"), py::arg("z") = py::none(),
              py::arg("triangles") = py::none(),
              py::arg("cmap") = py::none())
         .def("tricontour",
              [](PyAxes& a, const py::object& x, const py::object& y,
-                const py::object& z, const py::object& levels,
-                const py::object& cmap) {
+                const py::object& z, const py::object& triangles,
+                const py::object& levels, const py::object& cmap) {
+                 std::vector<float> xv, yv, zv;
+                 std::vector<plot::Triangle> tris;
+                 py::object levelsArg = levels;
+                 if (auto tri = asTriangulation(x)) {
+                     // mpl tricontour(triangulation, z, *args).
+                     xv = tri->x;
+                     yv = tri->y;
+                     tris = tri->maskedTris();
+                     zv = toFloats(y);
+                     if (levelsArg.is_none() && !z.is_none())
+                         levelsArg = z;
+                 } else {
+                     xv = toFloats(x);
+                     yv = toFloats(y);
+                     zv = toFloats(z);
+                     tris = toTriangles(triangles);
+                 }
                  plot::TriContourConfig cfg;
-                 if (py::isinstance<py::int_>(levels))
-                     cfg.numLevels = levels.cast<int>();
-                 else if (!levels.is_none())
-                     cfg.levels = toFloats(levels);
+                 if (py::isinstance<py::int_>(levelsArg))
+                     cfg.numLevels = levelsArg.cast<int>();
+                 else if (!levelsArg.is_none())
+                     cfg.levels = toFloats(levelsArg);
                  if (!cmap.is_none())
                      cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::TriContourPlot>(
-                     toFloats(x), toFloats(y), toFloats(z), cfg));
+                 std::unique_ptr<plot::TriContourPlot> tp;
+                 if (tris.empty())
+                     tp = std::make_unique<plot::TriContourPlot>(
+                         std::move(xv), std::move(yv), std::move(zv),
+                         cfg);
+                 else
+                     tp = std::make_unique<plot::TriContourPlot>(
+                         std::move(xv), std::move(yv), std::move(tris),
+                         std::move(zv), cfg);
+                 auto* p = a.ax->addPlot(std::move(tp));
+                 return wrapArtist(a.owner, a.ax, p);
              },
-             py::arg("x"), py::arg("y"), py::arg("z"),
+             py::arg("x"), py::arg("y"), py::arg("z") = py::none(),
+             py::arg("triangles") = py::none(),
              py::arg("levels") = py::none(), py::arg("cmap") = py::none())
         .def("tricontourf",
              [](PyAxes& a, const py::object& x, const py::object& y,
-                const py::object& z, const py::object& levels,
-                const py::object& cmap) {
+                const py::object& z, const py::object& triangles,
+                const py::object& levels, const py::object& cmap) {
+                 std::vector<float> xv, yv, zv;
+                 std::vector<plot::Triangle> tris;
+                 py::object levelsArg = levels;
+                 if (auto tri = asTriangulation(x)) {
+                     xv = tri->x;
+                     yv = tri->y;
+                     tris = tri->maskedTris();
+                     zv = toFloats(y);
+                     if (levelsArg.is_none() && !z.is_none())
+                         levelsArg = z;
+                 } else {
+                     xv = toFloats(x);
+                     yv = toFloats(y);
+                     zv = toFloats(z);
+                     tris = toTriangles(triangles);
+                 }
                  plot::TriContourConfig cfg;
-                 if (py::isinstance<py::int_>(levels))
-                     cfg.numLevels = levels.cast<int>();
-                 else if (!levels.is_none())
-                     cfg.levels = toFloats(levels);
+                 if (py::isinstance<py::int_>(levelsArg))
+                     cfg.numLevels = levelsArg.cast<int>();
+                 else if (!levelsArg.is_none())
+                     cfg.levels = toFloats(levelsArg);
                  if (!cmap.is_none())
                      cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::TriContourfPlot>(
-                     toFloats(x), toFloats(y), toFloats(z), cfg));
+                 std::unique_ptr<plot::TriContourfPlot> tp;
+                 if (tris.empty())
+                     tp = std::make_unique<plot::TriContourfPlot>(
+                         std::move(xv), std::move(yv), std::move(zv),
+                         cfg);
+                 else
+                     tp = std::make_unique<plot::TriContourfPlot>(
+                         std::move(xv), std::move(yv), std::move(tris),
+                         std::move(zv), cfg);
+                 auto* p = a.ax->addPlot(std::move(tp));
+                 return wrapArtist(a.owner, a.ax, p);
              },
-             py::arg("x"), py::arg("y"), py::arg("z"),
+             py::arg("x"), py::arg("y"), py::arg("z") = py::none(),
+             py::arg("triangles") = py::none(),
              py::arg("levels") = py::none(), py::arg("cmap") = py::none())
         // ── Spectral plots (mpl psd/csd/specgram/cohere/xcorr/acorr) ──
         .def("psd",
@@ -3405,8 +15714,14 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::PsdPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::PsdPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::PsdPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 // mpl returns (Pxx, freqs) — the line is added
+                 // internally, not returned.
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()));
              },
              py::arg("x"), py::arg("Fs") = 2.0f, py::arg("NFFT") = 0,
              py::arg("noverlap") = 0, py::arg("window") = "hann",
@@ -3425,8 +15740,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::CsdPlot>(
-                     toFloats(x), toFloats(y), cfg));
+                 auto* p = static_cast<plot::CsdPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::CsdPlot>(
+                         toFloats(x), toFloats(y), cfg)));
+                 p->ensureComputed();
+                 // mpl returns (Pxy, freqs).
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()));
              },
              py::arg("x"), py::arg("y"), py::arg("Fs") = 2.0f,
              py::arg("NFFT") = 0, py::arg("noverlap") = 0,
@@ -3444,8 +15764,32 @@ PYBIND11_MODULE(volcanoplot, m) {
                      : cfg.nfft / 2;
                  if (!cmap.is_none())
                      cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::SpecgramPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::SpecgramPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::SpecgramPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 // mpl returns (spectrum, freqs, t, im); spectrum is
+                 // nfreq × ntime. Native data is row-major [freq][t].
+                 const uint32_t nr = p->numRows(), nc = p->numCols();
+                 const auto& dat = p->data();
+                 py::list rows;
+                 for (uint32_t k = 0; k < nr; ++k)
+                     rows.append(py::cast(std::vector<float>(
+                         dat.begin() + k * nc,
+                         dat.begin() + (k + 1) * nc)));
+                 // freqs: k * Fs / NFFT (one-sided); t: window centers.
+                 const float nf = 2.0f * static_cast<float>(nr);
+                 std::vector<float> freqs(nr), t(nc);
+                 const uint32_t hop = static_cast<uint32_t>(nf) -
+                     cfg.noverlap;
+                 for (uint32_t k = 0; k < nr; ++k)
+                     freqs[k] = static_cast<float>(k) * Fs / nf;
+                 for (uint32_t i = 0; i < nc; ++i)
+                     t[i] = (static_cast<float>(i * hop) +
+                             nf * 0.5f) / Fs;
+                 return py::make_tuple(py::cast<py::object>(rows),
+                                       py::cast(freqs), py::cast(t),
+                                       wrapArtist(a.owner, a.ax, p));
              },
              py::arg("x"), py::arg("Fs") = 2.0f, py::arg("NFFT") = 256,
              py::arg("noverlap") = -1, py::arg("cmap") = py::none())
@@ -3463,8 +15807,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::CoherePlot>(
-                     toFloats(x), toFloats(y), cfg));
+                 auto* p = static_cast<plot::CoherePlot*>(
+                     a.ax->addPlot(std::make_unique<plot::CoherePlot>(
+                         toFloats(x), toFloats(y), cfg)));
+                 p->ensureComputed();
+                 // mpl returns (Cxy, freqs).
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()));
              },
              py::arg("x"), py::arg("y"), py::arg("Fs") = 2.0f,
              py::arg("NFFT") = 0, py::arg("noverlap") = 0,
@@ -3474,36 +15823,62 @@ PYBIND11_MODULE(volcanoplot, m) {
              [](PyAxes& a, const py::object& x, const py::object& y,
                 bool normed, int maxlags, const py::object& color,
                 const std::string& label) {
+                 // mpl raises ValueError when maxlags >= len(x) or < 1.
+                 const auto nx = toFloats(x).size();
+                 if (maxlags < 1 || maxlags >= static_cast<int>(nx))
+                     throw std::invalid_argument(std::format(
+                         "maxlags must be None or strictly positive "
+                         "< {}", nx));
                  plot::XCorrConfig cfg;
                  cfg.normed = normed;
-                 cfg.maxLags = maxlags > 0 ? uint32_t(maxlags) : 0;
+                 cfg.maxLags = uint32_t(maxlags);
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
+                 std::unique_ptr<plot::XCorrPlot> xp;
                  if (y.is_none())
-                     a.ax->addPlot(std::make_unique<plot::XCorrPlot>(
-                         toFloats(x), cfg));
+                     xp = std::make_unique<plot::XCorrPlot>(
+                         toFloats(x), cfg);
                  else
-                     a.ax->addPlot(std::make_unique<plot::XCorrPlot>(
-                         toFloats(x), toFloats(y), cfg));
+                     xp = std::make_unique<plot::XCorrPlot>(
+                         toFloats(x), toFloats(y), cfg);
+                 auto* raw = xp.get();
+                 a.ax->addPlot(std::move(xp));
+                 raw->ensureComputed();
+                 // mpl returns (lags, c, line, b).
+                 return py::make_tuple(py::cast(raw->lags()),
+                                       py::cast(raw->values()),
+                                       wrapArtist(a.owner, a.ax, raw),
+                                       py::none());
              },
              py::arg("x"), py::arg("y") = py::none(),
-             py::arg("normed") = true, py::arg("maxlags") = 0,
+             py::arg("normed") = true, py::arg("maxlags") = 10,
              py::arg("color") = py::none(), py::arg("label") = "")
         .def("acorr",
              [](PyAxes& a, const py::object& x, bool normed, int maxlags,
                 const py::object& color, const std::string& label) {
+                 const auto nx = toFloats(x).size();
+                 if (maxlags < 1 || maxlags >= static_cast<int>(nx))
+                     throw std::invalid_argument(std::format(
+                         "maxlags must be None or strictly positive "
+                         "< {}", nx));
                  plot::XCorrConfig cfg;
                  cfg.normed = normed;
-                 cfg.maxLags = maxlags > 0 ? uint32_t(maxlags) : 0;
+                 cfg.maxLags = uint32_t(maxlags);
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::XCorrPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::XCorrPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::XCorrPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 return py::make_tuple(py::cast(p->lags()),
+                                       py::cast(p->values()),
+                                       wrapArtist(a.owner, a.ax, p),
+                                       py::none());
              },
              py::arg("x"), py::arg("normed") = true,
-             py::arg("maxlags") = 0, py::arg("color") = py::none(),
+             py::arg("maxlags") = 10, py::arg("color") = py::none(),
              py::arg("label") = "")
         .def("magnitude_spectrum",
              [](PyAxes& a, const py::object& x, float Fs,
@@ -3519,8 +15894,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::SpectrumPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()),
+                                       wrapArtist(a.owner, a.ax, p));
              },
              py::arg("x"), py::arg("Fs") = 2.0f,
              py::arg("scale") = "linear", py::arg("window") = "hann",
@@ -3537,8 +15917,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::SpectrumPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()),
+                                       wrapArtist(a.owner, a.ax, p));
              },
              py::arg("x"), py::arg("Fs") = 2.0f,
              py::arg("window") = "hann", py::arg("color") = py::none(),
@@ -3555,8 +15940,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
-                     toFloats(x), cfg));
+                 auto* p = static_cast<plot::SpectrumPlot*>(
+                     a.ax->addPlot(std::make_unique<plot::SpectrumPlot>(
+                         toFloats(x), cfg)));
+                 p->ensureComputed();
+                 return py::make_tuple(py::cast(p->values()),
+                                       py::cast(p->frequencies()),
+                                       wrapArtist(a.owner, a.ax, p));
              },
              py::arg("x"), py::arg("Fs") = 2.0f,
              py::arg("window") = "hann", py::arg("color") = py::none(),
@@ -3573,8 +15963,10 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
                  cfg.label = label;
-                 a.ax->addPlot(std::make_unique<plot::ECDFPlot>(
-                     toFloats(x), cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::ECDFPlot>(
+                         toFloats(x), cfg));
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("x"), py::arg("complementary") = false,
              py::arg("markers") = false, py::arg("fill") = false,
@@ -3585,23 +15977,28 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto [data, dims] = flat2d(z);
                  plot::SpyConfig cfg;
                  cfg.precision = precision;
-                 cfg.markerSize = markersize;
+                 cfg.markerSize = markersize * pt2px(*a.ax);
                  cfg.color = lineColor(
                      color, plot::Color::fromRgba8(31, 119, 180, 255));
-                 a.ax->addPlot(std::make_unique<plot::SpyPlot>(
-                     std::move(data), dims.first, dims.second, cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::SpyPlot>(
+                         std::move(data), dims.first, dims.second,
+                         cfg));
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("Z"), py::arg("precision") = 0.0f,
-             py::arg("markersize") = 1.0f,
+             py::arg("markersize") = 10.0f,
              py::arg("color") = py::none())
         .def("matshow",
              [](PyAxes& a, const py::object& z, const py::object& cmap) {
                  auto [data, dims] = flat2d(z);
                  plot::MatshowConfig cfg;
-                 if (!cmap.is_none())
-                     cfg.cmap = &cmapByName(cmap.cast<std::string>());
-                 a.ax->addPlot(std::make_unique<plot::MatshowPlot>(
-                     std::move(data), dims.first, dims.second, cfg));
+                 if (!cmap.is_none()) cfg.cmap = &cmapArg(cmap);
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::MatshowPlot>(
+                         std::move(data), dims.first, dims.second,
+                         cfg));
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("A"), py::arg("cmap") = py::none())
         .def("fill_betweenx",
@@ -3634,8 +16031,9 @@ PYBIND11_MODULE(volcanoplot, m) {
                      color,
                      plot::Color::fromRgba8(31, 119, 180, 128));
                  s.label = label;
-                 a.ax->addPlot(
+                 auto* p = a.ax->addPlot(
                      std::make_unique<plot::FillPlot>(std::move(s)));
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("y"), py::arg("x1"), py::arg("x2") = py::none(),
              py::arg("color") = py::none(), py::arg("label") = "")
@@ -3648,7 +16046,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto vr = range3(xv, yv, zv);
                  plot::Plot3DConfig cfg;
                  if (auto c = parseColor(color); c.a > 0) cfg.color = c;
-                 cfg.lineWidth = linewidth; cfg.label = label;
+                 cfg.lineWidth = linewidth * pt2px(*a.ax);
+                 cfg.label = label;
                  auto p = std::make_unique<plot::Plot3D>(std::move(xv),
                      std::move(yv), std::move(zv), std::move(cfg));
                  p->setCamera(cameraFor3D(a, vr));
@@ -3711,7 +16110,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                  }
                  plot::WireframeConfig cfg;
                  if (auto c = parseColor(color); c.a > 0) cfg.color = c;
-                 cfg.lineWidth = linewidth;
+                 cfg.lineWidth = linewidth * pt2px(*a.ax);
                  cfg.rowStride = rstride; cfg.colStride = cstride;
                  auto p = std::make_unique<plot::WireframePlot>(
                      g, std::move(cfg));
@@ -3959,13 +16358,16 @@ PYBIND11_MODULE(volcanoplot, m) {
                 float linewidth, bool rounding, const std::string& label) {
                  plot::BarbsConfig cfg;
                  cfg.length = length; cfg.flip = flip;
-                 cfg.lineWidth = linewidth; cfg.rounding = rounding;
+                 cfg.lineWidth = linewidth * pt2px(*a.ax);
+                 cfg.rounding = rounding;
                  cfg.label = label;
                  if (auto c = parseColor(color); c.a > 0) cfg.color = c;
-                 a.ax->addPlot(std::make_unique<plot::BarbsPlot>(
-                     toFloats(x), toFloats(y), toFloats(u), toFloats(v),
-                     cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::BarbsPlot>(
+                         toFloats(x), toFloats(y), toFloats(u),
+                         toFloats(v), cfg));
                  a.ax->touch();
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("x"), py::arg("y"), py::arg("u"), py::arg("v"),
              py::arg("length") = 7.0f, py::arg("flip") = false,
@@ -4008,9 +16410,11 @@ PYBIND11_MODULE(volcanoplot, m) {
                  }
                  if (auto c = parseColor(edgecolor); c.a > 0)
                      cfg.edgeColor = c;
-                 a.ax->addPlot(std::make_unique<plot::BrokenBarHPlot>(
-                     std::move(segs), cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::BrokenBarHPlot>(
+                         std::move(segs), cfg));
                  a.ax->touch();
+                 return wrapArtist(a.owner, a.ax, p);
              },
              py::arg("xranges"), py::arg("yrange"),
              py::arg("facecolors") = py::none(),
@@ -4044,9 +16448,13 @@ PYBIND11_MODULE(volcanoplot, m) {
                      xv = toFloats(container);
                      hv = toFloats(heights);
                  }
-                 a.ax->addPlot(std::make_unique<plot::BarLabelPlot>(
-                     std::move(xv), std::move(hv), baseline, cfg));
+                 auto* p = a.ax->addPlot(
+                     std::make_unique<plot::BarLabelPlot>(
+                         std::move(xv), std::move(hv), baseline, cfg));
                  a.ax->touch();
+                 py::list out;
+                 out.append(wrapArtist(a.owner, a.ax, p));
+                 return out;
              },
              py::arg("container"), py::arg("heights") = py::none(),
              py::arg("baseline") = 0.0f,
@@ -4100,6 +16508,9 @@ PYBIND11_MODULE(volcanoplot, m) {
                  // cellLoc/rowLoc/colLoc/colWidths/edges accepted via
                  // kwargs for signature parity (renderer centers text).
                  a.ax->touch();
+                 PyTable pt{a.owner, a.ax, &t};
+                 a.owner->tables_[a.ax].append(py::cast(pt));
+                 return pt;
              },
              py::arg("cellText") = py::none(),
              py::arg("rowLabels") = py::none(),
@@ -4243,7 +16654,8 @@ PYBIND11_MODULE(volcanoplot, m) {
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& fmt, const py::kwargs& kw) {
                  a.ax->loglog();
-                 return axesPlot(a, x, y, fmt,
+                 py::list out;
+                 out.append(py::cast(axesPlot(a, x, y, fmt,
                                  kw.contains("color")
                                      ? kw["color"].cast<py::object>()
                                      : py::none(),
@@ -4262,14 +16674,25 @@ PYBIND11_MODULE(volcanoplot, m) {
                                      ? kw["alpha"].cast<float>() : -1,
                                  kw.contains("label")
                                      ? kw["label"].cast<std::string>()
-                                     : "");
+                                     : "",
+                                 kw.contains("markevery")
+                                     ? kw["markevery"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("transform")
+                                     ? kw["transform"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("path_effects")
+                                     ? kw["path_effects"].cast<py::object>()
+                                     : py::none())));
+                 return out;
              },
              py::arg("x"), py::arg("y"), py::arg("fmt") = py::none())
         .def("semilogx",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& fmt, const py::kwargs& kw) {
                  a.ax->semilogx();
-                 return axesPlot(a, x, y, fmt,
+                 py::list out;
+                 out.append(py::cast(axesPlot(a, x, y, fmt,
                                  kw.contains("color")
                                      ? kw["color"].cast<py::object>()
                                      : py::none(),
@@ -4288,14 +16711,25 @@ PYBIND11_MODULE(volcanoplot, m) {
                                      ? kw["alpha"].cast<float>() : -1,
                                  kw.contains("label")
                                      ? kw["label"].cast<std::string>()
-                                     : "");
+                                     : "",
+                                 kw.contains("markevery")
+                                     ? kw["markevery"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("transform")
+                                     ? kw["transform"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("path_effects")
+                                     ? kw["path_effects"].cast<py::object>()
+                                     : py::none())));
+                 return out;
              },
              py::arg("x"), py::arg("y"), py::arg("fmt") = py::none())
         .def("semilogy",
              [](PyAxes& a, const py::object& x, const py::object& y,
                 const py::object& fmt, const py::kwargs& kw) {
                  a.ax->semilogy();
-                 return axesPlot(a, x, y, fmt,
+                 py::list out;
+                 out.append(py::cast(axesPlot(a, x, y, fmt,
                                  kw.contains("color")
                                      ? kw["color"].cast<py::object>()
                                      : py::none(),
@@ -4314,7 +16748,17 @@ PYBIND11_MODULE(volcanoplot, m) {
                                      ? kw["alpha"].cast<float>() : -1,
                                  kw.contains("label")
                                      ? kw["label"].cast<std::string>()
-                                     : "");
+                                     : "",
+                                 kw.contains("markevery")
+                                     ? kw["markevery"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("transform")
+                                     ? kw["transform"].cast<py::object>()
+                                     : py::none(),
+                                 kw.contains("path_effects")
+                                     ? kw["path_effects"].cast<py::object>()
+                                     : py::none())));
+                 return out;
              },
              py::arg("x"), py::arg("y"), py::arg("fmt") = py::none())
         // ── mpl Axes3D extras ──
@@ -4359,9 +16803,169 @@ PYBIND11_MODULE(volcanoplot, m) {
                  a.ax->touch();
              },
              py::arg("corner") = "upper left",
-             py::arg("mode") = "triad", py::arg("size") = 36.0f);
-
-    // mpl FuncAnimation(fig, func, frames, init_func, fargs, ...)
+             py::arg("mode") = "triad", py::arg("size") = 36.0f)
+        // mpl ax.quiverkey(Q, X, Y, U, label, **kw)
+        .def("quiverkey",
+             [](PyAxes& a, PyQuiver& q, float x, float y, float u,
+                const std::string& label, const std::string& labelpos,
+                float angle, const py::object& color,
+                const py::object& labelcolor) {
+                 auto& k = a.ax->quiverKey(*q.quiver, x, y, u, label,
+                                           labelpos, angle);
+                 if (auto c = parseColor(color); c.a > 0)
+                     k.config().color = c;
+                 if (auto c = parseColor(labelcolor); c.a > 0)
+                     k.config().labelColor = c;
+                 a.ax->touch();
+                 return PyArtist{a.owner, a.ax, &k};
+             },
+             py::arg("Q"), py::arg("X"), py::arg("Y"), py::arg("U"),
+             py::arg("label"), py::arg("labelpos") = "N",
+             py::arg("angle") = 0.0f, py::arg("color") = py::none(),
+             py::arg("labelcolor") = py::none())
+        // mpl ax.stairs(values, edges=None, *, fill=False, ...)
+        .def("stairs",
+             [](PyAxes& a, const py::object& values,
+                const py::object& edges, bool fill,
+                const py::object& color, float linewidth,
+                const std::string& label) {
+                 auto vals = toFloats(values);
+                 std::vector<float> e;
+                 if (edges.is_none()) {
+                     // mpl: edges default to arange(len(values)+1).
+                     e.resize(vals.size() + 1);
+                     for (size_t i = 0; i < e.size(); ++i)
+                         e[i] = float(i);
+                 } else {
+                     e = toFloats(edges);
+                 }
+                 if (e.size() != vals.size() + 1)
+                     throw std::invalid_argument(
+                         "stairs: edges must have len(values)+1 elements");
+                 auto c = parseColor(color);
+                 auto p = std::make_unique<plot::StairsPlot>(
+                     std::move(vals), std::move(e),
+                     c.a > 0 ? c : plot::Color::blue(),
+                     (linewidth > 0.0f ? linewidth : 1.5f) *
+                         pt2px(*a.ax), fill);
+                 p->setLabel(label);
+                 auto* raw = p.get();
+                 a.ax->addPlot(std::move(p));
+                 a.ax->touch();
+                 return PyArtist{a.owner, a.ax, raw};
+             },
+             py::arg("values"), py::arg("edges") = py::none(),
+             py::arg("fill") = false, py::arg("color") = py::none(),
+             py::arg("linewidth") = 0.0f, py::arg("label") = "")
+        // mpl ax.pcolor(*args, cmap=..., shading=...) — flat shading
+        // mesh; accepts (C) or (X, Y, C).
+        .def("pcolor",
+             [](PyAxes& a, const py::args& args, const std::string& cmapName,
+                const std::string& shading) {
+                 plot::PcolormeshConfig cfg;
+                 cfg.cmap = &cmapByName(cmapName);
+                 if (shading == "gouraud")
+                     cfg.shading = plot::PcmShading::Gouraud;
+                 std::vector<float> x, y, vals;
+                 uint32_t gw, gh;
+                 if (args.size() == 1) {
+                     auto g = toGrid2D(args[0].cast<py::object>());
+                     x.resize(g.width + 1);
+                     y.resize(g.height + 1);
+                     for (uint32_t i = 0; i <= g.width; ++i)
+                         x[i] = float(i);
+                     for (uint32_t j = 0; j <= g.height; ++j)
+                         y[j] = float(j);
+                     vals = std::move(g.values);
+                     gw = g.width; gh = g.height;
+                 } else if (args.size() == 3) {
+                     x = toFloats(args[0].cast<py::object>());
+                     y = toFloats(args[1].cast<py::object>());
+                     auto g = toGrid2D(args[2].cast<py::object>());
+                     vals = std::move(g.values);
+                     gw = g.width; gh = g.height;
+                     if (x.size() != gw + 1 || y.size() != gh + 1)
+                         throw std::invalid_argument(
+                             "pcolor: X/Y must be edge arrays of "
+                             "len ncols+1/nrows+1");
+                 } else {
+                     throw std::invalid_argument(
+                         "pcolor takes (C) or (X, Y, C)");
+                 }
+                 auto p = std::make_unique<plot::PcolormeshPlot>(
+                     std::move(x), std::move(y), std::move(vals),
+                     gw, gh, std::move(cfg));
+                 auto* raw = p.get();
+                 a.ax->addPlot(std::move(p));
+                 a.ax->touch();
+                 // mpl pcolor returns a QuadMesh (mpl>=3.5).
+                 return py::cast(PyQuadMesh{a.owner, a.ax, raw});
+             },
+             py::arg("cmap") = "viridis", py::arg("shading") = "flat")
+        // mpl ax.inset_axes(bounds) — bounds = (x0, y0, w, h) in axes
+        // fraction.
+        .def("inset_axes",
+             [](PyAxes& a, const py::object& bounds) {
+                 auto b = bounds.cast<py::sequence>();
+                 if (b.size() != 4)
+                     throw std::invalid_argument(
+                         "inset_axes bounds must be (x0, y0, w, h)");
+                 auto* inner = a.ax->insetAxes(b[0].cast<float>(),
+                                               b[1].cast<float>(),
+                                               b[2].cast<float>(),
+                                               b[3].cast<float>());
+                 if (!inner)
+                     throw std::runtime_error("inset_axes: no figure");
+                 return wrapAxes(a.owner, inner);
+             },
+             py::arg("bounds"))
+        // mpl ax.indicate_inset(bounds, inset_ax=None, **kw)
+        .def("indicate_inset",
+             [](PyAxes& a, const py::object& bounds,
+                const py::object& insetAx, const py::object& edgecolor,
+                float alpha) {
+                 const plot::Axes* in = nullptr;
+                 if (!insetAx.is_none())
+                     in = insetAx.cast<PyAxes>().ax;
+                 plot::InsetIndicator* ind;
+                 if (bounds.is_none()) {
+                     if (!in)
+                         throw std::invalid_argument(
+                             "indicate_inset needs bounds or inset_ax");
+                     ind = &a.ax->indicateInsetZoom(*in);
+                 } else {
+                     auto b = bounds.cast<py::sequence>();
+                     if (b.size() != 4)
+                         throw std::invalid_argument(
+                             "indicate_inset bounds must be "
+                             "(x0, y0, x1, y1)");
+                     ind = &a.ax->indicateInset(b[0].cast<float>(),
+                                                b[1].cast<float>(),
+                                                b[2].cast<float>(),
+                                                b[3].cast<float>(), in);
+                 }
+                 if (auto c = parseColor(edgecolor); c.a > 0)
+                     ind->edgeColor = c;
+                 if (alpha >= 0.0f) ind->alpha = alpha;
+                 a.ax->touch();
+                 return PyInsetIndicator{a.owner, ind};
+             },
+             py::arg("bounds") = py::none(),
+             py::arg("inset_ax") = py::none(),
+             py::arg("edgecolor") = py::none(), py::arg("alpha") = -1.0f)
+        // mpl ax.indicate_inset_zoom(inset_ax, **kw)
+        .def("indicate_inset_zoom",
+             [](PyAxes& a, PyAxes& insetAx, const py::object& edgecolor,
+                float alpha) {
+                 auto& ind = a.ax->indicateInsetZoom(*insetAx.ax);
+                 if (auto c = parseColor(edgecolor); c.a > 0)
+                     ind.edgeColor = c;
+                 if (alpha >= 0.0f) ind.alpha = alpha;
+                 a.ax->touch();
+                 return PyInsetIndicator{a.owner, &ind};
+             },
+             py::arg("inset_ax"), py::arg("edgecolor") = py::none(),
+             py::arg("alpha") = -1.0f);
     py::class_<PyAnimation>(m, "FuncAnimation")
         .def(py::init<std::shared_ptr<PyFigure>, py::object, py::object,
                       py::object, py::object, int, bool, bool, int>(),
@@ -4377,7 +16981,7 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("to_html5_video", &PyAnimation::toHtml5Video,
              py::arg("fps") = 0.0);
 
-    py::class_<plot::LegendStyle>(m, "Legend")
+    py::class_<plot::LegendStyle>(m, "LegendStyle")
         .def_readwrite("location", &plot::LegendStyle::location)
         .def_readwrite("visible", &plot::LegendStyle::visible)
         .def_readwrite("frameAlpha", &plot::LegendStyle::frameAlpha);
@@ -4386,18 +16990,76 @@ PYBIND11_MODULE(volcanoplot, m) {
     // `import volcanoplot.pyplot`-style usage directly on the module:
     //   vp.plot([1,2,3], [0,1,0]); vp.savefig("out.png")
     m.def("figure",
-          [](const py::object& figsize, float dpi) {
+          [](const py::object& num, const py::object& figsize,
+             const py::object& dpiObj, const py::object& facecolor,
+             const py::object& edgecolor, bool frameon, bool clear,
+             const py::object& layout) {
+              float dpi = dpiObj.is_none() ? 100.0f : dpiObj.cast<float>();
+              // mpl figure(num): int → Figure.number, str → label,
+              // Figure → activate. Existing figure → activate (+clear).
+              std::shared_ptr<PyFigure> found;
+              int numI = -1;
+              std::string label;
+              if (num.is_none()) {
+                  numI = gFigReg.empty() ? 1
+                      : std::ranges::max(gFigReg | std::views::transform(
+                            &FigRegEntry::num)) + 1;
+              } else if (py::isinstance<py::int_>(num)) {
+                  numI = num.cast<int>();
+                  for (auto& e : gFigReg)
+                      if (e.num == numI) found = e.fig;
+              } else if (py::isinstance<py::str>(num)) {
+                  label = num.cast<std::string>();
+                  for (auto& e : gFigReg)
+                      if (e.label == label) found = e.fig;
+              } else {
+                  // Figure/SubFigure instance → activate its root.
+                  auto f = num.cast<std::shared_ptr<PyFigure>>();
+                  found = f->root_ ? f->root_ : f;
+                  gCurrentFig = found;
+                  if (clear) found->fig().clear();
+                  return found;
+              }
+              if (found) {
+                  gCurrentFig = found;
+                  if (clear) found->fig().clear();
+                  return found;
+              }
+              if (numI < 0) {
+                  numI = gFigReg.empty() ? 1
+                      : std::ranges::max(gFigReg | std::views::transform(
+                            &FigRegEntry::num)) + 1;
+              }
               auto f = std::make_shared<PyFigure>(
-                  figsize.is_none() ? 800u
+                  figsize.is_none() ? 640u
                       : uint32_t(figsize.cast<std::pair<double,double>>().first * dpi + 0.5),
-                  figsize.is_none() ? 600u
+                  figsize.is_none() ? 480u
                       : uint32_t(figsize.cast<std::pair<double,double>>().second * dpi + 0.5),
                   dpi);
-              gCurrentFig = f;
-              gCurrentAx = nullptr;
+              if (!facecolor.is_none()) {
+                  f->fig().style().faceColor =
+                      parseColor(facecolor);
+              }
+              if (!edgecolor.is_none()) {
+                  f->fig().style().edgeColor =
+                      parseColor(edgecolor);
+              }
+              f->fig().style().frameOn = frameon;
+              if (!layout.is_none()) {
+                  auto l = layout.cast<std::string>();
+                  if (l == "constrained")
+                      (void)f->fig().constrainedLayout();
+                  else if (l == "tight")
+                      (void)f->fig().tightLayout();
+              }
+              registerFigure(f, numI, label);
               return f;
           },
-          py::arg("figsize") = py::none(), py::arg("dpi") = 100.0f)
+          py::arg("num") = py::none(), py::arg("figsize") = py::none(),
+          py::arg("dpi") = py::none(), py::arg("facecolor") = py::none(),
+          py::arg("edgecolor") = py::none(), py::arg("frameon") = true,
+          py::arg("clear") = false, py::arg("layout") = py::none(),
+          "mpl plt.figure(num, figsize, dpi, ...) — create or activate.")
         .def("gcf", [] { return gcf(); })
         .def("gca", [] { return gca(); })
         .def("subplots",
@@ -4411,8 +17073,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                      figsize.is_none() ? 480u
                          : uint32_t(figsize.cast<std::pair<double,double>>().second * dpi + 0.5),
                      dpi);
-                 gCurrentFig = f;
-                 gCurrentAx = nullptr;
+                 registerFigure(f, allocFigNum(), "");
                  // mpl: projection kwarg or subplot_kw={'projection': ...}.
                  std::string proj;
                  if (!projection.is_none())
@@ -4425,12 +17086,10 @@ PYBIND11_MODULE(volcanoplot, m) {
                  py::list axs;
                  for (uint32_t r = 0; r < nrows; ++r)
                      for (uint32_t c = 0; c < ncols; ++c) {
-                         auto* ax = f->figure_.subplot2grid({nrows, ncols}, {r, c});
+                         auto* ax = f->fig().subplot2grid({nrows, ncols}, {r, c});
                          if (!proj.empty()) ax->setProjection(proj);
                          axs.append(wrapAxes(f, ax));
                      }
-                 if (!axs.empty())
-                     gCurrentAx = axs[0].cast<PyAxes>().ax;
                  // mpl sharex/sharey: True → all share with the first
                  // axes; an Axes → share with it; "col"/"row" share per
                  // column/row.
@@ -4494,41 +17153,92 @@ PYBIND11_MODULE(volcanoplot, m) {
                 const py::object& fmt, const py::object& color,
                 float linewidth, const py::object& marker,
                 const py::object& linestyle, float markersize,
-                float alpha, const std::string& label) {
+                float alpha, const std::string& label,
+                const py::object& markevery,
+                const py::object& transform,
+                const py::object& pathEffects) {
                  auto a = gca();
                  // mpl plot(y), plot(y, fmt), plot(x, y), plot(x, y, fmt).
                  if (y.is_none())
                      return axesPlot(a, implicitX(x), x, fmt, color,
                                      linewidth, marker, linestyle,
-                                     markersize, alpha, label);
+                                     markersize, alpha, label, markevery,
+                                     transform, pathEffects);
                  if (py::isinstance<py::str>(y) && fmt.is_none())
                      return axesPlot(a, implicitX(x), x, y, color,
                                      linewidth, marker, linestyle,
-                                     markersize, alpha, label);
+                                     markersize, alpha, label, markevery,
+                                     transform, pathEffects);
                  return axesPlot(a, x, y, fmt, color, linewidth, marker,
-                                 linestyle, markersize, alpha, label);
+                                 linestyle, markersize, alpha, label,
+                                 markevery, transform, pathEffects);
              },
              py::arg("x"), py::arg("y") = py::none(),
              py::arg("fmt") = py::none(), py::arg("color") = py::none(),
              py::arg("linewidth") = 1.5f, py::arg("marker") = py::none(),
              py::arg("linestyle") = py::none(),
              py::arg("markersize") = -1.0f, py::arg("alpha") = -1.0f,
-             py::arg("label") = "")
+             py::arg("label") = "", py::arg("markevery") = py::none(),
+             py::arg("transform") = py::none(),
+             py::arg("path_effects") = py::none())
         .def("scatter",
              [](const py::object& x, const py::object& y,
-                const py::object& color, float s, const std::string& label) {
+                const py::object& s, const py::object& c,
+                const py::object& marker, const py::object& cmap,
+                const py::object& norm, const py::object& vmin,
+                const py::object& vmax, const py::object& alpha,
+                const py::object& linewidths, const py::object& edgecolors,
+                const py::object& color, const std::string& label,
+                const py::object& transform, const py::object& pathEffects) {
                  auto a = gca();
-                 return axesScatter(a, x, y, color, s, label);
+                 return axesScatter(a, x, y, s, c, marker, cmap, norm,
+                                    vmin, vmax, alpha, linewidths,
+                                    edgecolors, color, label, transform,
+                                    pathEffects);
              },
-             py::arg("x"), py::arg("y"), py::arg("color") = py::none(),
-             py::arg("s") = 8.0f, py::arg("label") = "")
-        .def("xlabel", [](const std::string& s) {
-                 gca().ax->style().xAxis.label = s; })
-        .def("ylabel", [](const std::string& s) {
-                 gca().ax->style().yAxis.label = s; })
-        .def("title", [](const std::string& s) { gca().ax->setTitle(s); })
-        .def("suptitle", [](const std::string& s) {
-                 gcf()->figure_.suptitle(s); })
+             py::arg("x"), py::arg("y"), py::arg("s") = py::none(),
+             py::arg("c") = py::none(), py::arg("marker") = py::none(),
+             py::arg("cmap") = py::none(), py::arg("norm") = py::none(),
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+             py::arg("alpha") = py::none(),
+             py::arg("linewidths") = py::none(),
+             py::arg("edgecolors") = py::none(),
+             py::arg("color") = py::none(), py::arg("label") = "",
+             py::arg("transform") = py::none(),
+             py::arg("path_effects") = py::none())
+        .def("xlabel",
+             [](const std::string& s, const py::kwargs& kw) {
+                 auto a = gca();
+                 a.ax->style().xAxis.label = s;
+                 applyFontKwargs(a.ax->style().xAxis.labelFont, kw);
+             },
+             py::arg("xlabel"))
+        .def("ylabel",
+             [](const std::string& s, const py::kwargs& kw) {
+                 auto a = gca();
+                 a.ax->style().yAxis.label = s;
+                 applyFontKwargs(a.ax->style().yAxis.labelFont, kw);
+             },
+             py::arg("ylabel"))
+        .def("title",
+             [](const std::string& s, const py::kwargs& kw) {
+                 auto a = gca();
+                 a.ax->setTitle(s);
+                 applyFontKwargs(a.ax->style().title.font, kw);
+                 return PyTitle{a.owner, a.ax};
+             },
+             py::arg("label"))
+        .def("suptitle",
+             [](const std::string& s, const py::kwargs& kw) {
+                 auto f = gcf();
+                 f->fig().suptitle(s);
+                 applyFontKwargs(f->fig().style().title.font, kw);
+                 if (kw && kw.contains("color"))
+                     f->fig().style().title.color =
+                         parseColor(kw["color"]);
+                 return PyTitle{f, nullptr};
+             },
+             py::arg("t"))
         .def("xlim", [](float lo, float hi) { gca().ax->setXlim(lo, hi); })
         .def("ylim", [](float lo, float hi) { gca().ax->setYlim(lo, hi); })
         .def("xscale", [](const std::string& s) { gca().ax->setXscale(s); })
@@ -4540,7 +17250,31 @@ PYBIND11_MODULE(volcanoplot, m) {
              },
              py::arg("on") = true, py::arg("which") = "major",
              py::arg("axis") = "both")
-        .def("legend", [] { gca().ax->legend(); })
+        .def("legend",
+             [](py::args args, py::kwargs kw) {
+                 auto a = gca();
+                 auto& ls = a.ax->legend();
+                 py::dict kwd = kw ? py::dict(kw) : py::dict();
+                 if (args.size() >= 1 && !kwd.contains("handles") &&
+                     !kwd.contains("labels")) {
+                     auto v = py::reinterpret_borrow<py::object>(args[0]);
+                     bool labelsForm = py::isinstance<py::sequence>(v) &&
+                         !py::isinstance<py::str>(v);
+                     if (labelsForm && py::len(v) > 0) {
+                         auto first = py::reinterpret_borrow<py::object>(
+                             v[py::int_(0)]);
+                         labelsForm = py::isinstance<py::str>(first);
+                     }
+                     if (labelsForm) kwd["labels"] = v;
+                     else kwd["handles"] = v;
+                 }
+                 if (args.size() >= 2 && !kwd.contains("labels"))
+                     kwd["labels"] =
+                         py::reinterpret_borrow<py::object>(args[1]);
+                 applyLegendKwargs(ls, kwd, a.ax->style().faceColor,
+                                   a.ax->style().edgeColor);
+                 return PyLegend{a.owner, a.ax};
+             })
         .def("axis",
              [](const py::object& arg) {
                  auto a = gca();
@@ -4576,57 +17310,112 @@ PYBIND11_MODULE(volcanoplot, m) {
                  a.ax->setYlim(lims[2], lims[3]);
              },
              py::arg("arg") = py::none())
+        // mpl plt.xticks(ticks=None, labels=None, *, minor=False) —
+        // returns (locs, labels); called bare, returns the current
+        // values (the Axis.get_ticklocs / get_ticklabels pair).
         .def("xticks",
-             [](const py::object& ticks, const py::object& labels) {
+             [](const py::object& ticks, const py::object& labels,
+                bool minor, const py::kwargs& kw) {
                  auto a = gca();
-                 a.ax->setXLocator(std::make_shared<plot::FixedLocator>(
-                     toFloats(ticks)));
-                 if (!labels.is_none())
-                     a.ax->setXFormatter(
-                         std::make_shared<plot::FixedFormatter>(
-                             labels.cast<std::vector<std::string>>()));
+                 if (!ticks.is_none())
+                     axisSetTicks(*a.ax, true, ticks, labels, minor, kw);
+                 auto locs = axisTickLocs(*a.ax, true, minor);
+                 std::vector<PyTickLabel> lbls;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     lbls.push_back({a.owner, a.ax, true, minor,
+                                     int(i), locs[i]});
+                 return std::make_tuple(locs, lbls);
              },
-             py::arg("ticks"), py::arg("labels") = py::none())
+             py::arg("ticks") = py::none(),
+             py::arg("labels") = py::none(), py::arg("minor") = false)
         .def("yticks",
-             [](const py::object& ticks, const py::object& labels) {
+             [](const py::object& ticks, const py::object& labels,
+                bool minor, const py::kwargs& kw) {
                  auto a = gca();
-                 a.ax->setYLocator(std::make_shared<plot::FixedLocator>(
-                     toFloats(ticks)));
-                 if (!labels.is_none())
-                     a.ax->setYFormatter(
-                         std::make_shared<plot::FixedFormatter>(
-                             labels.cast<std::vector<std::string>>()));
+                 if (!ticks.is_none())
+                     axisSetTicks(*a.ax, false, ticks, labels, minor, kw);
+                 auto locs = axisTickLocs(*a.ax, false, minor);
+                 std::vector<PyTickLabel> lbls;
+                 for (size_t i = 0; i < locs.size(); ++i)
+                     lbls.push_back({a.owner, a.ax, false, minor,
+                                     int(i), locs[i]});
+                 return std::make_tuple(locs, lbls);
              },
-             py::arg("ticks"), py::arg("labels") = py::none())
+             py::arg("ticks") = py::none(),
+             py::arg("labels") = py::none(), py::arg("minor") = false)
         .def("minorticks_on", [] { gca().ax->minorticksOn(); })
-        .def("tick_params",
-             [](const std::string& axis, const std::string& direction,
-                float length, float minor_length, float width,
-                float minor_width) {
-                 gca().ax->tickParams(axis, direction, length,
-                                      minor_length, width, minor_width);
+        .def("minorticks_off", [] { gca().ax->minorticksOff(); })
+        // mpl plt.ticklabel_format — Axes.ticklabel_format on gca.
+        .def("ticklabel_format",
+             [](const std::string& axis, const std::string& style,
+                std::pair<int, int> scilimits, bool useOffset,
+                bool useMathText, bool useLocale) {
+                 (void)useLocale;  // locale-aware formatting unsupported
+                 gca().ax->ticklabelFormat(axis, style, scilimits,
+                                           useOffset, useMathText);
              },
-             py::arg("axis") = "both", py::arg("direction") = "",
-             py::arg("length") = -1.0f, py::arg("minor_length") = -1.0f,
-             py::arg("width") = -1.0f, py::arg("minor_width") = -1.0f)
+             py::arg("axis") = "both", py::arg("style") = "sci",
+             py::arg("scilimits") = std::pair<int, int>{0, 0},
+             py::arg("useOffset") = true, py::arg("useMathText") = false,
+             py::arg("useLocale") = false)
+        // mpl plt.tick_params(**kwargs) → Axes.tick_params on gca.
+        .def("tick_params",
+             [](const std::string& axis, const std::string& which,
+                bool reset, const py::kwargs& kw) {
+                 auto a = gca();
+                 if (axis == "x" || axis == "both")
+                     applyTickParams(*a.ax, true, which, reset, kw);
+                 if (axis == "y" || axis == "both")
+                     applyTickParams(*a.ax, false, which, reset, kw);
+             },
+             py::arg("axis") = "both", py::arg("which") = "major",
+             py::arg("reset") = false)
         .def("text",
              [](float x, float y, const std::string& s,
                 const std::string& transform, const py::object& color,
-                float fontsize) {
-                 auto* t = gca().ax->text(x, y, s,
-                                          toCoordSystem(transform));
+                float fontsize, const py::object& bbox,
+                const py::kwargs& kw) {
+                 auto a = gca();
+                 auto* t = a.ax->text(x, y, s,
+                                      toCoordSystem(transform));
                  if (auto c = parseColor(color); c.a > 0) t->color = c;
-                 if (fontsize > 0.0f) t->fontSize = fontsize / 16.0f;
+                 if (fontsize > 0.0f) t->fontSize = fontsize;
+                 if (!bbox.is_none())
+                     applyTextBbox(bbox, *t,
+                                   a.owner->fig().style().dpi);
+                 applyFontKwargs(t->font, kw);
+                 applyTextKwargs(*t, kw);
+                 if (kw && (kw.contains("fontsize") ||
+                            kw.contains("size") ||
+                            kw.contains("fontproperties") ||
+                            kw.contains("font_properties")))
+                     t->fontSize = t->font.size;
+                 return PyText{a.owner, a.ax, t};
              },
              py::arg("x"), py::arg("y"), py::arg("s"),
              py::arg("transform") = "data", py::arg("color") = py::none(),
-             py::arg("fontsize") = -1.0f)
+             py::arg("fontsize") = -1.0f, py::arg("bbox") = py::none())
         .def("subplot",
              [](const py::object& a, const py::object& b,
                 const py::object& c, const py::object& projection) {
                  auto f = gcf();
+                 // mpl plt.subplot(gs[i, j]) — a SubplotSpec arg.
+                 const PySubplotSpec* ss = nullptr;
+                 try { ss = a.cast<const PySubplotSpec*>(); }
+                 catch (const py::cast_error&) {}
+                 if (ss) {
+                     auto ax = wrapAxes(f, f->fig().addAxes(ss->spec));
+                     ax.gsKeepAlive = ss->gs;
+                     if (!projection.is_none())
+                         ax.ax->setProjection(
+                             projection.cast<std::string>());
+                     return ax;
+                 }
                  uint32_t nrows, ncols, index;
-                 if (b.is_none()) {
+                 if (a.is_none()) {
+                     // mpl: bare add_subplot() == add_subplot(111).
+                     nrows = ncols = index = 1;
+                 } else if (b.is_none()) {
                      int code = a.cast<int>();
                      nrows = uint32_t(code / 100);
                      ncols = uint32_t(code / 10 % 10);
@@ -4638,13 +17427,10 @@ PYBIND11_MODULE(volcanoplot, m) {
                  }
                  uint32_t r = (index - 1) / ncols,
                           col = (index - 1) % ncols;
-                 auto* ax = f->figure_.subplot2grid({nrows, ncols},
-                                                    {r, col});
-                 if (!projection.is_none())
-                     ax->setProjection(
-                         projection.cast<std::string>());
-                 gCurrentAx = ax;
-                 return wrapAxes(f, ax);
+                 return subplotAt(f, nrows, ncols, r, col,
+                                  projection.is_none()
+                                      ? ""
+                                      : projection.cast<std::string>());
              },
              py::arg("nrows"), py::arg("ncols") = py::none(),
              py::arg("index") = py::none(),
@@ -4680,7 +17466,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                      }
                  }
                  py::dict out;
-                 for (auto& [k, v] : f->figure_.subplotMosaic(layout))
+                 for (auto& [k, v] : f->fig().subplotMosaic(layout))
                      out[py::str(k)] = wrapAxes(f, v);
                  return out;
              },
@@ -4698,16 +17484,21 @@ PYBIND11_MODULE(volcanoplot, m) {
                  return wrapAxes(a.owner, t);
              })
         .def("colorbar",
-             [](const py::object& axObj, const std::string& orientation,
+             [](const py::object& mappable, const py::object& axObj,
+                const std::string& orientation,
                 float fraction, float pad, float shrink,
                 const std::string& label) {
                  auto f = gcf();
                  plot::Axes* target = nullptr;
                  if (!axObj.is_none())
                      target = axObj.cast<PyAxes>().ax;
-                 else if (gCurrentAx) target = gCurrentAx;
-                 else if (auto all = f->figure_.allAxes(); !all.empty())
-                     target = all.back();
+                 else if (auto all = f->fig().allAxes();
+                          !all.empty())
+                     target =
+                         std::ranges::find(all, f->currentAx_) !=
+                                 all.end()
+                             ? f->currentAx_
+                             : all.back();
                  if (!target)
                      throw std::invalid_argument(
                          "colorbar: no axes to attach to");
@@ -4718,44 +17509,256 @@ PYBIND11_MODULE(volcanoplot, m) {
                  cb.pad = pad;
                  cb.shrink = shrink;
                  if (!label.empty()) cb.label = label;
+                 if (!mappable.is_none()) {
+                     plot::IPlot* mp = mappableFrom(mappable);
+                     if (!mp)
+                         throw std::invalid_argument(
+                             "colorbar: mappable must be an artist "
+                             "handle (image, collection, ...)");
+                     cb.mappable = mp;
+                 }
                  target->touch();
+                 auto cbh = py::cast(PyColorbar{f, target, mappable});
+                 if (!mappable.is_none() &&
+                     py::hasattr(mappable, "_set_colorbar"))
+                     mappable.attr("_set_colorbar")(cbh);
+                 return cbh;
              },
+             py::arg("mappable") = py::none(),
              py::arg("ax") = py::none(),
              py::arg("orientation") = "vertical",
              py::arg("fraction") = 0.15f, py::arg("pad") = 0.05f,
              py::arg("shrink") = 1.0f, py::arg("label") = "")
-        .def("savefig", [](const std::string& path) {
-                 return gcf()->savefig(path); },
-             py::arg("path"))
+        .def("savefig",
+             [](const std::string& path, const py::object& transparent,
+                const py::object& dpi, const py::object& format,
+                const py::object& metadata, const py::object& bboxInches,
+                float padInches, const py::object& facecolor,
+                const py::object& edgecolor, const py::kwargs& kw) {
+                 auto f = gcf();
+                 auto opts = makeSaveOptions(f->fig(), transparent, dpi,
+                                             format, metadata, bboxInches,
+                                             padInches, facecolor,
+                                             edgecolor, kw);
+                 return f->savefig(path, opts);
+             },
+             py::arg("fname"), py::arg("transparent") = py::none(),
+             py::arg("dpi") = py::none(), py::arg("format") = py::none(),
+             py::arg("metadata") = py::none(),
+             py::arg("bbox_inches") = py::none(),
+             py::arg("pad_inches") = 0.1f,
+             py::arg("facecolor") = py::none(),
+             py::arg("edgecolor") = py::none())
         .def("cla", [] {
-                 gca().ax->plots().clear();
-                 gca().ax->touch();
+                 // mpl plt.cla — Axes.cla(): full axes reset.
+                 gca().ax->clear();
              })
         .def("clf", [] {
-                 // Recreate the figure (Axes pointers dangle).
-                 auto f = std::make_shared<PyFigure>(800, 600, 100.0f);
-                 gCurrentFig = f;
-                 gCurrentAx = nullptr;
+                 // mpl plt.clf: clear the current figure in place —
+                 // it stays registered and keeps its number.
+                 if (gCurrentFig) gCurrentFig->fig().clear();
              })
-        .def("close", [] {
-                 gCurrentFig.reset();
-                 gCurrentAx = nullptr;
+        .def("close",
+             [](const py::object& arg) {
+                 // mpl pyplot.close: None=current, 'all'=all figures,
+                 // int → figure number, str → label, Figure instance.
+                 auto drop = [&](const std::shared_ptr<PyFigure>& f) {
+                     std::erase_if(gFigReg,
+                                   [&](const FigRegEntry& e) {
+                                       return e.fig == f;
+                                   });
+                     if (gCurrentFig == f) gCurrentFig.reset();
+                 };
+                 if (arg.is_none()) {
+                     if (gCurrentFig) drop(gCurrentFig);
+                     return;
+                 }
+                 if (py::isinstance<py::str>(arg)) {
+                     const std::string s = arg.cast<std::string>();
+                     if (s == "all") {
+                         gFigReg.clear();
+                         gCurrentFig.reset();
+                         return;
+                     }
+                     for (auto& e : gFigReg)
+                         if (e.label == s) { drop(e.fig); return; }
+                     return;
+                 }
+                 if (py::isinstance<py::int_>(arg)) {
+                     int n = arg.cast<int>();
+                     for (auto& e : gFigReg)
+                         if (e.num == n) { drop(e.fig); return; }
+                     return;
+                 }
+                 try {
+                     auto f = arg.cast<std::shared_ptr<PyFigure>>();
+                     if (f->root_) f = f->root_;   // SubFigure → parent
+                     drop(f);
+                 } catch (const py::cast_error&) {
+                     // Unsupported target: mpl would raise; we no-op.
+                 }
+             },
+             py::arg("fig") = py::none())
+        .def("fignum_exists",
+             [](int num) {
+                 for (auto& e : gFigReg)
+                     if (e.num == num) return true;
+                 return false;
+             },
+             py::arg("num"))
+        .def("get_fignums",
+             [] {
+                 // mpl returns the numbers sorted ascending.
+                 std::vector<int> nums;
+                 nums.reserve(gFigReg.size());
+                 for (auto& e : gFigReg) nums.push_back(e.num);
+                 std::ranges::sort(nums);
+                 return py::cast(nums);
+             })
+        .def("get_figlabels",
+             [] {
+                 // mpl: the *labels* of managed figures (str num only;
+                 // int-numbered figures have an empty label).
+                 py::list out;
+                 for (auto& e : gFigReg) out.append(e.label);
+                 return out;
+             })
+        .def("axes",
+             [](const py::object& rect, const py::object& projection,
+                bool polar, py::kwargs kw) {
+                 // mpl plt.axes(rect=None|subplot int|SubplotSpec, ...).
+                 auto f = gcf();
+                 PyAxes out;
+                 const PySubplotSpec* ss = nullptr;
+                 try { ss = rect.cast<const PySubplotSpec*>(); }
+                 catch (const py::cast_error&) {}
+                 if (ss) {
+                     // mpl plt.axes(gs[i, j]) — a SubplotSpec arg.
+                     out = wrapAxes(f, f->fig().addAxes(ss->spec));
+                     out.gsKeepAlive = ss->gs;
+                 } else if (rect.is_none()) {
+                     auto* ax = f->fig().allAxes().empty()
+                         ? f->addAxes()
+                         : f->fig().allAxes().back();
+                     out = wrapAxes(f, ax);
+                 } else if (py::isinstance<py::int_>(rect)) {
+                     int code = rect.cast<int>();
+                     uint32_t nrows = uint32_t(code / 100);
+                     uint32_t ncols = uint32_t(code / 10 % 10);
+                     uint32_t index = uint32_t(code % 10);
+                     out = subplotAt(f, nrows, ncols,
+                                     (index - 1) / ncols,
+                                     (index - 1) % ncols, "");
+                 } else {
+                     auto r = rect.cast<std::vector<float>>();
+                     if (r.size() != 4)
+                         throw std::invalid_argument(
+                             "axes() rect must be [left, bottom, w, h]");
+                     out = wrapAxes(f, f->addAxesFraction(
+                                        r[0], r[1], r[2], r[3]));
+                 }
+                 if (polar)
+                     out.ax->setProjection("polar");
+                 if (!projection.is_none())
+                     out.ax->setProjection(
+                         projection.cast<std::string>());
+                 return out;
+             },
+             py::arg("rect") = py::none(), py::arg("projection") = py::none(),
+             py::arg("polar") = false,
+             "mpl plt.axes() — add/activate an axes on the current figure.")
+        .def("delaxes",
+             [](const py::object& axObj) {
+                 // mpl plt.delaxes(ax=None): remove from current figure.
+                 auto f = gcf();
+                 plot::Axes* target = nullptr;
+                 if (axObj.is_none())
+                     target = f->currentAx_ ? f->currentAx_
+                            : (f->fig().allAxes().empty()
+                                   ? nullptr : f->fig().allAxes().back());
+                 else
+                     target = axObj.cast<PyAxes>().ax;
+                 if (target) {
+                     auto removed = f->fig().removeAxes(target);
+                     if (f->currentAx_ == target)
+                         f->currentAx_ = nullptr;
+                 }
+             },
+             py::arg("ax") = py::none())
+        .def("sca",
+             [](PyAxes& a) {
+                 // mpl pyplot.sca — set current figure+axes.
+                 gCurrentFig = a.owner;
+                 a.owner->currentAx_ = a.ax;
+             },
+             py::arg("ax"))
+        .def("draw",
+             [] {
+                 auto f = gcf();
+                 f->renderer()->renderFrame(f->fig());
+             })
+        .def("findobj",
+             [](const py::object& o,
+                const py::object& match) -> py::object {
+                 py::list out;
+                 if (o.is_none()) {
+                     if (gCurrentFig)
+                         return py::cast(gCurrentFig)
+                             .attr("findobj")(match);
+                     return out;
+                 }
+                 return o.attr("findobj")(match);
+             },
+             py::arg("o") = py::none(), py::arg("match") = py::none())
+        .def("figtext",
+             [](float x, float y, const std::string& s,
+                const py::kwargs& kw) {
+                 return py::cast(gcf()).attr("text")(x, y, s,
+                                                     **py::kwargs(kw));
+             },
+             py::arg("x"), py::arg("y"), py::arg("s"))
+        .def("figimage",
+             [](const py::object& X, uint32_t xo, uint32_t yo,
+                const std::string& cmap) {
+                 return py::cast(gcf()).attr("figimage")(
+                     X, py::arg("xo") = xo, py::arg("yo") = yo,
+                     py::arg("cmap") = cmap);
+             },
+             py::arg("X"), py::arg("xo") = 0, py::arg("yo") = 0,
+             py::arg("cmap") = "viridis")
+        .def("sci",
+             [](const py::object& im) {
+                 auto a = gca();
+                 a.owner->currentMappable_[a.ax] = im;
+             },
+             py::arg("im"))
+        .def("gci",
+             [] {
+                 if (!gCurrentFig) return py::object(py::none());
+                 auto a = gca();
+                 auto it = a.owner->currentMappable_.find(a.ax);
+                 return it == a.owner->currentMappable_.end()
+                            ? py::object(py::none()) : it->second;
              })
         // ── Reference lines / layout on the current axes/figure ──
         .def("axhline",
              [](float y, const py::object& color, float lw) {
-                 gca().ax->axhline(
-                     y, lineColor(color, plot::Color::black()), lw);
+                 auto ax = gca();
+                 ax.ax->axhline(
+                     y, lineColor(color, plot::Color::black()),
+                     lw * pt2px(*ax.ax));
              },
              py::arg("y") = 0.0f, py::arg("color") = py::none(),
-             py::arg("linewidth") = 1.0f)
+             py::arg("linewidth") = 1.5f)
         .def("axvline",
              [](float x, const py::object& color, float lw) {
-                 gca().ax->axvline(
-                     x, lineColor(color, plot::Color::black()), lw);
+                 auto ax = gca();
+                 ax.ax->axvline(
+                     x, lineColor(color, plot::Color::black()),
+                     lw * pt2px(*ax.ax));
              },
              py::arg("x") = 0.0f, py::arg("color") = py::none(),
-             py::arg("linewidth") = 1.0f)
+             py::arg("linewidth") = 1.5f)
         .def("axhspan",
              [](float ymin, float ymax, const py::object& color) {
                  gca().ax->axhspan(
@@ -4777,34 +17780,38 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("hlines",
              [](const py::object& y, float xmin, float xmax,
                 const py::object& color, float lw) {
-                 gca().ax->hlines(
+                 auto ax = gca();
+                 ax.ax->hlines(
                      toFloatList(y), xmin, xmax,
-                     lineColor(color, plot::Color::black()), lw);
+                     lineColor(color, plot::Color::black()),
+                     lw * pt2px(*ax.ax));
              },
              py::arg("y"), py::arg("xmin"), py::arg("xmax"),
-             py::arg("color") = py::none(), py::arg("linewidth") = 1.0f)
+             py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
         .def("vlines",
              [](const py::object& x, float ymin, float ymax,
                 const py::object& color, float lw) {
-                 gca().ax->vlines(
+                 auto ax = gca();
+                 ax.ax->vlines(
                      toFloatList(x), ymin, ymax,
-                     lineColor(color, plot::Color::black()), lw);
+                     lineColor(color, plot::Color::black()),
+                     lw * pt2px(*ax.ax));
              },
              py::arg("x"), py::arg("ymin"), py::arg("ymax"),
-             py::arg("color") = py::none(), py::arg("linewidth") = 1.0f)
+             py::arg("color") = py::none(), py::arg("linewidth") = 1.5f)
         .def("tight_layout", [] {
-                 gcf()->figure_.setTightLayout(true); })
+                 gcf()->fig().setTightLayout(true); })
         .def("subplots_adjust",
              [](float left, float bottom, float right, float top,
                 float wspace, float hspace) {
-                 gcf()->figure_.subplotsAdjust(left, bottom, right, top,
+                 gcf()->fig().subplotsAdjust(left, bottom, right, top,
                                                wspace, hspace);
              },
              py::arg("left") = 0.125f, py::arg("bottom") = 0.11f,
              py::arg("right") = 0.9f, py::arg("top") = 0.88f,
              py::arg("wspace") = 0.2f, py::arg("hspace") = 0.2f)
         .def("figlegend",
-             [](std::string loc) { gcf()->figure_.legend(loc); },
+             [](std::string loc) { gcf()->fig().legend(loc); },
              py::arg("loc") = "upper right")
         // ── rc configuration (mpl matplotlib.rc / rcParams) ──
         .def("rc",
@@ -4837,7 +17844,271 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("show", [] {
                  // Headless backend: nothing to display — savefig is the
                  // output path (mirrors mpl's Agg backend behavior).
-             });
+             })
+        // ── mpl interactive-mode + event-connection state ──
+        .def("ion", [] { gInteractive = true; },
+             "mpl plt.ion() — enable interactive mode.")
+        .def("ioff", [] { gInteractive = false; },
+             "mpl plt.ioff() — disable interactive mode.")
+        .def("isinteractive", [] { return gInteractive; },
+             "mpl plt.isinteractive().")
+        .def("install_repl_displayhook", [] { gInteractive = true; },
+             "mpl plt.install_repl_displayhook() — implies ion().")
+        .def("uninstall_repl_displayhook", [] {},
+             "mpl plt.uninstall_repl_displayhook().")
+        .def("pause", [](double) {},
+             "mpl plt.pause(interval) — no-op on the headless backend.",
+             py::arg("interval"))
+        .def("connect",
+             [](const std::string& s, const py::object& func) {
+                 // mpl mpl_connect(s, func) → cid. The headless backend
+                 // has no event loop, but callbacks are registered and
+                 // disconnectable exactly as in matplotlib.
+                 const int cid = gNextCid++;
+                 gEventCallbacks[cid] = {s, func};
+                 return cid;
+             },
+             py::arg("s"), py::arg("func"),
+             "mpl plt.connect(s, func) → callback id.")
+        .def("disconnect",
+             [](int cid) {
+                 // mpl mpl_disconnect(cid) — unknown cid is a no-op
+                 // (mpl deletes from a dict; raises only via its
+                 // own bookkeeping).
+                 gEventCallbacks.erase(cid);
+             },
+             py::arg("cid"), "mpl plt.disconnect(cid).")
+        .def("get_backend", [] { return gBackend; },
+             "mpl matplotlib.get_backend().")
+        .def("switch_backend",
+             [](const std::string& bk) {
+                 // Only 'headless' is implemented; mpl raises for an
+                 // unknown backend, we do the same.
+                 if (bk != "headless" && bk != "agg" && bk != "Agg")
+                     throw std::invalid_argument(
+                         std::format("switch_backend: unknown backend '{}'",
+                                     bk));
+                 gBackend = bk;
+             },
+             py::arg("newbackend"))
+        // mpl plt.clim — operate on the current scalar-mappable
+        // (gci()), falling back to the last image on gca().
+        .def("clim",
+             [](const py::object& vmin, const py::object& vmax) {
+                 return py::cast(gca()).attr("clim")(vmin, vmax);
+             },
+             py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+             "mpl plt.clim(vmin, vmax).")
+        .def("subplot2grid",
+             [](std::pair<uint32_t, uint32_t> shape,
+                std::pair<uint32_t, uint32_t> loc, uint32_t rowspan,
+                uint32_t colspan) {
+                 return py::cast(gcf()).attr("subplot2grid")(
+                     shape, loc, py::arg("rowspan") = rowspan,
+                     py::arg("colspan") = colspan);
+             },
+             py::arg("shape"), py::arg("loc"), py::arg("rowspan") = 1,
+             py::arg("colspan") = 1,
+             "mpl plt.subplot2grid(shape, loc, rowspan, colspan).")
+        // mpl plt.polar — ensure a polar axes then plot.
+        .def("polar",
+             [](py::args args, py::kwargs kw) {
+                 auto f = gcf();
+                 PyAxes a;
+                 if (f->fig().allAxes().empty() || !f->currentAx_) {
+                     a = subplotAt(f, 1, 1, 0, 0, "polar");
+                 } else {
+                     a = {f, f->currentAx_};
+                     if (a.ax->projection().kind !=
+                         plot::ProjectionKind::Polar)
+                         a.ax->setProjection("polar");
+                 }
+                 return py::cast(a).attr("plot")(*args, **kw);
+             })
+        // mpl plt.box(on=None) — toggle the axes frame.
+        .def("box",
+             [](const py::object& on) {
+                 auto a = gca();
+                 a.ax->setFrameOn(on.is_none() ? !a.ax->frameOn()
+                                               : on.cast<bool>());
+             },
+             py::arg("on") = py::none())
+        // mpl plt.set_cmap / named colormap shortcuts (plt.viridis() …).
+        .def("set_cmap",
+             [](const std::string& name) {
+                 gRcParams->set("image.cmap", py::str(name));
+             },
+             py::arg("cmap"))
+        // mpl plt.figaspect — compute figsize honoring an aspect ratio
+        // (scalar = height/width; array → rows/cols).
+        .def("figaspect",
+             [](const py::object& arg) {
+                 float ratio;
+                 if (py::isinstance<py::float_>(arg) ||
+                     py::isinstance<py::int_>(arg))
+                     ratio = arg.cast<float>();
+                 else {
+                     auto arr = py::cast<py::array>(arg);
+                     ratio = float(arr.shape(0)) / float(arr.shape(1));
+                 }
+                 // mpl: height from rc figure.figsize[1], width follows
+                 // the ratio; scale so neither drops below (4,2) nor
+                 // exceeds (16,16), then hard-clip.
+                 float h = 4.8f;   // mpl default figure.figsize[1]
+                 float w = h / ratio;
+                 if (float s = std::min(w / 4.0f, h / 2.0f); s < 1.0f) {
+                     w /= s;
+                     h /= s;
+                 }
+                 if (float s = std::max(w / 16.0f, h / 16.0f); s > 1.0f) {
+                     w /= s;
+                     h /= s;
+                 }
+                 w = std::clamp(w, 4.0f, 16.0f);
+                 h = std::clamp(h, 2.0f, 16.0f);
+                 return py::make_tuple(w, h);
+             },
+             py::arg("arg"))
+        .def("get_scale_names",
+             [] {
+                 return py::cast(std::vector<std::string>{
+                     "linear", "log", "symlog", "logit", "function",
+                     "functionlog"});
+             })
+        .def("draw_if_interactive", [] {})
+        .def("draw_all", [] {})
+        .def("get_current_fig_manager",
+             [] { return py::cast(gcf()); })
+        .def("waitforbuttonpress", [](double) { return false; },
+             py::arg("timeout") = -1.0);
+
+    // mpl pyplot: most pyplot functions are thin wrappers that call the
+    // same-named method on the current Axes (gca()).
+    static const char* const kAxesForwards[] = {
+        "acorr", "angle_spectrum", "annotate", "arrow", "autoscale",
+        "axline", "bar", "bar_label", "barbs", "barh", "boxplot",
+        "broken_barh", "clabel", "cohere", "contour", "contourf", "csd",
+        "ecdf", "errorbar", "eventplot", "fill", "fill_between",
+        "fill_betweenx", "hexbin", "hist", "hist2d", "imshow",
+        "locator_params", "loglog", "magnitude_spectrum", "margins",
+        "matshow", "pcolor", "pcolormesh", "phase_spectrum", "pie",
+        "plot_date", "psd", "quiver", "quiverkey", "rgrids",
+        "semilogx", "semilogy", "set_rgrids", "set_thetagrids",
+        "specgram", "spy", "stackplot", "stairs", "stem", "step",
+        "streamplot", "table", "thetagrids", "tricontour", "tricontourf",
+        "tripcolor", "triplot", "violinplot", "xcorr",
+    };
+    for (const char* name : kAxesForwards)
+        m.def(name,
+              [n = std::string(name)](py::args args, py::kwargs kw) {
+                  return py::cast(gca()).attr(n.c_str())(*args, **kw);
+              });
+
+    // mpl matplotlib.tri also re-exports the tri* plotting functions.
+    for (const char* name :
+         {"triplot", "tripcolor", "tricontour", "tricontourf"})
+        triMod.attr(name) = m.attr(name);
+
+    // mpl plt.<cmap>() shortcuts — plt.viridis() etc. set the default
+    // colormap (set_cmap).
+    for (const char* cmapName :
+         {"autumn", "bone", "cool", "copper", "flag", "gray", "hot",
+          "hsv", "inferno", "jet", "magma", "nipy_spectral", "pink",
+          "plasma", "prism", "spring", "summer", "viridis", "winter"})
+        m.def(cmapName,
+              [n = std::string(cmapName)] {
+                  gRcParams->set("image.cmap", py::str(n));
+              });
+    m.def("setp",
+          [](py::object obj, py::args args, py::kwargs kw) {
+              std::vector<py::object> targets;
+              if (py::isinstance<py::list>(obj) ||
+                  py::isinstance<py::tuple>(obj) ||
+                  py::isinstance<py::set>(obj)) {
+                  for (auto o : obj)
+                      targets.push_back(
+                          py::reinterpret_borrow<py::object>(o));
+              } else {
+                  targets.push_back(obj);
+              }
+              auto setProp = [](py::object& t, const std::string& name,
+                                py::object v) {
+                  std::string setter = "set_" + name;
+                  if (py::hasattr(t, setter.c_str())) {
+                      t.attr(setter.c_str())(v);
+                  } else if (py::hasattr(t, "set")) {
+                      py::dict d;
+                      d[py::str(name)] = v;
+                      PyObject_Call(t.attr("set").ptr(),
+                                    py::tuple().ptr(), d.ptr());
+                  } else {
+                      throw py::attribute_error(
+                          "object has no property '" + name + "'");
+                  }
+              };
+              py::list out;
+              size_t i = 0;
+              while (i < args.size()) {
+                  std::string name = args[i].cast<std::string>();
+                  if (i + 1 < args.size()) {
+                      for (auto& t : targets)
+                          setProp(t, name,
+                                  py::reinterpret_borrow<py::object>(
+                                      args[i + 1]));
+                      i += 2;
+                  } else {
+                      // mpl query form: setp(obj, 'prop') → get value.
+                      std::string getter = "get_" + name;
+                      for (auto& t : targets) {
+                          if (py::hasattr(t, getter.c_str()))
+                              out.append(t.attr(getter.c_str())());
+                          else if (py::hasattr(t, name.c_str()))
+                              out.append(t.attr(name.c_str())());
+                          else
+                              throw py::attribute_error(
+                                  "object has no property '" + name +
+                                  "'");
+                      }
+                      ++i;
+                  }
+              }
+              for (auto [k, v] : kw)
+                  for (auto& t : targets)
+                      setProp(t, k.cast<std::string>(),
+                              py::reinterpret_borrow<py::object>(v));
+              return out;
+          })
+        .def("getp",
+          [](py::object obj, const py::object& prop) -> py::object {
+              if (prop.is_none()) return py::list();
+              auto name = prop.cast<std::string>();
+              std::string getter = "get_" + name;
+              if (py::hasattr(obj, getter.c_str()))
+                  return py::reinterpret_steal<py::object>(
+                      PyObject_CallNoArgs(
+                          obj.attr(getter.c_str()).ptr()));
+              if (py::hasattr(obj, name.c_str()))
+                  return py::reinterpret_steal<py::object>(
+                      PyObject_CallNoArgs(obj.attr(name.c_str()).ptr()));
+              throw py::attribute_error(
+                  "object has no property '" + name + "'");
+          },
+          py::arg("obj"), py::arg("prop") = py::none())
+        // mpl plt.xkcd(scale, length, randomness) — context manager
+        // applying the xkcd style for the `with` block.
+        .def("xkcd",
+          [](float scale, float length, float randomness) {
+              // mpl plt.xkcd: rc_context with the xkcd style plus
+              // path.sketch = (scale, length, randomness).
+              auto ctx = plot::style::context("xkcd");
+              auto& p = plot::rc::params();
+              p.sketchScale = scale;
+              p.sketchLength = length;
+              p.sketchRandomness = randomness;
+              return std::make_shared<PyStyleContext>(std::move(ctx));
+          },
+          py::arg("scale") = 1.0f, py::arg("length") = 100.0f,
+          py::arg("randomness") = 2.0f);
 
     py::class_<PyRcParams, std::shared_ptr<PyRcParams>>(m, "RcParams")
         .def("__setitem__", &PyRcParams::set)
@@ -4846,12 +18117,617 @@ PYBIND11_MODULE(volcanoplot, m) {
         .def("keys", &PyRcParams::keys);
     m.attr("rcParams") = gRcParams;
 
+    // ── Generic mpl Artist surface ────────────────────────────────
+    // Fill in the shared Artist methods on every artist handle class.
+    // defArtistAPI only registers names the class doesn't already
+    // define, so the native implementations above always win.
+    defArtistAPI<PyFigure>(m.attr("Figure"));
+    defArtistAPI<PyAxes>(m.attr("Axes"));
+    defArtistAPI<PyLine2D>(m.attr("Line2D"));
+    defArtistAPI<PyCollection>(m.attr("PathCollection"));
+    defArtistAPI<PyColl>(m.attr("Collection"));
+    defArtistAPI<PyImage>(m.attr("AxesImage"));
+    defArtistAPI<PyText>(m.attr("Text"));
+    defArtistAPI<PyTitle>(m.attr("TitleText"));
+    defArtistAPI<PyAnnotation>(m.attr("Annotation"));
+    defArtistAPI<PyPatch>(m.attr("Patch"));
+    defArtistAPI<PyLegend>(m.attr("Legend"));
+    defArtistAPI<PyTable>(m.attr("Table"));
+    defArtistAPI<PyQuiver>(m.attr("Quiver"));
+    defArtistAPI<PyArtist>(m.attr("Artist"));
+    defArtistAPI<PyContourSet>(m.attr("ContourSet"));
+    defArtistAPI<PyAxis>(m.attr("Axis"));
+    defArtistAPI<PyTick>(m.attr("Tick"));
+    defArtistAPI<PyTickLabel>(m.attr("TickLabel"));
+    defArtistAPI<PyTickLine>(m.attr("TickLine"));
+    defArtistAPI<PySpine>(m.attr("Spine"));
+    defArtistAPI<PyBarContainer>(m.attr("BarContainer"));
+    defArtistAPI<PyErrorbarContainer>(m.attr("ErrorbarContainer"));
+    defArtistAPI<PyStemContainer>(m.attr("StemContainer"));
+    defArtistAPI<PyEventCollection>(m.attr("EventCollection"));
+    defArtistAPI<PyQuadMesh>(m.attr("QuadMesh"));
+    defArtistAPI<PyInsetIndicator>(m.attr("InsetIndicator"));
+    defArtistAPI<PyColorbar>(m.attr("Colorbar"));
+
+    // mpl offsetbox artists are full Artists too.
+    {
+        auto ob = m.attr("offsetbox");
+        defArtistAPI<PyTextArea>(ob.attr("TextArea"));
+        defArtistAPI<PyDrawingArea>(ob.attr("DrawingArea"));
+        defArtistAPI<PyPacker>(ob.attr("PackerBase"));
+        defArtistAPI<PyHPacker>(ob.attr("HPacker"));
+        defArtistAPI<PyVPacker>(ob.attr("VPacker"));
+        defArtistAPI<PyAnchoredOffsetbox>(
+            ob.attr("AnchoredOffsetbox"));
+        defArtistAPI<PyAnchoredText>(ob.attr("AnchoredText"));
+        defArtistAPI<PyAnchoredSizeBar>(ob.attr("AnchoredSizeBar"));
+    }
+
+    // ── mpl ScalarMappable / Collection / AxesImage extras ───────
+    defMappableAPI<PyCollection>(m.attr("PathCollection"));
+    defMappableAPI<PyColl>(m.attr("Collection"));
+    defMappableAPI<PyImage>(m.attr("AxesImage"));
+    defMappableAPI<PyContourSet>(m.attr("ContourSet"));
+    defMappableAPI<PyQuadMesh>(m.attr("QuadMesh"));
+    defCollectionAPI<PyColl>(m.attr("Collection"));
+    defCollectionAPI<PyCollection>(m.attr("PathCollection"));
+    defAxesImageAPI(m.attr("AxesImage"));
+
+    // Release globals holding py::objects while the interpreter is
+    // still alive — static C++ destructors would otherwise decref
+    // after Py_Finalize and segfault at exit.
+    py::module_::import("atexit").attr("register")(
+        py::cpp_function([] {
+            gEventCallbacks.clear();
+            gFigReg.clear();
+            gCurrentFig.reset();
+            gRcParams->clear();
+        }));
+
     py::class_<PyStyleContext, std::shared_ptr<PyStyleContext>>(
         m, "RcContext")
         .def("__enter__", &PyStyleContext::enter)
         .def("__exit__", &PyStyleContext::exit);
 
     // plt.style submodule: use / available / context
+    // ── vp.font_manager (matplotlib.font_manager) ──
+    auto fmMod = m.def_submodule("font_manager");
+    {
+        py::class_<PyFontEntry>(fmMod, "FontEntry")
+            .def(py::init([](const std::string& fname,
+                             const std::string& name,
+                             const std::string& style,
+                             const std::string& variant,
+                             const std::string& weight,
+                             const std::string& stretch,
+                             const std::string& size) {
+                     auto e = std::make_unique<PyFontEntry>();
+                     e->fname = fname; e->name = name;
+                     e->style = style; e->variant = variant;
+                     e->weight = weight; e->stretch = stretch;
+                     e->size = size;
+                     return e;
+                 }),
+                 py::arg("fname") = "", py::arg("name") = "",
+                 py::arg("style") = "normal",
+                 py::arg("variant") = "normal",
+                 py::arg("weight") = "normal",
+                 py::arg("stretch") = "normal",
+                 py::arg("size") = "scalable")
+            .def_readwrite("fname", &PyFontEntry::fname)
+            .def_readwrite("name", &PyFontEntry::name)
+            .def_readwrite("style", &PyFontEntry::style)
+            .def_readwrite("variant", &PyFontEntry::variant)
+            .def_readwrite("weight", &PyFontEntry::weight)
+            .def_readwrite("stretch", &PyFontEntry::stretch)
+            .def_readwrite("size", &PyFontEntry::size)
+            .def("__repr__", [](const PyFontEntry& e) {
+                return std::format(
+                    "<FontEntry '{}' name='{}' style='{}'>",
+                    e.fname, e.name, e.style);
+            });
+
+        // mpl FontProperties — full field set.
+        py::class_<PyFontProps>(fmMod, "FontProperties")
+            .def(py::init([](const py::object& family,
+                             const py::object& style,
+                             const py::object& variant,
+                             const py::object& weight,
+                             const py::object& stretch,
+                             const py::object& size,
+                             const py::object& fname,
+                             const py::object& file,
+                             const py::object& mathFontfamily) {
+                     auto p = std::make_unique<PyFontProps>();
+                     // mpl: a lone positional string is a fontconfig
+                     // pattern ('DejaVu Sans:style=italic:size=9').
+                     if (py::isinstance<py::str>(family) &&
+                         style.is_none() && variant.is_none() &&
+                         weight.is_none() && stretch.is_none() &&
+                         size.is_none() && fname.is_none() &&
+                         file.is_none()) {
+                         applyFontconfigPattern(
+                             *p, family.cast<std::string>());
+                         return p;
+                     }
+                     if (!family.is_none()) {
+                         if (py::isinstance<py::str>(family))
+                             p->family = {family.cast<std::string>()};
+                         else
+                             p->family =
+                                 family.cast<std::vector<std::string>>();
+                     }
+                     if (!style.is_none())
+                         p->style = style.cast<std::string>();
+                     if (!variant.is_none()) {
+                         auto v = variant.cast<std::string>();
+                         if (v != "normal" && v != "small-caps")
+                             throw py::value_error(
+                                 "variant must be 'normal' or "
+                                 "'small-caps'");
+                         p->variant = v;
+                     }
+                     p->weight = normWeight(weight);
+                     p->stretch = normStretch(stretch);
+                     if (!size.is_none()) p->size = normSize(size);
+                     if (!fname.is_none())
+                         p->file = fname.cast<std::string>();
+                     if (!file.is_none())
+                         p->file = file.cast<std::string>();
+                     if (!mathFontfamily.is_none())
+                         p->mathFontfamily =
+                             mathFontfamily.cast<std::string>();
+                     return p;
+                 }),
+                 py::arg("family") = py::none(),
+                 py::arg("style") = py::none(),
+                 py::arg("variant") = py::none(),
+                 py::arg("weight") = py::none(),
+                 py::arg("stretch") = py::none(),
+                 py::arg("size") = py::none(),
+                 py::arg("fname") = py::none(),
+                 py::arg("file") = py::none(),
+                 py::arg("math_fontfamily") = py::none())
+            .def("get_family",
+                 [](const PyFontProps& p) { return p.family; })
+            .def("set_family",
+                 [](PyFontProps& p, const py::object& f) {
+                     if (f.is_none()) p.family = {"sans-serif"};
+                     else if (py::isinstance<py::str>(f))
+                         p.family = {f.cast<std::string>()};
+                     else
+                         p.family =
+                             f.cast<std::vector<std::string>>();
+                 })
+            .def("set_name",
+                 [](PyFontProps& p, const std::string& f) {
+                     p.family = {f};
+                 })
+            .def("get_style", [](const PyFontProps& p) { return p.style; })
+            .def("set_style",
+                 [](PyFontProps& p, const py::object& s) {
+                     auto v = s.is_none() ? "normal"
+                                          : s.cast<std::string>();
+                     if (v != "normal" && v != "italic" &&
+                         v != "oblique")
+                         throw py::value_error(
+                             "style must be 'normal', 'italic', or "
+                             "'oblique'");
+                     p.style = v;
+                 })
+            .def("get_slant", [](const PyFontProps& p) { return p.style; })
+            .def("set_slant",
+                 [](PyFontProps& p, const std::string& s) {
+                     p.style = s;
+                 })
+            .def("get_variant",
+                 [](const PyFontProps& p) { return p.variant; })
+            .def("set_variant",
+                 [](PyFontProps& p, const py::object& v) {
+                     auto s = v.is_none() ? "normal"
+                                          : v.cast<std::string>();
+                     if (s != "normal" && s != "small-caps")
+                         throw py::value_error(
+                             "variant must be 'normal' or 'small-caps'");
+                     p.variant = s;
+                 })
+            .def("get_weight",
+                 [](const PyFontProps& p) { return p.weight; })
+            .def("set_weight",
+                 [](PyFontProps& p, const py::object& w) {
+                     p.weight = normWeight(w);
+                 })
+            .def("get_stretch",
+                 [](const PyFontProps& p) { return p.stretch; })
+            .def("set_stretch",
+                 [](PyFontProps& p, const py::object& s) {
+                     p.stretch = normStretch(s);
+                 })
+            .def("get_size", [](const PyFontProps& p) { return p.size; })
+            .def("get_size_in_points",
+                 [](const PyFontProps& p) { return p.size; })
+            .def("set_size",
+                 [](PyFontProps& p, const py::object& s) {
+                     p.size = normSize(s);
+                 })
+            .def("get_file", [](const PyFontProps& p) { return p.file; })
+            .def("set_file",
+                 [](PyFontProps& p, const std::string& f) {
+                     p.file = f;
+                 })
+            .def("get_math_fontfamily",
+                 [](const PyFontProps& p) { return p.mathFontfamily; })
+            .def("set_math_fontfamily",
+                 [](PyFontProps& p, const std::string& f) {
+                     p.mathFontfamily = f;
+                 })
+            .def("get_name",
+                 [](const PyFontProps& p) {
+                     // mpl: get_font(findfont(self)).family_name —
+                     // the resolved font's name.
+                     if (auto* e = findFontEntry(p)) return e->name;
+                     if (auto* e = defaultFontEntry()) return e->name;
+                     return p.family.empty() ? std::string("sans-serif")
+                                             : p.family.front();
+                 })
+            .def("get_fontconfig_pattern",
+                 [](const PyFontProps& p) {
+                     return generateFontconfigPattern(p);
+                 })
+            .def("set_fontconfig_pattern",
+                 [](PyFontProps& p, const std::string& pat) {
+                     applyFontconfigPattern(p, pat);
+                 },
+                 py::arg("pattern"))
+            .def("copy", [](const PyFontProps& p) { return p; })
+            .def("__repr__",
+                 [](const PyFontProps& p) {
+                     return std::format(
+                         "<FontProperties family={} style={} size={}>",
+                         p.family.empty() ? "sans-serif"
+                                          : p.family.front(),
+                         p.style, p.size);
+                 })
+            .def("__str__",
+                 [](const PyFontProps& p) {
+                     return generateFontconfigPattern(p);
+                 })
+            .def("__hash__",
+                 [](const PyFontProps& p) {
+                     size_t h = 0;
+                     auto mix = [&h](size_t v) {
+                         h ^= v + 0x9e3779b9 + (h << 6) + (h >> 2);
+                     };
+                     for (auto& f : p.family)
+                         mix(std::hash<std::string>{}(f));
+                     mix(std::hash<std::string>{}(p.style));
+                     mix(std::hash<std::string>{}(p.variant));
+                     mix(std::hash<std::string>{}(
+                         py::str(p.weight).cast<std::string>()));
+                     mix(std::hash<std::string>{}(
+                         py::str(p.stretch).cast<std::string>()));
+                     mix(std::hash<float>{}(p.size));
+                     mix(std::hash<std::string>{}(p.file));
+                     mix(std::hash<std::string>{}(p.mathFontfamily));
+                     return static_cast<py::ssize_t>(h);
+                 })
+            .def("__eq__",
+                 [](const PyFontProps& a, const PyFontProps& b) {
+                     auto pyStr = [](const py::object& o) {
+                         return py::str(o).cast<std::string>();
+                     };
+                     return a.family == b.family && a.style == b.style &&
+                            a.variant == b.variant &&
+                            pyStr(a.weight) == pyStr(b.weight) &&
+                            pyStr(a.stretch) == pyStr(b.stretch) &&
+                            a.size == b.size && a.file == b.file &&
+                            a.mathFontfamily == b.mathFontfamily;
+                 });
+
+        // mpl font_manager JSON helpers (a FontProperties as a dict).
+        fmMod.def("json_dump",
+                  [](const PyFontProps& p) {
+                      py::dict d;
+                      d["family"] = p.family;
+                      d["style"] = p.style;
+                      d["variant"] = p.variant;
+                      d["weight"] = p.weight;
+                      d["stretch"] = p.stretch;
+                      d["size"] = p.size;
+                      d["file"] = p.file;
+                      return std::string(py::str(
+                          py::module_::import("json").attr("dumps")(
+                              py::dict(d))));
+                  },
+                  py::arg("fontprops"));
+
+        // ── mpl FontManager ──
+        auto fontManager = std::make_shared<PyFontManager>();
+        fontManager->ttflist = scanSystemFonts();
+        theFontManager() = fontManager;
+
+        py::class_<PyFontManager, std::shared_ptr<PyFontManager>>
+            fmCls(fmMod, "FontManager");
+        fmCls
+            .def(py::init([](const py::object& size,
+                             const std::string& weight) {
+                     // mpl FontManager(size=None, weight='normal').
+                     auto m = std::make_shared<PyFontManager>();
+                     m->ttflist = scanSystemFonts();
+                     if (!size.is_none())
+                         m->defaultSize = normSize(size);
+                     m->defaultWeight = weight;
+                     return m;
+                 }),
+                 py::arg("size") = py::none(),
+                 py::arg("weight") = "normal")
+            .def_property_readonly(
+                "ttflist",
+                [](const PyFontManager& m) {
+                    py::list l;
+                    for (const auto& e : m.ttflist) l.append(e);
+                    return l;
+                })
+            .def_property_readonly(
+                "afmlist",
+                [](const PyFontManager& m) {
+                    py::list l;
+                    for (const auto& e : m.afmlist) l.append(e);
+                    return l;
+                })
+            .def_property_readonly(
+                "defaultFamily",
+                [](const PyFontManager& m) { return m.defaultFamily; })
+            .def_property_readonly(
+                "defaultFont",
+                [](const PyFontManager& m) {
+                    // mpl: defaultFont[ext] = best default face.
+                    py::dict d;
+                    const PyFontEntry* def = nullptr;
+                    for (const auto& e : m.ttflist) {
+                        if (normFontName(e.name) == "dejavusans" &&
+                            e.style == "normal" &&
+                            e.weight == "normal") {
+                            def = &e;
+                            break;
+                        }
+                    }
+                    if (!def && !m.ttflist.empty())
+                        def = &m.ttflist.front();
+                    if (def) d["ttf"] = def->fname;
+                    return d;
+                })
+            .def("get_default_size",
+                 [](const PyFontManager& m) { return m.defaultSize; })
+            .def("set_default_size",
+                 [](PyFontManager& m, float s) { m.defaultSize = s; })
+            .def("get_default_weight",
+                 [](const PyFontManager& m) { return m.defaultWeight; })
+            .def("set_default_weight",
+                 [](PyFontManager& m, const std::string& w) {
+                     m.defaultWeight = w;
+                 })
+            .def("get_font_names",
+                 [](const PyFontManager& m) {
+                     std::set<std::string> names;
+                     for (const auto& e : m.ttflist)
+                         names.insert(e.name);
+                     for (const auto& e : m.afmlist)
+                         names.insert(e.name);
+                     return std::vector<std::string>(names.begin(),
+                                                     names.end());
+                 })
+            .def("addfont",
+                 [](PyFontManager& m, const std::string& path) {
+                     if (!std::filesystem::exists(path))
+                         throw std::invalid_argument(
+                             "addfont: no such font file");
+                     PyFontEntry fe;
+                     fe.fname = path;
+                     fe.name = std::filesystem::path(path).stem().string();
+                     m.ttflist.push_back(std::move(fe));
+                 })
+            .def("findfont",
+                 [](const PyFontManager&, const py::object& prop,
+                    const py::object& fontext,
+                    const py::object& directory,
+                    bool fallback_to_default, bool rebuild_if_missing) {
+                     (void)fontext; (void)directory;
+                     (void)rebuild_if_missing;
+                     return findFontPath(fontPropsFromAny(prop),
+                                         fallback_to_default);
+                 },
+                 py::arg("prop"), py::arg("fontext") = "ttf",
+                 py::arg("directory") = py::none(),
+                 py::arg("fallback_to_default") = true,
+                 py::arg("rebuild_if_missing") = true);
+        fmMod.attr("fontManager") = py::cast(fontManager);
+
+        // mpl findSystemFonts(fontpaths=None, fontext='ttf').
+        fmMod.def("findSystemFonts",
+                  [](const py::object& fontpaths,
+                     const std::string& fontext) {
+                      (void)fontext;
+                      std::vector<PyFontEntry> entries;
+                      if (fontpaths.is_none()) {
+                          entries = scanSystemFonts();
+                      } else {
+                          for (auto h : py::cast<py::list>(fontpaths)) {
+                              std::filesystem::path d =
+                                  py::cast<std::string>(h);
+                              if (!std::filesystem::exists(d)) continue;
+                              for (auto& e :
+                                   std::filesystem::
+                                       recursive_directory_iterator(d)) {
+                                  if (!e.is_regular_file()) continue;
+                                  auto ext =
+                                      e.path().extension().string();
+                                  std::transform(ext.begin(), ext.end(),
+                                                 ext.begin(), ::tolower);
+                                  if (ext == ".ttf" || ext == ".otf") {
+                                      PyFontEntry fe;
+                                      fe.fname = e.path().string();
+                                      entries.push_back(fe);
+                                  }
+                              }
+                          }
+                      }
+                      py::list out;
+                      for (const auto& e : entries) out.append(e.fname);
+                      return out;
+                  },
+                  py::arg("fontpaths") = py::none(),
+                  py::arg("fontext") = "ttf");
+        // mpl module-level findfont(prop) delegates to fontManager.
+        fmMod.def("findfont",
+                  [](const py::object& prop,
+                     const py::object& fontext,
+                     const py::object& directory,
+                     bool fallback_to_default,
+                     bool rebuild_if_missing) {
+                      (void)fontext; (void)directory;
+                      (void)rebuild_if_missing;
+                      return findFontPath(fontPropsFromAny(prop),
+                                          fallback_to_default);
+                  },
+                  py::arg("prop"), py::arg("fontext") = "ttf",
+                  py::arg("directory") = py::none(),
+                  py::arg("fallback_to_default") = true,
+                  py::arg("rebuild_if_missing") = true);
+    }
+
+    // ── vp.image (matplotlib.image) ──
+    auto imageMod = m.def_submodule("image");
+    {
+        // mpl image.imread — decode PNG/WebP to float32 RGBA [0,1].
+        auto imread = [](const py::object& src,
+                         const py::object& format) {
+            (void)format;  // auto-detected from magic bytes
+            std::optional<encode::DecodedImage> im;
+            if (py::isinstance<py::bytes>(src)) {
+                std::string b = src.cast<std::string>();
+                im = encode::decodeImage(
+                    {reinterpret_cast<const uint8_t*>(b.data()),
+                     b.size()});
+            } else if (py::isinstance<py::str>(src)) {
+                im = encode::imread(src.cast<std::string>());
+            } else if (py::hasattr(src, "read")) {
+                std::string b =
+                    py::bytes(src.attr("read")()).cast<std::string>();
+                im = encode::decodeImage(
+                    {reinterpret_cast<const uint8_t*>(b.data()),
+                     b.size()});
+            } else {
+                throw py::type_error(
+                    "imread expects a path, bytes, or file-like");
+            }
+            if (!im)
+                throw std::runtime_error("imread: decode failed "
+                                         "(unsupported or invalid image)");
+            // mpl returns float32 in [0,1], shape (H,W,4).
+            py::array_t<float> out(
+                {py::ssize_t(im->height), py::ssize_t(im->width),
+                 py::ssize_t(4)});
+            auto r = out.mutable_unchecked<3>();
+            for (uint32_t j = 0; j < im->height; ++j)
+                for (uint32_t i = 0; i < im->width; ++i)
+                    for (int c = 0; c < 4; ++c)
+                        r(j, i, c) =
+                            im->rgba[(size_t(j) * im->width + i) * 4 + c]
+                            / 255.0f;
+            return out;
+        };
+        // mpl image.imsave — encode an array to PNG/WebP.
+        auto imsave = [](const py::object& fname, const py::object& arr,
+                         const py::object& vmin, const py::object& vmax,
+                         const py::object& cmap, const py::object& format,
+                         const std::string& origin, float dpi,
+                         const py::object& metadata) {
+            std::string path = fname.cast<std::string>();
+            std::string fmt = format.is_none()
+                                  ? std::filesystem::path(path)
+                                        .extension().string()
+                                  : format.cast<std::string>();
+            if (!fmt.empty() && fmt[0] == '.') fmt = fmt.substr(1);
+            static const std::map<std::string, encode::ImageFormat>
+                fmts = {{"png", encode::ImageFormat::Png},
+                        {"webp", encode::ImageFormat::Webp},
+                        {"bmp", encode::ImageFormat::Bmp},
+                        {"raw", encode::ImageFormat::Raw},
+                        {"rgba", encode::ImageFormat::Raw}};
+            auto it = fmts.find(fmt);
+            if (it == fmts.end())
+                throw py::value_error(std::format(
+                    "imsave: unsupported format '{}'", fmt));
+            auto rgba = toRgba8Bytes(arr,
+                                     cmap.is_none()
+                                         ? "viridis"
+                                         : cmap.cast<std::string>(),
+                                     vmin, vmax, origin);
+            auto enc = encode::createCpuEncoder(it->second);
+            if (!enc)
+                throw std::runtime_error("imsave: no encoder for " + fmt);
+            if (!metadata.is_none()) {
+                std::map<std::string, std::string> md;
+                for (auto item : py::reinterpret_borrow<py::dict>(metadata))
+                    md[item.first.cast<std::string>()] =
+                        py::str(item.second).cast<std::string>();
+                enc->setMetadata(std::move(md));
+            }
+            if (!enc->encodeToFile(rgba.bytes, rgba.w, rgba.h, path))
+                throw std::runtime_error("imsave: encode failed");
+        };
+        imageMod.def("imread", imread, py::arg("fname"),
+                     py::arg("format") = py::none());
+        imageMod.def("imsave", imsave, py::arg("fname"), py::arg("arr"),
+                     py::arg("vmin") = py::none(),
+                     py::arg("vmax") = py::none(),
+                     py::arg("cmap") = py::none(),
+                     py::arg("format") = py::none(),
+                     py::arg("origin") = "upper",
+                     py::arg("dpi") = 100.0f,
+                     py::arg("metadata") = py::none());
+        // pyplot re-exports (mpl pyplot.imread/imsave).
+        m.def("imread", imread, py::arg("fname"),
+              py::arg("format") = py::none());
+        m.def("imsave", imsave, py::arg("fname"), py::arg("arr"),
+              py::arg("vmin") = py::none(), py::arg("vmax") = py::none(),
+              py::arg("cmap") = py::none(),
+              py::arg("format") = py::none(), py::arg("origin") = "upper",
+              py::arg("dpi") = 100.0f, py::arg("metadata") = py::none());
+        // mpl image.thumbnail — decode, downscale, encode.
+        imageMod.def("thumbnail",
+            [](const std::string& in, const std::string& out,
+               float scale, const py::object& interp) {
+                auto im = encode::imread(in);
+                if (!im)
+                    throw std::runtime_error("thumbnail: decode failed");
+                uint32_t nw = std::max(1u, uint32_t(im->width * scale));
+                uint32_t nh = std::max(1u, uint32_t(im->height * scale));
+                std::vector<uint8_t> px(size_t(nw) * nh * 4);
+                for (uint32_t j = 0; j < nh; ++j)
+                    for (uint32_t i = 0; i < nw; ++i) {
+                        uint32_t sj = uint32_t(j / scale),
+                                 si = uint32_t(i / scale);
+                        sj = std::min(sj, im->height - 1);
+                        si = std::min(si, im->width - 1);
+                        std::copy_n(&im->rgba[(size_t(sj) * im->width + si) * 4],
+                                    4, &px[(size_t(j) * nw + i) * 4]);
+                    }
+                std::string ext = std::filesystem::path(out)
+                                      .extension().string();
+                if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
+                auto fmt = ext == "webp" ? encode::ImageFormat::Webp
+                                         : encode::ImageFormat::Png;
+                auto enc = encode::createCpuEncoder(fmt);
+                if (!enc ||
+                    !enc->encodeToFile(px, nw, nh, out))
+                    throw std::runtime_error("thumbnail: encode failed");
+            },
+            py::arg("in"), py::arg("out"), py::arg("scale") = 0.1f,
+            py::arg("interpolation") = py::none());
+    }
+
     auto styleMod = m.def_submodule("style");
     styleMod.def("use",
                  [](const py::object& name) {
@@ -4871,4 +18747,34 @@ PYBIND11_MODULE(volcanoplot, m) {
                      plot::style::context(
                          name.cast<std::vector<std::string>>()));
              });
+
+    // mpl gridspec submodule — GridSpec/SubplotSpec are bound on `m`;
+    // re-export them plus GridSpecFromSubplotSpec.
+    auto gsMod = m.def_submodule("gridspec");
+    gsMod.attr("GridSpec") = m.attr("GridSpec");
+    gsMod.attr("SubplotSpec") = m.attr("SubplotSpec");
+    gsMod.attr("GridSpecBase") = m.attr("GridSpec");
+    gsMod.def("GridSpecFromSubplotSpec",
+              [](const PySubplotSpec& s, uint32_t nrows, uint32_t ncols,
+                 const py::kwargs& kw)
+                  -> std::shared_ptr<PyGridSpec> {
+                  auto nested = s.spec.nested(nrows, ncols);
+                  auto setF = [&](const char* k, float& f) {
+                      if (kw && kw.contains(k) && !kw[k].is_none())
+                          f = kw[k].cast<float>();
+                  };
+                  setF("left", nested->left); setF("right", nested->right);
+                  setF("bottom", nested->bottom); setF("top", nested->top);
+                  setF("wspace", nested->wspace);
+                  setF("hspace", nested->hspace);
+                  if (kw && kw.contains("width_ratios") &&
+                      !kw["width_ratios"].is_none())
+                      nested->widthRatios = toFloats(kw["width_ratios"]);
+                  if (kw && kw.contains("height_ratios") &&
+                      !kw["height_ratios"].is_none())
+                      nested->heightRatios = toFloats(kw["height_ratios"]);
+                  return std::make_shared<PyGridSpec>(
+                      PyGridSpec{s.owner, std::move(nested), s.gs});
+              },
+              py::arg("subplot_spec"), py::arg("nrows"), py::arg("ncols"));
 }

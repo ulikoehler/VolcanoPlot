@@ -672,11 +672,12 @@ static Rect2Df anchoredBox(AnchorLoc a, float cw, float ch,
 
 AnchoredTextLayout layoutAnchoredText(
     const AnchoredText& at, const Axes& /*axes*/, Rect2D axesRect,
+    float dpi,
     const std::function<SizeBarTextMeasure(std::string_view,
                                            float)>& measure) {
     AnchoredTextLayout out;
     if (at.text.empty()) return out;
-    const float fontPx = 16.0f * at.fontSize;
+    const float fontPx = at.fontSize * dpi / 72.0f;
     // Split lines; measure each.
     float maxW = 0, firstAscent = 0, lineH = 0;
     size_t start = 0;
@@ -715,7 +716,7 @@ SizeBarLayout layoutSizeBar(
     SizeBarLayout out;
     if (bar.size <= 0.0f) return out;
 
-    const float fontPx = 16.0f * bar.fontSize;
+    const float fontPx = bar.fontSize * dpi / 72.0f;
     const auto& vp = axes.viewport();
 
     // Bar extent: data units → axes-fraction → px (mpl evaluates the

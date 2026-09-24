@@ -77,7 +77,7 @@ layout(push_constant) uniform PC {
     vec4 u_proj;
     vec2 u_valueRange;
     float u_interp;  // 0 = nearest, 1 = bilinear, 2 = bicubic
-    float u_interpPad;
+    float u_rgba;    // 1 = grid texture is RGBA8 (sampled directly)
 } pc;
 
 // Catmull-Rom bicubic weights for fractional offset f (taps at -1..2).
@@ -103,6 +103,24 @@ float bicubicSample(vec2 uv) {
         for (int i = 0; i < 4; ++i) {
             int tx = clamp(base.x + i - 1, 0, sz.x - 1);
             acc += wx[i] * wy[j] * texelFetch(u_grid, ivec2(tx, ty), 0).r;
+        }
+    }
+    return acc;
+}
+
+vec4 bicubicSample4(vec2 uv) {
+    ivec2 sz = textureSize(u_grid, 0);
+    vec2 tc = uv * vec2(sz) - 0.5;
+    vec2 f = fract(tc);
+    ivec2 base = ivec2(floor(tc));
+    vec4 wx = crWeights(f.x);
+    vec4 wy = crWeights(f.y);
+    vec4 acc = vec4(0.0);
+    for (int j = 0; j < 4; ++j) {
+        int ty = clamp(base.y + j - 1, 0, sz.y - 1);
+        for (int i = 0; i < 4; ++i) {
+            int tx = clamp(base.x + i - 1, 0, sz.x - 1);
+            acc += wx[i] * wy[j] * texelFetch(u_grid, ivec2(tx, ty), 0);
         }
     }
     return acc;
@@ -134,6 +152,12 @@ void main() {
             outColor = vec4(0.0);
             return;
         }
+    }
+    // mpl RGB(A) imshow: the texture holds color data directly.
+    if (pc.u_rgba > 0.5) {
+        outColor = pc.u_interp > 1.5 ? bicubicSample4(uv)
+                                   : texture(u_grid, uv);
+        return;
     }
     // nearest/bilinear differ only by the bound sampler's filter mode;
     // bicubic fetches texels explicitly.
@@ -177,7 +201,7 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
-       .setOffset(0).setSize(sizeof(float) * 24);
+       .setOffset(0).setSize(sizeof(float) * 26);
     vk::PipelineLayoutCreateInfo plci;
     plci.setSetLayouts(descLayout_.get()).setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -211,8 +235,8 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
     att.setBlendEnable(true)
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
-       .setSrcAlphaBlendFactor(vk::BlendFactor::eZero)
-       .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setDstAlphaBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
        .setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
                           vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
     vk::PipelineColorBlendStateCreateInfo cbsci;
@@ -259,10 +283,13 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
 void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                              VmaAllocator allocator, const plot::Grid2D& grid,
                              const plot::Colormap& cmap) {
-    // Upload grid as R32_SFLOAT image.
+    rgbaMode_ = !grid.rgba.empty();
+    const vk::Format gridFmt = rgbaMode_ ? vk::Format::eR8G8B8A8Unorm
+                                         : vk::Format::eR32Sfloat;
+    // Upload grid as R32_SFLOAT (scalar) or R8G8B8A8_UNORM (RGBA image).
     {
         core::ImageDesc idesc{};
-        idesc.format = vk::Format::eR32Sfloat;
+        idesc.format = gridFmt;
         idesc.extent = vk::Extent2D{grid.width, grid.height};
         idesc.usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
         idesc.tiling = vk::ImageTiling::eOptimal;
@@ -270,11 +297,15 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
 
         // Staging buffer + copy
         core::BufferDesc bdesc{};
-        bdesc.size = grid.values.size() * sizeof(float);
+        bdesc.size = rgbaMode_ ? grid.rgba.size() * sizeof(uint32_t)
+                               : grid.values.size() * sizeof(float);
         bdesc.usage = core::BufferUsage::Staging;
         bdesc.hostVisible = true;
         core::Buffer staging(allocator, bdesc);
-        std::memcpy(staging.mappedData(), grid.values.data(), bdesc.size);
+        std::memcpy(staging.mappedData(),
+                    rgbaMode_ ? static_cast<const void*>(grid.rgba.data())
+                              : static_cast<const void*>(grid.values.data()),
+                    bdesc.size);
 
         core::OneTimeCommands cmd(device, pool, queue);
         vk::BufferImageCopy region{};
@@ -288,19 +319,19 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
               .setImageExtent({grid.width, grid.height, 1});
         // Transition to transfer dst
         core::Image::transitionLayout(cmd.handle(), gridImage_.handle(),
-            vk::Format::eR32Sfloat, vk::ImageLayout::eUndefined,
+            gridFmt, vk::ImageLayout::eUndefined,
             vk::ImageLayout::eTransferDstOptimal);
         cmd.handle().copyBufferToImage(staging.handle(), gridImage_.handle(),
             vk::ImageLayout::eTransferDstOptimal, region);
         // Transition to shader read
         core::Image::transitionLayout(cmd.handle(), gridImage_.handle(),
-            vk::Format::eR32Sfloat, vk::ImageLayout::eTransferDstOptimal,
+            gridFmt, vk::ImageLayout::eTransferDstOptimal,
             vk::ImageLayout::eShaderReadOnlyOptimal);
     }
     {
         vk::ImageViewCreateInfo vci{};
         vci.setImage(gridImage_.handle()).setViewType(vk::ImageViewType::e2D)
-           .setFormat(vk::Format::eR32Sfloat)
+           .setFormat(gridFmt)
            .setSubresourceRange(vk::ImageSubresourceRange{}
                .setAspectMask(vk::ImageAspectFlagBits::eColor)
                .setBaseMipLevel(0).setLevelCount(1)
@@ -429,7 +460,8 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         float syCode, syP1, syP2, syPad;
         float prCode, thetaOff, thetaDir, prPad;
         float valueMin, valueMax;
-        float interp, interpPad;
+        float interp, rgba;
+        float pad0, pad1;
     } pc;
     pc.viewMinX = transform.view.x.min;
     pc.viewMinY = transform.view.y.min;
@@ -452,7 +484,8 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.valueMin = valueMin_;
     pc.valueMax = valueMax_;
     pc.interp = static_cast<float>(interpMode_);
-    pc.interpPad = 0.0f;
+    pc.rgba = rgbaMode_ ? 1.0f : 0.0f;
+    pc.pad0 = pc.pad1 = 0.0f;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout_.get(), 0, descSet_, {});

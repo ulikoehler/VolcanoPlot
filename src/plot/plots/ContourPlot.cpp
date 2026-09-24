@@ -270,8 +270,7 @@ void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + f.x * float(rect.width),
                        rect.y + (1.0f - f.y) * float(rect.height)};
     };
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     vk::Extent2D res = r.backend().extent();
     auto& spine = r.spineRenderer();
 
@@ -373,8 +372,7 @@ void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
                               const Axes& axes, Rect2D rect) {
     Color color = config_.clabelColor.a > 0 ? config_.clabelColor
                                             : config_.lineColor;
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     auto& text = r.textRenderer();
 
     for (const auto& [level, anchor] : clabelAnchors()) {
@@ -555,12 +553,11 @@ void ContourfPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t);
 }
 

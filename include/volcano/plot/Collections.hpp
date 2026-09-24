@@ -115,6 +115,7 @@ protected:
                              std::span<const float> dash,
                              const std::string& hatch, float hatchSpacing,
                              float sketchScale = 0.0f,
+                             float sketchLength = 128.0f,
                              std::span<const Point2D> clipRing = {});
     /// Vector-export counterpart of drawSubpaths: fill + edge + hatch.
     static void emitSubpaths(render::VectorCanvas& c,
@@ -123,6 +124,26 @@ protected:
                              std::span<const float> dash,
                              const std::string& hatch, float hatchSpacing,
                              std::span<const Point2D> clipRing = {});
+    /// mpl patheffects on a collection: replay drawSubpaths/emitSubpaths
+    /// once per effect pass (offset shadow copies, stroke overrides) in
+    /// list order. An empty `fx` list is a single normal draw.
+    static void drawSubpathsFx(vk::CommandBuffer cmd,
+                               render::Renderer& r,
+                               vk::Rect2D clip, vk::Extent2D res,
+                               std::vector<Path::Subpath> subs,
+                               Color face, Color edge, float lw,
+                               std::span<const float> dash,
+                               const std::string& hatch, float hatchSpacing,
+                               float sketchScale, float sketchLength,
+                               std::span<const Point2D> clipRing,
+                               std::span<const PathEffect> fx, float dpi);
+    static void emitSubpathsFx(render::VectorCanvas& c,
+                               std::vector<Path::Subpath> subs,
+                               Color face, Color edge, float lw,
+                               std::span<const float> dash,
+                               const std::string& hatch, float hatchSpacing,
+                               std::span<const Point2D> clipRing,
+                               std::span<const PathEffect> fx, float dpi);
 
     /// Resolve `clipPath` to a pixel-space ring (first/largest subpath),
     /// or empty when unset.

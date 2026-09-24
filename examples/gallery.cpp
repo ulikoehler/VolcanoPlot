@@ -383,6 +383,7 @@ void plotErrorbar(GalleryCtx& ctx) {
     cfg.yerr = yerr;
     cfg.markerSize = 16.7f;  // mpl markersize=6pt → 16.7 px at 200 dpi
     cfg.capSize = 8.3f;      // mpl capsize=3pt → 8.3 px at 200 dpi
+    cfg.drawCaps = true;
     cfg.drawLine = false;    // mpl fmt="o" draws markers only
     ax->addPlot(std::make_unique<ErrorbarPlot>(x, y, cfg));
     ctx.render(fig, "errorbar");

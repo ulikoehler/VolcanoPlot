@@ -82,7 +82,7 @@ TEST(ZOrder, RasterizedFlagStored) {
         std::make_unique<ScatterPlot>(makeSeries({{0.5f, 0.5f}}))));
     s->rasterized = true;
     EXPECT_TRUE(s->rasterized);
-    EXPECT_FLOAT_EQ(s->zorder, 0.0f);
+    EXPECT_FLOAT_EQ(s->zorder, 1.0f);  // mpl Collection zorder default
 }
 
 // ═══ picking ══════════════════════════════════════════════════════════════

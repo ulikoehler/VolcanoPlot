@@ -136,10 +136,10 @@ TEST(PowerNorm, Gamma1IsLinear) {
 }
 
 TEST(PowerNorm, Gamma2CompressesLow) {
-    // With gamma=2 and positive range, low values are compressed.
+    // mpl PowerNorm: t = ((v - vmin) / (vmax - vmin)) ^ gamma.
     PowerNorm n(2.0f, 1.0f, 100.0f);
-    // v=10: log(10/1)/log(100/1) = 0.5, then ^2 = 0.25
-    EXPECT_NEAR(n(10.0f), 0.25f, kTol);
+    // v=10: (9/99)^2 = 0.008264
+    EXPECT_NEAR(n(10.0f), 9.0f * 9.0f / (99.0f * 99.0f), kTol);
 }
 
 TEST(PowerNorm, MapsEndpoints) {
@@ -160,8 +160,8 @@ TEST(PowerNorm, StraddlesZero) {
     PowerNorm n(0.5f, -10.0f, 10.0f);
     EXPECT_NEAR(n(-10.0f), 0.0f, kTol);
     EXPECT_NEAR(n(10.0f), 1.0f, kTol);
-    // Midpoint at 0: (0-(-10))/20 = 0.5, ^(1/0.5)=^2 = 0.25
-    EXPECT_NEAR(n(0.0f), 0.25f, kTol);
+    // Midpoint at 0: ratio 0.5, mpl applies t^gamma = 0.5^0.5 ≈ 0.7071
+    EXPECT_NEAR(n(0.0f), 0.7071f, 1e-3f);
 }
 
 // ─── SymLogNorm ───────────────────────────────────────────────────────────
@@ -235,27 +235,32 @@ TEST(AsinhNorm, HandlesZeroCrossing) {
 
 // ─── BoundaryNorm ─────────────────────────────────────────────────────────
 
-TEST(BoundaryNorm, MapsToBinCenters) {
-    // 3 bins: [0,1), [1,2), [2,3]
+TEST(BoundaryNorm, MapsToLutFractions) {
+    // mpl BoundaryNorm returns LUT indices stretched across ncolors;
+    // our protocol returns t = iret / (ncolors - 1). With ncolors
+    // defaulting to the bin count (3), bins map to t = 0, 0.5, 1.
     BoundaryNorm n({0, 1, 2, 3});
-    // Bin 0: t = 0.5/3 ≈ 0.167
-    EXPECT_NEAR(n(0.5f), 0.5f / 3.0f, kTol);
-    // Bin 1: t = 1.5/3 = 0.5
-    EXPECT_NEAR(n(1.5f), 1.5f / 3.0f, kTol);
-    // Bin 2: t = 2.5/3 ≈ 0.833
-    EXPECT_NEAR(n(2.5f), 2.5f / 3.0f, kTol);
+    EXPECT_NEAR(n(0.5f), 0.0f, kTol);   // bin 0 → index 0
+    EXPECT_NEAR(n(1.5f), 0.5f, kTol);   // bin 1 → index 1
+    EXPECT_NEAR(n(2.5f), 1.0f, kTol);   // bin 2 → index 2
 }
 
-TEST(BoundaryNorm, ClipsOutOfRange) {
+TEST(BoundaryNorm, UnderOverOutOfRange) {
+    // clip off: below vmin → index -1 (under), above vmax → index
+    // ncolors (over), matching mpl's index protocol.
     BoundaryNorm n({0, 1, 2, 3});
+    n.setClip(false);
+    EXPECT_LT(n(-1.0f), 0.0f);
+    EXPECT_GT(n(5.0f), 1.0f);
+    // clip on: values are clamped into range first (mpl clip=True).
+    n.setClip(true);
     EXPECT_NEAR(n(-1.0f), 0.0f, kTol);
-    EXPECT_NEAR(n(5.0f), 1.0f, kTol);
 }
 
 TEST(BoundaryNorm, BoundaryValueGoesToUpperBin) {
     // v=1 should go to bin 1 (matplotlib convention: lower-inclusive).
     BoundaryNorm n({0, 1, 2, 3});
-    EXPECT_NEAR(n(1.0f), 1.5f / 3.0f, kTol);
+    EXPECT_NEAR(n(1.0f), 0.5f, kTol);
 }
 
 TEST(BoundaryNorm, NumBins) {
@@ -388,8 +393,8 @@ TEST(MultiNorm, LogThenPower) {
     auto n2 = std::make_shared<PowerNorm>(2.0f, 0.0f, 1.0f);
     MultiNorm mn({n1, n2});
     // v=100: log10(100)=2, (2-0)/3 = 0.667
-    // PowerNorm with vmin=0 uses pow(ratio, 1/gamma) = pow(0.667, 0.5) = 0.817
-    EXPECT_NEAR(mn(100.0f), 0.817f, 0.05f);
+    // mpl PowerNorm applies pow(ratio, gamma) = 0.667^2 = 0.444
+    EXPECT_NEAR(mn(100.0f), 0.444f, 0.05f);
 }
 
 TEST(MultiNorm, InverseReversesOrder) {
@@ -438,7 +443,8 @@ TEST(NormsFactory, AsinhFactory) {
 
 TEST(NormsFactory, BoundaryFactory) {
     auto n = norms::boundary({0, 1, 2, 3});
-    EXPECT_NEAR((*n)(0.5f), 0.5f / 3.0f, kTol);
+    // mpl index protocol: bin 0 → iret 0 → t = 0 / (nbins - 1) = 0.
+    EXPECT_NEAR((*n)(0.5f), 0.0f, kTol);
 }
 
 TEST(NormsFactory, CenteredFactory) {

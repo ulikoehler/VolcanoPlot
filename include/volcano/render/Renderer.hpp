@@ -111,14 +111,35 @@ public:
     /// Draw UTF-8 text with mathtext (`$…$`) support at a pixel position
     /// (baseline origin). Used internally and by plot layers drawing
     /// rich-text elements (TeX markers, contour labels).
+    /// `font` selects the face (family/style/weight) via
+    /// TextRenderer::faceFor; nullptr uses the primary face.
     void drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
                       std::string_view text, float x, float y,
                       plot::Color color, float scale = 1.0f,
                       float rotation = 0.0f,
-                      plot::HAlign lineAlign = plot::HAlign::Left);
+                      plot::HAlign lineAlign = plot::HAlign::Left,
+                      const plot::FontProperties* font = nullptr);
     /// Measure rich text at `scale` (mathtext-aware).
     [[nodiscard]] text::TextRenderer::TextMetrics
     measureRichText(std::string_view text, float scale = 1.0f);
+    /// mpl fontproperties → font face resolution (family/style/weight).
+    /// Returns the primary face when no better match exists; `.bold`
+    /// tells callers whether the face is genuinely bold (skip faux-bold).
+    [[nodiscard]] text::TextRenderer::FaceMatch
+    richTextFace(const plot::FontProperties& font);
+    /// Draw rich text honoring mpl `path_effects`: Stroke passes draw
+    /// the text at a disk of pixel offsets in the foreground color
+    /// (approximating the glyph outline), shadow passes draw one offset
+    /// copy, Normal/thenNormal run the plain draw at their position in
+    /// the list.
+    void drawRichTextFx(vk::CommandBuffer cmd, vk::Rect2D scissor,
+                        std::span<const plot::PathEffect> fxs,
+                        std::string_view text, float x, float y,
+                        plot::Color color, float scale = 1.0f,
+                        float rotation = 0.0f,
+                        plot::HAlign lineAlign = plot::HAlign::Left,
+                        float dpi = 96.0f,
+                        const plot::FontProperties* font = nullptr);
 
 private:
     /// Which plot subset a frame draws (blit modes).
@@ -218,6 +239,7 @@ private:
         std::string label;
         plot::Color color;
         plot::LegendMarker marker;
+        int points = -1;  ///< LegendHandle::points (handle marker count)
     };
     /// Measured legend layout (mpl VPacker/HPacker packing).
     struct LegendLayout {
@@ -234,12 +256,15 @@ private:
     static std::vector<LegendEntry> collectLegendEntries(const plot::Axes& axes);
     LegendLayout measureLegend(const std::vector<LegendEntry>& entries,
                                const plot::LegendStyle& lg, float dpi);
+    /// forceW > 0 (mpl mode="expand" / 4-tuple bbox_to_anchor): the box
+    /// grows to that width, spreading columns to fill it.
     plot::Rect2D paintLegendBox(vk::CommandBuffer cmd,
                                 const std::vector<LegendEntry>& entries,
                                 const plot::LegendStyle& lg,
                                 const LegendLayout& L,
                                 plot::Color textColor,
-                                plot::Point2D anchor, float bx, float by);
+                                plot::Point2D anchor, float bx, float by,
+                                float forceW = -1.0f);
 };
 
 } // namespace volcano::render

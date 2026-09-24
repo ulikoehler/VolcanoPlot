@@ -22,6 +22,8 @@
 #include <volcano/plot/Ticks.hpp>
 #include <volcano/plot/Collections.hpp>
 #include <volcano/plot/Path.hpp>
+#include <volcano/plot/Annotation.hpp>
+#include <volcano/plot/Normalize.hpp>
 #include <volcano/encode/ImageEncoder.hpp>
 
 #include <volcano/plot/plots/ScatterPlot.hpp>
@@ -33,12 +35,22 @@
 #include <volcano/plot/plots/FillBetweenPlot.hpp>
 #include <volcano/plot/plots/HeatmapPlot.hpp>
 #include <volcano/plot/plots/QuiverPlot.hpp>
+#include <volcano/plot/plots/QuiverKeyPlot.hpp>
+#include <volcano/plot/plots/PcolormeshPlot.hpp>
 #include <volcano/plot/plots/StreamPlot.hpp>
 #include <volcano/plot/plots/ContourPlot.hpp>
 #include <volcano/plot/plots/Scatter3D.hpp>
 #include <volcano/plot/plots/SurfacePlot.hpp>
 #include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/plots/PiePlot.hpp>
+#include <volcano/plot/plots/StackPlot.hpp>
+#include <volcano/plot/plots/HistPlot.hpp>
+#include <volcano/plot/GridSpec.hpp>
+#include <volcano/plot/Triangulation.hpp>
+#include <volcano/plot/plots/TripcolorPlot.hpp>
+#include <volcano/plot/plots/TriplotPlot.hpp>
+#include <volcano/plot/plots/StemPlot.hpp>
+#include <volcano/plot/plots/ReferenceLines.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -121,6 +133,13 @@ Series2D fewPoints() {
     Series2D s;
     s.points = {{1, 1}, {2, 3}, {3, 2}, {4, 4}, {5, 3}};
     return s;
+}
+
+std::unique_ptr<LinePlot> lineOf(std::vector<Point2D> pts, Color c) {
+    Series2D s;
+    s.points = std::move(pts);
+    s.color = c;
+    return std::make_unique<LinePlot>(std::move(s));
 }
 
 // ═══ Tier 0 — canvas & axes chrome ═══════════════════════════════════════
@@ -934,7 +953,7 @@ void f102_mathtext(Figure& fig) {
     auto* ax = mfAxes(fig);
     ax->setXlim(0, 10); ax->setYlim(0, 10);
     auto* t = ax->text(5, 5, "$x^2 + \\alpha$");
-    t->fontSize = 1.6f;
+    t->fontSize = 19.2f;
 }
 
 void f103_annotate_arrow(Figure& fig) {
@@ -1117,6 +1136,7 @@ void f111_errorbar_caps(Figure& fig) {
     ErrorbarConfig cfg;
     cfg.yerr = yerr;
     cfg.capSize = 5.0f;
+    cfg.drawCaps = true;
     cfg.drawLine = false;
     ax->addPlot(std::make_unique<ErrorbarPlot>(x, y, cfg));
     ax->setXlim(0, 6); ax->setYlim(0, 5);
@@ -1195,6 +1215,9 @@ void f126_imshow_aspect_auto(Figure& fig) {
     auto* ax = mfAxes(fig);
     Grid2D g = smallGrid();
     g.width = 4; g.height = 16;    // tall image
+    g.origin = "upper";            // mpl imshow(origin="upper")
+    g.xRange = {-0.5f, 3.5f};      // mpl default extent (verbatim)
+    g.yRange = {15.5f, -0.5f};
     g.values.resize(4 * 16);
     for (uint32_t j = 0; j < 16; ++j)
         for (uint32_t i = 0; i < 4; ++i)
@@ -1446,7 +1469,7 @@ void f143_pie_explode(Figure& fig) {
     PieData d;
     d.values = {30, 25, 20, 15, 10};
     d.labels = {"A", "B", "C", "D", "E"};
-    d.explode = 0.08f;
+    d.explode = {0.08f};
     ax->addPlot(std::make_unique<PiePlot>(std::move(d)));
     ax->setAspect(AspectMode::Equal);
     ax->style().xAxis.visible = false;
@@ -1468,6 +1491,718 @@ void f145_mathtext_frac_sum(Figure& fig) {
     auto* t = ax->text(5.0f, 0.5f,
                        "$\\frac{x}{y} + \\sum_{i=0}^{n} i$");
     (void)t;
+}
+
+// ═══ Tier 16 — parity batch 10 (146-155) ═══════════════════════════════
+
+void f146_locator_params(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    ax->locatorParams("x", 4);   // mpl ax.locator_params('x', nbins=4)
+}
+
+void f147_set_xbound(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    ax->setXbound(2.0f, 8.0f);   // mpl ax.set_xbound(2, 8)
+}
+
+void f148_markevery_int(Figure& fig) {
+    Series2D s = sineSeries();
+    s.marker = MarkerStyle::Circle;
+    s.size = 10.0f;
+    s.setMarkevery(5);           // mpl markevery=5
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+}
+
+void f149_pie_startangle(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    PieData d;
+    d.values = {30, 25, 20, 15, 10};
+    d.labels = {"A", "B", "C", "D", "E"};
+    d.startAngle = 90.0f;
+    d.counterclock = false;
+    ax->pie(std::move(d));
+}
+
+void f150_pie_autopct(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    PieData d;
+    d.values = {30, 25, 20, 15, 10};
+    d.labels = {"A", "B", "C", "D", "E"};
+    d.autopct = "%1.1f%%";
+    ax->pie(std::move(d));
+}
+
+void f151_fill_between_where(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 60);
+    std::vector<float> y1, y2(60, 0.0f);
+    std::vector<bool> where;
+    for (float xi : x) {
+        y1.push_back(std::sin(xi));
+        where.push_back(xi > 2.0f && xi < 8.0f);
+    }
+    auto p = std::make_unique<FillBetweenPlot>(
+        std::move(x), std::move(y1), std::move(y2),
+        Color::fromRgba8(31, 119, 180, 128));
+    p->setWhere(std::move(where), true);
+    ax->addPlot(std::move(p));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+}
+
+void f152_stackplot_wiggle(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 40);
+    std::vector<float> a, b, c;
+    for (float xi : x) {
+        a.push_back(std::sin(xi) + 1.5f);
+        b.push_back(std::cos(xi * 0.7f) + 1.0f);
+        c.push_back(std::sin(xi * 0.4f) * 0.5f + 1.0f);
+    }
+    auto p = std::make_unique<StackPlot>(
+        std::move(x), std::vector<std::vector<float>>{a, b, c});
+    p->setBaseline(StackBaseline::Wiggle);   // mpl baseline='wiggle'
+    ax->addPlot(std::move(p));
+}
+
+void f153_label_outer(Figure& fig) {
+    for (uint32_t r = 0; r < 2; ++r)
+        for (uint32_t c = 0; c < 2; ++c) {
+            auto* ax = fig.subplot2grid({2, 2}, {r, c});
+            ax->setStyle(mfStyle());
+            ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+            ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+            ax->labelOuter();
+        }
+}
+
+void f154_axis_off(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    ax->setAxisOff();            // mpl ax.axis('off')
+}
+
+void f155_imshow_origin_lower(Figure& fig) {
+    auto* ax = mfAxes(fig);
+    Grid2D g;
+    g.width = 4; g.height = 4;
+    g.values.resize(16);
+    for (uint32_t j = 0; j < 4; ++j)
+        for (uint32_t i = 0; i < 4; ++i)
+            g.values[j * 4 + i] = (j == 0) ? 1.0f : 0.0f;  // hot top row
+    g.xRange = {0, 4}; g.yRange = {0, 4};
+    ax->imshow(std::move(g), colormaps::viridis(), "nearest",
+               "equal", "lower");            // origin='lower' → hot at bottom
+    ax->setXlim(-0.5f, 4.5f); ax->setYlim(-0.5f, 4.5f);
+}
+
+// ═══ Tier 17 — parity batch 11 (156-165) ═══════════════════════════════
+
+void f156_marker_colors(Figure& fig) {
+    // mpl markerfacecolor/markeredgecolor/markeredgewidth
+    Series2D s = sineSeries();
+    s.marker = MarkerStyle::Circle;
+    s.size = 12.0f;
+    s.setMarkevery(6);
+    s.markerFaceColor = Color::red();
+    s.markerEdgeColor = Color::black();
+    s.markerEdgeWidth = 2.0f;
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+}
+
+void f157_spine_center(Figure& fig) {
+    // mpl spines['bottom'].set_position(('data', 0)) — classic
+    // centered-axes figure.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto& b = ax->spine("bottom");
+    b.posMode = Axes::SpineSpec::PosMode::Data;
+    b.posAmount = 0.0f;
+    b.positionSet = true;
+    auto& l = ax->spine("left");
+    l.posMode = Axes::SpineSpec::PosMode::Data;
+    l.posAmount = 0.0f;
+    l.positionSet = true;
+    ax->setSpineVisible("top", false);
+    ax->setSpineVisible("right", false);
+}
+
+void f158_spine_outward_bounds(Figure& fig) {
+    // mpl set_position(('outward', 10)) + set_bounds(2, 8) +
+    // set_color — bottom spine pushed out, clipped to x∈[2,8], red.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto& b = ax->spine("bottom");
+    b.posMode = Axes::SpineSpec::PosMode::Outward;
+    b.posAmount = 10.0f;
+    b.positionSet = true;
+    b.bounds = std::pair{2.0f, 8.0f};
+    b.color = Color::red();
+    ax->setSpineVisible("top", false);
+    ax->setSpineVisible("right", false);
+}
+
+void f159_quiverkey(Figure& fig) {
+    // mpl ax.quiverkey(Q, 0.9, 0.9, 1, '1 m/s')
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, u, v;
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i) {
+            x.push_back(float(i)); y.push_back(float(j));
+            u.push_back(1.0f); v.push_back(0.5f);
+        }
+    auto* q = static_cast<QuiverPlot*>(ax->addPlot(
+        std::make_unique<QuiverPlot>(x, y, u, v)));
+    ax->setXlim(-0.5f, 3.5f); ax->setYlim(-0.5f, 3.5f);
+    ax->quiverKey(*q, 0.9f, 0.9f, 1.0f, "1 m/s", "E");
+}
+
+void f160_xkcd_sketch(Figure& fig) {
+    // mpl plt.xkcd() — path.sketch wobble on a line.
+    auto* ax = mfAxes(fig);
+    ax->setSketchParams(1.0f, 100.0f, 2.0f);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.4, 1.4);
+}
+
+void f161_clip_off(Figure& fig) {
+    // mpl clip_on=False — the artist draws across the whole figure.
+    auto* ax = mfAxes(fig);
+    auto* p = static_cast<LinePlot*>(ax->addPlot(lineOf(
+        {{0.0f, 0.0f}, {10.0f, 40.0f}}, Color::red())));
+    p->clipOn = false;
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+}
+
+void f162_sticky_edges_bar(Figure& fig) {
+    // mpl bar: y=0 is a sticky edge — autoscale keeps the baseline
+    // pinned at 0 instead of padding below it.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<BarPlot>(
+        BarData{.heights = {1.0f, 3.0f, 2.0f, 4.0f, 3.0f}}));
+    ax->autoscale();
+}
+
+void f163_stairs_fill(Figure& fig) {
+    // mpl ax.stairs(values, edges, fill=True)
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<StairsPlot>(
+        std::vector<float>{1.0f, 3.0f, 2.0f, 4.0f, 2.0f},
+        std::vector<float>{0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
+        Color::blue(), 1.5f, true));
+    ax->setXlim(0, 5); ax->setYlim(0, 4.5f);
+}
+
+void f164_pcolor(Figure& fig) {
+    // mpl ax.pcolor(C) — flat-shaded quad mesh.
+    auto* ax = mfAxes(fig);
+    std::vector<float> x{0, 1, 2, 3, 4}, y{0, 1, 2, 3};
+    std::vector<float> vals;
+    for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 4; ++i)
+            vals.push_back(float(i * j) / 12.0f);
+    PcolormeshConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.shading = PcmShading::Flat;
+    ax->addPlot(std::make_unique<PcolormeshPlot>(
+        x, y, vals, 4, 3, std::move(cfg)));
+    ax->setXlim(0, 4); ax->setYlim(0, 3);
+}
+
+void f165_inset_zoom(Figure& fig) {
+    // mpl ax.inset_axes + ax.indicate_inset_zoom
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 200);
+    std::vector<Point2D> pts;
+    for (float xi : x) pts.push_back({xi, std::sin(xi * 3.0f)});
+    Series2D s; s.points = std::move(pts);
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto* inner = ax->insetAxes(0.55f, 0.55f, 0.4f, 0.4f);
+    inner->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    inner->setXlim(2.0f, 4.0f); inner->setYlim(-0.6f, 0.6f);
+    ax->indicateInsetZoom(*inner);
+}
+
+// ═══ Tier 18 — parity batch 12 (166-170) ═══════════════════════════════
+
+void f166_patheffects_stroke(Figure& fig) {
+    // mpl patheffects.withStroke(linewidth=4, foreground='black') —
+    // dark outline under the line.
+    auto* ax = mfAxes(fig);
+    Series2D s = sineSeries();
+    s.color = Color::blue();
+    s.lineWidth = 2.0f;
+    auto lp = std::make_unique<LinePlot>(std::move(s));
+    PathEffect stroke;
+    stroke.kind = PathEffect::Kind::Stroke;
+    stroke.foreground = Color::black();
+    stroke.lineWidth = 4.0f;
+    stroke.thenNormal = true;   // mpl withStroke
+    lp->pathEffects = {stroke};
+    ax->addPlot(std::move(lp));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+}
+
+void f167_patheffects_shadow(Figure& fig) {
+    // mpl patheffects.SimplePatchShadow() — offset filled shadow.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int i = 0; i < 8; ++i)
+        s.points.push_back({float(i) * 1.2f + 0.5f,
+                            std::sin(float(i)) * 0.6f + 0.5f});
+    s.color = Color::red();
+    s.size = 14.0f;
+    auto sp = std::make_unique<ScatterPlot>(std::move(s));
+    PathEffect sh;
+    sh.kind = PathEffect::Kind::PatchShadow;
+    sh.thenNormal = true;
+    sp->pathEffects = {sh};
+    ax->addPlot(std::move(sp));
+    ax->setXlim(0, 10); ax->setYlim(-0.5, 1.5);
+}
+
+void f168_ticks_both(Figure& fig) {
+    // mpl ax.xaxis/yaxis.set_ticks_position('both') — tick marks on
+    // all four sides, labels stay near-side.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    ax->setXTicksPosition("both");
+    ax->setYTicksPosition("both");
+}
+
+void f169_transform_transaxes(Figure& fig) {
+    // mpl ax.plot(..., transform=ax.transAxes) — the diagonal runs in
+    // axes coordinates, ignoring the data viewport.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    Series2D s;
+    s.points = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+    s.color = Color::red();
+    s.lineWidth = 2.0f;
+    auto lp = std::make_unique<LinePlot>(std::move(s));
+    lp->transform = ax->transAxes();
+    ax->addPlot(std::move(lp));
+}
+
+void f170_colorbar_ticks(Figure& fig) {
+    // mpl fig.colorbar(im, ticks=...) + set_ticklabels + minorticks_on.
+    auto* ax = mfAxes(fig);
+    Grid2D grid;
+    grid.width = 4; grid.height = 4;
+    grid.xRange = {-0.5f, 3.5f};   // mpl imshow default extent
+    grid.yRange = {3.5f, -0.5f};   // (verbatim; origin='upper' inverts y)
+    for (uint32_t j = 0; j < 4; ++j)
+        for (uint32_t i = 0; i < 4; ++i)
+            grid.values.push_back(float(i + j * 4) / 15.0f);
+    auto& hm = ax->imshow(std::move(grid));
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.mappable = &hm;
+    cb.ticks = {0.0f, 0.5f, 1.0f};
+    cb.tickLabels = {"low", "mid", "high"};
+    cb.minorTicksOn = true;
+}
+
+void f171_scatter_c(Figure& fig) {
+    // mpl ax.scatter(x, y, c=values, cmap='viridis') + colorbar —
+    // per-point scalar colormapping.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int i = 0; i < 8; ++i)
+        s.points.push_back({float(i) * 1.2f + 0.5f,
+                            std::sin(float(i)) * 0.6f + 0.5f});
+    s.size = 14.0f;
+    auto sp = std::make_unique<ScatterPlot>(std::move(s));
+    auto* spp = sp.get();
+    for (int i = 0; i < 8; ++i)
+        spp->array_.push_back(float(i) / 7.0f);
+    ax->addPlot(std::move(sp));
+    ax->setXlim(0, 10); ax->setYlim(-0.5, 1.5);
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.mappable = spp;
+}
+
+void f172_scatter_s(Figure& fig) {
+    // mpl ax.scatter(x, y, s=sizes) — per-point marker areas.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int i = 0; i < 6; ++i)
+        s.points.push_back({float(i) * 1.6f + 0.8f, 0.5f});
+    s.color = Color::blue();
+    s.size = 8.0f;
+    auto sp = std::make_unique<ScatterPlot>(std::move(s));
+    // mpl s is pt² area → diameter px = sqrt(s)·dpi/72 (dpi=200).
+    for (int i = 0; i < 6; ++i)
+        sp->sizes_.push_back(std::sqrt(20.0f + float(i) * 60.0f) *
+                             200.0f / 72.0f);
+    ax->addPlot(std::move(sp));
+    ax->setXlim(0, 10); ax->setYlim(0, 1);
+}
+
+void f173_text_boxstyle(Figure& fig) {
+    // mpl ax.text(..., bbox=dict(boxstyle='round', fc='wheat', ec='k')).
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    TextAnnotation t;
+    t.text = "peak";
+    t.x = 5.0f; t.y = 0.8f;
+    t.halign = HAlign::Center;
+    t.valign = VAlign::Center;
+    t.hasBbox = true;
+    t.bboxFaceColor = Color::fromRgba8(0xf5, 0xde, 0xb3);  // wheat
+    t.bboxEdgeColor = Color::black();
+    t.boxStyle = BoxStyleSpec{BoxStyleSpec::Kind::Round, 0.3f};
+    ax->texts().push_back(t);
+}
+
+void f174_legend_anchor(Figure& fig) {
+    // mpl ax.legend(bbox_to_anchor=(1, 1), loc='upper left',
+    //               handles=..., labels=..., edgecolor='red').
+    auto* ax = mfAxes(fig);
+    Series2D s = sineSeries();
+    s.label = "sine";
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto& lg = ax->legend();
+    lg.location = "upper left";
+    lg.anchorX = 1.0f; lg.anchorY = 1.0f;
+    lg.explicitLabels = {"wave"};
+    lg.edgeColor = Color::red();
+    lg.faceColor = Color{1, 1, 1, 1};
+}
+
+void f175_imshow_norm(Figure& fig) {
+    // mpl ax.imshow(C, norm=LogNorm(), cmap='viridis') + colorbar.
+    auto* ax = mfAxes(fig);
+    Grid2D grid;
+    grid.width = 4; grid.height = 4;
+    grid.xRange = {-0.5f, 3.5f};
+    grid.yRange = {3.5f, -0.5f};   // mpl default extent, origin='upper'
+    for (uint32_t j = 0; j < 4; ++j)
+        for (uint32_t i = 0; i < 4; ++i)
+            grid.values.push_back(std::pow(10.0f, float(i + j * 4) / 15.0f * 2.0f));
+    grid.valueRange = {1.0f, 100.0f};
+    auto& hm = ax->imshow(std::move(grid));
+    hm.setNorm(std::make_shared<LogNorm>());
+    auto& cb = ax->style().colorbar;
+    cb.visible = true;
+    cb.mappable = &hm;
+}
+
+void f176_font_family(Figure& fig) {
+    // mpl ax.text(..., family='serif'/'sans-serif'/'monospace').
+    auto* ax = mfAxes(fig);
+    ax->setXlim(0, 1); ax->setYlim(0, 1);
+    const char* fams[3] = {"serif", "sans-serif", "monospace"};
+    const float ys[3] = {0.75f, 0.5f, 0.25f};
+    for (int i = 0; i < 3; ++i) {
+        auto* t = ax->text(0.05f, ys[i], fams[i], CoordSystem::Axes);
+        t->font.family = fams[i];
+        t->fontSize = 14.0f;
+        t->font.size = 14.0f;
+    }
+}
+
+void f177_tick_labelsize(Figure& fig) {
+    // mpl ax.tick_params(axis='x', labelsize=14) / y labelsize=7.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    ax->style().xAxis.tickFont.size = 14.0f;
+    ax->style().yAxis.tickFont.size = 7.0f;
+}
+
+void f178_fig_text(Figure& fig) {
+    // mpl fig.text(0.5, 0.02, ...) + fig.suptitle/supxlabel with kwargs.
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    fig.suptitle("suptitle");
+    fig.style().title.font.size = 14.0f;
+    fig.style().title.font.weight = "bold";
+    fig.supxlabel("supxlabel");
+    fig.supXlabelFont.size = 9.0f;
+    TextAnnotation t;
+    t.coords = CoordSystem::Figure;
+    t.x = 0.5f; t.y = 0.5f;
+    t.text = "fig text";
+    t.color = Color::red();
+    t.fontSize = 11.0f;
+    t.font.size = 11.0f;
+    t.halign = HAlign::Center;
+    fig.texts().push_back(t);
+}
+
+void f179_imshow_rgb(Figure& fig) {
+    // mpl ax.imshow(rgb) with an (H,W,3) float array — direct RGBA path.
+    auto* ax = mfAxes(fig);
+    Grid2D grid;
+    grid.width = 8; grid.height = 8;
+    grid.xRange = {-0.5f, 7.5f};
+    grid.yRange = {7.5f, -0.5f};  // mpl default extent, origin='upper'
+    for (uint32_t j = 0; j < 8; ++j)
+        for (uint32_t i = 0; i < 8; ++i) {
+            uint32_t r = uint32_t(31 * i), g = uint32_t(31 * j);
+            uint32_t b = 128, a = 255;
+            grid.rgba.push_back(r | (g << 8) | (b << 16) | (a << 24));
+        }
+    ax->imshow(std::move(grid));
+}
+
+void f180_annotate_fontsize(Figure& fig) {
+    // mpl ax.annotate('big', xy=..., xytext=..., fontsize=20,
+    //                 fontweight='bold', arrowprops={'arrowstyle':'->'}).
+    auto* ax = mfAxes(fig);
+    ax->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    ax->setXlim(0, 10); ax->setYlim(-1.2, 1.2);
+    auto* a = ax->annotate(5.0f, -0.96f, 6.5f, -0.6f, "big",
+                           CoordSystem::Data);
+    a->arrowStyle = ArrowStyle::Arrow;
+    a->fontSize = 20.0f;
+    a->font.size = 20.0f;
+    a->font.weight = "bold";
+}
+
+
+void f181_gridspec_ratios(Figure& fig) {
+    // mpl GridSpec(2, 3, width_ratios=[2,1,1], height_ratios=[1,2])
+    // with an axes spanning the top row.
+    auto gs = std::make_shared<GridSpec>(2, 3);
+    fig.adoptGrid(gs);
+    gs->widthRatios = {2, 1, 1};
+    gs->heightRatios = {1, 2};
+    auto* top = fig.addAxes(gs->at(0, 0, 1, 3));
+    top->setStyle(mfStyle());
+    top->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    for (uint32_t c = 0; c < 3; ++c) {
+        auto* ax = fig.addAxes(gs->at(1, c));
+        ax->setStyle(mfStyle());
+        Series2D s;
+        s.points = {{0, float(c)}, {1, float(c + 1)}};
+        ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    }
+}
+
+void f182_gridspec_nested(Figure& fig) {
+    // mpl: gs = GridSpec(1, 2); ax0 at gs[0,0]; nested GridSpec(2,1)
+    // inside gs[0,1] with two stacked axes.
+    auto gs = std::make_shared<GridSpec>(1, 2);
+    fig.adoptGrid(gs);
+    auto* left = fig.addAxes(gs->at(0, 0));
+    left->setStyle(mfStyle());
+    left->addPlot(std::make_unique<LinePlot>(sineSeries()));
+    auto nested = gs->at(0, 1).nested(2, 1);
+    fig.adoptGrid(nested);
+    for (uint32_t r = 0; r < 2; ++r) {
+        auto* ax = fig.addAxes(nested->at(r, 0));
+        ax->setStyle(mfStyle());
+        Series2D s;
+        s.points = {{0, float(r)}, {1, float(1 - r)}};
+        ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    }
+}
+
+void f183_artist_props(Figure& fig) {
+    // mpl: scatter.set_zorder(5); line.set_alpha(0.4);
+    // hidden.set_visible(False).
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 60);
+    Series2D s1 = sineSeries();
+    s1.color = Color::blue();
+    s1.alpha = 0.4f;
+    s1.lineWidth = 3.0f;
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s1)));
+    // Red scatter drawn above (zorder 5) — green hidden line skipped.
+    Series2D s2;
+    for (int i = 0; i < 12; ++i)
+        s2.points.push_back({float(i), 0.5f});
+    s2.color = Color::red();
+    s2.marker = MarkerStyle::Circle;
+    // mpl s=64 (pt²) → 8pt diameter → px = 8 * dpi/72.
+    s2.size = 8.0f * 200.0f / 72.0f;
+    auto sc = std::make_unique<ScatterPlot>(std::move(s2));
+    sc->zorder = 5.0f;
+    ax->addPlot(std::move(sc));
+    Series2D s3;
+    s3.points = {{0, -0.9f}, {10, 0.9f}};
+    s3.color = Color::fromRgba8(0, 180, 0);
+    s3.lineWidth = 4.0f;
+    auto hidden = std::make_unique<LinePlot>(std::move(s3));
+    hidden->visible = false;
+    ax->addPlot(std::move(hidden));
+}
+
+void f184_collection_props(Figure& fig) {
+    // mpl scatter(x, y, s=sizes, c=colors) then
+    // coll.set_edgecolor('k'); coll.set_linewidth(1.5).
+    auto* ax = mfAxes(fig);
+    auto x = linspace(0, 10, 20);
+    Series2D s;
+    s.marker = MarkerStyle::Circle;
+    s.markerEdgeColor = Color::black();
+    s.markerEdgeWidth = 1.5f * 200.0f / 72.0f;  // mpl 1.5pt
+    for (int i = 0; i < 20; ++i)
+        s.points.push_back({x[i], 0.5f + 0.3f * std::sin(x[i])});
+    auto sc = std::make_unique<ScatterPlot>(std::move(s));
+    std::vector<float> sizes;
+    for (int i = 0; i < 20; ++i) {
+        sc->colors_.push_back(Color::fromRgba8(
+            uint8_t(30 + 10 * i), uint8_t(80), uint8_t(220 - 10 * i)));
+        // mpl s=(5+i*0.5)² pt² → diameter (5+i*0.5)pt → px at 200dpi.
+        sizes.push_back((5.0f + float(i) * 0.5f) * 200.0f / 72.0f);
+    }
+    sc->setSizes(std::move(sizes));
+    ax->addPlot(std::move(sc));
+    ax->setXlim(-0.5f, 10.5f); ax->setYlim(0.0f, 1.0f);
+}
+
+void f185_return_handles(Figure& fig) {
+    // mpl: hist returns (n, bins, patches) — annotate at a returned
+    // bin edge; errorbar returns an ErrorbarContainer.
+    auto* ax = mfAxes(fig);
+    std::vector<float> data;
+    for (int i = 0; i < 200; ++i)
+        data.push_back(float(std::sin(float(i) * 0.31) * 2.0 +
+                             std::cos(float(i) * 0.13)));
+    HistConfig hcfg; hcfg.bins = HistBinMethod::Fixed;
+    hcfg.binCount = 8;
+    ax->addPlot(std::make_unique<HistPlot>(std::move(data), hcfg));
+    ax->axvline(1.0f, Color::red(), 2.0f);
+    ax->setXlim(-3.5f, 3.5f);
+}
+
+void f186_tri_explicit(Figure& fig) {
+    // mpl: tri = mtri.Triangulation(x, y, tris);
+    // ax.tripcolor(tri, facecolors) + ax.triplot(tri, 'k-', lw=0.7).
+    auto* ax = mfAxes(fig);
+    std::vector<float> x = {0, 1, 2, 0, 1, 2, 0.5f, 1.5f};
+    std::vector<float> y = {0, 0, 0, 1, 1, 1, 0.5f, 0.5f};
+    std::vector<Triangle> tris = {{0, 1, 6}, {1, 6, 7}, {1, 2, 7},
+                                  {0, 6, 3}, {6, 3, 4}, {6, 4, 7},
+                                  {7, 4, 5}, {2, 7, 5}};
+    std::vector<float> face = {0.1f, 0.3f, 0.5f, 0.7f,
+                               0.2f, 0.9f, 0.4f, 0.6f};
+    ax->addPlot(
+        std::make_unique<TripcolorPlot>(x, y, tris, face));
+    TriplotConfig tcfg;
+    tcfg.color = Color::black();
+    tcfg.lineWidth = 0.7f * 200.0f / 72.0f;
+    ax->addPlot(std::make_unique<TriplotPlot>(x, y, tris, tcfg));
+    ax->setXlim(-0.1f, 2.1f); ax->setYlim(-0.1f, 1.1f);
+}
+
+void f187_named_containers(Figure& fig) {
+    // mpl: ax.errorbar → ErrorbarContainer; ax.stem → StemContainer;
+    // ax.eventplot → [EventCollection]. 3 stacked axes, one each.
+    auto gs = std::make_shared<GridSpec>(3, 1);
+    fig.adoptGrid(gs);
+    auto* ax = fig.addAxes(gs->at(0, 0));
+    ax->setStyle(mfStyle());
+    auto x = linspace(0, 10, 12);
+    std::vector<float> y, ye;
+    for (float xi : x) {
+        y.push_back(std::sin(xi));
+        ye.push_back(0.15f + 0.05f * std::abs(std::sin(xi * 3)));
+    }
+    ErrorbarConfig ec;
+    ec.yerr = ye;
+    const float pt2px = 200.0f / 72.0f;
+    ec.capSize = 4.0f * pt2px;           // mpl capsize=4 (points)
+    ec.drawCaps = true;
+    ec.markerSize = 4.0f * pt2px;        // mpl ms=4
+    ec.lineWidth = 1.5f * pt2px;         // mpl lines.linewidth=1.5pt
+    ec.errorbarWidth = 1.5f * pt2px;     // mpl elinewidth→lw
+    ax->addPlot(std::make_unique<ErrorbarPlot>(x, y, ec));
+    ax->setYlim(-1.5f, 1.5f);
+    auto* ax2 = fig.addAxes(gs->at(1, 0));
+    ax2->setStyle(mfStyle());
+    std::vector<float> sy;
+    for (int i = 0; i < 12; ++i) sy.push_back(std::cos(float(i) * 0.7f));
+    StemConfig scfg;
+    scfg.markerSize = 6.0f * pt2px;   // mpl lines.markersize=6pt
+    scfg.lineWidth = 1.5f * pt2px;    // mpl stemlines lw=1.5pt
+    scfg.baselineWidth = 1.5f * pt2px;
+    ax2->addPlot(std::make_unique<StemPlot>(linspace(0, 10, 12), sy,
+                                          scfg));
+    ax2->setYlim(-1.3f, 1.3f);
+    auto* ax3 = fig.addAxes(gs->at(2, 0));
+    ax3->setStyle(mfStyle());
+    ax3->addPlot(std::make_unique<EventPlot>(
+        std::vector<std::vector<float>>{{1, 3, 5, 7},
+                                        {0.5f, 2.5f, 6.5f},
+                                        {2, 4, 8}}));
+    ax3->setXlim(0, 9); ax3->setYlim(-0.6f, 2.6f);
+}
+
+void f188_date_locators(Figure& fig) {
+    // mpl: ax.plot(days, y); ax.xaxis.set_major_locator(
+    //     mdates.MonthLocator(interval=2));
+    // ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int d = 0; d <= 180; d += 3)
+        s.points.push_back(
+            {18262.0f + float(d), std::sin(float(d) * 0.06f)});
+    s.color = Color::blue();
+    s.lineWidth = 1.5f * 200.0f / 72.0f;  // mpl lw=1.5pt
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXLocator(
+        std::make_shared<dates::MonthLocator>(2));
+    ax->setXFormatter(
+        std::make_shared<dates::DateFormatter>("%b %d"));
+    ax->setXlim(18262.0f, 18442.0f);
+    ax->setYlim(-1.2f, 1.2f);
+}
+
+void f189_anchored_artists(Figure& fig) {
+    // mpl offsetbox: AnchoredText("anchored", 'upper left') +
+    // AnchoredSizeBar(transData, 2, '2 units', 'lower right').
+    auto* ax = mfAxes(fig);
+    Series2D s = sineSeries();
+    s.lineWidth = 1.5f * 200.0f / 72.0f;  // mpl lw=1.5pt
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    auto& at = ax->addAnchoredText("anchored", "upper left");
+    at.pad = 0.4f; at.borderpad = 0.5f; at.frameon = true;
+    SizeBar sb;
+    sb.size = 2.0f; sb.label = "2 units"; sb.loc = "lower right";
+    sb.pad = 0.2f; sb.borderpad = 0.5f; sb.sep = 4.0f;
+    sb.frameon = true;
+    ax->addSizeBar(sb);
+}
+
+void f190_concise_dates(Figure& fig) {
+    // mpl: MonthLocator + DayLocator(7) minor + ConciseDateFormatter.
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int d = 0; d <= 60; ++d)
+        s.points.push_back(
+            {18262.0f + float(d), std::cos(float(d) * 0.1f)});
+    s.color = Color::fromRgba8(214, 39, 40);
+    s.lineWidth = 1.5f * 200.0f / 72.0f;  // mpl lw=1.5pt
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXLocator(
+        std::make_shared<dates::MonthLocator>(1));
+    ax->setXMinorLocator(
+        std::make_shared<dates::DayLocator>(7));
+    ax->setXFormatter(
+        std::make_shared<dates::ConciseDateFormatter>());
+    ax->setXlim(18262.0f, 18322.0f);
+    ax->setYlim(-1.2f, 1.2f);
 }
 
 // ═══ Registry ═══════════════════════════════════════════════════════════
@@ -1623,6 +2358,51 @@ const Feature kFeatures[] = {
     {"143_pie_explode",        f143_pie_explode},
     {"144_secondary_x",        f144_secondary_x},
     {"145_mathtext_frac_sum",  f145_mathtext_frac_sum},
+    {"146_locator_params",     f146_locator_params},
+    {"147_set_xbound",         f147_set_xbound},
+    {"148_markevery_int",      f148_markevery_int},
+    {"149_pie_startangle",     f149_pie_startangle},
+    {"150_pie_autopct",        f150_pie_autopct},
+    {"151_fill_between_where", f151_fill_between_where},
+    {"152_stackplot_wiggle",   f152_stackplot_wiggle},
+    {"153_label_outer",        f153_label_outer},
+    {"154_axis_off",           f154_axis_off},
+    {"155_imshow_origin_lower",f155_imshow_origin_lower},
+    {"156_marker_colors",      f156_marker_colors},
+    {"157_spine_center",       f157_spine_center},
+    {"158_spine_outward_bounds",f158_spine_outward_bounds},
+    {"159_quiverkey",          f159_quiverkey},
+    {"160_xkcd_sketch",        f160_xkcd_sketch},
+    {"161_clip_off",           f161_clip_off},
+    {"162_sticky_edges_bar",   f162_sticky_edges_bar},
+    {"163_stairs_fill",        f163_stairs_fill},
+    {"164_pcolor",             f164_pcolor},
+    {"165_inset_zoom",         f165_inset_zoom},
+    {"166_patheffects_stroke", f166_patheffects_stroke},
+    {"167_patheffects_shadow", f167_patheffects_shadow},
+    {"168_ticks_both",         f168_ticks_both},
+    {"169_transform_transaxes", f169_transform_transaxes},
+    {"170_colorbar_ticks",     f170_colorbar_ticks},
+    {"171_scatter_c",          f171_scatter_c},
+    {"172_scatter_s",          f172_scatter_s},
+    {"173_text_boxstyle",      f173_text_boxstyle},
+    {"174_legend_anchor",      f174_legend_anchor},
+    {"175_imshow_norm",        f175_imshow_norm},
+    {"176_font_family",        f176_font_family},
+    {"177_tick_labelsize",     f177_tick_labelsize},
+    {"178_fig_text",           f178_fig_text},
+    {"179_imshow_rgb",         f179_imshow_rgb},
+    {"180_annotate_fontsize",  f180_annotate_fontsize},
+    {"181_gridspec_ratios",    f181_gridspec_ratios},
+    {"182_gridspec_nested",    f182_gridspec_nested},
+    {"183_artist_props",       f183_artist_props},
+    {"184_collection_props",   f184_collection_props},
+    {"185_return_handles",     f185_return_handles},
+    {"186_tri_explicit",       f186_tri_explicit},
+    {"187_named_containers",   f187_named_containers},
+    {"188_date_locators",      f188_date_locators},
+    {"189_anchored_artists",   f189_anchored_artists},
+    {"190_concise_dates",      f190_concise_dates},
 };
 
 } // namespace
@@ -1686,6 +2466,8 @@ int main(int argc, char** argv) {
     for (auto& f : kFeatures) {
         if (!selected(f)) continue;
         Figure fig(1, 1);
+        // 800x600 canvas == 4x3in at 200 dpi (matches the mpl side).
+        fig.style().dpi = 200.0f;
         f.fn(fig);
         ctx.render(fig, f.name);
         ++count;

@@ -194,8 +194,7 @@ void Axes3DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.x = {-1.0f, 1.0f};
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     if (!paneTris_.empty())
         fillRenderer_.draw(cmd, vrect, t);

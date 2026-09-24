@@ -31,8 +31,7 @@ void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {static_cast<float>(rect.x + rect.width) + 10.0f, py}
     };
     // Clip to the axes patch (matplotlib clips these lines to the axes).
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
@@ -61,8 +60,7 @@ void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {px, static_cast<float>(rect.y) - 10.0f},
         {px, static_cast<float>(rect.y + rect.height) + 10.0f}
     };
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
@@ -103,8 +101,7 @@ void AxLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {p1.x - dx * ext, p1.y - dy * ext},
         {p1.x + dx * ext, p1.y + dy * ext}
     };
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
@@ -138,12 +135,11 @@ void AxhSpan::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void AxhSpan::draw(vk::CommandBuffer cmd, render::Renderer&,
+void AxhSpan::draw(vk::CommandBuffer cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t);
 }
 
@@ -174,12 +170,11 @@ void AxvSpan::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void AxvSpan::draw(vk::CommandBuffer cmd, render::Renderer&,
+void AxvSpan::draw(vk::CommandBuffer cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t);
 }
 
@@ -210,12 +205,11 @@ void Vlines::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Vlines::draw(vk::CommandBuffer cmd, render::Renderer&,
+void Vlines::draw(vk::CommandBuffer cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t, vertexCount_);
 }
 
@@ -250,12 +244,11 @@ void Hlines::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Hlines::draw(vk::CommandBuffer cmd, render::Renderer&,
+void Hlines::draw(vk::CommandBuffer cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t, vertexCount_);
 }
 
@@ -416,12 +409,11 @@ void EventPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void EventPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void EventPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     size_t row = 0;
     for (auto& sr : renderers_) {
         while (row < rowSegs_.size() && rowSegs_[row].empty()) ++row;

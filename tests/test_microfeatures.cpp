@@ -28,7 +28,9 @@ using namespace volcano::plot;
 // ═══ Tier 0 — pure logic: tick locator density ═══════════════════════════════
 
 TEST(MicroTicks, LinearDensityMatchesMaxNLocator) {
-    // matplotlib MaxNLocator(nbins=9) on [0,10] picks step 2 → 6 ticks.
+    // mpl's default linear locator is AutoLocator — steps
+    // [1,2,2.5,5,10] with standalone nbins=9. On [0,10] it picks
+    // step 2 → {0, 2, ..., 10} (6 ticks).
     auto t = scaleTicks(AxisScale::linear(), 0.0f, 10.0f, 9);
     ASSERT_EQ(t.size(), 6u);
     for (size_t i = 0; i < t.size(); ++i)
@@ -36,7 +38,7 @@ TEST(MicroTicks, LinearDensityMatchesMaxNLocator) {
 }
 
 TEST(MicroTicks, LinearDensityUnitInterval) {
-    // [0,1] → step 0.2 → {0, .2, ..., 1}.
+    // [0,1] → mpl AutoLocator step 0.2 → {0, .2, ..., 1.0}.
     auto t = scaleTicks(AxisScale::linear(), 0.0f, 1.0f, 9);
     ASSERT_EQ(t.size(), 6u);
     for (size_t i = 0; i < t.size(); ++i)
@@ -44,11 +46,11 @@ TEST(MicroTicks, LinearDensityUnitInterval) {
 }
 
 TEST(MicroTicks, LinearDensitySmallRange) {
-    // [0,5] → step 1 → 6 ticks.
+    // [0,5] → mpl AutoLocator step 1 → {0, 1, ..., 5}.
     auto t = scaleTicks(AxisScale::linear(), 0.0f, 5.0f, 9);
     ASSERT_EQ(t.size(), 6u);
     for (size_t i = 0; i < t.size(); ++i)
-        EXPECT_FLOAT_EQ(t[i], float(i));
+        EXPECT_NEAR(t[i], float(i) * 1.0f, 1e-6f);
 }
 
 // ═══ Tier 0 — pure logic: prop cycle consumes tab10 ══════════════════════════
@@ -217,9 +219,10 @@ TEST(MicroGrid, MajorGridStraightAndAligned) {
     MfFigure tf(256);
     tf.axes->grid(true);
     auto img = tf.render();
-    // Interior x major ticks at fractions .25/.5/.75 (AutoLocator on a
-    // ~200px axis gives step 2.5 → ticks 0,2.5,5,7.5,10) → vertical
-    // grid lines spanning the full axes height at those columns.
+    // Interior x major ticks at fractions .25/.5/.75 (the axis' AutoLocator
+    // nbins is capped by the ~200px tick space to ~4 → step 2.5 → ticks
+    // 0,2.5,5,7.5,10) → vertical grid lines spanning the full axes
+    // height at those columns.
     for (float f : {0.25f, 0.5f, 0.75f}) {
         int32_t cx = tf.rect.x + int32_t(f * float(tf.rect.width));
         // A 1-2px line may land anywhere in a few-px window depending on
@@ -234,13 +237,19 @@ TEST(MicroGrid, MajorGridStraightAndAligned) {
         EXPECT_GT(best, 0.5f)
             << "grid line at fraction " << f << " should span the axes";
     }
-    // A horizontal line at the .4 tick fraction too (y=4 is a tick).
-    int32_t cy = tf.rect.y + int32_t(0.6f * float(tf.rect.height));
+    // A horizontal grid line must also span the axes. The y step depends
+    // on the tick space (mpl staircase picks 1.5/2/2.5/4 there), so check
+    // the union of candidate tick fractions — data 4/5/6 → .6/.5/.4 from
+    // the top — and require at least one real line.
     float bestRow = 0.0f;
-    for (int dy = -3; dy <= 3; ++dy) {
-        size_t gray = countIn(img,
-            {tf.rect.x + 2, cy + dy, tf.rect.width - 4, 1}, isGridGray);
-        bestRow = std::max(bestRow, float(gray) / float(tf.rect.width - 4));
+    for (float f : {0.4f, 0.5f, 0.6f}) {
+        int32_t cy = tf.rect.y + int32_t(f * float(tf.rect.height));
+        for (int dy = -3; dy <= 3; ++dy) {
+            size_t gray = countIn(img,
+                {tf.rect.x + 2, cy + dy, tf.rect.width - 4, 1}, isGridGray);
+            bestRow = std::max(bestRow,
+                               float(gray) / float(tf.rect.width - 4));
+        }
     }
     EXPECT_GT(bestRow, 0.5f);
 }

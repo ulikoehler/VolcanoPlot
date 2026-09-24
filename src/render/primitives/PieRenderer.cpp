@@ -14,27 +14,21 @@ constexpr float PI = 3.14159265358979323846f;
 
 constexpr const char* kVertGlsl = R"(
 #version 460
-layout(location = 0) in vec2 a_pos;    // pie vertex in [-1,1] circle space
+layout(location = 0) in vec2 a_pos;    // pie vertex in pie data units
 layout(location = 1) in vec4 a_color;
 
 layout(push_constant) uniform PC {
-    vec4 u_rect;     // xy = center px, zw = half-extent px
-    float u_innerR;  // inner radius (donut)
+    vec2 u_ndcScale;  // NDC units per pie-data unit, per axis
+    vec2 u_center;    // mpl `center` in pie data units
 } pc;
 
 layout(location = 0) out vec4 v_color;
 
 void main() {
-    // a_pos is in unit circle [-1,1] space. The viewport is set to the
-    // axes rect, so NDC [-1,1] maps to the axes rect. The pie center is
-    // at the axes rect center (NDC 0,0). The pie radius in NDC is
-    // pieRadius / axesHalfExtent. We pass pieRadius as u_rect.zw and
-    // axesHalfExtent is half the viewport extent.
-    // ndc = a_pos * (pieRadius / axesHalfExtent)
-    // Since viewport = axes rect, axesHalfExtent = viewport_extent / 2.
-    // We need the viewport extent — but it's not available in the shader.
-    // Instead, we pass the NDC scale directly via u_rect.zw.
-    vec2 ndc = a_pos * pc.u_rect.zw;
+    // a_pos is in matplotlib pie data units (the axes view spans
+    // ±1.25, so a radius-1 pie covers 80% of the half-extent). The
+    // viewport is the axes rect, so NDC [-1,1] maps to the rect.
+    vec2 ndc = (a_pos + pc.u_center) * pc.u_ndcScale;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
     v_color = a_color;
 }
@@ -59,7 +53,7 @@ void PieRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
     vk::PushConstantRange pc;
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex)
-       .setOffset(0).setSize(sizeof(float) * 5);
+       .setOffset(0).setSize(sizeof(float) * 4);
     vk::PipelineLayoutCreateInfo plci;
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -100,8 +94,8 @@ void PieRenderer::init(vk::Device device, vk::RenderPass renderPass,
     att.setBlendEnable(true)
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
-       .setSrcAlphaBlendFactor(vk::BlendFactor::eZero)
-       .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setDstAlphaBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
        .setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
                           vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
     vk::PipelineColorBlendStateCreateInfo cbsci;
@@ -136,44 +130,48 @@ void PieRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
     float total = 0;
     for (auto v : data.values) total += v;
     if (total <= 0) return;
+    center_ = data.center;
+
+    // mpl pie(): x normalized by its sum when `normalize`; fractions of
+    // the full circle accumulate from startangle, going counterclockwise
+    // (or clockwise when counterclock=False). Vertex space is pie data
+    // units: radius = data.radius, explode in the same units.
+    const float denom = data.normalize ? total : 1.0f;
+    const float dir = data.counterclock ? 1.0f : -1.0f;
 
     std::vector<plot::Point2D> verts;
     std::vector<plot::Color> colors;
     constexpr int kSeg = 32;
 
-    // matplotlib's pie() starts at 0° (3 o'clock) and goes counterclockwise.
-    // The shader flips Y: gl_Position.y = -ndc.y, so:
-    //   a = 0      → (1, 0) → NDC (1, 0) → right (3 o'clock)
-    //   a = PI/2   → (0, 1) → NDC (0, -1) → top (12 o'clock)
-    //   a = PI     → (-1, 0) → left (9 o'clock)
-    // CCW on screen (3→12→9→6→3) = increasing angle.
-    // Render slices in reverse order so the first slice (A) is drawn last
-    // and appears on top at the 3 o'clock boundary.
-    float a0 = 0;
-    std::vector<size_t> sliceOrder(data.values.size());
-    for (size_t i = 0; i < data.values.size(); ++i) sliceOrder[i] = i;
-    std::reverse(sliceOrder.begin(), sliceOrder.end());
-
-    // Precompute slice start angles.
-    std::vector<float> sliceStart(data.values.size());
-    float acc = 0;
-    for (size_t i = 0; i < data.values.size(); ++i) {
-        sliceStart[i] = acc;
-        acc += 2.0f * PI * data.values[i] / total;
+    const size_t n = data.values.size();
+    std::vector<float> sliceStart(n), sliceEnd(n);
+    float theta1 = data.startAngle / 360.0f;   // circle fractions
+    for (size_t i = 0; i < n; ++i) {
+        sliceStart[i] = theta1;
+        theta1 += dir * (data.values[i] / denom);
+        sliceEnd[i] = theta1;
     }
 
-    for (size_t idx : sliceOrder) {
-        float sa0 = sliceStart[idx];
-        float sa1 = sa0 + 2.0f * PI * data.values[idx] / total;
-        float r0 = data.innerRadius;
-        float r1 = 1.0f;
+    auto explodeAt = [&](size_t i) {
+        if (data.explode.empty()) return 0.0f;
+        if (data.explode.size() == 1) return data.explode[0];
+        return i < n && i < data.explode.size() ? data.explode[i] : 0.0f;
+    };
+
+    // mpl draws wedges in order — later slices paint over earlier ones.
+    for (size_t idx = 0; idx < n; ++idx) {
+        float sa0 = 2.0f * PI * sliceStart[idx];
+        float sa1 = 2.0f * PI * sliceEnd[idx];
+        float r0 = data.innerRadius * data.radius;
+        float r1 = data.radius;
         // mpl explode: translate the wedge center radially along its
-        // bisector by explode*radius (scalar applies to all wedges).
+        // bisector by explode (data units).
         float mid = (sa0 + sa1) * 0.5f;
-        plot::Point2D off{data.explode * std::cos(mid),
-                          data.explode * std::sin(mid)};
-        plot::Color c = (idx < data.colors.size()) ? data.colors[idx]
-                                                    : plot::Color::fromRgba8(31, 119, 180);
+        float expl = explodeAt(idx);
+        plot::Point2D off{expl * std::cos(mid), expl * std::sin(mid)};
+        plot::Color c = (idx < data.colors.size())
+                            ? data.colors[idx]
+                            : plot::ColorCycle::at(idx);
         for (int s = 0; s < kSeg; ++s) {
             float ta0 = sa0 + (sa1 - sa0) * s / kSeg;
             float ta1 = sa0 + (sa1 - sa0) * (s + 1) / kSeg;
@@ -209,25 +207,20 @@ void PieRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
 void PieRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect) const {
     if (!inited_ || vertexCount_ == 0) return;
 
-    // The viewport is set to the axes rect, so NDC [-1,1] maps to the rect.
-    // The pie radius in pixels is min(w,h)*0.45. The NDC scale is
-    // pieRadius / (rect_extent/2) = min(w,h)*0.45 / (rect_extent/2).
+    // NDC per pie-data unit, per axis. The mpl pie view spans ±1.25,
+    // so 1 data unit covers 1/1.25 = 0.8 of the half-extent.
     float halfW = static_cast<float>(rect.extent.width) * 0.5f;
     float halfH = static_cast<float>(rect.extent.height) * 0.5f;
-    float pieRadius = std::min(halfW, halfH) * 0.9f;  // 90% of half-extent
-    // NDC scale: pieRadius / axesHalfExtent (per axis)
-    float scaleX = pieRadius / halfW;
-    float scaleY = pieRadius / halfH;
+    float halfMin = std::min(halfW, halfH);
 
     struct PC {
-        float centerX, centerY, scaleW, scaleH;
-        float innerR;
+        float ndcScaleX, ndcScaleY;
+        float centerX, centerY;
     } pc;
-    pc.centerX = 0.0f;  // not used in shader (viewport centers the pie)
-    pc.centerY = 0.0f;
-    pc.scaleW = scaleX;
-    pc.scaleH = scaleY;
-    pc.innerR = 0.0f;
+    pc.ndcScaleX = 0.8f * halfMin / halfW;
+    pc.ndcScaleY = 0.8f * halfMin / halfH;
+    pc.centerX = center_.x;
+    pc.centerY = center_.y;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex, 0, sizeof(PC), &pc);

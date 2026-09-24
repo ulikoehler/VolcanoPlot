@@ -79,13 +79,12 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
                      std::span{points}, color_, lineWidth_);
 }
 
-void FunctionPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void FunctionPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     axes_ = &axes;  // bind for viewport-change detection in prepare()
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t, renderer_.pointCount());
 }
 

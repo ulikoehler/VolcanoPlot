@@ -3,6 +3,7 @@
 
 set(VOLCANO_ENCODE_SOURCES
     ${VOLCANO_ROOT}/src/encode/SaveImage.cpp
+    ${VOLCANO_ROOT}/src/encode/ImageDecoder.cpp
     ${VOLCANO_ROOT}/src/encode/PngEncoder.cpp
     ${VOLCANO_ROOT}/src/encode/WebpEncoder.cpp
     ${VOLCANO_ROOT}/src/encode/ExtraEncoders.cpp

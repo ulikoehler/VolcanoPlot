@@ -59,7 +59,7 @@ TEST(CjkText, RendersViaFallbackFont) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto* t = cf.axes->text(0.2f, 0.5f, "中文日本語", CoordSystem::Data);
     t->color = Color::black();
-    t->fontSize = 2.0f;
+    t->fontSize = 24.0f;
     auto img = cf.render();
     EXPECT_GT(darkPixels(img), 100u);
 }
@@ -72,7 +72,7 @@ TEST(CjkText, MixedLatinCjkRenders) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto* t = cf.axes->text(0.1f, 0.5f, "abc中文xyz", CoordSystem::Data);
     t->color = Color::black();
-    t->fontSize = 2.0f;
+    t->fontSize = 24.0f;
     auto img = cf.render();
     EXPECT_GT(darkPixels(img), 150u);
 }
@@ -84,7 +84,7 @@ TEST(RtlText, HebrewRenders) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto* t = cf.axes->text(0.2f, 0.5f, "שלום", CoordSystem::Data);
     t->color = Color::black();
-    t->fontSize = 2.0f;
+    t->fontSize = 24.0f;
     auto img = cf.render();
     EXPECT_GT(darkPixels(img), 60u);
 }
@@ -98,7 +98,7 @@ TEST(RtlText, ArabicRenders) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto* t = cf.axes->text(0.2f, 0.5f, "مرحبا", CoordSystem::Data);
     t->color = Color::black();
-    t->fontSize = 2.0f;
+    t->fontSize = 24.0f;
     auto img = cf.render();
     EXPECT_GT(darkPixels(img), 60u);
 }
@@ -110,7 +110,7 @@ TEST(RtlText, MeasureRtlWidthPositive) {
     // a Hebrew label at right-align must still land on-canvas.
     auto* t = cf.axes->text(0.9f, 0.5f, "שלום", CoordSystem::Axes);
     t->color = Color::black();
-    t->fontSize = 1.5f;
+    t->fontSize = 18.0f;
     t->halign = HAlign::Right;
     auto img = cf.render();
     EXPECT_GT(darkPixels(img), 30u);

@@ -4,6 +4,7 @@
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -67,9 +68,11 @@ std::optional<ImageFormat> formatFromPath(const std::filesystem::path& path);
 
 /// matplotlib savefig options.
 struct SaveOptions {
-    /// Output resolution: output pixels = canvas * dpi / 100
-    /// (figure.dpi is 100).
+    /// Output resolution (mpl savefig dpi): output pixels =
+    /// canvas * dpi / canvasDpi.
     float dpi = 100.0f;
+    /// The DPI the canvas pixels were rendered at (figure.dpi).
+    float canvasDpi = 100.0f;
     /// Transparent background (clear alpha 0 instead of opaque facecolor).
     bool transparent = false;
     /// Crop to the drawn content bounding box (bbox_inches="tight").
@@ -83,6 +86,12 @@ struct SaveOptions {
     /// Explicit format override (matplotlib format="pdf"); when set the
     /// file extension is ignored.
     std::optional<ImageFormat> format;
+    /// matplotlib savefig facecolor/edgecolor (RGBA floats, 'auto' →
+    /// nullopt → the figure's own colors). edgecolor is stored for API
+    /// parity; the figure patch edge has linewidth 0 like matplotlib's
+    /// default, so it draws nothing.
+    std::optional<std::array<float, 4>> facecolor;
+    std::optional<std::array<float, 4>> edgecolor;
 };
 
 /// High-level save: applies dpi scaling, tight bbox crop + pad, and

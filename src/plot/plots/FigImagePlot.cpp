@@ -10,6 +10,7 @@ FigImagePlot::FigImagePlot(std::vector<uint32_t> pixels, uint32_t width,
                            uint32_t height, FigImageConfig config)
     : pixels_(std::move(pixels)), width_(width), height_(height),
       config_(std::move(config)) {
+    zorder = 0.0f;  // mpl AxesImage default zorder
     if (pixels_.size() != width_ * height_)
         throw std::invalid_argument("FigImagePlot: pixels size must be width*height");
     if (width_ == 0 || height_ == 0)

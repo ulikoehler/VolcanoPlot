@@ -68,6 +68,10 @@ public:
     /// Access computed spectrum values (valid after prepare()).
     [[nodiscard]] const std::vector<float>& values() const { return values_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeSpectrum(); }
+
 private:
     std::vector<float> signal_;
     SpectrumConfig config_;

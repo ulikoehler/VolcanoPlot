@@ -29,6 +29,14 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
     [[nodiscard]] const BarData& data() const noexcept { return data_; }
+    [[nodiscard]] BarData& mutableData() noexcept { return data_; }
+    /// mpl bar: the baseline is a sticky edge — autoscale margins never
+    /// cross it (ylim won't pad below 0 for upward bars).
+    [[nodiscard]] StickyEdges stickyEdges() const override {
+        StickyEdges e;
+        (data_.horizontal ? e.x : e.y).push_back(0.0f);
+        return e;
+    }
 private:
     BarData data_;
     render::primitives::BarRenderer renderer_;

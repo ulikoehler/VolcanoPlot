@@ -192,12 +192,12 @@ TEST(AxesText, CustomizeReturnedAnnotation) {
     Axes ax;
     auto* t = ax.text(1, 2, "label");
     t->color = Color::red();
-    t->fontSize = 2.0f;
+    t->fontSize = 24.0f;
     t->halign = HAlign::Center;
     t->valign = VAlign::Top;
     EXPECT_NEAR(ax.texts()[0].color.r, Color::red().r, 0.01f);
     EXPECT_NEAR(ax.texts()[0].color.g, Color::red().g, 0.01f);
-    EXPECT_NEAR(ax.texts()[0].fontSize, 2.0f, 0.01f);
+    EXPECT_NEAR(ax.texts()[0].fontSize, 24.0f, 0.01f);
     EXPECT_EQ(ax.texts()[0].halign, HAlign::Center);
     EXPECT_EQ(ax.texts()[0].valign, VAlign::Top);
 }

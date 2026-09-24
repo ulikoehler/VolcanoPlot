@@ -21,6 +21,7 @@ MatshowPlot::MatshowPlot(std::vector<float> data, uint32_t nrows, uint32_t ncols
                          MatshowConfig config)
     : data_(std::move(data)), nrows_(nrows), ncols_(ncols),
       config_(std::move(config)) {
+    zorder = 0.0f;  // mpl AxesImage default zorder
     if (data_.size() != nrows_ * ncols_)
         throw std::invalid_argument("MatshowPlot: data size must be nrows * ncols");
     if (nrows_ == 0 || ncols_ == 0)
@@ -104,12 +105,11 @@ void MatshowPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void MatshowPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void MatshowPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     fillRenderer_.draw(cmd, vrect, t);
 }
 

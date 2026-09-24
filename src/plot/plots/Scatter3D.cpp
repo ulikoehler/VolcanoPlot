@@ -109,7 +109,7 @@ void Scatter3D::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Scatter3D::draw(vk::CommandBuffer cmd, render::Renderer&,
+void Scatter3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || projectedPoints_.empty()) return;
 
@@ -118,8 +118,7 @@ void Scatter3D::draw(vk::CommandBuffer cmd, render::Renderer&,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(projectedPoints_.size()));
 }
 

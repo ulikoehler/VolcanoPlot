@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // Forward declarations for glyb types
@@ -22,6 +23,21 @@ struct font_face;
 namespace volcano::core { class PipelineCache; class DescriptorPool; }
 
 namespace volcano::text {
+
+/// Metadata read from a font file via FreeType (family/style names
+/// from the name table plus bold/italic style flags). familyName is
+/// empty when the file can't be opened as a font.
+struct FontFileInfo {
+    std::string familyName;
+    std::string styleName;
+    bool bold = false;
+    bool italic = false;
+};
+
+/// Open `path` with FreeType and read its name-table metadata.
+/// Used by the Python font_manager bindings to populate FontEntry
+/// names (mpl reads them via ft2font the same way).
+FontFileInfo fontFileInfo(const std::string& path);
 
 /// Renders text using glyb's FreeType + HarfBuzz bitmap atlas.
 /// Glyphs are rasterized on-demand into a font atlas bitmap, uploaded
@@ -77,6 +93,17 @@ public:
     /// system has no DejaVu Serif). Shares the primary face's atlas.
     [[nodiscard]] font_face* serifFace() const noexcept { return serifFace_; }
 
+    /// mpl fontproperties resolution: pick a face matching
+    /// family/style/weight, lazily loading matching system fonts (they
+    /// share the primary atlas). Returns the best match — the primary
+    /// face when nothing better is found. `isBold`/`isItalic` reflect
+    /// whether the returned face genuinely provides that styling so
+    /// callers can fall back to faux-bold when needed.
+    struct FaceMatch { font_face* face; bool bold; bool italic; };
+    [[nodiscard]] FaceMatch faceFor(std::string_view family,
+                                    std::string_view style,
+                                    std::string_view weight);
+
     /// Font line advance (ascent+descent+leading) in pixels at `scale`.
     float lineHeight(float scale = 1.0f);
 
@@ -108,6 +135,8 @@ private:
     font_face* fallbackFace_ = nullptr;
     /// DejaVu Serif — the dejavuserif mathtext fontset face.
     font_face* serifFace_ = nullptr;
+    /// Lazily-resolved faces for fontproperties (family/style/weight).
+    std::unordered_map<std::string, FaceMatch> faceCache_;
 
     // Atlas texture (uploaded lazily, re-uploaded when it grows)
     core::Image atlasImage_;

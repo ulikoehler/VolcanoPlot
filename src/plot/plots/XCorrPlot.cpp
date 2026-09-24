@@ -31,36 +31,25 @@ void XCorrPlot::computeCorrelation() {
     if (maxLag == 0) maxLag = static_cast<uint32_t>(n - 1);
     maxLag = std::min(maxLag, static_cast<uint32_t>(n - 1));
 
-    // Compute means.
-    double xMean = std::accumulate(x_.begin(), x_.end(), 0.0) / n;
-    double yMean = isAuto_ ? xMean :
-        std::accumulate(y_.begin(), y_.end(), 0.0) / n;
-
-    // Compute variances for normalization.
-    double xVar = 0.0, yVar = 0.0;
+    // mpl semantics: np.correlate(x, y, "full") with no detrending;
+    // normed divides by sqrt(dot(x,x) * dot(y,y)) — L2 norms of the
+    // raw signals.
+    double xDot = 0.0, yDot = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        xVar += (x_[i] - xMean) * (x_[i] - xMean);
-        if (isAuto_)
-            yVar += (x_[i] - xMean) * (x_[i] - xMean);
-        else
-            yVar += (y_[i] - yMean) * (y_[i] - yMean);
+        xDot += static_cast<double>(x_[i]) * x_[i];
+        yDot += static_cast<double>(isAuto_ ? x_[i] : y_[i]) *
+                (isAuto_ ? x_[i] : y_[i]);
     }
-    double norm = std::sqrt(xVar * yVar);
+    double norm = std::sqrt(xDot * yDot);
     if (norm < 1e-30) norm = 1.0;
 
-    // Compute correlation at each lag from -maxLag to +maxLag.
+    // np.correlate(x, y, 'full'): c[lag] = sum_i x[i] * y[i - lag].
     for (int lag = -static_cast<int>(maxLag); lag <= static_cast<int>(maxLag); ++lag) {
         double corr = 0.0;
-        // r[lag] = sum over i of (x[i] - xMean) * (y[i+lag] - yMean)
-        // where i+lag must be in [0, n-1].
-        int startI = std::max(0, -lag);
-        int endI = static_cast<int>(n) - 1 - std::max(0, lag);
-        for (int i = startI; i <= endI; ++i) {
-            int j = i + lag;
-            float xv = x_[i] - static_cast<float>(xMean);
-            float yv = isAuto_ ? (x_[j] - static_cast<float>(xMean))
-                              : (y_[j] - static_cast<float>(yMean));
-            corr += xv * yv;
+        for (int i = 0; i < static_cast<int>(n); ++i) {
+            int j = i - lag;
+            if (j < 0 || j >= static_cast<int>(n)) continue;
+            corr += static_cast<double>(x_[i]) * (isAuto_ ? x_[j] : y_[j]);
         }
         if (config_.normed) corr /= norm;
 
@@ -114,12 +103,11 @@ void XCorrPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void XCorrPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void XCorrPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || stemSegments_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     stemRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stemSegments_.size()));
 

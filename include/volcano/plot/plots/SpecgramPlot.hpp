@@ -63,6 +63,10 @@ public:
     [[nodiscard]] uint32_t numRows() const { return nrows_; }
     [[nodiscard]] uint32_t numCols() const { return ncols_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeSpecgram(); }
+
 private:
     std::vector<float> signal_;
     SpecgramConfig config_;

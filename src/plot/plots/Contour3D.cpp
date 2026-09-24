@@ -206,8 +206,7 @@ void Contour3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + (p.x * 0.5f + 0.5f) * float(rect.width),
                        rect.y + (0.5f - p.y * 0.5f) * float(rect.height)};
     };
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     vk::Extent2D res = r.backend().extent();
     auto& spine = r.spineRenderer();
 
@@ -344,15 +343,14 @@ void Contourf3D::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Contourf3D::draw(vk::CommandBuffer cmd, render::Renderer&,
+void Contourf3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
     Transform2D t;
     t.view.x = {-1.0f, 1.0f};
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t);
 }
 

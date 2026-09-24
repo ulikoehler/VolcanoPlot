@@ -80,6 +80,38 @@ public:
         return valueRange_.valid() ? std::optional{valueRange_} : std::nullopt;
     }
 
+    // ── mpl ScalarMappable ───────────────────────────────────────────
+    [[nodiscard]] std::shared_ptr<Normalize> norm() const override {
+        return config_.norm;
+    }
+    void setNorm(std::shared_ptr<Normalize> n) override {
+        config_.norm = std::move(n);
+        prepared_ = false;
+        touch();
+    }
+    [[nodiscard]] const Colormap* cmap() const override {
+        return config_.cmap;
+    }
+    void setCmap(const Colormap& cm) override {
+        config_.cmap = &cm;
+        prepared_ = false;
+        touch();
+    }
+    void setArray(std::vector<float> a) override;
+    [[nodiscard]] std::vector<float> array() const override { return C_; }
+    void setClim(std::optional<float> vmin,
+                 std::optional<float> vmax) override;
+
+    /// mpl QuadMesh coordinate access — flat shading: x/y are the
+    /// (ncols+1)/(nrows+1) edge arrays; gouraud: corner arrays.
+    [[nodiscard]] const std::vector<float>& xs() const { return x_; }
+    [[nodiscard]] const std::vector<float>& ys() const { return y_; }
+    [[nodiscard]] uint32_t nCols() const { return nCols_; }
+    [[nodiscard]] uint32_t nRows() const { return nRows_; }
+    [[nodiscard]] const PcolormeshConfig& config() const {
+        return config_;
+    }
+
 private:
     std::vector<float> x_, y_, C_;
     uint32_t nCols_, nRows_;

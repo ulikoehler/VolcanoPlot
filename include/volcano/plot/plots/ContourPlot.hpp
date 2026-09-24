@@ -53,6 +53,9 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return config_.lineColor; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    /// mpl ContourSet attribute access for clabel & introspection.
+    [[nodiscard]] const ContourConfig& config() const { return config_; }
+    [[nodiscard]] ContourConfig& mutableConfig() { return config_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
@@ -98,6 +101,8 @@ public:
         return Range{config_.levels.front(), config_.levels.back()};
     }
     void setLabel(std::string l) { label_ = std::move(l); }
+    [[nodiscard]] const ContourConfig& config() const { return config_; }
+    [[nodiscard]] ContourConfig& mutableConfig() { return config_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;

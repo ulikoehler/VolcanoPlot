@@ -75,12 +75,11 @@ void StepPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void StepPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void StepPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || stepPoints_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
 }
 
@@ -184,12 +183,11 @@ void StairsPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void StairsPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void StairsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     if (fill_ && !fillPositions_.empty())
         fillRenderer_.draw(cmd, vrect, t);
     if (!stepPoints_.empty())

@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <typeindex>
 #include <unordered_map>
@@ -16,12 +17,22 @@
 
 namespace volcano::plot {
 
+struct Colormap;
+
 /// Font description (matplotlib font_properties equivalent).
 struct FontProperties {
     std::string family = "DejaVu Sans";
-    std::string style = "normal";   // normal, italic, oblique
-    std::string weight = "normal";  // normal, bold, light
-    float size = 12.0f;             // points
+    std::string style = "normal";    // normal, italic, oblique
+    /// mpl fontvariant: "normal" or "small-caps" (stored for parity;
+    /// the bitmap renderer does not synthesize small-caps).
+    std::string variant = "normal";
+    std::string weight = "normal";   // normal, bold, light
+    /// mpl fontstretch: name or numeric 0-1000 as a string ("condensed",
+    /// "expanded", "700"); stored for parity.
+    std::string stretch = "normal";
+    /// mpl fname: explicit font file path (overrides family lookup).
+    std::string file;
+    float size = 10.0f;              // points (mpl font.size)
     /// Text rotation in radians (screen space, Y-down; added to any
     /// built-in rotation such as the y-label's -90°).
     float rotation = 0.0f;
@@ -60,6 +71,19 @@ struct TickConfig {
     float majorWidth = 0.8f;
     /// Minor tick width in points.
     float minorWidth = 0.6f;
+    /// Tick-label color override (matplotlib tick_params labelcolor /
+    /// colors). nullopt → axis color. Also colors the offset text
+    /// (matplotlib applies labelcolor to offsetText).
+    std::optional<Color> labelColor;
+    /// mpl tick_params rotation_mode ("default" / "anchor"). Stored for
+    /// introspection; rotated labels already anchor at the baseline end.
+    std::string labelRotationMode = "default";
+    /// Tick-label indices suppressed via label.set_visible(False) —
+    /// indices into the current major/minor tick list (unlike mpl's
+    /// persistent Tick artists, these reset semantics follow the tick
+    /// list, so they only stay valid while positions are stable).
+    std::set<int> hiddenLabels;
+    std::set<int> hiddenMinorLabels;
     /// Locator/formatter overrides (matplotlib set_major_locator,
     /// set_minor_locator, set_major_formatter, set_minor_formatter).
     /// Null → automatic (scale-aware nice ticks / ScalarFormatter /
@@ -149,6 +173,34 @@ struct LegendStyle {
     float labelSpacing = 0.5f;
     float columnSpacing = 2.0f;
     float borderAxesPad = 0.5f;
+    /// Markers on a Line handle (mpl legend.numpoints; only when the
+    /// source artist carries markers — see LegendHandle::points).
+    int numpoints = 1;
+    /// Marker count on scatter/Circle handles (mpl legend.scatterpoints).
+    int scatterpoints = 3;
+    /// Scale applied to handle markers (mpl legend.markerscale).
+    float markerScale = 1.0f;
+    /// Handle left of the label (mpl legend.markerfirst). False → label
+    /// first, handle right-aligned at the column edge.
+    bool markerFirst = true;
+    /// Reverse the entry order (mpl legend.reverse).
+    bool reverse = false;
+    /// mpl mode="expand": the legend box expands horizontally to fill
+    /// the anchor (bbox_to_anchor width, else the axes width).
+    bool expand = false;
+    /// mpl alignment: "left"/"center"/"right" — aligns the entry block
+    /// and title within the legend box.
+    std::string alignment = "center";
+    /// bbox_to_anchor 4-tuple extent (x, y, w, h): when anchorW/anchorH
+    /// >= 0 the anchor point is resolved inside that sub-box instead of
+    /// the full axes/figure (mpl (x0, y0, width, height) form).
+    float anchorW = -1.0f, anchorH = -1.0f;
+    /// mpl handles=: explicit handles replace axes collection. Entries
+    /// are snapshotted at legend() time (labels/colors/markers).
+    std::optional<std::vector<LegendHandle>> explicitHandles;
+    /// mpl labels=: labels applied positionally over the collected (or
+    /// explicit) handles.
+    std::vector<std::string> explicitLabels;
     /// Whether the legend may be dragged (mpl legend.draggable()).
     /// While dragged, `dragOffset` accumulates the pixel displacement
     /// applied to the loc/anchor position.
@@ -200,12 +252,30 @@ struct ColorbarStyle {
     /// Optional custom normalization (matplotlib colorbar `norm`). When
     /// set, strip colors and tick positions map through it.
     std::shared_ptr<Normalize> norm;
+    /// mpl `fig.colorbar(mappable)` — the scalar-mappable plot this
+    /// colorbar describes. nullptr → the first plot with a valueRange.
+    /// Non-owning; the plot is owned by the axes.
+    const IPlot* mappable = nullptr;
+    /// Explicit colormap (mpl `fig.colorbar(cm.ScalarMappable)` or a
+    /// mappable's cmap) — overrides `colormap` when set.
+    const Colormap* cmapPtr = nullptr;
+    /// Scalar range for a standalone ScalarMappable (no axes plot).
+    std::optional<Range> explicitRange;
+    /// mpl `Colorbar.set_ticks` — explicit major tick values (data
+    /// units); empty → auto-located ticks.
+    std::vector<float> ticks;
+    /// mpl `Colorbar.set_ticklabels` — positional labels for `ticks`.
+    std::vector<std::string> tickLabels;
+    /// mpl `Colorbar.minorticks_on` — draw minor tick marks (unlabeled)
+    /// between the major ticks.
+    bool minorTicksOn = false;
 };
 
 /// Title configuration.
 struct TitleStyle {
     std::string text;
-    FontProperties font;
+    /// mpl axes.titlesize / figure.titlesize = 'large' (12pt).
+    FontProperties font{.size = 12.0f};
     Color color = Color::black();
     float pad = 6.0f;
     /// Font weight for the title (e.g. "normal", "bold").
@@ -247,6 +317,9 @@ struct ColorCycleStyle {
 struct FigureStyle {
     Color faceColor = Color::white();
     Color edgeColor = Color::white();
+    /// mpl `figure.frameon` — when false the figure patch isn't drawn
+    /// (the canvas stays at the clear color).
+    bool frameOn = true;
     float dpi = 100.0f;
     std::string styleName = "default"; // ggplot, seaborn, default, ...
     TitleStyle title;
@@ -305,6 +378,11 @@ struct FigureStyle {
     /// Path sketch wobble amplitude in pixels (mpl `path.sketch` /
     /// plt.xkcd). 0 = off; xkcd style sets ~1.0.
     float sketchScale = 0.0f;
+    /// mpl `path.sketch`[1]: wobble wavelength in pixels.
+    float sketchLength = 128.0f;
+    /// mpl `path.sketch`[2]: wavelength jitter factor (stored for parity;
+    /// the wobble currently uses scale+length only).
+    float sketchRandomness = 16.0f;
 };
 
 /// Built-in style presets (matplotlib style sheets equivalent).

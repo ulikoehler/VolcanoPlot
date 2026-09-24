@@ -258,7 +258,7 @@ TEST(TextRegression, MathTextRendersInAnnotation) {
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto* t = cf.axes->text(0.3f, 0.5f, "$x^2 + \\alpha$", CoordSystem::Data);
     t->color = Color::black();
-    t->fontSize = 2.0f;  // larger text → more dark pixels
+    t->fontSize = 24.0f;  // larger text → more dark pixels
     auto img = cf.render();
     // Math text should render noticeably dark pixels (AA edges are gray,
     // so count anything darker than mid-gray).
@@ -510,11 +510,12 @@ TEST(AnchoredText, LayoutHonorsLoc) {
     TFig cf(256);
     cf.axes->setViewport({0, 1, 0, 1, 0, 1});
     auto& at = cf.axes->addAnchoredText("x", "lower right");
-    auto m = [](std::string_view t, float s) {
-        return SizeBarTextMeasure{float(t.size()) * 8.0f * s,
-                                  16.0f * s, 12.8f * s};
+    auto m = [](std::string_view t, float pt) {
+        // measure takes points; report ~8px/em at 96dpi proportions.
+        return SizeBarTextMeasure{float(t.size()) * pt * 0.6f * 96.0f / 72.0f,
+                                  pt * 96.0f / 72.0f, pt * 96.0f / 72.0f * 0.8f};
     };
-    auto L = layoutAnchoredText(at, *cf.axes, cf.axes->rect, m);
+    auto L = layoutAnchoredText(at, *cf.axes, cf.axes->rect, 96.0f, m);
     ASSERT_TRUE(L.valid);
     const auto& r = cf.axes->rect;
     // Lower-right: box right/bottom near the rect's right/bottom edges.
@@ -586,7 +587,7 @@ TEST(TextRegression, MathTextSerifFontsetDiffers) {
         auto* t = cf.axes->text(0.25f, 0.5f, "$\\alpha x^2$",
                                 CoordSystem::Data);
         t->color = Color::black();
-        t->fontSize = 2.0f;
+        t->fontSize = 24.0f;
         return cf.render();
     };
     auto sans = renderWith("dejavusans");

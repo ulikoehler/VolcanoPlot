@@ -54,6 +54,10 @@ public:
     /// Access computed PSD values in dB (valid after prepare()).
     [[nodiscard]] const std::vector<float>& values() const { return values_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computePsd(); }
+
 private:
     std::vector<float> signal_;
     PsdConfig config_;

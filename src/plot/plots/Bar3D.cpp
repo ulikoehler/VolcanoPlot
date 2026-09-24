@@ -168,7 +168,7 @@ void Bar3D::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Bar3D::draw(vk::CommandBuffer cmd, render::Renderer&,
+void Bar3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
                  const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -177,8 +177,7 @@ void Bar3D::draw(vk::CommandBuffer cmd, render::Renderer&,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     if (!fillPositions_.empty())
         fillRenderer_.draw(cmd, vrect, t);

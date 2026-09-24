@@ -11,6 +11,8 @@
 #pragma once
 
 #include "volcano/plot/Path.hpp"
+#include "volcano/plot/Style.hpp"
+#include "volcano/plot/Transform.hpp"
 #include "volcano/plot/Types.hpp"
 
 #include <array>
@@ -118,14 +120,20 @@ struct TextAnnotation {
     float x = 0.0f, y = 0.0f;
     /// Coordinate system for (x, y).
     CoordSystem coords = CoordSystem::Data;
+    /// mpl `transform=` — a full Transform object (e.g. transAxes or a
+    /// blended transform). When set, it overrides `coords`.
+    TransformPtr transform;
     /// For OffsetPoints: offset in points from the data position.
     float xyOffsetX = 0.0f, xyOffsetY = 0.0f;
 
     /// Text content (UTF-8).
     std::string text;
 
-    /// Font size scale (1.0 = default 16px).
-    float fontSize = 1.0f;
+    /// Font size in points (mpl font.size; default 10pt).
+    float fontSize = 10.0f;
+    /// mpl fontproperties — family/style/variant/weight/stretch.
+    /// `font.size` mirrors fontSize (kept in sync by bindings).
+    FontProperties font{.size = 10.0f};
     /// Text color.
     Color color = Color::black();
     /// Rotation in radians (clockwise, screen space Y-down).
@@ -135,10 +143,21 @@ struct TextAnnotation {
     /// Vertical alignment.
     VAlign valign = VAlign::Baseline;
 
+    /// mpl Artist.visible — invisible texts are skipped.
+    bool visible = true;
+    /// mpl `Artist.remove()`: detached texts are excluded from
+    /// `ax.texts` and never drawn. The slot stays in the vector so
+    /// outstanding handles don't dangle.
+    bool detached = false;
+    /// mpl `bbox=dict(...)` present — draws the FancyBboxPatch even when
+    /// face/edge colors are left at their (transparent) defaults.
+    bool hasBbox = false;
     /// Optional background box color (alpha=0 = no background).
     Color bboxFaceColor = Color::transparent();
     /// Optional background box edge color (alpha=0 = no edge).
     Color bboxEdgeColor = Color::transparent();
+    /// Background box edge linewidth in pixels (mpl bbox lw).
+    float bboxEdgeWidth = 1.0f;
     /// Background box padding in pixels.
     float bboxPadding = 4.0f;
     /// Background box corner radius in pixels (0 = square corners).
@@ -151,8 +170,29 @@ struct TextAnnotation {
     /// Default false (matplotlib default); set true to clip data-space text.
     bool clipOn = false;
 
+    /// mpl text kwargs stored for API parity:
+    /// `usetex` — TeX rendering is unsupported; kept for round-trip.
+    bool usetex = false;
+    /// `wrap` — wrap text to the axes/figure width (stored; the bitmap
+    /// renderer does not re-flow text).
+    bool wrap = false;
+    /// `rotation_mode` — "default" or "anchor" (stored; rotation already
+    /// anchors at the baseline origin).
+    std::string rotationMode = "default";
+    /// `linespacing` — multiple of single-line advance (stored; the
+    /// renderer uses the font's natural advance).
+    float lineSpacing = 1.2f;
+    /// `multialignment`/`ma` — per-line horizontal alignment (defaults
+    /// to `halign` when unset).
+    std::optional<HAlign> multiAlign;
+    /// `backgroundcolor` — a flat patch behind the text (mpl draws a
+    /// Rectangle in this color under the text).
+    Color backgroundColor = Color::transparent();
+
     /// mpl draggable(): allow dragging the text with the mouse.
     bool draggable = false;
+    /// mpl `path_effects` — under-draw passes before the text renders.
+    std::vector<PathEffect> pathEffects;
     /// Accumulated pixel-space drag displacement (figure px, Y-down).
     mutable Point2D dragOffset{0.0f, 0.0f};
     /// Text bounding box in figure px from the last draw (hit-testing).
@@ -176,8 +216,10 @@ struct Annotation {
     /// Text content.
     std::string text;
 
-    /// Font size scale.
-    float fontSize = 1.0f;
+    /// Font size in points (mpl font.size).
+    float fontSize = 10.0f;
+    /// mpl fontproperties — family/style/variant/weight/stretch.
+    FontProperties font{.size = 10.0f};
     /// Text color.
     Color color = Color::black();
     /// Text alignment.
@@ -206,10 +248,25 @@ struct Annotation {
 
     /// Whether to clip the text/arrow to the axes rect (matplotlib clip_on).
     bool clipOn = false;
+    /// mpl text kwargs stored for parity (see TextAnnotation).
+    bool usetex = false;
+    bool wrap = false;
+    std::string rotationMode = "default";
+    float lineSpacing = 1.2f;
+    std::optional<HAlign> multiAlign;
+    Color backgroundColor = Color::transparent();
+    /// mpl `Artist.remove()`: detached annotations are skipped by the
+    /// renderer and excluded from child listings.
+    bool detached = false;
 
+    /// mpl `bbox=dict(...)` present — draws the FancyBboxPatch even when
+    /// face/edge colors are left at their defaults.
+    bool hasBbox = false;
     /// Optional background box for the text.
     Color bboxFaceColor = Color::transparent();
     Color bboxEdgeColor = Color::transparent();
+    /// Background box edge linewidth in pixels (mpl bbox lw).
+    float bboxEdgeWidth = 1.0f;
     float bboxPadding = 4.0f;
     /// mpl bbox=dict(boxstyle=...) — outline path for the bbox.
     std::optional<BoxStyleSpec> boxStyle;
@@ -226,6 +283,8 @@ struct Annotation {
     /// mpl draggable(): allow dragging the annotation text (the arrow
     /// follows, keeping its data-space anchor).
     bool draggable = false;
+    /// mpl `path_effects` — under-draw passes before the text renders.
+    std::vector<PathEffect> pathEffects;
     /// Accumulated pixel-space drag displacement (figure px, Y-down).
     mutable Point2D dragOffset{0.0f, 0.0f};
     /// Text bounding box in figure px from the last draw (hit-testing).
@@ -261,10 +320,15 @@ struct SizeBar {
     /// Fill the bar instead of stroking its outline (mpl fill_bar;
     /// default: fill when sizeVertical > 0).
     std::optional<bool> fillBar;
-    /// Font size scale (1.0 = default 16px).
-    float fontSize = 1.0f;
-    /// Frame fill color (mpl legend-style white@0.8).
-    Color frameFaceColor{1.0f, 1.0f, 1.0f, 0.8f};
+    /// Font size in points (mpl font.size; default 10pt).
+    float fontSize = 10.0f;
+    /// Frame fill color (mpl AnchoredOffsetbox patch: facecolor='w').
+    Color frameFaceColor{1.0f, 1.0f, 1.0f, 1.0f};
+    /// Frame edge color (mpl AnchoredOffsetbox patch: edgecolor='k').
+    Color frameEdgeColor{0.0f, 0.0f, 0.0f, 1.0f};
+    /// mpl `Artist.remove()`: detached bars are skipped by renderers
+    /// and excluded from artist listings.
+    bool detached = false;
 };
 
 class Axes;
@@ -286,13 +350,18 @@ struct AnchoredText {
     float borderpad = 0.5f;
     /// Draw a frame box (mpl frameon=True).
     bool frameon = true;
-    /// Font size scale (1.0 = default 16px).
-    float fontSize = 1.0f;
+    /// Font size in points (mpl prop fontsize; default 10pt).
+    float fontSize = 10.0f;
+    /// mpl AnchoredText prop= fontproperties.
+    FontProperties font{.size = 10.0f};
     Color color = Color::black();
-    /// mpl patch facecolor/edgecolor defaults ('white'/'0.8' at 0.8 alpha
-    /// via the offset-box frame).
-    Color frameFaceColor{1.0f, 1.0f, 1.0f, 0.8f};
-    Color frameEdgeColor{0.8f, 0.8f, 0.8f, 0.8f};
+    /// mpl AnchoredOffsetbox patch defaults: facecolor='w',
+    /// edgecolor='k' (opaque).
+    Color frameFaceColor{1.0f, 1.0f, 1.0f, 1.0f};
+    Color frameEdgeColor{0.0f, 0.0f, 0.0f, 1.0f};
+    /// mpl `Artist.remove()`: detached boxes are skipped by renderers
+    /// and excluded from artist listings.
+    bool detached = false;
 };
 
 /// Pixel-space layout of an AnchoredText (shared by raster + vector).
@@ -302,8 +371,10 @@ struct AnchoredTextLayout {
     bool valid = false;
 };
 
+/// `measure` takes the text size in *points* (mpl semantics).
 AnchoredTextLayout layoutAnchoredText(
     const AnchoredText& at, const Axes& axes, Rect2D axesRect,
+    float dpi,
     const std::function<SizeBarTextMeasure(std::string_view,
                                            float)>& measure);
 
@@ -360,8 +431,8 @@ struct SizeBarLayout {
 /// anchored-artist structs.
 
 /// Lay out a SizeBar inside `axesRect` (figure pixels, Y-down).
-/// `measure` returns {width, height, ascent} for the label at scale
-/// `bar.fontSize` (matches TextRenderer::measureText / VectorRenderer).
+/// `measure` returns {width, height, ascent} for the label given its
+/// size in *points* (callers convert pt → their canvas scale).
 [[nodiscard]] SizeBarLayout
 layoutSizeBar(const SizeBar& bar, const Axes& axes, Rect2D axesRect,
               Extent2D figExtent, float dpi,

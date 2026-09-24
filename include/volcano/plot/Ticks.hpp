@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace volcano::plot {
@@ -17,6 +18,14 @@ public:
     virtual ~Locator() = default;
     [[nodiscard]] virtual std::vector<float> tickValues(float vmin,
                                                        float vmax) const = 0;
+    /// Double-precision variant — date locators need float64 to
+    /// resolve sub-day positions at epoch-day magnitudes (float32
+    /// loses ~86 s at day 18000+).  Defaults to the float version.
+    [[nodiscard]] virtual std::vector<double>
+    tickValuesD(double vmin, double vmax) const {
+        const auto f = tickValues(float(vmin), float(vmax));
+        return {f.begin(), f.end()};
+    }
 };
 
 /// Tick formatter: produces the label for a tick value.
@@ -35,6 +44,11 @@ public:
     [[nodiscard]] virtual std::string format(float v, int pos) const = 0;
     /// Optional offset text drawn at the axis end (e.g. "+1e5").
     [[nodiscard]] virtual std::string offsetText() const { return {}; }
+    /// mpl Formatter.__call__ wraps format() output in fix_minus
+    /// (ASCII '-' → U+2212) for most formatters; NullFormatter,
+    /// FormatStrFormatter, FuncFormatter and FixedFormatter bypass it,
+    /// and StrMethodFormatter applies it per substituted value.
+    [[nodiscard]] virtual bool unicodeMinus() const { return true; }
 };
 
 // ─── Locators ───────────────────────────────────────────────────────────────
@@ -89,20 +103,56 @@ private:
     float base_, offset_;
 };
 
-/// Nice-number locator targeting at most `nbins` ticks
-/// (matplotlib MaxNLocator; AutoLocator = nbins 9).
+/// Nice-number locator targeting at most `nbins` intervals
+/// (matplotlib MaxNLocator; mpl default nbins=10).
 class MaxNLocator : public Locator {
 public:
-    explicit MaxNLocator(int nbins = 9) : nbins_(nbins) {}
+    explicit MaxNLocator(int nbins = 10) : nbins_(nbins) {}
     [[nodiscard]] std::vector<float> tickValues(float vmin,
                                                 float vmax) const override;
+
+    // ── mpl MaxNLocator.set_params (forwarded by Axes::locatorParams) ──
+    [[nodiscard]] int nbins() const { return nbins_; }
+    void setNbins(int n) { nbins_ = n < 1 ? 1 : n; }
+    /// mpl nbins='auto' (AutoLocator): the caller derives nbins from
+    /// the axis' tick space (see axisTicks) instead of a fixed count.
+    void setNbinsAuto() { nbins_ = 0; }
+    [[nodiscard]] bool autoNbins() const { return nbins_ <= 0; }
+    /// mpl `steps`: acceptable step multiples in [1, 10]; the extended
+    /// staircase (0.1·steps, steps, 10·steps[1]) is derived from it.
+    void setSteps(std::vector<float> steps);
+    [[nodiscard]] const std::vector<float>& steps() const { return steps_; }
+    /// mpl `integer`: ticks take only integer values.
+    void setInteger(bool v) { integer_ = v; }
+    /// mpl `symmetric`: the located range is symmetrized about zero.
+    void setSymmetric(bool v) { symmetric_ = v; }
+    /// mpl `prune`: "lower"/"upper"/"both" drop the edge tick(s);
+    /// "none"/"" keeps them.
+    void setPrune(std::string_view p);
+    /// mpl `min_n_ticks`: relax the step until ≥ n ticks are emitted.
+    void setMinNTicks(int n) { minNTicks_ = n < 1 ? 1 : n; }
+    [[nodiscard]] int minNTicks() const { return minNTicks_; }
+
 private:
+    /// mpl _raw_ticks: edge-inclusive ticks spanning [vmin, vmax].
+    std::vector<float> rawTicks(double vmin, double vmax) const;
     int nbins_;
+    /// mpl _raw_steps default: [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].
+    std::vector<float> steps_{1, 1.5f, 2, 2.5f, 3, 4, 5, 6, 8, 10};
+    bool integer_ = false;
+    bool symmetric_ = false;
+    std::string prune_;   ///< "", "lower", "upper" or "both"
+    int minNTicks_ = 2;
 };
 
+/// mpl AutoLocator: MaxNLocator with nbins='auto' (derived from the
+/// axis tick space by axisTicks) and the narrower staircase
+/// steps=[1, 2, 2.5, 5, 10].
 class AutoLocator : public MaxNLocator {
 public:
-    AutoLocator() : MaxNLocator(9) {}
+    AutoLocator() : MaxNLocator(0) {
+        setSteps({1.0f, 2.0f, 2.5f, 5.0f, 10.0f});
+    }
 };
 
 /// Decade ticks for log axes (matplotlib LogLocator). `subs` are the
@@ -140,6 +190,28 @@ public:
                                                 float vmax) const override;
 };
 
+/// Ticks spaced evenly on an inverse-sinh scale (matplotlib
+/// AsinhLocator — used with asinh axes). `linearWidth` is the
+/// quasi-linear region extent; `subs` are base multiples for minor
+/// ticks.
+class AsinhLocator : public Locator {
+public:
+    // Params are doubles: the asinh→sinh roundtrip is ulp-sensitive
+    // (matplotlib computes in float64; float32 params visibly shift
+    // the generated ticks at decade boundaries).
+    explicit AsinhLocator(double linearWidth, int numticks = 11,
+                          double symthresh = 0.2, double base = 10.0,
+                          std::vector<double> subs = {})
+        : linearWidth_(linearWidth), numticks_(numticks),
+          symthresh_(symthresh), base_(base), subs_(std::move(subs)) {}
+    [[nodiscard]] std::vector<float> tickValues(float vmin,
+                                                float vmax) const override;
+private:
+    double linearWidth_, symthresh_, base_;
+    int numticks_;
+    std::vector<double> subs_;
+};
+
 /// Minor ticks between major ticks (matplotlib AutoMinorLocator).
 /// tickValues() returns the *minor* positions. `ndivs` = subdivisions
 /// per major interval (0 → auto: 5, or 4 when the step divides unevenly).
@@ -161,6 +233,7 @@ private:
 class NullFormatter : public Formatter {
 public:
     [[nodiscard]] std::string format(float, int) const override { return {}; }
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
 };
 
 /// Explicit label per tick index.
@@ -169,6 +242,7 @@ public:
     explicit FixedFormatter(std::vector<std::string> labels)
         : labels_(std::move(labels)) {}
     [[nodiscard]] std::string format(float, int pos) const override;
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
 private:
     std::vector<std::string> labels_;
 };
@@ -181,6 +255,7 @@ public:
     [[nodiscard]] std::string format(float v, int pos) const override {
         return fn_ ? fn_(v, pos) : std::string{};
     }
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
 private:
     std::function<std::string(float, int)> fn_;
 };
@@ -190,6 +265,7 @@ class FormatStrFormatter : public Formatter {
 public:
     explicit FormatStrFormatter(std::string fmt) : fmt_(std::move(fmt)) {}
     [[nodiscard]] std::string format(float v, int pos) const override;
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
 private:
     std::string fmt_;
 };
@@ -199,6 +275,8 @@ class StrMethodFormatter : public Formatter {
 public:
     explicit StrMethodFormatter(std::string tmpl) : tmpl_(std::move(tmpl)) {}
     [[nodiscard]] std::string format(float v, int pos) const override;
+    // mpl applies fix_minus to each substituted value, not literals.
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
 private:
     std::string tmpl_;
 };
@@ -285,7 +363,9 @@ public:
 /// 1234 → "1.234 k", 0.001 → "1 m". `unit` is appended (e.g. "Hz").
 class EngFormatter : public Formatter {
 public:
-    explicit EngFormatter(std::string unit = "", int places = 1,
+    /// mpl places=None (default) → "%g" mantissa; an int → "%.Nf".
+    /// Pass -1 for mpl's None.
+    explicit EngFormatter(std::string unit = "", int places = -1,
                           std::string sep = " ")
         : unit_(std::move(unit)), places_(places), sep_(std::move(sep)) {}
     [[nodiscard]] std::string format(float v, int pos) const override;
@@ -301,11 +381,15 @@ public:
     explicit PercentFormatter(float xmax = 100.0f, int decimals = -1,
                               std::string symbol = "%")
         : xmax_(xmax), decimals_(decimals), symbol_(std::move(symbol)) {}
+    void setViewInterval(float vmin, float vmax) override {
+        vmin_ = vmin; vmax_ = vmax;
+    }
     [[nodiscard]] std::string format(float v, int pos) const override;
 private:
     float xmax_;
-    int decimals_; // -1 → auto
+    int decimals_; // -1 → auto (mpl: derived from the display range)
     std::string symbol_;
+    float vmin_ = 0.0f, vmax_ = 0.0f;
 };
 
 } // namespace volcano::plot

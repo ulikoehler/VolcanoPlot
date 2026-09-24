@@ -159,7 +159,7 @@ void Sankey::finish() {
                     auto* t = axes_->text(0.02f, inSrcY - w * 0.5f,
                                           s.labels[i], CoordSystem::Data);
                     t->valign = VAlign::Center;
-                    t->fontSize = 0.6f;
+                    t->fontSize = 7.2f;
                 }
                 inSrcY -= w + gap_;
                 inY -= w;
@@ -178,7 +178,7 @@ void Sankey::finish() {
                                           s.labels[i], CoordSystem::Data);
                     t->valign = VAlign::Center;
                     t->halign = HAlign::Right;
-                    t->fontSize = 0.6f;
+                    t->fontSize = 7.2f;
                 }
                 outSrcY += w + gap_;
                 outY += w;
@@ -283,7 +283,7 @@ void treemap(Axes& axes, std::span<const float> sizes,
                                 labels[i], CoordSystem::Data);
             t->halign = HAlign::Center;
             t->valign = VAlign::Center;
-            t->fontSize = std::min(1.0f, rc.h * 0.9f);
+            t->fontSize = std::min(12.0f, rc.h * 10.8f);
             t->color = Color::white();
         }
     }
@@ -393,8 +393,7 @@ void WordCloudPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!laidOut_) layout(r, rect);
     if (placed_.empty() || !r.textReady()) return;
 
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     for (const auto& p : placed_) {
         const auto& word = words[p.word];
         auto m = r.textRenderer().measureText(word.text, p.scale);
@@ -526,8 +525,7 @@ void NetworkPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     if (edgesR_.pointCount() >= 2)
         edgesR_.draw(cmd, vrect, t, edgesR_.pointCount());
     if (nodesR_.pointCount() > 0)

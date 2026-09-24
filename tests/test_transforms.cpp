@@ -131,19 +131,19 @@ TEST(TransformTree, BlendedGeneric) {
 // ═══ offset_copy ═══════════════════════════════════════════════════════════
 
 TEST(TransformTree, OffsetCopyPoints) {
-    // At 72dpi, 1pt = 1px. +x right, +y up (Y-down display → y shrinks).
+    // At 72dpi, 1pt = 1px. mpl offset_copy adds +x/+y in display units.
     auto t = offsetCopy(*transDisplay(), 72.0f, 10.0f, 5.0f, "points");
-    expectPt(t->apply({0, 0}), 10, -5);
+    expectPt(t->apply({0, 0}), 10, 5);
 }
 
 TEST(TransformTree, OffsetCopyInches) {
     auto t = offsetCopy(*transDisplay(), 100.0f, 1.0f, 0.5f, "inches");
-    expectPt(t->apply({0, 0}), 100, -50);
+    expectPt(t->apply({0, 0}), 100, 50);
 }
 
 TEST(TransformTree, OffsetCopyPixels) {
     auto t = offsetCopy(*transDisplay(), 300.0f, 7.0f, -3.0f, "pixels");
-    expectPt(t->apply({2, 2}), 9, 5);
+    expectPt(t->apply({2, 2}), 9, -1);
 }
 
 TEST(TransformTree, OffsetCopyOnBound) {

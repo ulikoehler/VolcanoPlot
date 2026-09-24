@@ -78,10 +78,11 @@ TEST(DateUnits, FractionalDaysBecomeClockTime) {
 TEST(DateLocators, YearLocatorYearStarts) {
     dates::YearLocator loc{1};
     auto t = loc.tickValues(num(2020, 3, 1), num(2023, 8, 1));
-    // Jan 1 2020 is before vmin — ticks are 2021, 2022, 2023.
-    ASSERT_EQ(t.size(), 3u);
+    // mpl does not clip: ticks run base.le(vmin.year)..base.ge(vmax.year),
+    // so Jan 1 2020 (before vmin) is included — 2020, 2021, 2022, 2023.
+    ASSERT_EQ(t.size(), 4u);
     auto c = dates::civilFromNum(t.front());
-    EXPECT_EQ(c.year, 2021);
+    EXPECT_EQ(c.year, 2020);
     EXPECT_EQ(c.month, 1u);
     EXPECT_EQ(c.day, 1u);
 }
@@ -89,10 +90,11 @@ TEST(DateLocators, YearLocatorYearStarts) {
 TEST(DateLocators, YearLocatorStep) {
     dates::YearLocator loc{5};
     auto t = loc.tickValues(num(1998, 6, 1), num(2021, 1, 1));
-    // 5-aligned years in range: 2000, 2005, 2010, 2015, 2020
-    ASSERT_EQ(t.size(), 5u);
-    EXPECT_EQ(dates::civilFromNum(t[0]).year, 2000);
-    EXPECT_EQ(dates::civilFromNum(t[4]).year, 2020);
+    // mpl: base.le(1998)=1995 .. base.ge(2021)=2025, unclipped:
+    // 1995, 2000, 2005, 2010, 2015, 2020, 2025
+    ASSERT_EQ(t.size(), 7u);
+    EXPECT_EQ(dates::civilFromNum(t[0]).year, 1995);
+    EXPECT_EQ(dates::civilFromNum(t[6]).year, 2025);
 }
 
 TEST(DateLocators, MonthLocatorQuarterly) {
@@ -105,9 +107,11 @@ TEST(DateLocators, MonthLocatorQuarterly) {
 TEST(DateLocators, DayLocatorMultiples) {
     dates::DayLocator loc{7};
     auto t = loc.tickValues(100.0f, 121.0f);
-    ASSERT_EQ(t.size(), 3u);  // 105, 112, 119
-    EXPECT_FLOAT_EQ(t[0], 105.0f);
-    EXPECT_FLOAT_EQ(t[2], 119.0f);
+    // mpl rrule anchors at dtstart = vmin - relativedelta(vmax,vmin) = 79,
+    // so ticks land at 100, 107, 114, 121 (not epoch-aligned multiples).
+    ASSERT_EQ(t.size(), 4u);
+    EXPECT_FLOAT_EQ(t[0], 100.0f);
+    EXPECT_FLOAT_EQ(t[3], 121.0f);
 }
 
 TEST(DateLocators, WeekdayLocatorMondays) {
@@ -182,10 +186,11 @@ TEST(DateFormatters, ConciseFormatter) {
     std::vector<float> locs = {num(2024, 3, 1), num(2024, 3, 2),
                                num(2024, 3, 3)};
     f.setLocs(locs);
-    EXPECT_EQ(f.format(locs[0], 0), "01");
+    // mpl: day-level labels, but the Mar 1 boundary tick uses the
+    // zero format '%b'; larger context goes in the offset text.
+    EXPECT_EQ(f.format(locs[0], 0), "Mar");
     EXPECT_EQ(f.format(locs[1], 1), "02");
-    // Larger context carried in the offset text.
-    EXPECT_EQ(f.offsetText(), "Mar 2024");
+    EXPECT_EQ(f.offsetText(), "2024-Mar");
 }
 
 TEST(DateFormatters, ConciseYearScaleNoOffset) {

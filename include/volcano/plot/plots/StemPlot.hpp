@@ -59,6 +59,16 @@ public:
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
+    [[nodiscard]] const StemConfig& config() const noexcept {
+        return config_;
+    }
+    [[nodiscard]] StemConfig& config() noexcept { return config_; }
+    [[nodiscard]] const std::vector<float>& xs() const noexcept {
+        return x_;
+    }
+    [[nodiscard]] const std::vector<float>& ys() const noexcept {
+        return y_;
+    }
 
 private:
     std::vector<float> x_, y_;

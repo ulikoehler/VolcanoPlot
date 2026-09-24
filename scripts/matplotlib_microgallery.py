@@ -1140,6 +1140,442 @@ def f145_mathtext_frac_sum(fig, out):
     ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
     ax.text(5, 0.5, r"$\frac{x}{y} + \sum_{i=0}^{n} i$")
 
+# ═══ Tier 16 — parity batch 10 (146-155) ═══════════════════════════════
+
+def f146_locator_params(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.locator_params("x", nbins=4)
+
+
+def f147_set_xbound(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.set_xbound(2, 8)
+
+
+def f148_markevery_int(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()), marker="o", markevery=5,
+            markersize=7)
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f149_pie_startangle(fig, out):
+    ax = mf_axes(fig)
+    ax.pie([30, 25, 20, 15, 10], labels=["A", "B", "C", "D", "E"],
+           startangle=90, counterclock=False)
+    ax.set_aspect("equal")
+
+
+def f150_pie_autopct(fig, out):
+    ax = mf_axes(fig)
+    ax.pie([30, 25, 20, 15, 10], labels=["A", "B", "C", "D", "E"],
+           autopct="%1.1f%%")
+    ax.set_aspect("equal")
+
+
+def f151_fill_between_where(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(0, 10, 60)
+    ax.fill_between(x, np.sin(x), 0,
+                    where=(x > 2) & (x < 8), interpolate=True,
+                    color="#1f77b4", alpha=0.5)
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f152_stackplot_wiggle(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(0, 10, 40)
+    ax.stackplot(x, np.sin(x) + 1.5, np.cos(x * 0.7) + 1.0,
+                 np.sin(x * 0.4) * 0.5 + 1.0, baseline="wiggle")
+
+
+def f153_label_outer(fig, out):
+    for r in range(2):
+        for c in range(2):
+            ax = fig.add_subplot(2, 2, r * 2 + c + 1)
+            x = sine_x()
+            ax.plot(x, np.sin(x))
+            ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+            ax.label_outer()
+
+
+def f154_axis_off(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.axis("off")
+
+
+def f155_imshow_origin_lower(fig, out):
+    ax = mf_axes(fig)
+    g = np.zeros((4, 4))
+    g[0, :] = 1.0
+    ax.imshow(g, cmap="viridis", origin="lower",
+              extent=(-0.5, 3.5, -0.5, 3.5))
+    ax.set_xlim(-0.5, 4.5); ax.set_ylim(-0.5, 4.5)
+
+
+def f156_marker_colors(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()), marker="o", markevery=6,
+            markersize=8, markerfacecolor="red",
+            markeredgecolor="black", markeredgewidth=2)
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f157_spine_center(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.spines["bottom"].set_position(("data", 0.0))
+    ax.spines["left"].set_position(("data", 0.0))
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def f158_spine_outward_bounds(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    sp = ax.spines["bottom"]
+    sp.set_position(("outward", 10))
+    sp.set_bounds(2, 8)
+    sp.set_color("red")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def f159_quiverkey(fig, out):
+    ax = mf_axes(fig)
+    X, Y = np.meshgrid(np.arange(4), np.arange(4))
+    U = np.ones_like(X, dtype=float)
+    V = np.full_like(X, 0.5, dtype=float)
+    Q = ax.quiver(X.ravel(), Y.ravel(), U.ravel(), V.ravel())
+    ax.set_xlim(-0.5, 3.5); ax.set_ylim(-0.5, 3.5)
+    ax.quiverkey(Q, 0.9, 0.9, 1.0, "1 m/s", labelpos="E")
+
+
+def f160_xkcd_sketch(fig, out):
+    ax = mf_axes(fig)
+    ax.set_sketch_params(scale=1.0, length=100.0, randomness=2.0)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.4, 1.4)
+
+
+def f161_clip_off(fig, out):
+    ax = mf_axes(fig)
+    ax.plot([0, 10], [0, 40], color="red", clip_on=False)
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f162_sticky_edges_bar(fig, out):
+    ax = mf_axes(fig)
+    ax.bar([1, 2, 3, 4, 5], [1, 3, 2, 4, 3])
+    ax.autoscale()
+
+
+def f163_stairs_fill(fig, out):
+    ax = mf_axes(fig)
+    ax.stairs([1, 3, 2, 4, 2], [0, 1, 2, 3, 4, 5], fill=True,
+              color="blue")
+    ax.set_xlim(0, 5); ax.set_ylim(0, 4.5)
+
+
+def f164_pcolor(fig, out):
+    ax = mf_axes(fig)
+    C = np.array([[i * j / 12.0 for i in range(4)] for j in range(3)])
+    ax.pcolor(np.arange(5), np.arange(4), C, cmap="viridis")
+    ax.set_xlim(0, 4); ax.set_ylim(0, 3)
+
+
+def f165_inset_zoom(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(0, 10, 200)
+    ax.plot(x, np.sin(x * 3.0))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    inner = ax.inset_axes([0.55, 0.55, 0.4, 0.4])
+    inner.plot(sine_x(), np.sin(sine_x()))
+    inner.set_xlim(2.0, 4.0); inner.set_ylim(-0.6, 0.6)
+    ax.indicate_inset_zoom(inner)
+
+
+def f166_patheffects_stroke(fig, out):
+    import matplotlib.patheffects as pe
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()), color="blue", lw=2,
+            path_effects=[pe.withStroke(linewidth=4,
+                                        foreground="black")])
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+
+
+def f167_patheffects_shadow(fig, out):
+    import matplotlib.patheffects as pe
+    ax = mf_axes(fig)
+    xs = [i * 1.2 + 0.5 for i in range(8)]
+    ys = [np.sin(i) * 0.6 + 0.5 for i in range(8)]
+    ax.scatter(xs, ys, s=60, color="red",
+               path_effects=[pe.withSimplePatchShadow()])
+    ax.set_xlim(0, 10); ax.set_ylim(-0.5, 1.5)
+
+
+def f168_ticks_both(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.xaxis.set_ticks_position("both")
+    ax.yaxis.set_ticks_position("both")
+
+
+def f169_transform_transaxes(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.plot([0, 1], [0, 1], color="red", lw=2,
+            transform=ax.transAxes)
+
+
+def f170_colorbar_ticks(fig, out):
+    ax = mf_axes(fig)
+    C = np.array([[i + j * 4 for i in range(4)] for j in range(4)]) / 15.0
+    im = ax.imshow(C, cmap="viridis")
+    cb = fig.colorbar(im, ax=ax, ticks=[0.0, 0.5, 1.0])
+    cb.set_ticklabels(["low", "mid", "high"])
+    cb.minorticks_on()
+
+
+def f171_scatter_c(fig, out):
+    ax = mf_axes(fig)
+    x = [i * 1.2 + 0.5 for i in range(8)]
+    y = [np.sin(i) * 0.6 + 0.5 for i in range(8)]
+    coll = ax.scatter(x, y, c=[i / 7.0 for i in range(8)],
+                      cmap="viridis")
+    ax.set_xlim(0, 10); ax.set_ylim(-0.5, 1.5)
+    fig.colorbar(coll, ax=ax)
+
+
+def f172_scatter_s(fig, out):
+    ax = mf_axes(fig)
+    x = [i * 1.6 + 0.8 for i in range(6)]
+    ax.scatter(x, [0.5] * 6, s=[20 + i * 60 for i in range(6)],
+               c="blue")
+    ax.set_xlim(0, 10); ax.set_ylim(0, 1)
+
+
+def f173_text_boxstyle(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(np.linspace(0, 10, 200),
+            np.sin(np.linspace(0, 10, 200)))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.text(5.0, 0.8, "peak", ha="center", va="center",
+            bbox=dict(boxstyle="round", fc="wheat", ec="k"))
+
+
+def f174_legend_anchor(fig, out):
+    ax = mf_axes(fig)
+    (l,) = ax.plot(np.linspace(0, 10, 200),
+                   np.sin(np.linspace(0, 10, 200)))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.legend(handles=[l], labels=["wave"], loc="upper left",
+              bbox_to_anchor=(1, 1), edgecolor="red",
+              facecolor="white")
+
+
+def f175_imshow_norm(fig, out):
+    from matplotlib.colors import LogNorm
+    ax = mf_axes(fig)
+    C = np.array([[10.0 ** ((i + j * 4) / 15.0 * 2.0) for i in range(4)]
+                  for j in range(4)])
+    im = ax.imshow(C, cmap="viridis", norm=LogNorm(vmin=1, vmax=100))
+    fig.colorbar(im, ax=ax)
+
+
+def f176_font_family(fig, out):
+    ax = mf_axes(fig)
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+    for fam, y in zip(("serif", "sans-serif", "monospace"),
+                      (0.75, 0.5, 0.25)):
+        ax.text(0.05, y, fam, transform=ax.transAxes,
+                family=fam, fontsize=14)
+
+
+def f177_tick_labelsize(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(np.linspace(0, 10, 60),
+            np.sin(np.linspace(0, 10, 60)))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.tick_params(axis="x", labelsize=14)
+    ax.tick_params(axis="y", labelsize=7)
+
+
+def f178_fig_text(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(np.linspace(0, 10, 60),
+            np.sin(np.linspace(0, 10, 60)))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    fig.suptitle("suptitle", fontsize=14, fontweight="bold")
+    fig.supxlabel("supxlabel", fontsize=9)
+    fig.text(0.5, 0.5, "fig text", color="red", fontsize=11,
+             ha="center")
+
+
+def f179_imshow_rgb(fig, out):
+    ax = mf_axes(fig)
+    rgb = np.zeros((8, 8, 3))
+    for j in range(8):
+        for i in range(8):
+            rgb[j, i] = (31 * i / 255.0, 31 * j / 255.0, 128 / 255.0)
+    ax.imshow(rgb)
+
+
+def f180_annotate_fontsize(fig, out):
+    ax = mf_axes(fig)
+    ax.plot(np.linspace(0, 10, 60),
+            np.sin(np.linspace(0, 10, 60)))
+    ax.set_xlim(0, 10); ax.set_ylim(-1.2, 1.2)
+    ax.annotate("big", xy=(5.0, -0.96), xytext=(6.5, -0.6),
+                fontsize=20, fontweight="bold",
+                arrowprops={"arrowstyle": "->"})
+
+def f181_gridspec_ratios(fig, out):
+    import matplotlib.gridspec as gridspec
+    gs = gridspec.GridSpec(2, 3, figure=fig,
+                           width_ratios=[2, 1, 1],
+                           height_ratios=[1, 2])
+    top = fig.add_subplot(gs[0, :])
+    top.plot(sine_x(), np.sin(sine_x()))
+    for c in range(3):
+        ax = fig.add_subplot(gs[1, c])
+        ax.plot([0, 1], [c, c + 1])
+
+
+def f182_gridspec_nested(fig, out):
+    import matplotlib.gridspec as gridspec
+    gs = gridspec.GridSpec(1, 2, figure=fig)
+    left = fig.add_subplot(gs[0, 0])
+    left.plot(sine_x(), np.sin(sine_x()))
+    nested = gs[0, 1].subgridspec(2, 1)
+    for r in range(2):
+        ax = fig.add_subplot(nested[r, 0])
+        ax.plot([0, 1], [r, 1 - r])
+
+
+def f183_artist_props(fig, out):
+    ax = mf_axes(fig)
+    (ln,) = ax.plot(sine_x(), np.sin(sine_x()),
+                    color="blue", lw=3)
+    ln.set_alpha(0.4)
+    sc = ax.scatter(range(12), [0.5] * 12, color="red", s=64)
+    sc.set_zorder(5)
+    (hidden,) = ax.plot([0, 10], [-0.9, 0.9],
+                        color=(0, 180 / 255, 0), lw=4)
+    hidden.set_visible(False)
+
+
+def f184_collection_props(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(0, 10, 20)
+    y = 0.5 + 0.3 * np.sin(x)
+    colors = [( (30 + 10 * i) / 255, 80 / 255,
+               (220 - 10 * i) / 255) for i in range(20)]
+    sizes = (5 + np.arange(20) * 0.5) ** 2
+    coll = ax.scatter(x, y, s=sizes, c=colors)
+    coll.set_edgecolor("k")
+    coll.set_linewidth(1.5)
+    ax.set_xlim(-0.5, 10.5); ax.set_ylim(0.0, 1.0)
+
+
+def f185_return_handles(fig, out):
+    ax = mf_axes(fig)
+    data = np.array([np.sin(i * 0.31) * 2.0 + np.cos(i * 0.13)
+                     for i in range(200)])
+    n, bins, patches = ax.hist(data, bins=8)
+    ax.axvline(1.0, color="red", lw=2)
+    ax.set_xlim(-3.5, 3.5)
+
+
+def f186_tri_explicit(fig, out):
+    import matplotlib.tri as mtri
+    ax = mf_axes(fig)
+    x = np.array([0, 1, 2, 0, 1, 2, 0.5, 1.5])
+    y = np.array([0, 0, 0, 1, 1, 1, 0.5, 0.5])
+    tris = np.array([[0, 1, 6], [1, 6, 7], [1, 2, 7], [0, 6, 3],
+                     [6, 3, 4], [6, 4, 7], [7, 4, 5], [2, 7, 5]])
+    tri = mtri.Triangulation(x, y, tris)
+    face = np.array([0.1, 0.3, 0.5, 0.7, 0.2, 0.9, 0.4, 0.6])
+    ax.tripcolor(tri, facecolors=face)
+    ax.triplot(tri, color="k", lw=0.7)
+    ax.set_xlim(-0.1, 2.1); ax.set_ylim(-0.1, 1.1)
+
+
+def f187_named_containers(fig, out):
+    import matplotlib.gridspec as gridspec
+    import matplotlib.container
+    gs = gridspec.GridSpec(3, 1, figure=fig)
+    ax = fig.add_subplot(gs[0, 0])
+    x = np.linspace(0, 10, 12)
+    y = np.sin(x)
+    ye = 0.15 + 0.05 * np.abs(np.sin(x * 3))
+    container = ax.errorbar(x, y, yerr=ye, capsize=4, fmt="o-", ms=4)
+    assert isinstance(container,
+                      matplotlib.container.ErrorbarContainer)
+    ax.set_ylim(-1.5, 1.5)
+    ax2 = fig.add_subplot(gs[1, 0])
+    sc = ax2.stem(np.linspace(0, 10, 12), np.cos(np.arange(12) * 0.7))
+    assert isinstance(sc, matplotlib.container.StemContainer)
+    ax2.set_ylim(-1.3, 1.3)
+    ax3 = fig.add_subplot(gs[2, 0])
+    cols = ax3.eventplot([[1, 3, 5, 7], [0.5, 2.5, 6.5], [2, 4, 8]])
+    ax3.set_xlim(0, 9); ax3.set_ylim(-0.6, 2.6)
+
+
+def f188_date_locators(fig, out):
+    import matplotlib.dates as mdates
+    ax = mf_axes(fig)
+    days = 18262 + np.arange(0, 181, 3)
+    ax.plot(days, np.sin(np.arange(0, 181, 3) * 0.06), color="blue")
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    ax.set_xlim(18262, 18442); ax.set_ylim(-1.2, 1.2)
+
+
+def f189_anchored_artists(fig, out):
+    from matplotlib.offsetbox import AnchoredText
+    try:
+        from mpl_toolkits.axes_grid1.anchored_artists import (
+            AnchoredSizeBar)
+    except Exception:
+        AnchoredSizeBar = None
+    ax = mf_axes(fig)
+    ax.plot(sine_x(), np.sin(sine_x()))
+    at = AnchoredText("anchored", loc="upper left", pad=0.4,
+                      borderpad=0.5, frameon=True)
+    ax.add_artist(at)
+    if AnchoredSizeBar is not None:
+        sb = AnchoredSizeBar(ax.transData, 2.0, "2 units",
+                             loc="lower right", pad=0.2,
+                             borderpad=0.5, sep=4, frameon=True)
+        ax.add_artist(sb)
+
+
+def f190_concise_dates(fig, out):
+    import matplotlib.dates as mdates
+    ax = mf_axes(fig)
+    days = 18262 + np.arange(0, 61)
+    ax.plot(days, np.cos(np.arange(0, 61) * 0.1),
+            color=(214 / 255, 39 / 255, 40 / 255))
+    loc = mdates.MonthLocator()
+    ax.xaxis.set_major_locator(loc)
+    ax.xaxis.set_minor_locator(mdates.DayLocator(7))
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+    ax.set_xlim(18262, 18322); ax.set_ylim(-1.2, 1.2)
+
+
+# ═══ Registry ═══════════════════════════════════════════════════════════
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # Feature name → generator. Names/numbers match microgallery.cpp exactly.

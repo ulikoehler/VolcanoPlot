@@ -78,12 +78,69 @@ struct Color {
     static Color parseOr(std::string_view s, Color fallback = black());
 };
 
+/// mpl patheffects: an under-draw pass applied before the artist's own
+/// draw (matplotlib.patheffects). A list of effects attaches to an
+/// artist via `path_effects`; each pass re-renders the same path with
+/// modified graphics state in list order. `withStroke`-style classes
+/// set `thenNormal` — the normal draw runs right after that pass.
+struct PathEffect {
+    enum class Kind {
+        Normal,       // draw the artist normally
+        Stroke,       // mpl Stroke — under-stroke with gc overrides
+        LineShadow,   // mpl SimpleLineShadow — offset stroked copy
+        PatchShadow,  // mpl SimplePatchShadow — offset filled copy
+    };
+    Kind kind = Kind::Normal;
+    /// mpl `offset` in points (x right, y up) applied to this pass.
+    Point2D offset{0.0f, 0.0f};
+    /// mpl `withX` subclasses: draw the artist normally after this pass.
+    bool thenNormal = false;
+    /// Stroke gc overrides — unset keeps the artist's own width/color
+    /// (mpl _update_gc semantics).
+    std::optional<float> lineWidth;   // points
+    std::optional<Color> foreground;
+    /// mpl gc alpha override for the pass (Stroke/etc.); unset keeps
+    /// the artist's alpha.
+    std::optional<float> alpha;
+    /// Shadow color — nullopt = mpl default (base rgb × rho for
+    /// PatchShadow; 'k' is the SimpleLineShadow default so Python passes
+    /// it explicitly).
+    std::optional<Color> shadowColor;
+    float shadowAlpha = 0.3f;  // mpl alpha default
+    float rho = 0.3f;          // mpl rho default
+
+    /// mpl shadow color resolution: explicit color, else base × rho.
+    /// Alpha is replaced by shadowAlpha (mpl gc.set_alpha).
+    [[nodiscard]] Color shadowFor(Color base) const {
+        Color c = shadowColor
+            ? *shadowColor
+            : Color{base.r * rho, base.g * rho, base.b * rho, 1.0f};
+        c.a = shadowAlpha;
+        return c;
+    }
+    /// Offset in display pixels (1pt = dpi/72 px; mpl offset y is up,
+    /// display is Y-down).
+    [[nodiscard]] Point2D offsetPx(float dpi) const {
+        return {offset.x * dpi / 72.0f, -offset.y * dpi / 72.0f};
+    }
+    /// Stroke pass width in px (falls back to `basePx`).
+    [[nodiscard]] float strokeWidthPx(float basePx, float dpi) const {
+        return lineWidth ? *lineWidth * dpi / 72.0f : basePx;
+    }
+};
+
 /// One legend entry (label + handle appearance). Plots with multiple
 /// legend items (e.g. per-series) produce several handles.
 struct LegendHandle {
     std::string label;
     Color color = Color::black();
     LegendMarker marker = LegendMarker::Square;
+    /// Markers drawn on the handle (mpl numpoints/scatterpoints):
+    ///   -1 = auto — Circle → legend.scatterpoints, others → none
+    ///   -2 = legend.numpoints (plots set this when the artist carries
+    ///        markers, e.g. a marked Line2D)
+    ///   >=0 = explicit count.
+    int points = -1;
 };
 
 /// Default color cycle (matplotlib's "tab10" palette).
@@ -95,6 +152,10 @@ public:
     /// Number of colors in the default cycle.
     static constexpr size_t size() { return 10; }
 };
+
+/// mpl `sticky_edges`: data-space values the autoscale margin must not
+/// cross (e.g. a bar's baseline at 0 keeps ylim from padding below it).
+struct StickyEdges { std::vector<float> x, y; };
 
 /// Axis range in data coordinates.
 struct Range {

@@ -57,6 +57,10 @@ public:
     /// Access computed correlation values (valid after prepare()).
     [[nodiscard]] const std::vector<float>& values() const { return values_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeCorrelation(); }
+
 private:
     std::vector<float> x_, y_;
     bool isAuto_ = false;

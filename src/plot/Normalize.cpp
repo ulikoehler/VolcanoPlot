@@ -87,23 +87,13 @@ float PowerNorm::operator()(float v) const {
     float span = vmax_ - vmin_;
     if (span == 0.0f) return 0.0f;
 
-    float t;
-    if (vmin_ > 0.0f) {
-        // All positive: log-power mapping.
-        if (v <= 0.0f) return maybeClip(0.0f);
-        float lr = std::log(v / vmin_) / std::log(vmax_ / vmin_);
-        t = std::pow(lr, gamma_);
-    } else if (vmax_ < 0.0f) {
-        // All negative: mirror.
-        if (v >= 0.0f) return maybeClip(1.0f);
-        float lr = std::log(-v / -vmin_) / std::log(-vmax_ / -vmin_);
-        t = 1.0f - std::pow(1.0f - lr, gamma_);
-    } else {
-        // Straddles zero or vmin==0: linear ratio with gamma power.
-        float ratio = (v - vmin_) / span;
-        t = std::pow(std::clamp(ratio, 0.0f, 1.0f), 1.0f / gamma_);
-    }
-    return maybeClip(t);
+    // mpl PowerNorm: t = (v - vmin) / span, then t^gamma where t > 0
+    // (below vmin the mapping stays linear). clip clamps input to
+    // [vmin, vmax] first.
+    if (clip_) v = std::clamp(v, vmin_, vmax_);
+    float t = (v - vmin_) / span;
+    if (t > 0.0f) t = std::pow(t, gamma_);
+    return t;
 }
 
 float PowerNorm::inverse(float t) const {
@@ -111,35 +101,26 @@ float PowerNorm::inverse(float t) const {
     float span = vmax_ - vmin_;
     if (span == 0.0f) return 0.0f;
 
-    if (vmin_ > 0.0f) {
-        float lr = std::pow(t, 1.0f / gamma_);
-        return vmin_ * std::pow(vmax_ / vmin_, lr);
-    } else if (vmax_ < 0.0f) {
-        float lr = 1.0f - std::pow(1.0f - t, 1.0f / gamma_);
-        return -(-vmin_ * std::pow(-vmax_ / -vmin_, lr));
-    } else {
-        float ratio = std::pow(t, gamma_);
-        return vmin_ + ratio * span;
-    }
+    if (t > 0.0f) t = std::pow(t, 1.0f / gamma_);
+    return vmin_ + t * span;
 }
 
 // ─── SymLogNorm ───────────────────────────────────────────────────────────
 
 float SymLogNorm::transform(float v) const {
-    // Symmetric log transform: linear near zero, log outside.
-    // The linear region spans [-linthresh, +linthresh] and is scaled
-    // by linscale to match the log curve at the boundary.
-    float log_thresh = std::log10(linthresh_);
-    // Avoid division by zero when linthresh=1 (log10(1)=0).
-    // In that case, the linear region maps 1:1 to the transformed space.
-    float scaled_lin = (log_thresh != 0.0f)
-        ? linthresh_ * linscale_ / log_thresh
-        : linthresh_ * linscale_;
+    // mpl SymmetricalLogTransform (base=10):
+    //   _linscale_adj = linscale / (1 - base^-1)
+    //   |v| <= linthresh : T(v) = v * _linscale_adj
+    //   |v| >  linthresh : T(v) = sign(v) * linthresh *
+    //                       (_linscale_adj + log(|v|/linthresh)/log(base))
+    const float base = 10.0f;
+    const float adj = linscale_ / (1.0f - std::pow(base, -1.0f));
     if (std::abs(v) <= linthresh_) {
-        return v / scaled_lin * linthresh_;
+        return v * adj;
     }
     float sign = v > 0.0f ? 1.0f : -1.0f;
-    return sign * (std::log10(std::abs(v)) - log_thresh + scaled_lin);
+    return sign * linthresh_ *
+           (adj + std::log(std::abs(v) / linthresh_) / std::log(base));
 }
 
 float SymLogNorm::operator()(float v) const {
@@ -156,15 +137,20 @@ float SymLogNorm::inverse(float t) const {
     float tmin = transform(vmin_);
     float tmax = transform(vmax_);
     float tv = tmin + t * (tmax - tmin);
-    float log_thresh = std::log10(linthresh_);
-    float scaled_lin = (log_thresh != 0.0f)
-        ? linthresh_ * linscale_ / log_thresh
-        : linthresh_ * linscale_;
-    if (std::abs(tv) <= scaled_lin) {
-        return tv / linthresh_ * scaled_lin;
+    // mpl InvertedSymmetricalLogTransform (base=10):
+    //   invlinthresh = T(linthresh) = linthresh * _linscale_adj
+    //   |tv| <= invlinthresh : v = tv / _linscale_adj
+    //   |tv| >  invlinthresh : v = sign(tv) * linthresh *
+    //                       base^(|tv|/linthresh - _linscale_adj)
+    const float base = 10.0f;
+    const float adj = linscale_ / (1.0f - std::pow(base, -1.0f));
+    const float invlinthresh = linthresh_ * adj;
+    if (std::abs(tv) <= invlinthresh) {
+        return tv / adj;
     }
     float sign = tv > 0.0f ? 1.0f : -1.0f;
-    return sign * std::pow(10.0f, std::abs(tv) - scaled_lin + log_thresh);
+    return sign * linthresh_ *
+           std::pow(base, std::abs(tv) / linthresh_ - adj);
 }
 
 // ─── AsinhNorm ────────────────────────────────────────────────────────────
@@ -192,17 +178,33 @@ float AsinhNorm::inverse(float t) const {
 // ─── BoundaryNorm ─────────────────────────────────────────────────────────
 
 float BoundaryNorm::operator()(float v) const {
-    size_t n = numBins();
-    if (n == 0) return 0.0f;
-    // Find the bin containing v.
-    if (v < boundaries_.front()) return clip_ ? 0.0f : -0.5f / n;
-    if (v >= boundaries_.back()) return clip_ ? 1.0f : 1.0f;
-    for (size_t i = 0; i < n; ++i) {
-        if (v < boundaries_[i + 1]) {
-            return (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+    if (numBins() == 0 || ncolors_ < 2) return 0.0f;
+    const float vminB = boundaries_.front();
+    const float vmaxB = boundaries_.back();
+    // mpl: clip clamps the input into [vmin, vmax] before digitizing.
+    const float vc = clip_ ? std::clamp(v, vminB, vmaxB) : v;
+    // np.digitize(vc, boundaries) == searchsorted right.
+    const long idx = static_cast<long>(
+        std::upper_bound(boundaries_.begin(), boundaries_.end(), vc) -
+        boundaries_.begin());
+    long iret = idx - 1 + offset_;
+    // Stretch region indices across the full LUT when ncolors exceeds the
+    // number of regions (first region → 0, last → ncolors-1).
+    if (ncolors_ > nRegions_ && nRegions_ > 0) {
+        if (nRegions_ == 1) {
+            if (iret == 0) iret = static_cast<long>((ncolors_ - 1) / 2);
+        } else {
+            iret = static_cast<long>(static_cast<double>(ncolors_ - 1) /
+                                     static_cast<double>(nRegions_ - 1) *
+                                     iret);
         }
     }
-    return 1.0f;
+    // mpl applies the under/over guards to the (possibly clipped) value:
+    // with clip, vc is already inside [vminB, vmaxB] so neither fires.
+    if (vc < vminB) iret = -1;
+    else if (vc > vmaxB) iret = clip_ ? static_cast<long>(ncolors_) - 1
+                                      : static_cast<long>(ncolors_);
+    return static_cast<float>(iret) / static_cast<float>(ncolors_ - 1);
 }
 
 float BoundaryNorm::inverse(float t) const {

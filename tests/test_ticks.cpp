@@ -7,6 +7,7 @@
 #include <volcano/plot/plots/ScatterPlot.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 
@@ -22,11 +23,14 @@ TEST(TickLocators, NullLocatorEmpty) {
 }
 
 TEST(TickLocators, FixedLocatorFiltersRange) {
+    // mpl FixedLocator returns ALL ticks — the axis clips to the view,
+    // not the locator.
     FixedLocator loc({1.0f, 5.0f, 20.0f});
     auto t = loc.tickValues(0.0f, 10.0f);
-    ASSERT_EQ(t.size(), 2u);
+    ASSERT_EQ(t.size(), 3u);
     EXPECT_FLOAT_EQ(t[0], 1.0f);
     EXPECT_FLOAT_EQ(t[1], 5.0f);
+    EXPECT_FLOAT_EQ(t[2], 20.0f);
 }
 
 TEST(TickLocators, LinearLocatorInclusiveEndpoints) {
@@ -39,29 +43,34 @@ TEST(TickLocators, LinearLocatorInclusiveEndpoints) {
 }
 
 TEST(TickLocators, MultipleLocatorBase) {
+    // mpl MultipleLocator expands the range by 10% of the interval:
+    // [0,1] → [-0.1,1.1] → {-0.5, 0, 0.5, 1, 1.5}.
     MultipleLocator loc(0.5f);
     auto t = loc.tickValues(0.0f, 1.0f);
-    ASSERT_EQ(t.size(), 3u);
-    EXPECT_FLOAT_EQ(t[0], 0.0f);
-    EXPECT_FLOAT_EQ(t[1], 0.5f);
-    EXPECT_FLOAT_EQ(t[2], 1.0f);
+    ASSERT_EQ(t.size(), 5u);
+    EXPECT_FLOAT_EQ(t[0], -0.5f);
+    EXPECT_FLOAT_EQ(t[2], 0.5f);
+    EXPECT_FLOAT_EQ(t[4], 1.5f);
 }
 
 TEST(TickLocators, MultipleLocatorOffset) {
+    // mpl: [0,5] → [-0.5,5.5] → {-1, 1, 3, 5, 7}.
     MultipleLocator loc(2.0f, 1.0f); // odd integers
     auto t = loc.tickValues(0.0f, 5.0f);
-    ASSERT_EQ(t.size(), 3u);
-    EXPECT_FLOAT_EQ(t[0], 1.0f);
-    EXPECT_FLOAT_EQ(t[1], 3.0f);
-    EXPECT_FLOAT_EQ(t[2], 5.0f);
+    ASSERT_EQ(t.size(), 5u);
+    EXPECT_FLOAT_EQ(t[0], -1.0f);
+    EXPECT_FLOAT_EQ(t[1], 1.0f);
+    EXPECT_FLOAT_EQ(t[4], 7.0f);
 }
 
 TEST(TickLocators, IndexLocatorIntegerSteps) {
+    // mpl IndexLocator emits all offset+basestep*k in the 10%-expanded
+    // range: [0,3] → {0.5, 1.5, 2.5, 3.5}.
     IndexLocator loc(1.0f, 0.5f);
     auto t = loc.tickValues(0.0f, 3.0f);
-    ASSERT_EQ(t.size(), 3u); // 0.5, 1.5, 2.5 (3.5 out of range)
+    ASSERT_EQ(t.size(), 4u);
     EXPECT_FLOAT_EQ(t[0], 0.5f);
-    EXPECT_FLOAT_EQ(t[2], 2.5f);
+    EXPECT_FLOAT_EQ(t[3], 3.5f);
 }
 
 TEST(TickLocators, MaxNLocatorNiceSteps) {
@@ -69,10 +78,13 @@ TEST(TickLocators, MaxNLocatorNiceSteps) {
     auto t = loc.tickValues(0.0f, 10.0f);
     EXPECT_GE(t.size(), 5u);
     EXPECT_LE(t.size(), 11u);
-    // Steps should be nice numbers (1, 2, 2.5, 5 × 10^k).
+    // mpl's default staircase: {1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10}.
+    // On [0,10] nbins=9 mpl picks step 1.5.
     float step = t[1] - t[0];
-    EXPECT_TRUE(step == 1.0f || step == 2.0f || step == 2.5f ||
-                step == 5.0f) << "step=" << step;
+    const float ok[] = {1.f, 1.5f, 2.f, 2.5f, 3.f, 4.f, 5.f, 6.f, 8.f, 10.f};
+    EXPECT_TRUE(std::ranges::any_of(ok, [&](float s) {
+        return std::abs(step - s) < 1e-5f;
+    })) << "step=" << step;
 }
 
 TEST(TickLocators, AutoLocatorDefaultsToNine) {
@@ -276,8 +288,9 @@ TEST(TickFormatters, LogitFormatterProbs) {
 }
 
 TEST(TickFormatters, EngFormatterPrefixes) {
+    // mpl places=None → "%g" mantissa (full precision, not 1 decimal).
     EngFormatter f("Hz");
-    EXPECT_EQ(f.format(1234.0f, 0), "1.2 kHz");
+    EXPECT_EQ(f.format(1234.0f, 0), "1.234 kHz");
     EXPECT_EQ(f.format(0.001f, 0), "1 mHz");
     EXPECT_EQ(f.format(2e6f, 0), "2 MHz");
     EXPECT_EQ(f.format(0.0f, 0), "0 Hz");

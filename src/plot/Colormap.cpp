@@ -305,19 +305,40 @@ const std::vector<NameEntry>& colormapTable() {
     return table;
 }
 
+/// User-registered colormaps (mpl cm.register_cmap). std::map nodes
+/// keep element addresses stable across insertions, so the returned
+/// references stay valid for the process lifetime.
+std::map<std::string, Colormap, std::less<>>& registered() {
+    static std::map<std::string, Colormap, std::less<>> reg;
+    return reg;
+}
+
+/// Resolve a base name to a colormap: registered maps first (they may
+/// shadow builtins via registerCmap(overrideBuiltin)), then builtins.
+/// Returns nullptr when unknown.
+const Colormap* lookupBase(std::string_view name) {
+    auto& reg = registered();
+    if (auto it = reg.find(name); it != reg.end()) return &it->second;
+    const auto& table = colormapTable();
+    for (const auto& entry : table)
+        if (entry.name == name) return &entry.fn();
+    return nullptr;
+}
+
+/// True when `name` is a builtin (not counting registered overrides).
+bool isBuiltin(std::string_view name) {
+    const auto& table = colormapTable();
+    for (const auto& entry : table)
+        if (entry.name == name) return true;
+    return false;
+}
+
 /// Cache of reversed colormaps, created on first lookup.
 /// Key: colormap name (without "_r" suffix).
 /// Returns a reference to the cached reversed colormap.
 const Colormap& getReversed(std::string_view baseName) {
-    // Find the base colormap.
-    const auto& table = colormapTable();
-    const Colormap* base = nullptr;
-    for (const auto& entry : table) {
-        if (entry.name == baseName) {
-            base = &entry.fn();
-            break;
-        }
-    }
+    // Find the base colormap (registered or builtin).
+    const Colormap* base = lookupBase(baseName);
     if (!base) return colormaps::grayscale();
 
     // Use a static map keyed by name to cache reversed colormaps.
@@ -342,20 +363,29 @@ const Colormap& Colormap::byName(std::string_view name) {
     if (name.size() > 2 && name.substr(name.size() - 2) == "_r") {
         return getReversed(name.substr(0, name.size() - 2));
     }
-
-    const auto& table = colormapTable();
-    for (const auto& entry : table) {
-        if (entry.name == name) return entry.fn();
-    }
+    if (const Colormap* cm = lookupBase(name)) return *cm;
     return colormaps::grayscale();
 }
 
+const Colormap& Colormap::registerCmap(Colormap cm, bool overrideBuiltin) {
+    if (cm.name.empty())
+        throw std::invalid_argument("registerCmap: colormap needs a name");
+    if (!overrideBuiltin && isBuiltin(cm.name))
+        throw std::invalid_argument(
+            "registerCmap: '" + cm.name +
+            "' is a builtin colormap (override_builtin=False)");
+    auto [it, _] = registered().insert_or_assign(cm.name, std::move(cm));
+    return it->second;
+}
+
 std::vector<std::string> Colormap::availableNames() {
-    const auto& table = colormapTable();
     std::vector<std::string> names;
-    names.reserve(table.size());
+    const auto& table = colormapTable();
+    names.reserve(table.size() + registered().size());
     for (const auto& entry : table)
         names.emplace_back(entry.name);
+    for (const auto& [name, _] : registered())
+        if (!isBuiltin(name)) names.push_back(name);
     return names;
 }
 

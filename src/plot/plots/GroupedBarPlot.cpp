@@ -125,12 +125,11 @@ void GroupedBarPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void GroupedBarPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void GroupedBarPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     fillRenderer_.draw(cmd, vrect, t);
 }
 

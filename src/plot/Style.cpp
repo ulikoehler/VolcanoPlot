@@ -132,6 +132,13 @@ FigureStyle defaultStyle() {
     s.yAxis.labelColor = Color::black();
     s.xAxis.ticks.direction = "out";
     s.yAxis.ticks.direction = "out";
+    // mpl rcParams: xtick/ytick.labelsize='medium' (font.size=10),
+    // axes.labelsize='medium', axes.titlesize='large' (12).
+    s.xAxis.tickFont.size = 10.0f;
+    s.yAxis.tickFont.size = 10.0f;
+    s.xAxis.labelFont.size = 10.0f;
+    s.yAxis.labelFont.size = 10.0f;
+    s.title.font.size = 12.0f;
     s.lines.lineWidth = 1.5f;
     s.lines.solidCapStyle = "projecting";
     s.lines.dashCapStyle = "butt";

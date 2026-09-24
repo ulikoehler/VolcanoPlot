@@ -64,6 +64,17 @@ TriContourPlot::TriContourPlot(std::vector<float> x, std::vector<float> y,
         throw std::invalid_argument("TriContourPlot: need at least 3 points");
 }
 
+TriContourPlot::TriContourPlot(std::vector<float> x, std::vector<float> y,
+                               std::vector<Triangle> triangles,
+                               std::vector<float> z, TriContourConfig config)
+    : x_(std::move(x)), y_(std::move(y)), z_(std::move(z)),
+      config_(std::move(config)), tris_(std::move(triangles)) {
+    if (x_.size() != y_.size() || x_.size() != z_.size())
+        throw std::invalid_argument("TriContourPlot: x, y, z must have the same size");
+    if (x_.size() < 3)
+        throw std::invalid_argument("TriContourPlot: need at least 3 points");
+}
+
 void TriContourPlot::computeLevels() {
     if (!config_.levels.empty()) {
         levels_ = config_.levels;
@@ -122,11 +133,13 @@ void TriContourPlot::marchingTriangles() {
 }
 
 void TriContourPlot::prepare(render::Renderer& r) {
-    // Triangulate.
-    std::vector<Point2D> pts(x_.size());
-    for (size_t i = 0; i < x_.size(); ++i)
-        pts[i] = {x_[i], y_[i]};
-    tris_ = delaunay(pts);
+    // Triangulate (unless an explicit triangulation was supplied).
+    if (tris_.empty()) {
+        std::vector<Point2D> pts(x_.size());
+        for (size_t i = 0; i < x_.size(); ++i)
+            pts[i] = {x_[i], y_[i]};
+        tris_ = delaunay(pts);
+    }
 
     computeLevels();
     marchingTriangles();
@@ -153,8 +166,7 @@ void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + f.x * float(rect.width),
                        rect.y + (1.0f - f.y) * float(rect.height)};
     };
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
     vk::Extent2D res = r.backend().extent();
     auto& spine = r.spineRenderer();
 
@@ -203,6 +215,17 @@ TriContourfPlot::TriContourfPlot(std::vector<float> x, std::vector<float> y,
                                  std::vector<float> z, TriContourConfig config)
     : x_(std::move(x)), y_(std::move(y)), z_(std::move(z)),
       config_(std::move(config)) {
+    if (x_.size() != y_.size() || x_.size() != z_.size())
+        throw std::invalid_argument("TriContourfPlot: x, y, z must have the same size");
+    if (x_.size() < 3)
+        throw std::invalid_argument("TriContourfPlot: need at least 3 points");
+}
+
+TriContourfPlot::TriContourfPlot(std::vector<float> x, std::vector<float> y,
+                                 std::vector<Triangle> triangles,
+                                 std::vector<float> z, TriContourConfig config)
+    : x_(std::move(x)), y_(std::move(y)), z_(std::move(z)),
+      config_(std::move(config)), tris_(std::move(triangles)) {
     if (x_.size() != y_.size() || x_.size() != z_.size())
         throw std::invalid_argument("TriContourfPlot: x, y, z must have the same size");
     if (x_.size() < 3)
@@ -328,11 +351,13 @@ void TriContourfPlot::marchingTrianglesFilled() {
 }
 
 void TriContourfPlot::prepare(render::Renderer& r) {
-    // Triangulate.
-    std::vector<Point2D> pts(x_.size());
-    for (size_t i = 0; i < x_.size(); ++i)
-        pts[i] = {x_[i], y_[i]};
-    tris_ = delaunay(pts);
+    // Triangulate (unless an explicit triangulation was supplied).
+    if (tris_.empty()) {
+        std::vector<Point2D> pts(x_.size());
+        for (size_t i = 0; i < x_.size(); ++i)
+            pts[i] = {x_[i], y_[i]};
+        tris_ = delaunay(pts);
+    }
 
     computeLevels();
     marchingTrianglesFilled();
@@ -348,12 +373,11 @@ void TriContourfPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void TriContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void TriContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     fillRenderer_.draw(cmd, vrect, t);
 }
 

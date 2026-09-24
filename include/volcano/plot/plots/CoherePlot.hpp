@@ -58,6 +58,10 @@ public:
     /// Access computed coherence values [0,1] (valid after prepare()).
     [[nodiscard]] const std::vector<float>& values() const { return values_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeCoherence(); }
+
 private:
     std::vector<float> signalX_;
     std::vector<float> signalY_;

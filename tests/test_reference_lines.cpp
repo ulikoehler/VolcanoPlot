@@ -199,11 +199,12 @@ TEST(RefLineRegression, AxhSpanFillsHorizontalBand) {
         3.0f, 7.0f, Color::fromRgba8(200, 200, 200, 255)));
     auto img = cf.render();
 
-    // Center of the band should be gray.
+    // Inside the band but off the white diagonal (mpl zorder: the line
+    // draws above the patch).
     auto vp = expectedViewport(0, 10, 0, 10);
-    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
+    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 7.0f, 5.0f);
     Pixel p = img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy));
-    EXPECT_TRUE(isGray(p)) << "Center of span should be gray";
+    EXPECT_TRUE(isGray(p)) << "Inside span should be gray";
 
     // Above and below the band should be white.
     auto [ax, ay] = dataToPixel(vp, cf.axes->rect, 5.0f, 9.0f);
@@ -230,11 +231,12 @@ TEST(RefLineRegression, AxvSpanFillsVerticalBand) {
         3.0f, 7.0f, Color::fromRgba8(100, 100, 255, 255)));
     auto img = cf.render();
 
-    // Center of the band should be blue.
+    // Inside the band but off the white diagonal (mpl zorder: the line
+    // draws above the patch).
     auto vp = expectedViewport(0, 10, 0, 10);
-    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
+    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 5.0f, 3.0f);
     Pixel p = img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy));
-    EXPECT_TRUE(isBlue(p)) << "Center of span should be blue";
+    EXPECT_TRUE(isBlue(p)) << "Inside span should be blue";
 
     // Left and right of the band should be white.
     auto [lx, ly] = dataToPixel(vp, cf.axes->rect, 1.0f, 5.0f);
@@ -261,10 +263,11 @@ TEST(RefLineRegression, VlinesRenderMultipleLines) {
         Color::fromRgba8(255, 0, 0, 255), 2.0f));
     auto img = cf.render();
 
-    // Each line should have red pixels at its x position.
+    // Each line should have red pixels at its x position (sampled off
+    // the white diagonal — mpl zorder puts the line above collections).
     auto vp = expectedViewport(0, 10, 0, 10);
     for (float xv : {2.0f, 5.0f, 8.0f}) {
-        auto [px, py] = dataToPixel(vp, cf.axes->rect, xv, 5.0f);
+        auto [px, py] = dataToPixel(vp, cf.axes->rect, xv, 4.0f);
         Pixel p = img.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
         EXPECT_TRUE(p.approx(Pixel::red(), 60))
             << "Vline at x=" << xv << " should be red";
@@ -292,10 +295,11 @@ TEST(RefLineRegression, HlinesRenderMultipleLines) {
         Color::fromRgba8(0, 200, 0, 255), 2.0f));
     auto img = cf.render();
 
-    // Each line should have green pixels at its y position.
+    // Each line should have green pixels at its y position (sampled off
+    // the white diagonal — mpl zorder puts the line above collections).
     auto vp = expectedViewport(0, 10, 0, 10);
     for (float yv : {2.0f, 5.0f, 8.0f}) {
-        auto [px, py] = dataToPixel(vp, cf.axes->rect, 5.0f, yv);
+        auto [px, py] = dataToPixel(vp, cf.axes->rect, 4.0f, yv);
         Pixel p = img.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
         EXPECT_TRUE(p.approx(Pixel::green(), 60))
             << "Hline at y=" << yv << " should be green";
@@ -346,9 +350,10 @@ TEST(RefLineRegression, AxhSpanAlphaBlended) {
         3.0f, 7.0f, Color::fromRgba8(100, 100, 100, 128)));
     auto img = cf.render();
 
-    // Center should be blended: ~(178, 178, 178) — light gray.
+    // Inside the band but off the white diagonal (mpl zorder: line
+    // above patch) should be blended: ~(178, 178, 178) — light gray.
     auto vp = expectedViewport(0, 10, 0, 10);
-    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 5.0f, 5.0f);
+    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 7.0f, 5.0f);
     Pixel p = img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy));
     EXPECT_GT(p.r, 150) << "Blended gray should be light";
     EXPECT_LT(p.r, 220) << "Blended gray should not be white";

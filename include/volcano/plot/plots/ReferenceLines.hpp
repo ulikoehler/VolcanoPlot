@@ -297,6 +297,22 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 
+    /// mpl EventCollection: one collection per position row.
+    [[nodiscard]] size_t rowCount() const { return positions_.size(); }
+    [[nodiscard]] const std::vector<float>&
+    positions(size_t row) const { return positions_.at(row); }
+    void setPositions(size_t row, std::vector<float> p) {
+        positions_.at(row) = std::move(p);
+        prepared_ = false;
+        touch();
+    }
+    void appendPositions(size_t row, const std::vector<float>& p) {
+        auto& dst = positions_.at(row);
+        dst.insert(dst.end(), p.begin(), p.end());
+        prepared_ = false;
+        touch();
+    }
+
 private:
     std::vector<std::vector<float>> positions_;
     std::string label_;

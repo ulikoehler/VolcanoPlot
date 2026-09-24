@@ -50,6 +50,12 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// The mpl-style scale factor mapping (u,v) magnitudes to data-space
+    /// displacement for a given axes (cfg.scale, else the auto formula).
+    /// Used by quiverkey to size the reference arrow like a real arrow.
+    [[nodiscard]] float effectiveScale(const Axes& axes) const;
+    /// The mpl-style shaft width in pixels for a given axes width.
+    [[nodiscard]] float shaftWidthPx(float axesWidthPx) const;
     [[nodiscard]] std::string label() const override { return cfg_.label; }
     [[nodiscard]] Color legendColor() const override { return cfg_.color; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Circle; }

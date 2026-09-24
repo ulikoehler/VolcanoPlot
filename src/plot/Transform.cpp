@@ -88,13 +88,23 @@ TransformPtr blendedTransformFactory(TransformPtr x, TransformPtr y) {
     return std::make_shared<BlendedGenericTransform>(std::move(x), std::move(y));
 }
 
+TransformPtr compositeTransformFactory(TransformPtr a, TransformPtr b) {
+    // mpl: IdentityTransform on either side returns the other transform.
+    if (dynamic_cast<IdentityTransform*>(a.get())) return b;
+    if (dynamic_cast<IdentityTransform*>(b.get())) return a;
+    if (auto* aa = dynamic_cast<Affine2D*>(a.get()))
+        if (auto* ba = dynamic_cast<Affine2D*>(b.get()))
+            return std::make_shared<CompositeAffine2D>(*aa, *ba);
+    return std::make_shared<CompositeGenericTransform>(std::move(a),
+                                                       std::move(b));
+}
+
 TransformPtr offsetCopy(const Transform& base, float dpi, float dx, float dy,
                         std::string_view units) {
     float scale = dpi / 72.0f; // points
     if (units == "pixels" || units == "dots") scale = 1.0f;
     else if (units == "inches") scale = dpi;
-    // Offset direction: positive y = up → subtract in Y-down display space.
-    auto off = std::make_shared<ScaledTranslation>(dx, -dy,
+    auto off = std::make_shared<ScaledTranslation>(dx, dy,
                                                    Affine2D::scale(scale));
     return base.clone()->then(off);
 }
@@ -196,6 +206,9 @@ public:
         Point2D fr = axes_->dataToFraction(p);
         return {r.x + fr.x * float(r.width),
                 r.y + (1.0f - fr.y) * float(r.height)};
+    }
+    bool containsDataBranch(const Axes& a) const override {
+        return &a == axes_;
     }
     TransformPtr inverted() const override;
     TransformPtr clone() const override {

@@ -52,13 +52,12 @@ void ChirpPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void ChirpPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void ChirpPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || points_.size() < 2) return;
 
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
 }
 

@@ -231,8 +231,7 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
     auto& ctx = r.backend().context();
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     // Draw streamline segments.
     uint32_t totalVerts = 0;

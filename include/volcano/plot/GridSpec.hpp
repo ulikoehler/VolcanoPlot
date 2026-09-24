@@ -86,6 +86,11 @@ inline std::shared_ptr<GridSpec> SubplotSpec::nested(uint32_t rows,
                                                    uint32_t cols) const {
     auto g = std::make_shared<GridSpec>(rows, cols);
     g->parent_ = std::make_shared<SubplotSpec>(*this);
+    // mpl GridSpecFromSubplotSpec: left/right/bottom/top default to
+    // None, meaning the nested grid fills the whole parent cell (the
+    // params are fractions of the cell, not of the figure).
+    g->left = 0.0f; g->right = 1.0f;
+    g->bottom = 0.0f; g->top = 1.0f;
     return g;
 }
 

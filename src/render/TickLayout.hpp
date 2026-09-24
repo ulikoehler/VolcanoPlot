@@ -10,10 +10,9 @@
 #include <string>
 #include <vector>
 
-namespace volcano::render {
+namespace volcano::plot { class Normalize; }
 
-/// Tick size/width are configured in points; render at ~96dpi (pt → px).
-constexpr float kPtToPx = 96.0f / 72.0f;
+namespace volcano::render {
 
 /// Simple "nice number" tick locator (matplotlib MaxNLocator style).
 std::vector<float> autoTicks(float vmin, float vmax, int nbins);
@@ -62,7 +61,33 @@ bool logMinorLabels(const plot::TickConfig& tc,
 /// Label for tick `t` at index `i`, honoring fixed labels first.
 std::string tickLabel(const plot::TickConfig& tc, const plot::Formatter& f,
                       float t, int i);
+/// mpl Formatter.__call__ wraps every label in fix_minus: ASCII '-'
+/// becomes U+2212 '−' when axes.unicode_minus is on (mpl default).
+std::string fixMinus(std::string s);
+/// mpl Formatter.__call__ per-formatter semantics: fix_minus applies
+/// only to formatters whose __call__ wraps it (Formatter::unicodeMinus).
+inline std::string fmtLabel(const plot::Formatter& f, float v, int pos) {
+    auto s = f.format(v, pos);
+    return f.unicodeMinus() ? fixMinus(std::move(s)) : s;
+}
 /// TickConfig direction string → fraction of tick length inside the axes.
 float tickInFrac(const plot::TickConfig& tc);
+
+/// Colorbar tick set: major positions + formatted labels + unlabeled
+/// minor marks. Honors mpl colorbar behavior: explicit ticks/labels win;
+/// a LogNorm mappable gets `_ColorbarLogLocator` decades labeled via
+/// LogFormatterSciNotation ("$10^{k}$" mathtext) plus subs minor marks;
+/// SymLogNorm gets SymmetricalLogLocator; linear norms get autoTicks +
+/// formatTick and `minorTicksOn` subdivisions (AutoMinorLocator /5).
+struct ColorbarTickSet {
+    std::vector<float> majors;
+    std::vector<std::string> labels;
+    std::vector<float> minors;
+};
+ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
+                              std::span<const std::string> explicitLabels,
+                              bool minorTicksOn,
+                              const plot::Normalize* norm,
+                              float vmin, float vmax);
 
 } // namespace volcano::render

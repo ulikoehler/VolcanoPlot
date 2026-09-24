@@ -59,6 +59,7 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/plots/StackPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/ViolinPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/QuiverPlot.cpp
+    ${VOLCANO_ROOT}/src/plot/plots/QuiverKeyPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/StreamPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/XCorrPlot.cpp
     ${VOLCANO_ROOT}/src/plot/plots/StemPlot.cpp

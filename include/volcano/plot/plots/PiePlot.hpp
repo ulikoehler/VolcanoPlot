@@ -14,6 +14,8 @@ public:
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
+    [[nodiscard]] const PieData& data() const noexcept { return data_; }
+    [[nodiscard]] PieData& data() noexcept { return data_; }
 private:
     PieData data_;
     render::primitives::PieRenderer renderer_;

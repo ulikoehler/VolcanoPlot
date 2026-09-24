@@ -88,6 +88,27 @@ public:
     /// range in matplotlib — drives the colorbar's tick range). Empty for
     /// plots without a scalar mapping.
     [[nodiscard]] virtual std::optional<Range> valueRange() const { return {}; }
+
+    // ── mpl ScalarMappable protocol ──────────────────────────────────
+    /// Colormapped artists (imshow, scatter with a scalar `c` array,
+    /// pcolormesh) expose their norm/colormap/array/clim here.
+    /// `norm()` returning nullptr marks the artist as non-mappable.
+    [[nodiscard]] virtual std::shared_ptr<Normalize> norm() const {
+        return nullptr;
+    }
+    /// mpl `set_norm` — replace the normalization.
+    virtual void setNorm(std::shared_ptr<Normalize>) {}
+    /// mpl `cmap` — the colormap in use; nullptr when not colormapped.
+    [[nodiscard]] virtual const Colormap* cmap() const { return nullptr; }
+    /// mpl `set_cmap` — replace the colormap.
+    virtual void setCmap(const Colormap&) {}
+    /// mpl `set_array` — replace the scalar array driving colormapping.
+    virtual void setArray(std::vector<float>) {}
+    /// mpl `get_array` — the scalar array (empty when none).
+    [[nodiscard]] virtual std::vector<float> array() const { return {}; }
+    /// mpl `set_clim(vmin, vmax)` — explicit norm bounds; a nullopt
+    /// bound keeps/derives the current one (autoscale).
+    virtual void setClim(std::optional<float>, std::optional<float>) {}
     /// Apply one entry of the axes' property cycler (matplotlib
     /// axes.prop_cycle). Return true when the entry was consumed — the
     /// cycle position only advances for consuming plots. Called by
@@ -102,8 +123,10 @@ public:
     }
 
     /// matplotlib `zorder`: plots are drawn in ascending zorder
-    /// (stable — equal zorder keeps insertion order).
-    float zorder = 0.0f;
+    /// (stable — equal zorder keeps insertion order). Default 1.0 =
+    /// mpl Collection/Patch; LinePlot overrides to 2.0, image plots
+    /// (AxesImage) to 0.0.
+    float zorder = 1.0f;
     /// matplotlib `rasterized`: stored for vector backends (PDF/SVG) which
     /// may embed the layer as a bitmap. No effect on raster rendering.
     bool rasterized = false;
@@ -111,6 +134,39 @@ public:
     /// are excluded from the captured background and re-drawn each frame
     /// over the restored snapshot.
     bool animated = false;
+    /// matplotlib `visible`: invisible artists are skipped by the
+    /// renderers (and by relim(visible_only=True)).
+    bool visible = true;
+    /// matplotlib `clip_on`: when false, the artist is not clipped to
+    /// the axes rect — it may draw anywhere on the figure canvas.
+    bool clipOn = true;
+    /// mpl `sticky_edges`: data-space values the autoscale margin must
+    /// not cross (e.g. a bar's baseline at 0 keeps ylim from padding
+    /// below it). Only consulted when Axes::useStickyEdges is set.
+    [[nodiscard]] virtual StickyEdges stickyEdges() const { return {}; }
+    /// mpl `path_effects`: under-draw passes applied before the artist
+    /// draws (matplotlib.patheffects). Empty = normal draw only.
+    std::vector<PathEffect> pathEffects;
+    /// mpl `transform=`: maps this artist's input coordinates to display
+    /// pixels. null = the axes' data transform (default). Bound
+    /// transforms (transAxes/transFigure/blended) read layout live.
+    TransformPtr transform;
+    /// mpl `transform.contains_branch(transData)`: whether the artist's
+    /// transform feeds the axes' x/y data limits. Default = both axes.
+    [[nodiscard]] std::pair<bool, bool> feedsData(const Axes& axes) const;
+    /// Effective clip rect for raster draws: `axesRect` when clipOn,
+    /// else the full canvas.
+    [[nodiscard]] Rect2D clipRect(Rect2D axesRect,
+                                  vk::Extent2D canvas) const {
+        return clipOn ? axesRect
+                      : Rect2D{0, 0, canvas.width, canvas.height};
+    }
+    /// Same as clipRect, as a Vulkan scissor.
+    [[nodiscard]] vk::Rect2D clipRectVk(Rect2D axesRect,
+                                        vk::Extent2D canvas) const {
+        auto r = clipRect(axesRect, canvas);
+        return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+    }
     /// Hit-test (matplotlib `contains` / pick): true when the data-space
     /// point hits this layer. Default: never hit.
     virtual bool contains(const Axes&, Point2D) const { return false; }
@@ -175,7 +231,15 @@ public:
     Axes* addAxes(uint32_t row = 0, uint32_t col = 0,
                   uint32_t rowSpan = 1, uint32_t colSpan = 1);
     /// Add an Axes for a SubplotSpec (from any GridSpec, incl. nested).
+    /// For specs from a GridSpec the figure doesn't own, call
+    /// adoptGrid() first to keep it alive (Python bindings do this
+    /// automatically).
     Axes* addAxes(const SubplotSpec& spec);
+    /// Retain a foreign GridSpec for the figure's lifetime — SubplotSpec
+    /// holds raw GridSpec pointers, so the grid must outlive the figure.
+    void adoptGrid(std::shared_ptr<GridSpec> g) {
+        if (g) retiredGrids_.push_back(std::move(g));
+    }
     /// Add an Axes at a figure-fraction rect [left, bottom, width, height]
     /// (matplotlib fig.add_axes([l, b, w, h])).
     Axes* addAxesFraction(float l, float b, float w, float h);
@@ -220,8 +284,15 @@ public:
     /// matplotlib tight_layout / constrained_layout toggles.
     void setTightLayout(bool on) { tightLayout_ = on; markStale(); }
     void setConstrainedLayout(bool on) { constrainedLayout_ = on; markStale(); }
+    /// mpl `fig.get_tight_layout` / `get_constrained_layout`.
+    [[nodiscard]] bool tightLayout() const noexcept { return tightLayout_; }
+    [[nodiscard]] bool constrainedLayout() const noexcept {
+        return constrainedLayout_;
+    }
 
     [[nodiscard]] const std::vector<AxesPlacement>& placements() const noexcept { return placements_; }
+    /// mpl draw order: placements sorted by axes zorder (stable).
+    [[nodiscard]] std::vector<const AxesPlacement*> axesDrawOrder() const;
     [[nodiscard]] const std::vector<SubfigPlacement>& subfigs() const noexcept { return subfigs_; }
     [[nodiscard]] GridSpec& grid() noexcept { return *grid_; }
     [[nodiscard]] const GridSpec& grid() const noexcept { return *grid_; }
@@ -232,10 +303,28 @@ public:
 
     /// matplotlib `fig.suptitle` — figure-level centered title.
     void suptitle(std::string t) { style_.title.text = std::move(t); markStale(); }
+    /// mpl `fig.text(x, y, s)` — a figure-fraction TextAnnotation
+    /// (x, y in figure coords, Y-up). Returns the stored text.
+    TextAnnotation& text(float x, float y, std::string s);
+    /// mpl `fig.texts` — figure-level text artists.
+    [[nodiscard]] const std::vector<TextAnnotation>& texts() const noexcept {
+        return figTexts_;
+    }
+    [[nodiscard]] std::vector<TextAnnotation>& texts() noexcept {
+        return figTexts_;
+    }
+    /// mpl `fig.clear()` / `plt.clf` — remove all axes, subfigures,
+    /// texts, legends and sup-labels; keep figure style/dpi.
+    void clear();
     /// matplotlib `fig.supxlabel` / `fig.supylabel` — figure-level axis
     /// labels (bottom center / left center, rotated).
     void supxlabel(std::string t) { supXlabel_ = std::move(t); markStale(); }
     void supylabel(std::string t) { supYlabel_ = std::move(t); markStale(); }
+    /// mpl fig.supxlabel(t, **fontkwargs) fonts + colors.
+    FontProperties supXlabelFont{.size = 12.0f};
+    FontProperties supYlabelFont{.size = 12.0f};
+    Color supXlabelColor = Color::black();
+    Color supYlabelColor = Color::black();
     [[nodiscard]] const std::string& supxlabel() const { return supXlabel_; }
     [[nodiscard]] const std::string& supylabel() const { return supYlabel_; }
 
@@ -301,6 +390,21 @@ public:
         return figLegend_;
     }
 
+    /// mpl `ax.remove()`: detach the axes from the figure and return
+    /// ownership (nullptr when not a child). The removed axes stays
+    /// usable and can be re-added.
+    std::unique_ptr<Axes> removeAxes(const Axes* ax);
+    /// Attach a previously-detached axes (mpl Artist.set_figure moves an
+    /// axes between figures). The axes keeps its stored SubplotSpec if
+    /// it had one; otherwise it fills the figure.
+    Axes* attachAxes(std::unique_ptr<Axes> ax);
+    /// mpl `ax.set_position([l, b, w, h])`: re-place the axes as a
+    /// figure-fraction rect (drops any grid placement).
+    void setAxesFraction(Axes* ax, float l, float b, float w, float h);
+    /// mpl `ax.set_subplotspec` — reposition a grid-placed axes onto a
+    /// (possibly different) SubplotSpec.
+    void setAxesSubplotSpec(Axes* ax, const SubplotSpec& spec);
+
     /// Hit-test: topmost axes containing canvas pixel (x, y), or nullptr.
     [[nodiscard]] Axes* axesAt(float x, float y);
     /// Dispatch a raw event: fills `inaxes`/`dataPos`, emits on the canvas,
@@ -322,6 +426,8 @@ private:
     std::vector<std::shared_ptr<GridSpec>> retiredGrids_;
     FigureStyle style_;
     std::string supXlabel_, supYlabel_;
+    /// mpl `fig.texts` — figure-level text artists (fig.text).
+    std::vector<TextAnnotation> figTexts_;
     std::vector<AxesPlacement> placements_;
     std::vector<SubfigPlacement> subfigs_;
     bool stale_ = true;

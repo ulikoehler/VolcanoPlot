@@ -281,6 +281,10 @@ TEST(SavefigFormats, TransparentExport) {
     Figure figure{1, 1};
     auto* axes = figure.addAxes(0, 0);
     axes->setStyle(flatTestStyle());
+    // mpl transparent=True / frame_on=False semantics: both the figure and
+    // axes patches are suppressed so the transparent clear shows through.
+    figure.style().frameOn = false;
+    axes->setFrameOn(false);
     Series2D s;
     s.points = {{0.5f, 0.5f}};
     s.color = Color::red();
@@ -291,7 +295,7 @@ TEST(SavefigFormats, TransparentExport) {
     harness.renderer().renderFrame(figure);
     auto px = harness.backend().readbackRgba8();
 
-    // Background pixels are transparent; the marker is opaque.
+    // Background pixels are transparent; the marker composites opaquely.
     Image img = Image::fromRgba8(px, 64, 64);
     EXPECT_EQ(img.get(0, 0).a, 0) << "corner should be transparent";
     auto c = img.centroid(Pixel::red(), 40);

@@ -45,7 +45,7 @@ struct HistConfig {
     std::optional<Range> range;  ///< data range; auto if unset
     HistNorm norm = HistNorm::Count;
     HistType histtype = HistType::Bar;
-    Color color = Color::fromRgba8(31, 119, 180, 128);
+    Color color = Color::fromRgba8(31, 119, 180, 255);
     /// Per-dataset colors (multi-dataset hist); empty → `color` for all.
     std::vector<Color> colors;
     std::string label;
@@ -93,6 +93,10 @@ public:
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
+
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeBins(); }
 
 private:
     std::vector<std::vector<float>> datasets_;

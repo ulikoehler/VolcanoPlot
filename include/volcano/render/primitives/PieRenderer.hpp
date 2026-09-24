@@ -21,6 +21,8 @@ private:
     vk::UniquePipeline pipeline_;
     core::Buffer posBuffer_;
     core::Buffer colorBuffer_;
+    /// mpl `center` in pie data units (set by upload, used by draw).
+    plot::Point2D center_{0.0f, 0.0f};
     uint32_t vertexCount_ = 0;
     bool inited_ = false;
 };

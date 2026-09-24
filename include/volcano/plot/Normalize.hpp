@@ -108,9 +108,8 @@ public:
 
 // ─── Power normalization ─────────────────────────────────────────────────
 
-/// PowerNorm: gamma power-law mapping.
-/// For vmin >= 0: t = (log(v/vmin) / log(vmax/vmin))^gamma
-/// For vmin < 0 < vmax: uses the sign-aware variant.
+/// PowerNorm: gamma power-law mapping (matplotlib-compatible).
+/// t = ((v - vmin) / (vmax - vmin))^gamma; values below vmin map linearly.
 class PowerNorm : public Normalize {
 public:
     explicit PowerNorm(float gamma = 1.0f) : gamma_(gamma) {}
@@ -174,18 +173,40 @@ private:
 
 // ─── Boundary normalization (discrete) ───────────────────────────────────
 
-/// BoundaryNorm: maps values to discrete bin indices.
-/// boundaries = [b0, b1, ..., bn] define n bins.
-/// Returns (i + 0.5) / n for bin i, so each bin samples the center of
-/// its colormap segment. Values below b0 → 0, above bn → 1 (if clip).
+/// How BoundaryNorm handles values outside the boundary range
+/// (matplotlib extend=).
+enum class BoundaryExtend { Neither, Min, Max, Both };
+
+/// BoundaryNorm: maps values to discrete colormap bins.
+/// boundaries = [b0, b1, ..., bn] define n bins. Following mpl, the bin
+/// index is stretched across the ncolors-entry lookup table when
+/// ncolors > n_regions, so the returned fraction is
+/// iret / (ncolors - 1). Values below b0 yield t < 0 (under color) and
+/// values above bn yield t > 1 (over color), matching mpl's index -1 /
+/// ncolors protocol.
 class BoundaryNorm : public Normalize {
 public:
-    explicit BoundaryNorm(std::vector<float> boundaries) : boundaries_(std::move(boundaries)) {}
+    explicit BoundaryNorm(std::vector<float> boundaries,
+                          size_t ncolors = 0,
+                          BoundaryExtend extend = BoundaryExtend::Neither)
+        : boundaries_(std::move(boundaries)),
+          ncolors_(ncolors == 0 ? (boundaries_.size() > 1
+                                   ? boundaries_.size() - 1 : 0)
+                                : ncolors) {
+        offset_ = (extend == BoundaryExtend::Min ||
+                   extend == BoundaryExtend::Both) ? 1 : 0;
+        nRegions_ = numBins() + offset_ +
+                    ((extend == BoundaryExtend::Max ||
+                      extend == BoundaryExtend::Both) ? 1 : 0);
+        vmin_ = boundaries_.empty() ? std::nanf("") : boundaries_.front();
+        vmax_ = boundaries_.empty() ? std::nanf("") : boundaries_.back();
+    }
 
     [[nodiscard]] float operator()(float v) const override;
     [[nodiscard]] float inverse(float t) const override;
     [[nodiscard]] const std::vector<float>& boundaries() const { return boundaries_; }
     [[nodiscard]] size_t numBins() const { return boundaries_.size() > 1 ? boundaries_.size() - 1 : 0; }
+    [[nodiscard]] size_t ncolors() const { return ncolors_; }
 
     // BoundaryNorm does not use vmin/vmax autoscale.
     void autoscale(const std::vector<float>&) override {}
@@ -193,6 +214,9 @@ public:
 
 private:
     std::vector<float> boundaries_;
+    size_t ncolors_ = 0;
+    size_t nRegions_ = 0;
+    int offset_ = 0;
 };
 
 // ─── Centered normalization ──────────────────────────────────────────────

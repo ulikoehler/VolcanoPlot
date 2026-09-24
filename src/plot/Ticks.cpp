@@ -7,43 +7,58 @@
 #include <cstdio>
 #include <format>
 #include <numeric>
+#include <set>
 
 namespace volcano::plot {
 
 namespace {
 
-/// Nice-number step (1, 2, 2.5, 5, 10 × 10^k): smallest step ≥ range/nbins.
-float niceStep(float vmin, float vmax, int nbins) {
-    if (vmin >= vmax) return 1.0f;
-    // matplotlib MaxNLocator: smallest nice step >= range/nbins.
-    float rawStep = (vmax - vmin) / std::max(nbins, 1);
-    float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    const float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
-    for (float s : niceSteps) {
-        float cand = s * mag;
-        if (cand >= rawStep * (1.0f - 1e-6f)) {
-            // Guard: denormal/zero steps would loop forever downstream.
-            if (cand > 0.0f && std::isfinite(cand)) return cand;
-            return 1.0f;
-        }
-    }
-    float fallback = 10.0f * mag;
-    return (fallback > 0.0f && std::isfinite(fallback)) ? fallback : 1.0f;
+/// matplotlib ticker.scale_range: a decade scale for the step staircase
+/// and, when ticks cluster far from zero, a large constant offset that
+/// is subtracted before locating ticks (precision fixup).
+std::pair<double, double> scaleRange(double vmin, double vmax, double n) {
+    double dv = std::abs(vmax - vmin);
+    if (!(dv > 0)) dv = 1;  // mpl nonsingular guarantees dv > 0 upstream
+    double meanv = (vmax + vmin) / 2.0;
+    double offset = std::abs(meanv) / dv < 100.0
+        ? 0.0
+        : std::copysign(
+              std::pow(10.0, std::floor(std::log10(std::abs(meanv)))),
+              meanv);
+    double scale = std::pow(10.0, std::floor(std::log10(dv / n)));
+    return {scale, offset};
 }
 
-/// Ticks at multiples of step covering [vmin, vmax].
-std::vector<float> steppedTicks(float vmin, float vmax, float step,
-                                float offset = 0.0f) {
-    std::vector<float> out;
-    if (!(step > 0.0f) || !std::isfinite(step)) return out;
-    float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
-    float start = (std::ceil((lo - offset) / step) * step) + offset;
-    for (float v = start; v <= hi + step * 1e-6f; v += step) {
-        out.push_back(std::round((v - offset) / step) * step + offset);
-        if (out.size() > 100000) break;  // pathological density guard
+/// matplotlib ticker._Edge_integer: integer-multiple comparisons of
+/// x/step with a tolerance widened when a large offset is in play.
+struct EdgeInteger {
+    double step, offset;
+    /// mpl _Edge_integer.closeto, widened by the f32 quantization error
+    /// of x (our data model is float32, mpl computes in float64).
+    [[nodiscard]] bool closeto(double ms, double edge, double x) const {
+        double tol = std::max(1e-10, std::abs(x) / step * 1.5e-7);
+        if (offset > 0) {
+            double digits = std::log10(offset / step);
+            tol = std::max(tol, std::pow(10.0, digits - 12));
+        }
+        tol = std::min(0.4999, tol);
+        return std::abs(ms - edge) < tol;
     }
-    return out;
-}
+    /// Largest n such that n·step <= x.
+    [[nodiscard]] double le(double x) const {
+        double d = std::floor(x / step);
+        double m = x - d * step;
+        if (closeto(m / step, 1.0, x)) return d + 1;
+        return d;
+    }
+    /// Smallest n such that n·step >= x.
+    [[nodiscard]] double ge(double x) const {
+        double d = std::floor(x / step);
+        double m = x - d * step;
+        if (closeto(m / step, 0.0, x)) return d;
+        return d + 1;
+    }
+};
 
 /// Trim trailing zeros / decimal point: "1.500" → "1.5".
 std::string trimZeros(std::string s) {
@@ -58,6 +73,30 @@ std::string gFormat(float v, int sigDigits = 6) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.*g", sigDigits, double(v));
     return buf;
+}
+
+/// Recover the float64 value a tick position was meant to represent.
+/// Our data model is float32; a value like 0.005f quantizes to
+/// 0.004999999888, which then formats differently than mpl's f64
+/// 0.005 ("0.00" vs "0.01"). float32 carries ~7 significant decimal
+/// digits — anything beyond is quantization noise, so %.7g + strtod
+/// snaps back to the intended value.
+double snapF64(float v) {
+    if (!std::isfinite(v)) return v;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.7g", double(v));
+    return std::strtod(buf, nullptr);
+}
+
+/// mpl Formatter.fix_minus (axes.unicode_minus=True default): ASCII
+/// '-' → U+2212. Kept in sync with render::fixMinus.
+std::string fixMinusStr(std::string s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+        if (c == '-') out += "\xe2\x88\x92";
+        else out += c;
+    return out;
 }
 
 /// Integer mantissa when v is an exact power: returns exponent or nullopt.
@@ -76,11 +115,10 @@ std::optional<int> exactPower(float v, float base) {
 // ─── Locators ───────────────────────────────────────────────────────────────
 
 std::vector<float> FixedLocator::tickValues(float vmin, float vmax) const {
-    std::vector<float> out;
-    float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
-    for (float p : positions_)
-        if (p >= lo && p <= hi) out.push_back(p);
-    return out;
+    // mpl FixedLocator returns all locs regardless of the view
+    // interval; out-of-view ticks are clipped at draw time.
+    (void)vmin; (void)vmax;
+    return positions_;
 }
 
 std::vector<float> LinearLocator::tickValues(float vmin, float vmax) const {
@@ -96,21 +134,136 @@ std::vector<float> LinearLocator::tickValues(float vmin, float vmax) const {
 }
 
 std::vector<float> MultipleLocator::tickValues(float vmin, float vmax) const {
-    return steppedTicks(vmin, vmax, base_, offset_);
+    // mpl MultipleLocator.tick_values: edge-align vmin, then emit one
+    // step below it through at least one step above vmax (ticks may
+    // extend beyond the view interval; drawing clips them).
+    std::vector<float> out;
+    double step = base_;
+    if (!(step > 0.0) || !std::isfinite(step)) return out;
+    if (vmax < vmin) std::swap(vmin, vmax);
+    double lo = double(vmin) - offset_, hi = double(vmax) - offset_;
+    EdgeInteger edge{step, std::abs(offset_)};
+    lo = edge.ge(lo) * step;
+    double n = std::floor((hi - lo) / step + 0.001);
+    if (!(n >= 0) || n > 100000) return out;  // density guard
+    for (double i = 0; i <= n + 2; ++i)
+        out.push_back(float(lo + (i - 1.0) * step + offset_));
+    return out;
 }
 
 std::vector<float> IndexLocator::tickValues(float vmin, float vmax) const {
-    return steppedTicks(vmin, vmax, base_, offset_);
+    // mpl IndexLocator.tick_values: arange(vmin + offset, vmax + 1,
+    // base) — ticks start at vmin+offset, not aligned to base.
+    std::vector<float> out;
+    double base = base_;
+    if (!(base > 0.0) || !std::isfinite(base)) return out;
+    if (vmax < vmin) std::swap(vmin, vmax);
+    for (double v = double(vmin) + offset_; v < double(vmax) + 1.0;
+         v += base) {
+        out.push_back(float(v));
+        if (out.size() > 100000) break;
+    }
+    return out;
+}
+
+void MaxNLocator::setSteps(std::vector<float> steps) {
+    // mpl validates 1 <= s <= 10, strictly increasing, needs >= 2 entries
+    // (the staircase uses steps[1] for the top extension).
+    if (steps.size() < 2) return;
+    std::ranges::sort(steps);
+    if (steps.front() < 1.0f || steps.back() > 10.0f) return;
+    steps_ = std::move(steps);
+}
+
+void MaxNLocator::setPrune(std::string_view p) {
+    prune_ = (p == "lower" || p == "upper" || p == "both")
+        ? std::string(p) : std::string{};
 }
 
 std::vector<float> MaxNLocator::tickValues(float vmin, float vmax) const {
-    float step = niceStep(vmin, vmax, nbins_);
-    // Degenerate range: a step too small to advance `v` (denormal or
-    // below the ulp of the bounds) would loop forever without making
-    // progress. Emit a single tick at the location instead.
-    if (vmax + step == vmax || vmin + step == vmin)
-        return {vmin};
-    return steppedTicks(vmin, vmax, step);
+    double dmin = vmin, dmax = vmax;
+    if (symmetric_) {
+        dmax = std::max(std::abs(dmin), std::abs(dmax));
+        dmin = -dmax;
+    }
+    // mpl transforms.nonsingular(expander=1e-13, tiny=1e-14).
+    if (!std::isfinite(dmin) || !std::isfinite(dmax)) {
+        dmin = -1e-13; dmax = 1e-13;
+    }
+    if (dmax < dmin) std::swap(dmin, dmax);
+    double maxabs = std::max(std::abs(dmin), std::abs(dmax));
+    constexpr double kTiny = 1e-14, kExpander = 1e-13;
+    if (maxabs < 1e6 / kTiny * std::numeric_limits<double>::denorm_min() ||
+        maxabs == 0.0) {
+        dmin = -kExpander; dmax = kExpander;
+    } else if (dmax - dmin <= maxabs * kTiny) {
+        dmin -= kExpander * std::abs(dmin);
+        dmax += kExpander * std::abs(dmax);
+    }
+
+    auto locs = rawTicks(dmin, dmax);
+    if (prune_ == "lower" && !locs.empty()) locs.erase(locs.begin());
+    else if (prune_ == "upper" && !locs.empty()) locs.pop_back();
+    else if (prune_ == "both" && locs.size() >= 2) {
+        locs.erase(locs.begin());
+        locs.pop_back();
+    }
+    return locs;
+}
+
+std::vector<float> MaxNLocator::rawTicks(double vmin, double vmax) const {
+    // mpl: nbins='auto' without an axis resolves to 9; axisTicks
+    // substitutes the tick-space-derived nbins for attached locators.
+    int nbins = nbins_ <= 0 ? 9 : nbins_;
+    auto [scale, offset] = scaleRange(vmin, vmax, double(nbins));
+    double vminS = vmin - offset, vmaxS = vmax - offset;
+
+    // mpl _extended_steps = concat(0.1*steps[:-1], steps, [10*steps[1]]).
+    std::vector<double> steps;
+    steps.reserve(steps_.size() * 2);
+    for (size_t i = 0; i + 1 < steps_.size(); ++i)
+        steps.push_back(0.1 * double(steps_[i]));
+    for (float s : steps_) steps.push_back(s);
+    if (steps_.size() > 1) steps.push_back(10.0 * steps_[1]);
+    for (auto& s : steps) s *= scale;
+    if (integer_)
+        std::erase_if(steps, [](double s) {
+            // mpl: for steps > 1 keep only integer values.
+            return s >= 1.0 && std::abs(s - std::round(s)) >= 0.001;
+        });
+    if (steps.empty()) steps.push_back(scale > 0 ? scale : 1.0);
+
+    double rawStep = (vmaxS - vminS) / nbins;
+    // mpl: smallest step >= raw_step, else the largest step.
+    size_t istep = steps.size() - 1;
+    for (size_t i = 0; i < steps.size(); ++i)
+        if (steps[i] >= rawStep) { istep = i; break; }
+
+    // Try steps from istep down until one emits >= min_n_ticks ticks.
+    std::vector<float> ticks;
+    for (size_t k = istep + 1; k-- > 0;) {
+        double step = steps[k];
+        if (integer_ &&
+            std::floor(vmaxS) - std::ceil(vminS) >= minNTicks_ - 1)
+            step = std::max(1.0, step);
+        double bestVmin = std::floor(vminS / step) * step;
+        EdgeInteger edge{step, std::abs(offset)};
+        double low = edge.le(vminS - bestVmin);
+        double high = edge.ge(vmaxS - bestVmin);
+        // Pathological density guard (e.g. step below the ulp of the
+        // bounds): mpl relies on raise_if_exceeds; bail out instead.
+        if (!(high - low < 100000)) continue;
+        ticks.clear();
+        int nticks = 0;
+        for (double n = low; n <= high; n += 1.0) {
+            double t = n * step + bestVmin;
+            if (t >= vminS && t <= vmaxS) ++nticks;
+            ticks.push_back(static_cast<float>(t));
+        }
+        if (nticks >= minNTicks_) break;
+    }
+    for (auto& t : ticks) t = static_cast<float>(double(t) + offset);
+    return ticks;
 }
 
 std::vector<float> LogLocator::tickValues(float vmin, float vmax) const {
@@ -211,6 +364,70 @@ std::vector<float> AutoMinorLocator::tickValues(float vmin, float vmax) const {
     return between(majors, vmin, vmax);
 }
 
+std::vector<float> AsinhLocator::tickValues(float vmin, float vmax) const {
+    // matplotlib AsinhLocator.__call__ + tick_values (mpl 3.10):
+    // almost-symmetric ranges snap to exactly symmetric bounds.
+    if (vmin * vmax < 0.0f &&
+        std::abs(1.0 + double(vmax) / double(vmin)) < symthresh_) {
+        float bound = std::max(std::abs(vmin), std::abs(vmax));
+        vmin = -bound;
+        vmax = bound;
+    }
+    const double lw = linearWidth_;
+    double ymin = lw * std::asinh(double(vmin) / lw);
+    double ymax = lw * std::asinh(double(vmax) / lw);
+    int n = std::max(numticks_, 2);
+    std::vector<double> ys;
+    ys.reserve(size_t(n) + 1);
+    for (int i = 0; i < n; ++i)
+        ys.push_back(ymin + (ymax - ymin) * double(i) / double(n - 1));
+    if (ymin * ymax < 0) {
+        // Straddling zero: drop near-zero ticks and add an exact 0
+        // (mpl keeps ticks whose relative deviation > 0.5/numticks).
+        std::vector<double> keep;
+        for (double y : ys)
+            if (std::abs(y / (ymax - ymin)) > 0.5 / double(n))
+                keep.push_back(y);
+        keep.push_back(0.0);
+        ys = std::move(keep);
+    }
+    std::set<double> ticks;
+    for (double y : ys) {
+        double x = lw * std::sinh(y / lw);
+        if (base_ > 1) {
+            // pows = sign(x) * base^floor(log_base|x|) — x==0 → 0.
+            // Compute in double: log(10.0f) rounding can push the
+            // ratio just below an integer boundary (100 → pows 10).
+            const double base = base_;
+            double p = x == 0.0
+                           ? 0.0
+                           : std::copysign(
+                                 std::pow(base, std::floor(
+                                                    std::log(std::abs(x)) /
+                                                    std::log(base))),
+                                 x);
+            if (subs_.empty()) {
+                ticks.insert(p);
+            } else {
+                for (double s : subs_) ticks.insert(p * s);
+            }
+        } else {
+            double p = x == 0.0 ? 1.0
+                                : std::pow(10.0, std::floor(
+                                                     std::log10(
+                                                         std::abs(x))));
+            ticks.insert(p * std::round(x / p));
+        }
+    }
+    if (ticks.size() >= 2)
+        return std::vector<float>(ticks.begin(), ticks.end());
+    std::vector<float> out;
+    out.resize(size_t(n));
+    for (int i = 0; i < n; ++i)
+        out[size_t(i)] = vmin + (vmax - vmin) * float(i) / float(n - 1);
+    return out;
+}
+
 // ─── Formatters ─────────────────────────────────────────────────────────────
 
 std::string FixedFormatter::format(float, int pos) const {
@@ -220,22 +437,138 @@ std::string FixedFormatter::format(float, int pos) const {
 
 std::string FormatStrFormatter::format(float v, int) const {
     char buf[128];
-    std::snprintf(buf, sizeof(buf), fmt_.c_str(), double(v));
+    std::snprintf(buf, sizeof(buf), fmt_.c_str(), snapF64(v));
     return buf;
 }
 
-std::string StrMethodFormatter::format(float v, int pos) const {
-    std::string out = tmpl_;
-    auto replaceAll = [](std::string& s, std::string_view from,
-                         const std::string& to) {
-        size_t i = 0;
-        while ((i = s.find(from, i)) != std::string::npos) {
-            s.replace(i, from.size(), to);
-            i += to.size();
+/// Format `v` per a Python str.format spec ('{x:.2f}' → spec ".2f").
+/// Supports [[fill]align][sign][0][width][.prec][type] for numeric
+/// types f/F/e/E/g/G/d/% plus empty spec (gFormat for floats).
+static std::string pyFormatSpec(double v, std::string_view spec,
+                                bool isInt) {
+    size_t i = 0, n = spec.size();
+    char fill = ' ', align = 0;
+    if (i + 1 < n && (spec[i + 1] == '<' || spec[i + 1] == '>' ||
+                      spec[i + 1] == '^' || spec[i + 1] == '=')) {
+        fill = spec[i]; align = spec[i + 1]; i += 2;
+    } else if (i < n && (spec[i] == '<' || spec[i] == '>' ||
+                         spec[i] == '^' || spec[i] == '=')) {
+        align = spec[i]; ++i;
+    }
+    char sign = 0;
+    if (i < n && (spec[i] == '+' || spec[i] == '-' || spec[i] == ' '))
+        sign = spec[i++];
+    bool zeroPad = false;
+    if (i < n && spec[i] == '0') { zeroPad = true; ++i; }
+    int width = 0;
+    while (i < n && std::isdigit(static_cast<unsigned char>(spec[i])))
+        width = width * 10 + (spec[i++] - '0');
+    int prec = -1;
+    if (i < n && spec[i] == '.') {
+        ++i; prec = 0;
+        while (i < n && std::isdigit(static_cast<unsigned char>(spec[i])))
+            prec = prec * 10 + (spec[i++] - '0');
+    }
+    char type = i < n ? spec[i] : '\0';
+
+    // printf handles width for '<' (left) and plain '>' (right); '^',
+    // '=' and custom fill chars are padded manually below.
+    const bool manualPad = align == '^' || align == '=' ||
+                           (align != 0 && fill != ' ') ||
+                           (align != 0 && zeroPad);
+    // Build a printf pattern for the numeric core.
+    std::string pat = "%";
+    if (align == '<' && !manualPad) pat += '-';
+    if (sign) pat += sign;
+    if (zeroPad && !manualPad) pat += '0';
+    if (width > 0 && !manualPad) pat += std::to_string(width);
+    if (prec >= 0) { pat += '.'; pat += std::to_string(prec); }
+    char buf[128];
+    bool appendPct = false;
+    switch (type) {
+    case 'd': case 'i': case 'n': case '\0':
+        if (type == '\0' && !isInt) {
+            pat += "g";
+            std::snprintf(buf, sizeof(buf), pat.c_str(), v);
+        } else {
+            if (type == 'n') pat += "d"; else pat += "lld";
+            std::snprintf(buf, sizeof(buf), pat.c_str(),
+                          (long long)std::llround(v));
         }
-    };
-    replaceAll(out, "{x}", gFormat(v));
-    replaceAll(out, "{pos}", std::to_string(pos));
+        break;
+    case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+        pat += type == 'F' ? 'f' : type;
+        std::snprintf(buf, sizeof(buf), pat.c_str(), v);
+        break;
+    case '%':
+        pat += 'f'; appendPct = true;
+        std::snprintf(buf, sizeof(buf), pat.c_str(), v * 100.0);
+        break;
+    default:
+        pat += 'g';
+        std::snprintf(buf, sizeof(buf), pat.c_str(), v);
+        break;
+    }
+    std::string out = buf;
+    if (appendPct) out += '%';
+    // fill/align for the cases printf can't express ('^', '=', custom
+    // fill); '^' puts the extra pad on the right like Python.
+    if (manualPad && int(out.size()) < width) {
+        int pad = width - int(out.size());
+        if (align == '^') {
+            int l = pad / 2;
+            out = std::string(l, fill) + out + std::string(pad - l, fill);
+        } else if (align == '<') {
+            out += std::string(pad, fill);
+        } else if (align == '=' &&
+                   (out.starts_with('-') || out.starts_with('+') ||
+                    out.starts_with(' '))) {
+            out = out.substr(0, 1) + std::string(pad, fill) +
+                  out.substr(1);
+        } else {
+            out = std::string(pad, fill) + out;
+        }
+    }
+    return out;
+}
+
+std::string StrMethodFormatter::format(float v, int pos) const {
+    // mpl StrMethodFormatter: tmpl.format(x=v, pos=pos) — substitute
+    // {x}, {pos} and their '{name:spec}' forms.
+    std::string out;
+    size_t i = 0;
+    while (i < tmpl_.size()) {
+        char c = tmpl_[i];
+        if (c == '{') {
+            if (i + 1 < tmpl_.size() && tmpl_[i + 1] == '{') {
+                out += '{'; i += 2; continue;
+            }
+            auto close = tmpl_.find('}', i);
+            if (close == std::string::npos) { out += c; ++i; continue; }
+            std::string_view inner(&tmpl_[i + 1], close - i - 1);
+            auto colon = inner.find(':');
+            std::string_view name = inner.substr(0, colon);
+            std::string_view spec =
+                colon == std::string_view::npos ? "" : inner.substr(colon + 1);
+            if (name == "x")
+                // mpl _UnicodeMinusFormat applies fix_minus to the
+                // substituted value (template literals keep '-').
+                out += fixMinusStr(
+                    spec.empty() ? gFormat(v)
+                                 : pyFormatSpec(snapF64(v), spec, false));
+            else if (name == "pos")
+                out += spec.empty() ? std::to_string(pos)
+                                    : pyFormatSpec(pos, spec, true);
+            else
+                out += "{" + std::string(inner) + "}";
+            i = close + 1;
+        } else if (c == '}' && i + 1 < tmpl_.size() &&
+                   tmpl_[i + 1] == '}') {
+            out += '}'; i += 2;
+        } else {
+            out += c; ++i;
+        }
+    }
     return out;
 }
 
@@ -403,27 +736,59 @@ std::string LogitFormatter::format(float v, int) const {
 }
 
 std::string EngFormatter::format(float v, int) const {
+    // mpl EngFormatter.format_data: places=None → "%g" mantissa,
+    // else "%.{places}f"; mantissas rounding up to 1000 roll over to
+    // the next prefix.
     static const char* kPrefix[] = {"y","z","a","f","p","n","µ","m","",
                                     "k","M","G","T","P","E","Z","Y"};
-    if (v == 0.0f)
-        return std::format("0{}{}", unit_.empty() ? "" : sep_, unit_);
-    int exp3 = static_cast<int>(std::floor(std::log10(std::abs(v)) / 3.0f));
-    exp3 = std::clamp(exp3, -8, 8);
-    float mant = v / std::pow(1000.0f, static_cast<float>(exp3));
+    double value = snapF64(v);
+    // mpl: pow10=0 for value 0, but the mantissa still goes through
+    // the fmt string ('0.00' for places=2, '0' for 'g').
+    int pow10 = value != 0.0
+        ? int(std::floor(std::log10(std::abs(value)) / 3.0) * 3) : 0;
+    pow10 = std::clamp(pow10, -24, 24);
+    double mant = value / std::pow(10.0, pow10);
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.*f", places_, double(mant));
-    std::string s = trimZeros(buf);
-    const char* pfx = kPrefix[exp3 + 8];
+    auto fmtMant = [&](double m) {
+        if (places_ < 0) return gFormat(float(m));
+        std::snprintf(buf, sizeof(buf), "%.*f", places_, m);
+        return std::string(buf);
+    };
+    // mpl: if the formatted mantissa rounds up to 1000, bump a decade.
+    if (std::abs(std::atof(fmtMant(mant).c_str())) >= 1000.0 &&
+        pow10 < 24) {
+        mant /= 1000.0;
+        pow10 += 3;
+    }
+    std::string s = fmtMant(mant);
+    const char* pfx = kPrefix[pow10 / 3 + 8];
     if (*pfx == '\0' && unit_.empty()) return s;
     return std::format("{}{}{}{}", s, sep_, pfx, unit_);
 }
 
 std::string PercentFormatter::format(float v, int) const {
-    float pct = v / xmax_ * 100.0f;
-    int dec = decimals_ >= 0 ? decimals_
-        : (std::abs(pct - std::round(pct)) < 1e-4f ? 0 : 1);
+    // mpl PercentFormatter: pct = x*100/xmax; decimals=None →
+    // clamp(ceil(2 - log10(2*scaled_range)), 0, 5) where scaled_range
+    // is the display range in percent units.
+    double pct = snapF64(v) * 100.0 / xmax_;
+    int dec;
+    if (decimals_ >= 0) {
+        dec = decimals_;
+    } else {
+        double scaledRange = std::abs(double(vmax_) - vmin_) * 100.0 /
+                             xmax_;
+        // f32 view bounds perturb the log by ~1e-7; mpl computes in
+        // f64 and lands on exact integers at decade boundaries, so
+        // shave a small epsilon off before ceil.
+        dec = scaledRange <= 0
+                  ? 0
+                  : std::clamp(int(std::ceil(
+                                   2.0 - std::log10(2.0 * scaledRange) -
+                                   1e-6)),
+                               0, 5);
+    }
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.*f", dec, double(pct));
+    std::snprintf(buf, sizeof(buf), "%.*f", dec, pct);
     return std::format("{}{}", buf, symbol_);
 }
 

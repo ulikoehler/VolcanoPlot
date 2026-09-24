@@ -36,12 +36,26 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     void setLabel(std::string l) { label_ = std::move(l); }
+    /// mpl fill_between `where`: fill between x[i] and x[i+1] only when
+    /// where[i] && where[i+1]. `interpolate` (mpl kwarg) extends each
+    /// contiguous fill run to the interpolated y1==y2 crossing point.
+    /// where must have the same size as x (mpl raises otherwise — here
+    /// a mismatched mask is ignored).
+    void setWhere(std::vector<bool> where, bool interpolate = false) {
+        where_ = std::move(where);
+        interpolate_ = interpolate;
+        prepared_ = false;   // rebuild the triangle list
+        touch();
+    }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 
 private:
     std::vector<float> x_, y1_, y2_;
+    /// mpl `where` mask (empty → fill everywhere).
+    std::vector<bool> where_;
+    bool interpolate_ = false;
     Color color_;
     std::string label_;
     render::primitives::FillRenderer renderer_;

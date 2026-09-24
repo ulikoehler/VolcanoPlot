@@ -18,6 +18,19 @@ void IPlot::contributeToAutoscaleGpu(
     contributeToAutoscale(v);
 }
 
+std::pair<bool, bool> IPlot::feedsData(const Axes& axes) const {
+    if (!transform) return {true, true};
+    // Blended transforms feed each axis independently (mpl
+    // blended_transform_factory: x/y_transform may contain transData).
+    if (const Transform* xb = transform->xBranch()) {
+        const Transform* yb = transform->yBranch();
+        return {xb->containsDataBranch(axes),
+                yb ? yb->containsDataBranch(axes) : false};
+    }
+    bool d = transform->containsDataBranch(axes);
+    return {d, d};
+}
+
 Figure::~Figure() = default;
 
 Figure::Figure() : grid_(std::make_shared<GridSpec>(1, 1)), style_(rc::params()) {}
@@ -36,6 +49,7 @@ Axes* Figure::addAxes(const SubplotSpec& spec) {
     auto a = std::make_unique<Axes>();
     Axes* raw = a.get();
     raw->setFigure(this);
+    raw->setSubplotSpec(spec);
     AxesPlacement p;
     p.axes = std::move(a);
     p.spec = spec;
@@ -263,8 +277,16 @@ void Figure::computeTightMargins(Extent2D extent) {
             st.yAxis.visible)
             needRight = std::max(needRight,
                 (4.0f + 4.0f + 40.0f) / extent.width);
+        // mpl yaxis.set_label_position('right'): the ylabel needs right
+        // margin even when the tick labels stay on the left.
+        if (p.axes->yFurniture().labelFar && !st.yAxis.label.empty())
+            needRight += (fontPx + 8.0f) / extent.width;
         if (p.axes->xTicksTop() && st.xAxis.visible)
             needTop = std::max(needTop, (4.0f + 4.0f + 16.0f) / extent.height);
+        // mpl xaxis.set_label_position('top'): the xlabel needs top
+        // margin alongside the title.
+        if (p.axes->xFurniture().labelFar && !st.xAxis.label.empty())
+            needTop += (fontPx + 8.0f) / extent.height;
     }
     // Figure title.
     if (!style_.title.text.empty())
@@ -282,60 +304,23 @@ void Figure::computeTightMargins(Extent2D extent) {
     }
 }
 
+std::vector<const AxesPlacement*> Figure::axesDrawOrder() const {
+    std::vector<const AxesPlacement*> out;
+    out.reserve(placements_.size());
+    for (const auto& p : placements_) out.push_back(&p);
+    std::ranges::stable_sort(out, [](const AxesPlacement* a,
+                                     const AxesPlacement* b) {
+        return a->axes->zorder() < b->axes->zorder();
+    });
+    return out;
+}
+
 void Figure::applyAspect() {
     for (auto& p : placements_) {
-        Axes& ax = *p.axes;
-        if (ax.aspect() != AspectMode::Equal) continue;
-        const auto& vp = ax.viewport();
-        // For non-rectilinear projections "equal" applies to the
-        // projected plane (polar circles must be round), not the raw
-        // (theta, r) data units.
-        float xs, ys;
-        if (ax.projection().kind == ProjectionKind::Rectilinear) {
-            xs = std::fabs(vp.x.span());
-            ys = std::fabs(vp.y.span());
-        } else {
-            auto b = ax.transform().view;
-            xs = std::fabs(b.x.span());
-            ys = std::fabs(b.y.span());
-        }
-        if (xs <= 0.0f || ys <= 0.0f) continue;
-        float w = static_cast<float>(ax.rect.width);
-        float h = static_cast<float>(ax.rect.height);
-        if (w <= 0.0f || h <= 0.0f) continue;
-        if (ax.adjustable() == Adjustable::Box) {
-            // Shrink the box so that px/unit is equal on both axes.
-            // px_per_x = w/xs, px_per_y = h/ys; equalize by shrinking the
-            // axis with more px per unit... actually: we want
-            //   w'/xs == h'/ys  →  w'/h' == xs/ys.
-            float target = xs / ys;  // required w/h ratio
-            float cur = w / h;
-            Rect2D r = ax.rect;
-            if (cur > target) {
-                // too wide → shrink width
-                uint32_t nw = static_cast<uint32_t>(h * target);
-                r.x += static_cast<int32_t>((w - nw) / 2.0f);
-                r.width = nw;
-            } else {
-                uint32_t nh = static_cast<uint32_t>(w / target);
-                r.y += static_cast<int32_t>((h - nh) / 2.0f);
-                r.height = nh;
-            }
-            ax.rect = r;
-        } else {
-            // adjustable='datalim': expand the smaller data range to match.
-            float pxPerX = w / xs, pxPerY = h / ys;
-            if (pxPerX > pxPerY) {
-                // x has more px per unit → x range too small → expand x.
-                float need = w / pxPerY;
-                float mid = (vp.x.min + vp.x.max) / 2.0f;
-                ax.viewport().x = {mid - need / 2.0f, mid + need / 2.0f};
-            } else {
-                float need = h / pxPerX;
-                float mid = (vp.y.min + vp.y.max) / 2.0f;
-                ax.viewport().y = {mid - need / 2.0f, mid + need / 2.0f};
-            }
-        }
+        // Axes::applyAspect covers aspect='equal' (box or datalim
+        // adjustable) and an explicit box_aspect; both early-out when
+        // neither applies.
+        p.axes->applyAspect();
     }
 }
 
@@ -500,6 +485,90 @@ std::vector<const Axes*> Figure::allAxes() const {
     return out;
 }
 
+Axes* Figure::attachAxes(std::unique_ptr<Axes> ax) {
+    Axes* raw = ax.get();
+    raw->setFigure(this);
+    AxesPlacement p;
+    p.axes = std::move(ax);
+    if (raw->subplotSpec()) {
+        p.spec = *raw->subplotSpec();
+        p.mode = PlacementMode::Grid;
+    } else {
+        p.mode = PlacementMode::FigureFraction;
+        p.fx = 0.0f; p.fy = 0.0f; p.fw = 1.0f; p.fh = 1.0f;
+    }
+    placements_.push_back(std::move(p));
+    markStale();
+    return raw;
+}
+
+void Figure::setAxesFraction(Axes* ax, float l, float b, float w,
+                             float h) {
+    for (auto& p : placements_) {
+        if (p.axes.get() != ax) continue;
+        p.mode = PlacementMode::FigureFraction;
+        p.fx = l; p.fy = b; p.fw = w; p.fh = h;
+        p.spec = SubplotSpec{};
+        ax->clearSubplotSpec();
+        markStale();
+        return;
+    }
+}
+
+void Figure::setAxesSubplotSpec(Axes* ax, const SubplotSpec& spec) {
+    for (auto& p : placements_) {
+        if (p.axes.get() != ax) continue;
+        p.mode = PlacementMode::Grid;
+        p.spec = spec;
+        ax->setSubplotSpec(spec);
+        markStale();
+        return;
+    }
+}
+
+TextAnnotation& Figure::text(float x, float y, std::string s) {
+    TextAnnotation t;
+    t.x = x;
+    t.y = y;
+    t.coords = CoordSystem::Figure;
+    t.text = std::move(s);
+    figTexts_.push_back(std::move(t));
+    markStale();
+    return figTexts_.back();
+}
+
+void Figure::clear() {
+    // mpl Figure.clear(): drop all axes, subfigures, figure artists,
+    // legends and sup-labels; keep dpi/facecolor/style.
+    placements_.clear();
+    subfigs_.clear();
+    retiredGrids_.clear();
+    figTexts_.clear();
+    figLegend_.visible = false;
+    style_.title.text.clear();
+    supXlabel_.clear();
+    supYlabel_.clear();
+    alignXLabels_ = alignYLabels_ = false;
+    tightLayout_ = false;
+    constrainedLayout_ = false;
+    grid_ = std::make_shared<GridSpec>(1, 1);
+    markStale();
+}
+
+std::unique_ptr<Axes> Figure::removeAxes(const Axes* ax) {
+    for (auto it = placements_.begin(); it != placements_.end(); ++it) {
+        if (it->axes.get() == ax) {
+            auto owned = std::move(it->axes);
+            placements_.erase(it);
+            markStale();
+            return owned;
+        }
+    }
+    for (auto& s : subfigs_)
+        if (auto owned = s.figure->removeAxes(ax)) return owned;
+    return nullptr;
+}
+
 bool Figure::stale() const {
     if (stale_) return true;
     for (const auto* ax : allAxes())
@@ -603,11 +672,13 @@ bool Figure::artistDragEvent(const Event& e) {
             if (!ax) return nullptr;
             for (auto it = ax->annotations().rbegin();
                  it != ax->annotations().rend(); ++it)
-                if (it->draggable && hit(it->drawBox, e.x, e.y))
+                if (it->draggable && !it->detached &&
+                    hit(it->drawBox, e.x, e.y))
                     return &it->dragOffset;
             for (auto it = ax->texts().rbegin(); it != ax->texts().rend();
                  ++it)
-                if (it->draggable && hit(it->drawBox, e.x, e.y))
+                if (it->draggable && !it->detached &&
+                    hit(it->drawBox, e.x, e.y))
                     return &it->dragOffset;
             return nullptr;
         };

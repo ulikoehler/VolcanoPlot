@@ -38,6 +38,9 @@ private:
     bool originLower_ = false;
     /// mpl imshow interpolation: 0 = nearest, 1 = bilinear, 2 = bicubic.
     int interpMode_ = 0;
+    /// RGB(A) imshow: the grid texture holds RGBA8 texels and is
+    /// sampled directly (no colormap LUT).
+    bool rgbaMode_ = false;
     bool inited_ = false;
 };
 } // namespace volcano::render::primitives

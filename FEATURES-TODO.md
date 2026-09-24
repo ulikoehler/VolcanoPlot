@@ -6,7 +6,9 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ## 1. Plot Types
 
 ### 1.1 2D — Pairwise / functional
-- [x] `plot` — line and/or marker plots (LinePlot)
+- [x] `plot` — line and/or marker plots (LinePlot), `markevery=` subsampling
+      (int/(start,step)/fraction/(frac,frac)/index list/`first`/`last`/`all`/
+      `none`, raster + vector, `Series2D::markevery`/`set_markevery`)
 - [x] `errorbar` — points/lines with x/y error bars (ErrorbarPlot — symmetric
       and asymmetric errors, caps, optional connecting line and markers)
 - [x] `scatter` — scatter with size/color mapping (ScatterPlot)
@@ -18,7 +20,10 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       and small-value data)
 - [x] `fill` — filled polygons (FillPlot — triangle-fan tessellation)
 - [x] `fill_between`, `fill_betweenx` (FillBetweenPlot — triangle-strip between
-      two curves or curve and baseline, with alpha blending)
+      two curves or curve and baseline, with alpha blending; `where=` boolean
+      mask splits into contiguous regions and `interpolate=` extends each
+      region to the y1==y2 root inside the gap, matching mpl
+      `_make_verts_for_region`; masked points excluded from autoscale)
 - [x] `vlines`, `hlines` (Vlines/Hlines — vertical/horizontal line segment
       collections via LineSegmentRenderer with eLineList topology)
 - [x] `axhline`, `axvline`, `axhspan`, `axvspan` (ReferenceLines —
@@ -42,8 +47,14 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       tab10 palette, horizontal/vertical orientation, negative height
       support, FillRenderer triangle tessellation)
 - [x] `stackplot` (StackPlot — stacked area plot with cumulative series,
-      per-series colors, FillRenderer triangle tessellation)
-- [x] `pie`, `pie_label` (PiePlot — stub pipeline, 2D + donut)
+      per-series colors, FillRenderer triangle tessellation; `baseline=`
+      `zero`/`sym`/`wiggle`/`weighted_wiggle` matching mpl's `stackplot`
+      baseline math)
+- [x] `pie`, `pie_label` (PiePlot — stub pipeline, 2D + donut; full mpl
+      geometry: `startangle`/`counterclock`/`radius`/`center`/`normalize`,
+      `autopct` fmt/callable percentage labels with `pctdistance`,
+      `labeldistance` (None disables), `rotatelabels`, `frame`; mpl
+      validation: negative x, normalize=False with sum>1, radius<=0 → error)
 - [x] `hist` (HistPlot — auto/fixed/FD/Sturges/Rice/Square bins, count/density/
       probability/cumulative normalization, horizontal mode, alpha blending)
 - [x] `hist2d` (Hist2DPlot — 2D histogram with auto/fixed/explicit bins,
@@ -71,7 +82,8 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `imshow` (HeatmapPlot — GPU texture path with `interpolation=`:
       "nearest"/"none", "bilinear" (linear sampler), "bicubic"
       (Catmull-Rom texelFetch in shader), "antialiased"/"hanning"
-      approximated by bilinear)
+      approximated by bilinear; `origin=` "upper"/"lower" row flipping
+      via shader flag, `Grid2D::origin`)
 - [x] `matshow` (MatshowPlot — matrix display with row-0-at-top convention,
       colormap coloring, NaN cell skipping, explicit value range, nearest-
       neighbor display via FillRenderer triangle tessellation)
@@ -360,6 +372,22 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
       spokes, concentric rgrid circles, degree theta labels, r labels at
       22.5°, equal aspect (raster path)
 - [x] Aspect ratio, equal axis, invert axis, set limits, autoscale (autoscale: [x])
+- [x] `relim` / `autoscale_view` / `autoscale(enable, axis, tight)` —
+      mpl autoscale state machine: `manualX_`/`manualY_` flags set by
+      set_xlim/set_xbound/invert, `autoscale(enable=None)` leaves flags
+      untouched and only updates autoscaling axes, `dataLim` holds raw
+      limits (margins applied to the view only, GPU autoscale too),
+      `set_autoscalex_on`/`get_autoscalex_on`, `relim(visible_only)`
+      skips invisible artists, sticky edges (bar baseline pins y=0)
+- [x] `set_xbound`/`set_ybound` (Axes::setXbound/setYbound — mpl sorted-bounds
+      semantics: None sides keep old displayed bounds, pair sorted
+      ascending/descending by inversion and applied atomically)
+- [x] `axis("off"/"on")`, `set_axis_off`/`set_axis_on`, `set_frame_on`,
+      `axison`, `frame_on` — mpl semantics: `axison` gates patch+spines+
+      ticks+labels (title stays), `frame_on` gates patch+spines; wired in
+      raster and vector renderers
+- [x] `label_outer` (Axes::labelOuter — suppress inner tick labels/ticks on
+      shared subplot grids by AxesPlacement spec position)
 
 ---
 
@@ -470,6 +498,36 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
   - [x] Norm autoscale from data (vmin/vmax auto-computed if unset)
   - [x] Factory functions (`norms::linear`, `norms::log`, `norms::power`, etc.)
   - [x] `Colormap` `bad`, `under`, `over` colors
+- [x] `vp.colors` submodule — `is_color_like`, `to_rgba`/`to_rgb`/`to_hex`,
+      `rgb2hex`, `hex2color`, `same_color`, `to_rgba_array`,
+      `hsv_to_rgb`/`rgb_to_hsv`, scalar-float grayscale specs; all mpl
+      `Normalize` classes bound (`Normalize`/`NoNorm`/`LogNorm`/
+      `PowerNorm`/`SymLogNorm`/`AsinhNorm`/`BoundaryNorm`/`CenteredNorm`/
+      `TwoSlopeNorm`) with `vmin`/`vmax`/`clip`/`scaled()`/`inverse`/
+      `autoscale`/`autoscale_None`; `ListedColormap` +
+      `LinearSegmentedColormap` (incl. `from_list`, segmentdata dicts,
+      `gamma`) via Python classes over registry factories
+- [x] `vp.cm` submodule — `get_cmap` (name/Colormap/None→viridis),
+      `register_cmap` (custom names persist; builtin names protected
+      unless `override_builtin`), `colormaps()` listing, `ScalarMappable`
+      standalone object (norm/cmap/array/clim/to_rgba/autoscale)
+- [x] `IPlot` ScalarMappable protocol — virtual `norm()`/`setNorm()`/
+      `cmap()`/`setCmap()`/`setArray()`/`array()`/`setClim()`; artist
+      handles (`PathCollection`, `AxesImage`) expose `set_cmap`,
+      `get_cmap`, `set_norm`, `get_norm`, `set_clim`, `get_clim`,
+      `set_array`, `get_array`, `to_rgba`, `autoscale`, `autoscale_None`,
+      `norm`/`cmap` properties
+- [x] `scatter(c=..., s=...)` — scalar `c` arrays colormapped through
+      cmap+norm (mpl disambiguation: color spec vs color list vs value
+      array), explicit per-point color lists, per-point `s` pt² sizes
+      (scalar or array, `sqrt(s)·dpi/72` px), `cmap`/`norm`/`vmin`/`vmax`/
+      `alpha`/`edgecolors`/`linewidths`/`marker` kwargs; raster + vector
+- [x] `imshow(cmap=Colormap, norm=..., vmin=..., vmax=..., alpha=...)` —
+      CPU norm pre-transform into the LUT upload, `set_array` reshape,
+      `set_clim`/`set_cmap`/`set_norm` mutation, alpha baked into stops
+- [x] `pcolormesh`/`matshow`/`hexbin`/`hist2d` accept Colormap objects and
+      `norm`/`vmin`/`vmax` kwargs; colorbar resolves cmap+range from the
+      `mappable` artist (`ColorbarStyle::mappable`)
 
 ---
 
@@ -483,6 +541,20 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `frameon`, `framealpha`, `facecolor`, `edgecolor`, `shadow`, `fancybox` (fields in LegendStyle)
 - [x] `labelcolor`
 - [x] `handlelength`, `handletextpad`, `borderpad`, `columnspacing` (+`borderaxespad`, rcParams)
+- [x] `markerscale`, `numpoints`, `scatterpoints` — marker counts/sizes on
+      handles (marked lines draw `numpoints` markers on the handle line)
+- [x] `reverse`, `markerfirst` (label-first + right-aligned handle),
+      `mode='expand'` (columns stretch to fill the anchor width),
+      `alignment` ('left'/'center'/'right' — title + entry block align
+      within the box)
+- [x] `handles=`/`labels=` kwargs — explicit artist handles snapshot
+      label/color/marker at legend() time; positional label override
+- [x] `bbox_to_anchor` 2- and 4-tuples — (x, y, w, h) resolves the loc
+      anchor inside the sub-box (mpl Bbox semantics)
+- [x] `Legend` artist handle — `ax.legend()`/`fig.legend()`/`plt.legend()`
+      return a `Legend` object (`set_visible`/`get_visible`/`remove`,
+      `draggable()`/`set_draggable`/`get_draggable`, `get_texts`,
+      `get_title`, `set_title`, `legend_handles`, `loc`/`_loc` introspection)
 - [x] `draggable` — legend + annotation/text pick-and-drag via
       `Figure::artistDragEvent` (dragOffset applied in raster+vector)
 - [~] `handler_map` / legend handlers — `IPlot::legendMarker()` provides per-plot handle shapes; no arbitrary handler factory
@@ -498,7 +570,12 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Auto tick computation (nice-number locator, tick label formatting)
 
 ### 9.2 Locators
-- [x] `AutoLocator`, `MaxNLocator` (nice-number algorithm, TickConfig::nbins)
+- [x] `AutoLocator`, `MaxNLocator` (mpl-faithful `_raw_ticks`: extended
+      step staircase {1,1.5,2,2.5,3,4,5,6,8,10}×10^k, integer/symmetric/
+      prune/min_n_ticks, auto-nbins from pixel space; TickConfig::nbins)
+- [x] `locator_params` (Axes::locatorParams — nbins/steps/integer/symmetric/
+      prune/min_n_ticks/tight forwarded to MaxNLocator; non-linear axes
+      unaffected per mpl)
 - [x] `LinearLocator`, `MultipleLocator`, `FixedLocator`, `IndexLocator` (Ticks.hpp; Axes::set*Locator)
 - [x] `LogLocator`, `LogitLocator`, `AutoMinorLocator` (incl. LogLocator::minorValues subs)
 - [x] `NullLocator`, `SymmetricalLogLocator`
@@ -527,6 +604,11 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [~] `pgf` (LaTeX/PGF backend — needs a true vector command stream; deferred)
 - [x] Metadata support per format (PNG tEXt, JPEG COM, TIFF ImageDescription, PDF /Info, SVG dc:*, EPS %%Title)
 - [x] `transparent`, `dpi`, `bbox_inches` (tight content crop), `pad_inches` (encode::SaveOptions + Renderer::savefig)
+- [x] `savefig` kwargs: `dpi='figure'`/number, `transparent`, `facecolor`,
+      `edgecolor`, `format`, `metadata`, `pad_inches`, `quality`,
+      `bbox_inches='tight'` — raster crops the readback; vector output does
+      a two-pass tight emit (BoundsCanvas probe → ShiftCanvas translate into
+      a tight-sized canvas)
 
 ---
 
@@ -565,6 +647,16 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `BlendedAffine2D`, `BlendedGenericTransform`
 - [x] `blended_transform_factory` (`blendedTransformFactory`)
 - [x] `offset_copy` (`offsetCopy`: points/pixels/inches at figure dpi)
+- [x] Artist `transform=` — `IPlot::transform` overrides data→pixel
+      mapping on lines/scatter/fill_between/collections; `relim` honors
+      `transform.contains_branch(transData)` via `feedsData` (blended
+      transforms feed each axis independently); `vp.transforms` module
+      (`Transform`, `Affine2D` chainable mpl mutators — premultiply
+      semantics, `translate` adds to the column, `transform_point`,
+      `transform`, `inverted`, `+` composition, `IdentityTransform`,
+      `blended_transform_factory`, `offset_copy`); `ax.transData` /
+      `transAxes`, `fig.transFigure` keep the owner alive; `ax.text`
+      accepts a Transform object
 - [x] `Affine2D` (scale, rotate, rotateAround, translate, skew, concat, inverted)
 - [x] Custom `Transform` / `TransformNode` hierarchy (abstract `Transform` with apply/inverted/clone)
 - [x] 3D camera (view + projection matrices) (Camera3D)
@@ -623,6 +715,20 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] Colorbars with `extend` arrows and custom norms
 - [x] Colorbar rendering (vertical color strip with viridis colormap + tick labels)
 - [x] Spines / axis styling (hide individual spines, `spines.set_visible`)
+- [x] Spine `set_position` / `set_bounds` / `set_color` / `set_linewidth` /
+      `set_linestyle` / `set_dashes` — mpl `('outward', pts)` /
+      `('axes', frac)` / `('data', v)` modes plus 'center'/'zero'
+      shortcuts; tick marks + tick labels + axis labels follow the moved
+      spine; raster quads + stroked dashes + vector lines
+- [x] `quiverkey` (QuiverKeyPlot — mpl reference arrow at axes-fraction
+      anchor with the quiver's effective scale, labelpos N/S/E/W,
+      labelsep/angle/color/labelcolor; raster + vector)
+- [x] `clip_on` (IPlot::clipOn — raster scissor per artist, vector
+      push/pop clip; `visible` flag honored by both renderers and by
+      relim(visible_only))
+- [x] `plt.xkcd(scale, length, randomness)` context manager + 
+      `ax.set_sketch_params` — mpl path.sketch rcParam semantics
+      (scale=None disables, length/randomness default 128/16)
 - [x] Spines / axis border rendering (rectangle border + tick marks around axes rect)
 - [x] `zorder` compositing
 - [x] Picking / hit testing
@@ -632,6 +738,47 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 - [x] `boxplot` notched, bootstrap, median/MU, cap/join styles
 - [x] `violinplot` with custom positions, widths, bodies
 - [x] `errorbar` continuous vs per-point error styles
+- [x] `matplotlib.patheffects` — `vp.patheffects` module:
+      `Normal`/`Stroke`/`SimpleLineShadow`/`SimplePatchShadow` +
+      `withStroke`/`withSimpleLineShadow`/`withSimplePatchShadow`
+      (effect + Normal); ordered passes, optional gc overrides
+      (linewidth/foreground/alpha/offset in points, +y up), mpl shadow
+      defaults (rho=0.3, alpha=0.3, offset (2,-2)); on lines, scatter,
+      collections, bars, text/annotations — raster + vector
+- [x] Axis placement — `ax.xaxis/yaxis.set_ticks_position` /
+      `get_ticks_position` ('top'/'bottom'/'both'/'default'/'none';
+      mpl's "default" = both marks + near labels, "unknown" otherwise),
+      `set_label_position`/`get_label_position`,
+      `tick_top`/`tick_bottom`/`tick_left`/`tick_right` (preserve
+      labels-off state); marks, tick labels, axis labels, and offset
+      text follow per-side furniture state in raster + vector; tight
+      margins account for far-side labels
+- [x] `fig.colorbar`/`plt.colorbar` object API — returns a `Colorbar`
+      handle (`set_label`, `set_ticks`, `set_ticklabels`, `get_ticks`,
+      `minorticks_on`/`off`, `remove`, `ax`, `mappable`,
+      `orientation`); `mappable` artist arg selects the value range;
+      `extend` min/max/both triangles; minor ticks subdivide majors /5
+      (AutoMinorLocator); raster + vector
+- [x] `Artist.remove()` — `Axes::removePlot`/`Figure::removeAxes` detach
+      ownership and return the `unique_ptr`; Python handles keep the
+      removed artist alive (`detached` shared_ptr slots); `.remove()`
+      on Line2D/PathCollection/AxesImage/Patch/Text/Annotation/Quiver/
+      BarContainer/Colorbar/Legend/Axes handles; `ax.remove()` drops the
+      axes from the figure
+- [x] Text `bbox=dict(...)` — mpl `set_bbox` semantics on `ax.text`,
+      `annotate`, `plt.text`, `fig.text`: absent boxstyle → 'square' with
+      pad = 4pt/fontsize fraction, explicit boxstyle → pad=0.3 default;
+      `fc`/`facecolor`, `ec`/`edgecolor`, `lw`/`linewidth`, `alpha`,
+      `pad` keys; full BoxStyle grammar (round/sawtooth/round4/etc.);
+      `set_bbox`/`get_bbox`/`get_bbox_patch` on Text handles; raster +
+      vector
+- [x] Figure geometry/color API — `set_size_inches`/`get_size_inches`
+      (HeadlessBackend::resize re-creates the framebuffer + render pass),
+      `set_dpi`/`get_dpi`, `set_figwidth`/`set_figheight`,
+      `set_facecolor`/`get_facecolor`, `set_edgecolor`/`get_edgecolor`,
+      `set_frameon`/`get_frameon` (frameless canvas keeps the transparent
+      clear color), `fig.set_facecolor` honored by savefig clear + vector
+      canvas op; `savefig(dpi=)` scales relative to `figure.dpi`
 
 ## 17. Units & Date/Categorical Axes
 
@@ -977,3 +1124,233 @@ tri_*) are checked off in the sections above.
       `ax.spines['top'].set_visible()` dict proxy, `vp.cycler()`
       (color/c/fc, linestyle/ls, linewidth/lw, marker keys; `+` concat
       and `*` outer product) and `ax.set_prop_cycle` (cycler or kwargs).
+- [x] **Python artist API surface** — `Line2D` full property set
+      (set/get data, color, linestyle, linewidth, marker, markersize,
+      markerface/edgecolor, markeredgewidth, markevery, alpha, label,
+      visible, zorder, clip_on, generic `set(**kw)`/`update`); `Axes.set`
+      (`xlim`/`ylim`/`xlabel`/`title`/`xscale`/`aspect`/`autoscale*_on`/
+      `xmargin`/`xticks`/`frame_on`/`axison`/`axisbelow`, unknown props
+      raise AttributeError) + `Axes.get`; module-level `vp.setp()`/
+      `vp.getp()` (single or iterable, positional pairs, kwargs, query
+      form); Axes getter batch (`get_xlim`/`get_xscale`/`get_aspect`/
+      `get_autoscalex_on`/`get_frame_on`/`get_axisbelow`/…); Axes
+      introspection (`lines`/`collections`/`patches`/`texts`/`images`/
+      `artists`/`get_children()`/`get_legend_handles_labels()`/
+      `findobj()`); artist handles for `text`/`quiver`/`imshow`/
+      `stairs`/`pcolor`/`quiverkey`/`inset_axes`/`indicate_inset`/
+      `indicate_inset_zoom` (Text/Quiver/Artist/AxesImage/
+      InsetIndicator wrappers keep the figure alive); Spine
+      `set_position`/`set_bounds`/`set_color`/`set_linewidth`/
+      `set_linestyle`/`set_dashes`; `ax.relim`/`autoscale_view`/
+      `autoscale`/`set_autoscalex_on`; `vp.xkcd()` context manager +
+      `ax.set_sketch_params`; PathCollection artist methods.
+- [x] **`vp.ticker` + axis tick introspection** — full mpl `ticker`
+      submodule (`Locator`/`Formatter` hierarchies incl. `AutoLocator`,
+      `AutoMinorLocator`, `IndexLocator`, `SymmetricalLogLocator`,
+      `LogitLocator`, `NullLocator`, `OldAutoLocator`, `Base`,
+      `TickHelper`; `StrMethodFormatter`, `LogFormatterExponent`,
+      `LogFormatterSciNotation`, `LogitFormatter`, `OldScalarFormatter`,
+      `NullFormatter`); mpl-exact locator semantics (FixedLocator
+      returns out-of-range values, MultipleLocator 10% range expansion,
+      EngFormatter `%g` mantissa); `Axis` proxies expose
+      `get_major_locator`/`get_major_formatter`/`get_majorticklocs`/
+      `get_minorticklocs`/`get_ticklabels`/`get_scale`/`get_label`/
+      `get_view_interval`, `Axes.get_xticks`/`get_yticks`/
+      `get_xticklabels`/`get_xaxis`/`get_yaxis`, `set_tick_params`,
+      `ticklabel_format`, `minorticks_on/off`. C++: `Scale.hpp`
+      locator/formatter classes + `TickLayout` mpl `get_tick_space`
+      (nbins = clip(axis_pt/label_pt, min_n_ticks-1, 9)).
+- [x] **Axes introspection + artist/container APIs** — `ax.dataLim`/
+      `viewLim`/`bbox` (`Bbox` class with `p0/p1/x0/x1/y0/y1/width/
+      height/bounds/extents`, `transformed`, iteration, `__array__`),
+      `tightbbox`, `get_window_extent`, `get_position`/`set_position`
+      (Bbox or [l,b,w,h], `which`), `get_subplotspec`/`set_subplotspec`,
+      `get_aspect`/`set_aspect` (+`box_aspect`, `anchor`, `adjustable`,
+      mpl `applyAspect` incl. 'datalim' mode), `margins`/`set_xmargin`/
+      `set_ymargin`, `ignore_existing_data_limits`, eager `dataLim`
+      (artist adds merge limits, mpl `update_datalim`), `relim`,
+      `autoscale`/`autoscale_view` preserve inverted limits;
+      artist state `get/set_visible`/`set_zorder`/`get_label`/
+      `set_figure`/`is_transform_set`/`can_pan`/`can_zoom`/`hitlist`;
+      `add_artist`/`add_line`/`add_collection`/`add_table`/`add_image`
+      re-attach handles (`plots_` is `shared_ptr`), `containers`/
+      `tables` lists populated by `bar`/`barh`/`table`; `start_pan`/
+      `drag_pan`/`end_pan` + `get_navigate`/`get_navigate_mode`;
+      `sharex`/`sharey`/`sharez` kwargs on `add_subplot`/`subplots`.
+- [x] **Figure object APIs + transforms** — `fig.transFigure`/
+      `dpi_scale_trans` (real `Transform` objects), `fig.text`/`figtext`
+      (figure-level text storage rendered by both backends),
+      `get_axes`/`get_ax`/`clf`/`clear`/`gca`/`sca`/`delaxes`,
+      `subplotpars` (`SubplotParams` handle: left/right/bottom/top/
+      wspace/hspace + `update`), `fig.subplots(nrows, ncols, ...)`,
+      `subfigures`/`add_subfigure` (non-owning `PyFigure` views;
+      `fig.axes` includes subfigure axes like mpl), `get_layout_engine`/
+      `set_layout_engine`/`get_constrained_layout_pads`,
+      `fig.set_size_inches`/`get_size_inches`/`get_dpi`/`set_dpi`/
+      `set_facecolor`/`get_facecolor`/`set_frameon`/`get_frameon`,
+      `figimage` returning an artist handle, `sci`/`gci` mappable
+      tracking, `align_labels`; module-level `gca`/`gcf`/`sca`/`draw`/
+      `close(fig|'all')`/`findobj`.
+- [x] **`vp.image` module + image kwargs** — `imread`/`imsave`
+      (PNG decode via libpng simplified API, WebP via libwebp,
+      float32 0-1 RGBA output like mpl), `figimage`, `thumbnail`;
+      `imshow` gains `extent`/`resample` kwargs and accepts
+      (H,W,3|4) RGB/RGBA arrays (RGBA texture path in
+      `HeatmapRenderer` + shader branch; `get_array`/`set_array`/
+      `get_size` RGBA-aware); mpl-verbatim default extent
+      `(-0.5, w-0.5, h-0.5, -0.5)` with `origin='upper'` preserving
+      the inverted y-axis through autoscale (`get_extent` returns
+      mpl order `(l, r, b, t)`).
+- [x] **`vp.font_manager` + `FontProperties`** — `FontProperties`
+      (family/style/variant/weight/stretch/size/file + mpl aliases
+      `fontfamily`/`fontstyle`/…, fontconfig pattern parsing and
+      `get_fontconfig_pattern`, `copy`/`__eq__`/`__hash__`/`__repr__`,
+      positional family arg), `FontEntry`, `FontManager`
+      (`ttflist`/`afmlist`, `addfont`, `findfont`,
+      `findSystemFonts`, `defaultFont`, `score_*`), global
+      `fontManager`, FreeType name-table metadata for system-font
+      scanning (`volcano_text::fontMetadata`); font kwargs
+      (`fontfamily`/`fontstyle`/`fontweight`/`fontsize`/`fontproperties`
+      incl. fontconfig strings + `fontdict`) on text/annotate/title/
+      labels/suptitle/fig.text/legend/tick_params; mpl `Text` artist
+      surface on `PyText`/`PyAnnotation`/`PyTitle`/`PyTickLabel`
+      (set/get fontfamily/style/weight/size/variant/stretch/
+      fontproperties/name, usetex/wrap/rotation_mode/linespacing/
+      multialignment/backgroundcolor/parse_math/antialiased);
+      `annotate` returns an `Annotation` handle; `ax.title`,
+      `get_suptitle`/`get_supxlabel`/`get_supylabel` return Text-like
+      handles. Renderer resolves DejaVu faces by family/style/weight
+      (`TextRenderer::faceFor`); **font sizes are mpl points** — all
+      raster+vector text/tick/spine/pad measurements scale by
+      `figDpi/72` at draw time (figure DPI resolved from the owning
+      figure, not the axes style).
+- [x] **Figure registry + pyplot state** — `figure(num=)` reuses
+      numbered/labeled figures like mpl's pyplot; `fignum_exists`,
+      `get_fignums` (sorted), `get_figlabels`, `close(num|fig|'all')`,
+      `gcf`/`gca`/`sca`, `axes()`/`delaxes` + mpl subplot reuse
+      (`add_subplot(111)` returns the existing axes), `cla`/`clear()`
+      full reset, `ion`/`ioff`/`isinteractive`, `connect`/`disconnect`
+      event stubs, `fig.number`/`label`; `atexit` cleanup of
+      Python-object globals (registry, callbacks, rc shadow) so
+      interpreter shutdown doesn't touch finalized objects.
+- [x] **Complete pyplot module surface** — ~60 module-level forwards
+      to `gca()`: bar/barh/hist/imshow/contour/contourf/clabel/clim/
+      margins/locator_params/fill/fill_between/fill_betweenx/errorbar/
+      semilogx/semilogy/loglog/step/stairs/stem/pie/stackplot/
+      annotate/arrow/axline/autoscale/boxplot/bxp/hexbin/hist2d/
+      matshow/pcolor/pcolormesh/quiver/quiverkey/spy/eventplot/
+      violinplot/ecdf/psd/csd/cohere/specgram/magnitude_spectrum/
+      phase_spectrum/angle_spectrum/xcorr/acorr/plot_date/bar_label/
+      triplot/tripcolor/tricontour/tricontourf/broken_barh/polar/
+      subplot2grid/subplots_adjust/grid/axis/minorticks_on-off/…
+- [x] **Generic Artist API sweep** — `defArtistAPI<T>` installs the
+      shared mpl `Artist` surface on every handle class (Figure, Axes,
+      Line2D, PathCollection, AxesImage, Annotation, Text, Title,
+      Legend, Colorbar, ContourSet, containers, ticks, spines, …):
+      gid/url/picker/snap/sketch/path_effects/rasterized/animated/
+      alpha/visible/zorder/mouseover/in_layout properties, figure/axes
+      wiring, transforms, clip APIs, get_window_extent/get_tightbbox/
+      get_datalim, stale/callback machinery (add_callback/remove_callback/
+      pchanged/stale_callback), contains/pick, findobj, unit
+      conversion, sticky_edges, draw, remove, `set`/`update`/
+      `update_from`/`properties`/`set_props`. Properties installed via
+      `PyProperty_Type` + `PyInstanceMethod_New` (this pybind has no
+      `py::property` helper); native methods always win (`hasattr`
+      check). mpl zorder defaults: lines 2, collections/patches 1,
+      images 0.
+- [x] **`vp.gridspec` submodule** — constructible `GridSpec` (nrows,
+      ncols, left/right/bottom/top/wspace/hspace/width_ratios/
+      height_ratios), `gs[i,j]` + row/col slicing → `SubplotSpec`,
+      `subgridspec`/`GridSpecFromSubplotSpec` with parent keepalive
+      chains, `fig.add_subplot`/`fig.add_gridspec`/module `subplot`/
+      `axes` accepting `SubplotSpec`; nested grids fill their parent
+      cell (verified subpixel-equal to mpl). `Figure::adoptGrid`
+      retains foreign grids whose SubplotSpecs hold raw pointers.
+- [x] **ScalarMappable + collection/image depth + return-handle
+      parity** — `defMappableAPI` (changed/colorbar/colorizer/norm/
+      cmap/array forwarding) and `defCollectionAPI` (offsets, sizes,
+      facecolors/facecolor/fc, edgecolors/edgecolor/ec with 'face'
+      resolution, linewidths/lw, linestyles/ls, paths, offset
+      transforms, hatch/cap/join/antialiased aliases) on
+      PathCollection/Collection/AxesImage/ContourSet; AxesImage
+      extent/origin/interpolation/write_png. **All Axes plotting
+      methods return mpl-shaped values**: hist→(n, bins, BarContainer),
+      hist2d→(h, xedges, yedges, image), psd/csd/cohere→(P, freqs),
+      specgram→(spec, freqs, t, im), spectra→(spec, freqs, line),
+      xcorr/acorr→(lags, c, line, b), errorbar/stem/fill_between/
+      fill_betweenx/pcolormesh/pcolor/hexbin/spy/matshow/ecdf/barbs/
+      streamplot/tripcolor/tricontour*/axhline/axvline/axhspan/axvspan/
+      hlines/vlines/axline→artist handles, step/stairs/plot_date→[h],
+      eventplot/bar_label→list, pie→(wedges, texts), triplot→(line,
+      markers), boxplot/bxp/violinplot→component dicts, clabel→[Text].
+      Public `ensureComputed()` on Psd/Csd/Cohere/Specgram/XCorr/
+      Hist/Hist2D/Spectrum plots makes derived arrays available before
+      the first render. `XCorrPlot` rewritten to mpl semantics
+      (np.correlate 'full', normed = L2-norm division); bindings raise
+      mpl's `maxlags must be … < Nx` ValueError. Scatter edge colors
+      (`edgecolors=`/`set_edgecolor`) now stroke marker outlines on
+      raster+vector paths; `set_sizes`/`get_sizes`/`set_linewidths`
+      convert mpl pt²/pt ↔ native px. `HistConfig.color` default now
+      opaque C0 like mpl.
+- [x] **`vp.tri` submodule** — `Triangulation` (x, y, triangles, mask;
+      `get_masked_triangles`, `set_mask`, `calculate_plane_coefficients`),
+      `TrapezoidMapTriFinder`, `LinearTriInterpolator` (triangle +
+      gradient evaluation), `UniformTriRefiner` (4-way midpoint split
+      honoring masks, `refine_field` interpolating vertex values),
+      `TriAnalyzer` (`scale_factors`, `get_flat_tri_mask`,
+      `circle_ratios`); all four `tri*` plotting methods accept a
+      `Triangulation` object first arg plus `triangles=` kwarg; mpl
+      per-vertex-vs-per-face precedence on ambiguous `tripcolor` C.
+- [x] **Named containers/collections** — `ErrorbarContainer`
+      (`.lines` = (line, caplines tuple, barlinecols tuple),
+      `.has_xerr`/`has_yerr`), `StemContainer` (`.markerline`/
+      `.stemlines`/`.baseline`), `EventCollection` (per-row handle
+      with positions/orientation/linelengths/linewidths/colors),
+      `QuadMesh` (pcolormesh/pcolor return, `get_array` preserving
+      2D shape), `Container` base API (`remove`, `get_children`,
+      `get_label`, `__iter__`/`__len__`/`__getitem__` unpacking);
+      `vp.container` submodule + `vp.collections` aliases; channel-
+      tagged artist handles route style calls to the right config
+      field; `pcolormesh` gains mpl's `[X, Y,] C` signature;
+      mpl `errorbar.capsize` rcParam default (0 → no caps).
+- [x] **`vp.transforms` depth** — `ScaledTranslation` corrected to
+      mpl's pure-translation semantics, `AffineDeltaTransform`,
+      `BboxTransform`/`BboxTransformTo`/`BboxTransformFrom`,
+      `TransformedBbox`/`TransformedPath`
+      (`get_transformed_path_and_affine`/`get_fully_transformed_path`/
+      `get_transformed_points_and_affine`), `composite_transform_factory`
+      (`CompositeAffine2D`), `nonsingular`, `offset_copy(trans, fig,
+      x, y, units)` mpl signature (inches default); `Transform`
+      gains `input_dims`/`output_dims`/`has_inverse`/`get_affine`/
+      `transform_path`/`transform_bbox`/`frozen`/`depth`; `Affine2D`
+      gains `from_values`/`set_matrix`/`clear`/`to_values`; `Path`
+      re-exported on `vp.transforms`.
+- [x] **`vp.dates` depth** — `RRuleLocator` (dateutil `rrule`/
+      `rrulewrapper` driven, `tick_values` accepting datetimes or
+      day numbers), `drange`, `ConciseDateConverter` + `DateConverter`
+      axisInfo, weekday constants (`MO`…`SU`); `AutoDateLocator`
+      rewritten to mpl's exact algorithm (interval_multiples `by*`-
+      set mode for hourly/minutely/secondly, `dtstart = vmin −
+      relativedelta` anchoring, mpl `maxticks`, YearLocator
+      `base.ge(vmax.year+1)` overshoot, `[vmin,vmax]` fallback when
+      a rule produces nothing); all date locators gain mpl `by*`/
+      `tz` kwargs; `tickValuesD` double-precision virtual (float day
+      numbers can't hold sub-day precision); mpl `date2num`
+      arithmetic (integer epoch-seconds + fractional term);
+      `ConciseDateFormatter` rewritten to mpl's `format_ticks`
+      (level detection, zero_formats, offset suppression).
+- [x] **`vp.offsetbox` submodule** — `AnchoredText`, `AnchoredSizeBar`
+      (mpl_toolkits compat), `AnchoredOffsetbox`, `TextArea`,
+      `HPacker`/`VPacker`/`PackerBase` (mpl child/align/pad/sep
+      signatures); `ax.add_artist` accepts the offsetbox handles;
+      `detached` flags on native `AnchoredText`/`SizeBar` for
+      `remove()`; mpl anchored-frame defaults (opaque white face,
+      opaque black edge) stroked in raster + vector renderers.
+      **Point-unit sweep**: `pt2px` helper converts mpl pt kwargs
+      (linewidth/markersize/elinewidth/capsize/stem sizes,
+      axh*/axv* lw, artist `set_linewidth`/`set_markersize`,
+      collection `set_linewidths`) to native px at figure DPI;
+      `errorbar` gains `fmt` (default `''` = line+bars, no markers)
+      and `ecolor=None` → line-color fallback; errorbar caps render
+      as `_`/`|` marker geometry (px-exact, raster + vector) instead
+      of data-space segments.

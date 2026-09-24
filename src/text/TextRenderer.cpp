@@ -13,6 +13,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -341,6 +343,25 @@ float shapeAndRenderRun(text_shaper* shaper, text_renderer_ft* renderer,
 
 } // namespace
 
+FontFileInfo fontFileInfo(const std::string& path) {
+    FontFileInfo info;
+    static FT_Library lib = [] {
+        FT_Library l = nullptr;
+        FT_Init_FreeType(&l);
+        return l;
+    }();
+    if (!lib) return info;
+    FT_Face face = nullptr;
+    if (FT_New_Face(lib, path.c_str(), 0, &face) || !face) return info;
+    if (face->family_name) info.familyName = face->family_name;
+    if (face->style_name) info.styleName = face->style_name;
+    info.bold = (face->style_flags & FT_STYLE_FLAG_BOLD) != 0;
+    info.italic = (face->style_flags & FT_STYLE_FLAG_ITALIC) != 0;
+    FT_Done_Face(face);
+    return info;
+}
+
+
 // The atlas always stores glyphs rasterized at this fixed reference size;
 // draw()/measureText() scale vertex positions and metrics from it. This
 // keeps every glyph valid at every render scale (the one atlas upload
@@ -590,6 +611,122 @@ void TextRenderer::loadFont() {
             fallbackFace_ = fontManager_->findFontByPath(fbPath);
         }
     }
+}
+
+
+/// mpl generic-family → file-name tags (mpl rcParams font.* lists lead
+/// with the DejaVu set, which this renderer also ships against).
+std::string familyTag(std::string_view family) {
+    std::string f(family);
+    std::string lower = f;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    if (lower == "sans-serif" || lower == "sans" || lower == "cursive" ||
+        lower == "fantasy" || lower.empty())
+        return "DejaVuSans";
+    if (lower == "serif") return "DejaVuSerif";
+    if (lower == "monospace" || lower == "mono") return "DejaVuSansMono";
+    std::string tag;
+    for (char c : f)
+        if (!std::isspace(static_cast<unsigned char>(c))) tag += c;
+    return tag;
+}
+
+/// mpl weight name/int → bold threshold (mpl weight_dict: bold=700,
+/// semibold/demibold=600; faces commonly exist only for bold ≥600).
+bool weightIsBold(std::string_view w) {
+    static const std::set<std::string_view> bolds = {
+        "bold", "heavy", "extra bold", "black", "semibold", "demibold",
+        "demi"};
+    if (bolds.contains(w)) return true;
+    if (auto v = std::string(w); !v.empty() &&
+        std::ranges::all_of(v, ::isdigit))
+        return std::stoi(v) >= 600;
+    return false;
+}
+
+bool styleIsItalic(std::string_view s) {
+    return s == "italic" || s == "oblique";
+}
+
+/// Locate a font file for (family tag, bold, italic). DejaVu naming:
+/// DejaVuSans-BoldOblique.ttf, DejaVuSerif-BoldItalic.ttf (Serif uses
+/// "Italic", Sans/Mono use "Oblique").
+std::string findFaceFile(const std::string& tag, bool bold, bool ital) {
+    const bool serifTag = tag.find("Serif") != std::string::npos;
+    std::string suffix;
+    if (bold && ital) suffix = serifTag ? "-BoldItalic" : "-BoldOblique";
+    else if (bold)     suffix = "-Bold";
+    else if (ital)     suffix = serifTag ? "-Italic" : "-Oblique";
+    std::vector<std::filesystem::path> dirs = {
+        "/usr/share/fonts", "/usr/local/share/fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
+        std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+    };
+    auto scan = [&](const std::string& want) -> std::string {
+        for (const auto& d : dirs) {
+            if (!std::filesystem::exists(d)) continue;
+            for (auto& e :
+                 std::filesystem::recursive_directory_iterator(d)) {
+                if (!e.is_regular_file()) continue;
+                auto name = e.path().filename().string();
+                std::string lower = name;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               ::tolower);
+                if (lower == want) return e.path().string();
+            }
+        }
+        return {};
+    };
+    if (auto p = scan([&] {
+            auto l = tag + suffix + ".ttf";
+            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+            return l;
+        }()); !p.empty())
+        return p;
+    // Fallback: any TTF whose filename contains the family tag and the
+    // requested style tokens.
+    std::string ltag = tag;
+    std::transform(ltag.begin(), ltag.end(), ltag.begin(), ::tolower);
+    for (const auto& d : dirs) {
+        if (!std::filesystem::exists(d)) continue;
+        for (auto& e : std::filesystem::recursive_directory_iterator(d)) {
+            if (!e.is_regular_file() ||
+                e.path().extension() != ".ttf") continue;
+            auto name = e.path().filename().string();
+            std::string lower = name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           ::tolower);
+            if (lower.find(ltag) == std::string::npos) continue;
+            bool hasBold = lower.find("bold") != std::string::npos;
+            bool hasItal = lower.find("italic") != std::string::npos ||
+                           lower.find("oblique") != std::string::npos;
+            if (bold == hasBold && ital == hasItal)
+                return e.path().string();
+        }
+    }
+    return {};
+}
+
+TextRenderer::FaceMatch TextRenderer::faceFor(std::string_view family,
+                                              std::string_view style,
+                                              std::string_view weight) {
+    std::string key = std::format("{}|{}|{}", family, style, weight);
+    if (auto it = faceCache_.find(key); it != faceCache_.end())
+        return it->second;
+    bool bold = weightIsBold(weight);
+    bool ital = styleIsItalic(style);
+    std::string path = findFaceFile(familyTag(family), bold, ital);
+    FaceMatch m{fontFace_, false, false};
+    if (!path.empty()) {
+        fontManager_->scanFontPath(path);
+        if (auto* f = fontManager_->findFontByPath(path)) {
+            m.face = f;
+            m.bold = bold;
+            m.italic = ital;
+        }
+    }
+    faceCache_[key] = m;
+    return m;
 }
 
 void TextRenderer::resetScratch() {

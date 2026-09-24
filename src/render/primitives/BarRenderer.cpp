@@ -100,8 +100,8 @@ void BarRenderer::init(vk::Device device, vk::RenderPass renderPass,
     att.setBlendEnable(true)
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
-       .setSrcAlphaBlendFactor(vk::BlendFactor::eZero)
-       .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setDstAlphaBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
        .setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
                           vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
     vk::PipelineColorBlendStateCreateInfo cbsci;

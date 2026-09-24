@@ -24,6 +24,11 @@ public:
     bool blitCapture() override;
     [[nodiscard]] bool blitCaptured() const override { return blitCaptured_; }
 
+    /// Recreate the color/depth targets at a new extent. The render
+    /// pass is extent-independent and stays alive, so renderer
+    /// pipelines remain valid.
+    void resize(uint32_t width, uint32_t height) override;
+
     [[nodiscard]] GpuContext& context() noexcept override { return ctx_; }
     [[nodiscard]] const GpuContext& context() const noexcept override { return ctx_; }
     [[nodiscard]] vk::Extent2D extent() const noexcept override { return extent_; }

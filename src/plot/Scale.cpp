@@ -73,7 +73,11 @@ namespace {
 /// Linear tick locator — matplotlib MaxNLocator semantics (nice steps
 /// [1,2,2.5,5,10]×10^k, at most ~nbins+1 ticks).
 std::vector<float> linearTicks(float vmin, float vmax, int nbins) {
-    return MaxNLocator{nbins}.tickValues(vmin, vmax);
+    // mpl's default linear locator is AutoLocator: MaxNLocator with
+    // steps=[1, 2, 2.5, 5, 10].
+    MaxNLocator loc{nbins};
+    loc.setSteps({1.0f, 2.0f, 2.5f, 5.0f, 10.0f});
+    return loc.tickValues(vmin, vmax);
 }
 
 } // namespace

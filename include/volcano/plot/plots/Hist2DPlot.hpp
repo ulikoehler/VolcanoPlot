@@ -73,6 +73,10 @@ public:
     /// counts_[j * nBinsX_ + i] = count in cell (i, j).
     [[nodiscard]] const std::vector<float>& counts() const { return counts_; }
 
+    /// Eagerly (re)compute the derived arrays so bindings can return
+    /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
+    void ensureComputed() { computeBins(); }
+
 private:
     std::vector<float> x_, y_;
     Hist2DConfig config_;

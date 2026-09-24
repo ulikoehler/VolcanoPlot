@@ -264,6 +264,86 @@ interpreting any data-carrying tier.
 | 144 | `secondary_x` | `secondary_xaxis('top')` |
 | 145 | `mathtext_frac_sum` | `\\frac` + `\\sum` limits |
 
+## Tier 16 — Parity batch 10 (146–155)
+
+| # | Name | Checks |
+|---|------|--------|
+| 146 | `locator_params` | `ax.locator_params('x', nbins=4)` — fewer x ticks |
+| 147 | `set_xbound` | `ax.set_xbound(2, 8)` — line clipped to bounds |
+| 148 | `markevery_int` | `markevery=5` — every 5th marker only |
+| 149 | `pie_startangle` | `startangle=90, counterclock=False` — rotated, clockwise |
+| 150 | `pie_autopct` | `autopct='%1.1f%%'` — percentage labels on wedges |
+| 151 | `fill_between_where` | `where=(2<x<8), interpolate=True` — masked band |
+| 152 | `stackplot_wiggle` | `baseline='wiggle'` — symmetric weighted stream |
+| 153 | `label_outer` | `ax.label_outer()` on 2×2 grid — inner labels hidden |
+| 154 | `axis_off` | `ax.axis('off')` — axes chrome gone, line stays |
+| 155 | `imshow_origin_lower` | `origin='lower'` — row 0 renders at bottom |
+
+## Tier 17 — Parity batch 11 (156–165)
+
+| # | Name | Checks |
+|---|------|--------|
+| 156 | `marker_colors` | `markerfacecolor`/`markeredgecolor`/`markeredgewidth` |
+| 157 | `spine_center` | `set_position(('data', 0))` — centered spines, ticks follow |
+| 158 | `spine_outward_bounds` | `('outward', 10)` + `set_bounds(2, 8)` + `set_color` |
+| 159 | `quiverkey` | `ax.quiverkey(Q, 0.9, 0.9, 1, '1 m/s')` reference arrow |
+| 160 | `xkcd_sketch` | `set_sketch_params(1, 100, 2)` — hand-drawn wobble |
+| 161 | `clip_off` | `clip_on=False` — line draws across the figure |
+| 162 | `sticky_edges_bar` | bar baseline pinned at y=0 by sticky edges |
+| 163 | `stairs_fill` | `ax.stairs(values, edges, fill=True)` |
+| 164 | `pcolor` | `ax.pcolor(X, Y, C)` flat shading |
+| 165 | `inset_zoom` | `inset_axes` + `indicate_inset_zoom` |
+
+## Tier 18 — Parity batch 12 (166–170)
+
+| # | Name | Checks |
+|---|------|--------|
+| 166 | `patheffects_stroke` | `withStroke(linewidth=4)` — black outline under line |
+| 167 | `patheffects_shadow` | `withSimplePatchShadow()` — offset gray scatter shadows |
+| 168 | `ticks_both` | `set_ticks_position('both')` — marks on all four sides |
+| 169 | `transform_transaxes` | `transform=ax.transAxes` — diagonal in axes coords |
+| 170 | `colorbar_ticks` | `fig.colorbar(ticks=...)` + `set_ticklabels` + `minorticks_on` |
+
+## Tier 19 — Parity batch 13 (171–175)
+
+| # | Name | Checks |
+|---|------|--------|
+| 171 | `scatter_c` | `ax.scatter(x, y, c=values, cmap='viridis')` + colorbar — scalar colormapping |
+| 172 | `scatter_s` | `ax.scatter(x, y, s=[20..320])` — per-point pt² marker sizes |
+| 173 | `text_boxstyle` | `ax.text(bbox=dict(boxstyle='round', fc='wheat', ec='k'))` |
+| 174 | `legend_anchor` | `ax.legend(bbox_to_anchor=(1,1), handles=, labels=, edgecolor='red')` |
+| 175 | `imshow_norm` | `imshow(norm=LogNorm(), cmap='viridis')` + colorbar |
+
+## Tier 20 — Parity batch 14 (176–180)
+
+| # | Name | Checks |
+|---|------|--------|
+| 176 | `font_family` | `ax.set_title/xlabel(fontfamily='serif'/'monospace')` — distinct faces |
+| 177 | `tick_labelsize` | `tick_params(labelsize=14)` — larger tick labels |
+| 178 | `fig_text` | `fig.text(0.5, 0.04, ...)` + `suptitle(fontsize=16)` |
+| 179 | `imshow_rgb` | `imshow` on an (H,W,3) RGB array — `origin='upper'` inverted y-axis |
+| 180 | `annotate_fontsize` | `ax.annotate(..., fontsize=18, fontweight='bold')` |
+
+## Tier 21 — Parity batch 15 (181–185)
+
+| # | Name | Checks |
+|---|------|--------|
+| 181 | `gridspec_ratios` | `GridSpec(2,3, width_ratios=[2,1,1], height_ratios=[1,2])` + span |
+| 182 | `gridspec_nested` | `GridSpec(1,2)` + `gs[0,1].subgridspec(2,1)` nested cell |
+| 183 | `artist_props` | `line.set_alpha(0.4)`, `scatter.set_zorder(5)`, `set_visible(False)` |
+| 184 | `collection_props` | `scatter(s=, c=)` + `set_edgecolor`/`set_linewidth` marker rings |
+| 185 | `return_handles` | `hist` → `(n, bins, patches)`; `axvline` handle |
+
+## Tier 22 — Parity batch 16 (186–190)
+
+| # | Name | Checks |
+|---|------|--------|
+| 186 | `tri_explicit` | `Triangulation` + `tripcolor(tri, facecolors=)` + `triplot` overlay |
+| 187 | `named_containers` | `errorbar` → `ErrorbarContainer`, `stem` → `StemContainer`, `eventplot` |
+| 188 | `date_locators` | `MonthLocator(interval=2)` + `DateFormatter('%b %d')` |
+| 189 | `anchored_artists` | `AnchoredText` + `AnchoredSizeBar` (framed offsetbox) |
+| 190 | `concise_dates` | `MonthLocator` + `DayLocator(7)` minor + `ConciseDateFormatter` |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.py`

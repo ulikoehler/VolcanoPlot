@@ -302,8 +302,8 @@ std::optional<Color> parseGrayscale(std::string_view s) {
     float v = std::strtof(tmp.c_str(), &end);
     if (end == tmp.c_str() || *end != '\0') return std::nullopt;
     if (v < 0.0f || v > 1.0f) return std::nullopt;
-    uint8_t g = static_cast<uint8_t>(std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
-    return Color::fromRgba8(g, g, g);
+    // Keep float precision (mpl to_rgba('0.5') returns exactly 0.5).
+    return Color{v, v, v, 1.0f};
 }
 
 } // namespace

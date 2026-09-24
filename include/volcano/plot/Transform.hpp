@@ -40,6 +40,22 @@ public:
     /// Deep copy (bound transforms keep their live axes/figure binding).
     [[nodiscard]] virtual TransformPtr clone() const = 0;
 
+    /// mpl `transform.contains_branch(transData)`: true when this
+    /// transform (or a branch of it) is the data transform of `axes`.
+    /// Artists use it to decide whether their data feeds autoscale.
+    [[nodiscard]] virtual bool containsDataBranch(const Axes&) const {
+        return false;
+    }
+    /// Blended transforms expose their per-axis branches (mpl
+    /// BlendedGenericTransform.x_transform / y_transform). nullptr for
+    /// non-blended transforms.
+    [[nodiscard]] virtual const Transform* xBranch() const {
+        return nullptr;
+    }
+    [[nodiscard]] virtual const Transform* yBranch() const {
+        return nullptr;
+    }
+
     [[nodiscard]] Point2D operator()(Point2D p) const { return apply(p); }
     /// Batch-transform a list of points.
     [[nodiscard]] std::vector<Point2D> apply(
@@ -115,6 +131,10 @@ public:
     [[nodiscard]] TransformPtr clone() const override {
         return std::make_shared<CompositeGenericTransform>(*this);
     }
+    [[nodiscard]] bool containsDataBranch(const Axes& axes) const override {
+        return first_->containsDataBranch(axes) ||
+               second_->containsDataBranch(axes);
+    }
     [[nodiscard]] const Transform& first() const { return *first_; }
     [[nodiscard]] const Transform& second() const { return *second_; }
 
@@ -145,6 +165,16 @@ public:
     [[nodiscard]] TransformPtr clone() const override {
         return std::make_shared<BlendedGenericTransform>(*this);
     }
+    [[nodiscard]] bool containsDataBranch(const Axes& axes) const override {
+        return x_->containsDataBranch(axes) ||
+               y_->containsDataBranch(axes);
+    }
+    [[nodiscard]] const Transform* xBranch() const override {
+        return x_.get();
+    }
+    [[nodiscard]] const Transform* yBranch() const override {
+        return y_.get();
+    }
     [[nodiscard]] const Transform& xTransform() const { return *x_; }
     [[nodiscard]] const Transform& yTransform() const { return *y_; }
 
@@ -164,13 +194,86 @@ public:
 [[nodiscard]] TransformPtr blendedTransformFactory(TransformPtr x,
                                                    TransformPtr y);
 
-/// ScaledTranslation — translate by (xt, yt) then apply `scale` (mpl
-/// `ScaledTranslation`: used for point/inch offsets).
+/// mpl `ScaledTranslation` — a *pure translation* by (xt, yt) after the
+/// offset itself has been mapped through `scale_trans` (e.g. the
+/// dpi-scale transform for point/inch offsets).
+///   out = p + scale_trans((xt, yt))
 class ScaledTranslation final : public Affine2D {
 public:
-    ScaledTranslation(float xt, float yt, const Affine2D& scaleT)
-        : Affine2D(scaleT.concat(translate(xt, yt))) {}
+    ScaledTranslation(float xt, float yt, const Transform& scaleT) {
+        const Point2D t = scaleT.apply({xt, yt});
+        a = 1; b = 0; c = 0; d = 1; e = t.x; f = t.y;
+    }
 };
+
+/// mpl `AffineDeltaTransform` — transforms *displacements* between
+/// points: the child's linear part with a zeroed offset column.
+///   apply(p) = base(p) - base(0)
+class AffineDeltaTransform final : public Transform {
+public:
+    explicit AffineDeltaTransform(TransformPtr base)
+        : base_(std::move(base)) {}
+    [[nodiscard]] Point2D apply(Point2D p) const override {
+        const Point2D q = base_->apply(p), o = base_->apply({0, 0});
+        return {q.x - o.x, q.y - o.y};
+    }
+    [[nodiscard]] bool isAffine() const noexcept override {
+        return base_->isAffine();
+    }
+    /// The probed linear part (exact when the base is affine).
+    [[nodiscard]] Affine2D deltaMatrix() const {
+        const Point2D o = base_->apply({0, 0}),
+                      x = base_->apply({1, 0}),
+                      y = base_->apply({0, 1});
+        return Affine2D{x.x - o.x, x.y - o.y,
+                        y.x - o.x, y.y - o.y, 0, 0};
+    }
+    [[nodiscard]] TransformPtr inverted() const override {
+        if (!isAffine()) return nullptr;
+        return deltaMatrix().inverted();
+    }
+    [[nodiscard]] TransformPtr clone() const override {
+        return std::make_shared<AffineDeltaTransform>(base_->clone());
+    }
+    [[nodiscard]] const Transform& base() const noexcept { return *base_; }
+
+private:
+    TransformPtr base_;
+};
+
+/// mpl `BboxTransform` — affine map from `boxin` bounds (x0,y0,w0,h0)
+/// to `boxout` bounds. Snapshot semantics (bounds are read once).
+class BboxTransform : public Affine2D {
+public:
+    BboxTransform(float inX, float inY, float inW, float inH,
+                  float outX, float outY, float outW, float outH) {
+        const float sx = outW / inW, sy = outH / inH;
+        a = sx; b = 0; c = 0; d = sy;
+        e = outX - inX * sx;
+        f = outY - inY * sy;
+    }
+};
+
+/// mpl `BboxTransformTo` — unit box → boxout.
+class BboxTransformTo final : public BboxTransform {
+public:
+    explicit BboxTransformTo(float outX, float outY,
+                             float outW, float outH)
+        : BboxTransform(0, 0, 1, 1, outX, outY, outW, outH) {}
+};
+
+/// mpl `BboxTransformFrom` — boxin → unit box.
+class BboxTransformFrom final : public BboxTransform {
+public:
+    explicit BboxTransformFrom(float inX, float inY,
+                               float inW, float inH)
+        : BboxTransform(inX, inY, inW, inH, 0, 0, 1, 1) {}
+};
+
+/// mpl `composite_transform_factory`: identity passthrough, affine
+/// collapse when both sides are affine, generic composite otherwise.
+[[nodiscard]] TransformPtr compositeTransformFactory(
+    TransformPtr a, TransformPtr b);
 
 /// mpl `offset_copy`: transform offset by (dx, dy) in `units`
 /// ("points", "pixels"/"dots", "inches") at `dpi`.

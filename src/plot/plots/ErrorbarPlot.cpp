@@ -41,22 +41,21 @@ std::pair<float, float> ErrorbarPlot::yerrBounds(size_t i) const {
 
 void ErrorbarPlot::buildErrorSegments() {
     errorSegments_.clear();
+    capYPoints_.clear();
+    capXPoints_.clear();
     size_t n = x_.size();
     if (n == 0) return;
 
-    // Estimate cap size in data units. Convert pixel cap size to data units
-    // using the viewport span. We use a rough estimate based on the data range.
+    // mpl draws caps as '_' / '|' markers at capsize points — collected
+    // here as positions and rendered as markers in px (not segments),
+    // so cap size is exact at any axes size.
     float xSpan = *std::max_element(x_.begin(), x_.end()) -
                   *std::min_element(x_.begin(), x_.end());
     float ySpan = *std::max_element(y_.begin(), y_.end()) -
                   *std::min_element(y_.begin(), y_.end());
     if (xSpan <= 0) xSpan = 1;
     if (ySpan <= 0) ySpan = 1;
-
-    // Cap size as fraction of data span (approximate pixel→data conversion).
-    // The actual pixel size depends on the axes rect, but we use a reasonable
-    // approximation: capSize pixels / canvasWidth * dataSpan.
-    // Since we don't know the canvas size here, we use a small fraction.
+    // Arrowhead half-extent for lim markers (data-space approximation).
     float xCapData = cfg_.capSize * xSpan / 256.0f;
     float yCapData = cfg_.capSize * ySpan / 256.0f;
 
@@ -83,28 +82,24 @@ void ErrorbarPlot::buildErrorSegments() {
             errorSegments_.push_back({x_[i], ylo});
             errorSegments_.push_back({x_[i], yhi});
 
-            if (cfg_.drawCaps || up || lo) {
-                if (!lo) {
-                    if (up) {  // arrowhead at the point end (limit)
-                        errorSegments_.push_back({x_[i] - xCapData, yhi - yCapData});
-                        errorSegments_.push_back({x_[i], yhi});
-                        errorSegments_.push_back({x_[i] + xCapData, yhi - yCapData});
-                        errorSegments_.push_back({x_[i], yhi});
-                    } else {
-                        errorSegments_.push_back({x_[i] - xCapData, yhi});
-                        errorSegments_.push_back({x_[i] + xCapData, yhi});
-                    }
+            if (!lo) {
+                if (up) {  // arrowhead at the point end (limit)
+                    errorSegments_.push_back({x_[i] - xCapData, yhi - yCapData});
+                    errorSegments_.push_back({x_[i], yhi});
+                    errorSegments_.push_back({x_[i] + xCapData, yhi - yCapData});
+                    errorSegments_.push_back({x_[i], yhi});
+                } else if (cfg_.drawCaps) {
+                    capYPoints_.push_back({x_[i], yhi});
                 }
-                if (!up) {
-                    if (lo) {  // arrowhead at the point end
-                        errorSegments_.push_back({x_[i] - xCapData, ylo + yCapData});
-                        errorSegments_.push_back({x_[i], ylo});
-                        errorSegments_.push_back({x_[i] + xCapData, ylo + yCapData});
-                        errorSegments_.push_back({x_[i], ylo});
-                    } else {
-                        errorSegments_.push_back({x_[i] - xCapData, ylo});
-                        errorSegments_.push_back({x_[i] + xCapData, ylo});
-                    }
+            }
+            if (!up) {
+                if (lo) {  // arrowhead at the point end
+                    errorSegments_.push_back({x_[i] - xCapData, ylo + yCapData});
+                    errorSegments_.push_back({x_[i], ylo});
+                    errorSegments_.push_back({x_[i] + xCapData, ylo + yCapData});
+                    errorSegments_.push_back({x_[i], ylo});
+                } else if (cfg_.drawCaps) {
+                    capYPoints_.push_back({x_[i], ylo});
                 }
             }
         }
@@ -119,28 +114,24 @@ void ErrorbarPlot::buildErrorSegments() {
             errorSegments_.push_back({xlo, y_[i]});
             errorSegments_.push_back({xhi, y_[i]});
 
-            if (cfg_.drawCaps || xu || xl) {
-                if (!xl) {
-                    if (xu) {
-                        errorSegments_.push_back({xhi - xCapData, y_[i] - yCapData});
-                        errorSegments_.push_back({xhi, y_[i]});
-                        errorSegments_.push_back({xhi - xCapData, y_[i] + yCapData});
-                        errorSegments_.push_back({xhi, y_[i]});
-                    } else {
-                        errorSegments_.push_back({xhi, y_[i] - yCapData});
-                        errorSegments_.push_back({xhi, y_[i] + yCapData});
-                    }
+            if (!xl) {
+                if (xu) {
+                    errorSegments_.push_back({xhi - xCapData, y_[i] - yCapData});
+                    errorSegments_.push_back({xhi, y_[i]});
+                    errorSegments_.push_back({xhi - xCapData, y_[i] + yCapData});
+                    errorSegments_.push_back({xhi, y_[i]});
+                } else if (cfg_.drawCaps) {
+                    capXPoints_.push_back({xhi, y_[i]});
                 }
-                if (!xu) {
-                    if (xl) {
-                        errorSegments_.push_back({xlo + xCapData, y_[i] - yCapData});
-                        errorSegments_.push_back({xlo, y_[i]});
-                        errorSegments_.push_back({xlo + xCapData, y_[i] + yCapData});
-                        errorSegments_.push_back({xlo, y_[i]});
-                    } else {
-                        errorSegments_.push_back({xlo, y_[i] - yCapData});
-                        errorSegments_.push_back({xlo, y_[i] + yCapData});
-                    }
+            }
+            if (!xu) {
+                if (xl) {
+                    errorSegments_.push_back({xlo + xCapData, y_[i] - yCapData});
+                    errorSegments_.push_back({xlo, y_[i]});
+                    errorSegments_.push_back({xlo + xCapData, y_[i] + yCapData});
+                    errorSegments_.push_back({xlo, y_[i]});
+                } else if (cfg_.drawCaps) {
+                    capXPoints_.push_back({xlo, y_[i]});
                 }
             }
         }
@@ -201,19 +192,53 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
                               std::span{sizes.data(), sizes.size()});
     }
 
+    // Cap markers (mpl draws caps as '_' / '|' markers at capsize pts).
+    auto uploadCaps = [&](render::primitives::PointRenderer& pr,
+                          const std::vector<Point2D>& pts) {
+        if (pts.empty()) return;
+        pr.init(device, renderPass, samples, r.descriptorPool(),
+                r.pipelineCache());
+        std::vector<Color> colors(pts.size(), cfg_.errorbarColor);
+        std::vector<float> sizes(pts.size(), cfg_.capSize);
+        pr.upload(device, queue, pool, allocator,
+                  std::span{pts.data(), pts.size()},
+                  std::span{colors.data(), colors.size()},
+                  std::span{sizes.data(), sizes.size()});
+    };
+    if (cfg_.drawCaps) {
+        uploadCaps(capYRenderer_, capYPoints_);
+        uploadCaps(capXRenderer_, capXPoints_);
+    }
+
     prepared_ = true;
 }
 
-void ErrorbarPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void ErrorbarPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     // Draw error bars first (behind line and markers).
     if (hasErrors_ && errorVertexCount_ >= 2)
         errorRenderer_.draw(cmd, vrect, t, errorVertexCount_);
+
+    // Caps as '_' / '|' markers (mpl renders caps via cap marker styles).
+    if (cfg_.drawCaps) {
+        render::primitives::MarkerParams mp;
+        if (capYRenderer_.pointCount() > 0) {
+            mp.code = static_cast<float>(
+                static_cast<int>(MarkerStyle::HLine));
+            capYRenderer_.draw(cmd, vrect, t,
+                               capYRenderer_.pointCount(), mp);
+        }
+        if (capXRenderer_.pointCount() > 0) {
+            mp.code = static_cast<float>(
+                static_cast<int>(MarkerStyle::VLine));
+            capXRenderer_.draw(cmd, vrect, t,
+                               capXRenderer_.pointCount(), mp);
+        }
+    }
 
     // Draw connecting line.
     if (cfg_.drawLine && x_.size() >= 2)
@@ -248,6 +273,15 @@ void ErrorbarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         lp.color = cfg_.color;
         lp.width = cfg_.lineWidth;
         c.polyline(px, lp);
+    }
+    // Caps as '_' / '|' markers (px-exact, like mpl).
+    if (cfg_.drawCaps) {
+        auto gy = markerGeom(MarkerStyle::HLine);
+        emitMarkerAt(c, toPx, capYPoints_, gy, cfg_.capSize,
+                     cfg_.errorbarColor);
+        auto gx = markerGeom(MarkerStyle::VLine);
+        emitMarkerAt(c, toPx, capXPoints_, gx, cfg_.capSize,
+                     cfg_.errorbarColor);
     }
     // Markers.
     if (cfg_.drawMarker && !x_.empty()) {

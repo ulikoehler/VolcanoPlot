@@ -8,7 +8,9 @@
 namespace volcano::plot {
 class LinePlot : public IPlot {
 public:
-    explicit LinePlot(Series2D series) : series_(std::move(series)) {}
+    explicit LinePlot(Series2D series) : series_(std::move(series)) {
+        zorder = 2.0f;  // mpl Line2D default zorder
+    }
     void prepare(render::Renderer& r) override;
     /// GPU pre-pass: solid (non-dashed) lines are tessellated on the GPU
     /// into a vertex soup consumed by draw() in the same frame.
@@ -42,6 +44,16 @@ public:
         return consumed;
     }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    /// mpl Line2D legend handle: the segment gets `numpoints` markers
+    /// only when the line actually has markers (marker=None → bare line).
+    [[nodiscard]] std::vector<LegendHandle> legendEntries() const override {
+        if (label().empty()) return {};
+        LegendHandle h{label(), legendColor(), LegendMarker::Line};
+        h.points = (series_.marker != MarkerStyle::None ||
+                    series_.markerPath || !series_.markerTex.empty())
+                       ? -2 : 0;
+        return {h};
+    }
 
     /// Fraction of series points inside the data-space box (loc="best").
     [[nodiscard]] float occupancy(Range xr, Range yr) const override {
@@ -94,9 +106,17 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 private:
+    /// Per-pass marker overrides for patheffects (offset + recolor).
+    struct MarkerFx {
+        Point2D offset{0.0f, 0.0f};
+        std::optional<Color> face;
+        std::optional<Color> edge;
+        float edgeWidth = -1.0f;  // <0 → series_.markerEdgeWidth
+    };
     /// Raster marker pass (series_.marker / markerPath / markerTex).
     void drawMarkersAtPoints(vk::CommandBuffer cmd, render::Renderer& r,
-                             const Axes& axes, Rect2D rect);
+                             const Axes& axes, Rect2D rect,
+                             const MarkerFx* fx = nullptr);
     Series2D series_;
     render::primitives::LineRenderer renderer_;
     /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).

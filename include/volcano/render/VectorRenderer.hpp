@@ -67,10 +67,13 @@ private:
     struct LegendVecEntry;
     static std::vector<LegendVecEntry>
     collectVecLegendEntries(const plot::Axes& axes);
+    /// forceW > 0 (mpl mode="expand" / 4-tuple bbox_to_anchor): the box
+    /// grows to that width.
     void emitLegendBox(VectorCanvas& c,
                        const std::vector<LegendVecEntry>& entries,
                        const plot::LegendStyle& lg, plot::Color textColor,
-                       plot::Point2D anchor, float bx, float by);
+                       plot::Point2D anchor, float bx, float by,
+                       float forceW = -1.0f, float dpi = 100.0f);
     void emitColorbar(const plot::Axes& axes, plot::Rect2D rect,
                       VectorCanvas& c);
 
@@ -78,6 +81,14 @@ private:
     void richText(VectorCanvas& c, std::string_view text, float x, float y,
                   plot::Color color, float scale, float rotation = 0.0f,
                   plot::HAlign lineAlign = plot::HAlign::Left);
+    /// mpl `path_effects` on text: Stroke = a disk of offset copies in
+    /// the foreground color; shadows = one offset copy; Normal /
+    /// withX-thenNormal emit the plain text at their list position.
+    void richTextFx(VectorCanvas& c, std::span<const plot::PathEffect> fxs,
+                    std::string_view text, float x, float y,
+                    plot::Color color, float scale, float rotation = 0.0f,
+                    plot::HAlign lineAlign = plot::HAlign::Left,
+                    float dpi = 96.0f);
     text::TextMeasure measure(std::string_view s, float scale);
     void fillRect(VectorCanvas& c, plot::Rect2D r, plot::Color col);
     void strokeRect(VectorCanvas& c, plot::Rect2D r, const VectorCanvas::Pen&);

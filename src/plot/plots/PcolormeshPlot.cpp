@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <format>
 #include <limits>
 #include <stdexcept>
 
@@ -129,6 +130,28 @@ PcolormeshPlot::PcolormeshPlot(std::vector<float> x, std::vector<float> y,
 Color PcolormeshPlot::legendColor() const {
     const Colormap& cmap = config_.cmap ? *config_.cmap : defaultColormap();
     return cmap.sample(0.5f);
+}
+
+void PcolormeshPlot::setArray(std::vector<float> a) {
+    if (a.size() != C_.size())
+        throw std::invalid_argument(
+            std::format("set_array: expected {} values, got {}",
+                        C_.size(), a.size()));
+    C_ = std::move(a);
+    config_.valueRange = {0, 0};  // invalid → re-autoscale
+    prepared_ = false;
+    touch();
+}
+
+void PcolormeshPlot::setClim(std::optional<float> vmin,
+                             std::optional<float> vmax) {
+    // mpl set_clim feeds the norm; without one the explicit range.
+    if (!config_.norm)
+        config_.norm = std::make_shared<NormalizeLinear>();
+    config_.norm->setVmin(vmin.value_or(std::nanf("")));
+    config_.norm->setVmax(vmax.value_or(std::nanf("")));
+    prepared_ = false;
+    touch();
 }
 
 void PcolormeshPlot::computeValueRange() {
@@ -398,12 +421,11 @@ void PcolormeshPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void PcolormeshPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void PcolormeshPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillRenderer_.pointCount() == 0) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     fillRenderer_.draw(cmd, vrect, t);
 }
 

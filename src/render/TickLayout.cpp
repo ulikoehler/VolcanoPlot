@@ -2,50 +2,21 @@
 // raster Renderer and the VectorRenderer driver.
 #include "TickLayout.hpp"
 
+#include "volcano/plot/Normalize.hpp"
+
 #include <cmath>
 #include <format>
 
 namespace volcano::render {
 
-/// Simple "nice number" tick locator (matplotlib MaxNLocator style).
-/// Returns ~nbins tick positions within [vmin, vmax].
-/// matplotlib's MaxNLocator with default steps=[1,2,5,10] picks the
-/// nice step that gives at most nbins ticks.
+/// Nice-number tick locator (matplotlib _ColorbarAutoLocator — an
+/// AutoLocator with the [1,2,2.5,5,10] staircase; used for colorbar
+/// ticks). Returns edge-inclusive positions spanning [vmin, vmax].
 std::vector<float> autoTicks(float vmin, float vmax, int nbins) {
     if (vmin >= vmax) return {};
-    float range = vmax - vmin;
-    // matplotlib's MaxNLocator tries steps [1, 2, 2.5, 5, 10] × 10^k and picks
-    // the smallest step that gives at most nbins+1 ticks (i.e. the most
-    // ticks without exceeding nbins).
-    float rawStep = range / nbins;
-    float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    // Try nice steps from smallest to largest, pick the FIRST one that
-    // gives <= nbins+1 ticks. This maximizes the number of ticks.
-    float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
-    float niceStep = 10.0f * mag;  // fallback: largest step
-    for (float s : niceSteps) {
-        float step = s * mag;
-        int numTicks = int(std::floor(vmax / step) - std::ceil(vmin / step)) + 1;
-        if (numTicks <= nbins + 1) {
-            niceStep = step;
-            break;  // first (smallest) step that fits
-        }
-    }
-    // Degenerate range: rawStep can underflow to 0 (or NaN) for denormal/
-    // identical min/max — a zero step would loop forever appending ticks.
-    // A step too small to advance v is equally fatal.
-    if (!(niceStep > 0.0f) || !std::isfinite(niceStep) ||
-        vmax + niceStep == vmax)
-        return {};
-
-    float start = std::ceil(vmin / niceStep) * niceStep;
-    std::vector<float> ticks;
-    for (float v = start; v <= vmax + niceStep * 0.001f; v += niceStep) {
-        // Round to avoid floating-point drift accumulating.
-        float k = std::round(v / niceStep);
-        ticks.push_back(k * niceStep);
-    }
-    return ticks;
+    plot::MaxNLocator loc{nbins};
+    loc.setSteps({1.0f, 2.0f, 2.5f, 5.0f, 10.0f});
+    return loc.tickValues(vmin, vmax);
 }
 
 /// Format a tick value as a short string, using the step size to determine
@@ -78,22 +49,10 @@ std::string formatTick(float v, float step) {
 
 /// Compute the nice step size used by autoTicks.
 float autoTickStep(float vmin, float vmax, int nbins) {
-    if (vmin >= vmax) return 1.0f;
-    float range = vmax - vmin;
-    float rawStep = range / nbins;
-    float mag = std::pow(10.0f, std::floor(std::log10(rawStep)));
-    float niceSteps[] = {1.0f, 2.0f, 2.5f, 5.0f, 10.0f};
-    float niceStep = 10.0f * mag;
-    for (float s : niceSteps) {
-        float step = s * mag;
-        int numTicks = int(std::floor(vmax / step) - std::ceil(vmin / step)) + 1;
-        if (numTicks <= nbins + 1) {
-            niceStep = step;
-            break;
-        }
-    }
-    if (!(niceStep > 0.0f) || !std::isfinite(niceStep)) return 1.0f;
-    return niceStep;
+    auto t = autoTicks(vmin, vmax, nbins);
+    if (t.size() < 2) return 1.0f;
+    float step = t[1] - t[0];
+    return (std::isfinite(step) && step > 0.0f) ? step : 1.0f;
 }
 
 // ─── Locator/formatter plumbing (matplotlib ticker framework) ───────────────
@@ -104,19 +63,36 @@ std::vector<float> axisTicks(const plot::TickConfig& tc,
                              float lo, float hi,
                              float axisLengthPx,
                              float fontPt, float dpi, bool yAxis) {
-    if (tc.locator) return tc.locator->tickValues(lo, hi);
+    // mpl Axis.get_tick_space: estimated labels that fit along the
+    // axis. X assumes ≤3:1 text aspect, Y uses 2× line spacing.
+    auto tickSpace = [&]() -> int {
+        if (axisLengthPx <= 0.0f) return -1;
+        float lengthPt = axisLengthPx * 72.0f / std::max(dpi, 1.0f);
+        float labelPt = std::max(fontPt, 1.0f) * (yAxis ? 2.0f : 3.0f);
+        return int(std::floor(lengthPt / labelPt));
+    };
+    if (tc.locator) {
+        // mpl AutoLocator = MaxNLocator with nbins='auto': nbins =
+        // clip(get_tick_space(), max(1, min_n_ticks-1), 9).
+        if (auto* mnl = dynamic_cast<plot::MaxNLocator*>(tc.locator.get());
+            mnl && mnl->autoNbins()) {
+            plot::MaxNLocator copy = *mnl;
+            int space = tickSpace();
+            copy.setNbins(space < 0 ? 9
+                          : std::clamp(space,
+                                       std::max(1, mnl->minNTicks() - 1),
+                                       9));
+            return copy.tickValues(lo, hi);
+        }
+        return tc.locator->tickValues(lo, hi);
+    }
     // An explicitly-set positions list is honored even when empty
     // (matplotlib ax.set_xticks([]) hides the ticks entirely).
     if (tc.positions) return *tc.positions;
-    int nb = tc.nbins;
-    if (axisLengthPx > 0.0f) {
-        // mpl Axis.get_tick_space: estimated labels that fit along the
-        // axis. X assumes ≤3:1 text aspect, Y uses 2× line spacing.
-        float lengthPt = axisLengthPx * 72.0f / std::max(dpi, 1.0f);
-        float labelPt = std::max(fontPt, 1.0f) * (yAxis ? 2.0f : 3.0f);
-        int space = int(std::floor(lengthPt / labelPt));
-        nb = std::min(nb, std::max(space, 2));
-    }
+    // mpl's default axis locator is AutoLocator: nbins=clip(space,…,9)
+    // with steps [1,2,2.5,5,10].
+    int space = tickSpace();
+    int nb = space < 0 ? 9 : std::clamp(space, 1, 9);
     return plot::scaleTicks(scale, lo, hi, nb);
 }
 
@@ -197,9 +173,20 @@ std::string tickLabel(const plot::TickConfig& tc, const plot::Formatter& f,
         tc.positions->size() == tc.labels->size()) {
         for (size_t k = 0; k < tc.positions->size(); ++k)
             if (std::abs((*tc.positions)[k] - t) < 1e-6f)
+                // mpl set_ticks labels are user text, returned raw.
                 return (*tc.labels)[k];
     }
-    return f.format(t, i);
+    return fmtLabel(f, t, i);
+}
+
+std::string fixMinus(std::string s) {
+    // U+2212 '−' in UTF-8 is 0xE2 0x88 0x92.
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+        if (c == '-') out += "\xe2\x88\x92";
+        else out += c;
+    return out;
 }
 
 /// TickConfig direction string → fraction of tick length inside the axes.
@@ -207,6 +194,61 @@ float tickInFrac(const plot::TickConfig& tc) {
     if (tc.direction == "in") return 1.0f;
     if (tc.direction == "inout") return 0.5f;
     return 0.0f; // "out"
+}
+
+ColorbarTickSet colorbarTicks(std::span<const float> explicitTicks,
+                              std::span<const std::string> explicitLabels,
+                              bool minorTicksOn,
+                              const plot::Normalize* norm,
+                              float vmin, float vmax) {
+    ColorbarTickSet out;
+    const float linStep = autoTickStep(vmin, vmax, 8);
+    if (!explicitTicks.empty()) {
+        out.majors.assign(explicitTicks.begin(), explicitTicks.end());
+        for (size_t i = 0; i < out.majors.size(); ++i)
+            out.labels.push_back(i < explicitLabels.size()
+                ? std::string(explicitLabels[i])
+                : formatTick(out.majors[i], linStep));
+    } else if (dynamic_cast<const plot::LogNorm*>(norm) && vmin > 0.0f) {
+        // mpl: LogNorm colorbars put the long axis on log scale →
+        // LogLocator decades + LogFormatterSciNotation + subs minors.
+        plot::LogLocator loc;
+        out.majors = loc.tickValues(vmin, vmax);
+        plot::LogFormatter f;
+        f.setViewInterval(vmin, vmax);
+        f.setLocs(out.majors);
+        for (size_t i = 0; i < out.majors.size(); ++i)
+            out.labels.push_back(fmtLabel(f, out.majors[i], int(i)));
+        out.minors = loc.minorValues(vmin, vmax);
+    } else if (auto* sln = dynamic_cast<const plot::SymLogNorm*>(norm)) {
+        // mpl: SymLogNorm colorbars get SymmetricalLogLocator ticks.
+        out.majors = plot::SymmetricalLogLocator{sln->linthresh()}
+                         .tickValues(vmin, vmax);
+        plot::LogFormatter f;
+        f.setViewInterval(vmin, vmax);
+        f.setLocs(out.majors);
+        for (size_t i = 0; i < out.majors.size(); ++i) {
+            std::string s = fmtLabel(f, out.majors[i], int(i));
+            out.labels.push_back(s.empty()
+                ? formatTick(out.majors[i], linStep) : s);
+        }
+    } else {
+        out.majors = autoTicks(vmin, vmax, 8);
+        for (float v : out.majors)
+            out.labels.push_back(formatTick(v, linStep));
+    }
+    // mpl AutoMinorLocator-style minor marks between linear majors;
+    // log minors come from the locator's subs above.
+    if (out.minors.empty() && minorTicksOn) {
+        for (size_t i = 0; i + 1 < out.majors.size(); ++i) {
+            float lo = out.majors[i], hi = out.majors[i + 1];
+            float step = hi - lo;
+            if (step <= 0.0f) continue;
+            for (int k = 1; k < 5; ++k)
+                out.minors.push_back(lo + step * float(k) / 5.0f);
+        }
+    }
+    return out;
 }
 
 } // namespace volcano::render

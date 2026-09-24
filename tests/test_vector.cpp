@@ -597,8 +597,8 @@ TEST(VectorSvgParity, AnchoredTextEmitsFrameAndText) {
     ASSERT_TRUE(harness.renderer().savefig(fig, f.path));
     auto doc = readText(f.path);
     EXPECT_NE(doc.find(">note</text>"), std::string::npos);
-    // Frame: a filled rect + stroked border around the text.
-    EXPECT_NE(doc.find("fill-opacity=\"0.8"), std::string::npos);
+    // Frame: opaque white fill + black edge (mpl AnchoredOffsetbox patch).
+    EXPECT_NE(doc.find("fill=\"#ffffff\" fill-opacity=\"1"), std::string::npos);
 }
 
 TEST(VectorSvg, AltTextEmitsTitleAndDesc) {

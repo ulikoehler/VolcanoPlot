@@ -2,7 +2,10 @@
 #include "volcano/plot/plots/StackPlot.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include "volcano/render/VectorCanvas.hpp"
+#include "../VectorEmitHelpers.hpp"
 #include <algorithm>
+#include <format>
 #include <stdexcept>
 
 namespace volcano::plot {
@@ -52,12 +55,71 @@ Color StackPlot::legendColor() const {
     return colors_.empty() ? Color::blue() : colors_[0];
 }
 
-void StackPlot::computeStack() {
-    size_t n = x_.size();
-    size_t numSeries = ys_.size();
-    stack_.assign(numSeries + 1, std::vector<float>(n, 0.0f));
-    // stack_[0] = baseline (0).
-    for (size_t s = 0; s < numSeries; ++s)
+void StackPlot::setBaseline(std::string_view name) {
+    if (name == "zero") baseline_ = StackBaseline::Zero;
+    else if (name == "sym") baseline_ = StackBaseline::Sym;
+    else if (name == "wiggle") baseline_ = StackBaseline::Wiggle;
+    else if (name == "weighted_wiggle")
+        baseline_ = StackBaseline::WeightedWiggle;
+    else
+        throw std::invalid_argument(
+            std::format("StackPlot: unknown baseline '{}'", name));
+    touch();
+}
+
+void StackPlot::computeStack() const {
+    const size_t n = x_.size();
+    const size_t m = ys_.size();
+    stack_.assign(m + 1, std::vector<float>(n, 0.0f));
+    // stack_[0] = the baseline — mpl Axes.stackplot `first_line`.
+    auto& first = stack_[0];
+    switch (baseline_) {
+    case StackBaseline::Zero:
+        break;
+    case StackBaseline::Sym:
+        // first_line = -sum(y, 0) * 0.5
+        for (size_t i = 0; i < n; ++i) {
+            float s = 0;
+            for (const auto& y : ys_) s += y[i];
+            first[i] = -0.5f * s;
+        }
+        break;
+    case StackBaseline::Wiggle:
+        // first_line = -(1/m) * Σ_s y_s · (m - 0.5 - s)
+        for (size_t i = 0; i < n; ++i) {
+            float acc = 0;
+            for (size_t s = 0; s < m; ++s)
+                acc += ys_[s][i] * (float(m) - 0.5f - float(s));
+            first[i] = -acc / float(m);
+        }
+        break;
+    case StackBaseline::WeightedWiggle: {
+        // mpl: total = sum(y,0); increase = [y[:,0], diff(y)];
+        // below_size = total - cumsum(y) + 0.5·y; move_up =
+        // below_size/total (0.5 at column 0); center = cumsum over x
+        // of Σ_s (move_up - 0.5)·increase; first_line = center - total/2.
+        float acc = 0;  // running cumsum of the center contribution
+        for (size_t i = 0; i < n; ++i) {
+            float total = 0;
+            for (const auto& y : ys_) total += y[i];
+            float inv = total > 0 ? 1.0f / total : 0.0f;
+            float cum = 0;  // cumsum over series at column i
+            float sum = 0;
+            for (size_t s = 0; s < m; ++s) {
+                cum += ys_[s][i];
+                float below = total - cum + 0.5f * ys_[s][i];
+                float moveUp = (i == 0) ? 0.5f : below * inv;
+                float increase = (i == 0) ? ys_[s][0]
+                                          : ys_[s][i] - ys_[s][i - 1];
+                sum += (moveUp - 0.5f) * increase;
+            }
+            acc += sum;
+            first[i] = acc - 0.5f * total;
+        }
+        break;
+    }
+    }
+    for (size_t s = 0; s < m; ++s)
         for (size_t i = 0; i < n; ++i)
             stack_[s + 1][i] = stack_[s][i] + ys_[s][i];
 }
@@ -106,13 +168,29 @@ void StackPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void StackPlot::draw(vk::CommandBuffer cmd, render::Renderer&,
+void StackPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
     fillRenderer_.draw(cmd, vrect, t);
+}
+
+void StackPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
+                           Rect2D rect) {
+    computeStack();
+    auto toPx = pxMapper(axes, rect);
+    const size_t n = x_.size(), m = ys_.size();
+    if (n < 2) return;
+    for (size_t s = 0; s < m; ++s) {
+        std::vector<Point2D> poly;
+        poly.reserve(n * 2);
+        for (size_t i = 0; i < n; ++i)
+            poly.push_back(toPx({x_[i], stack_[s + 1][i]}));
+        for (size_t i = n; i-- > 0;)
+            poly.push_back(toPx({x_[i], stack_[s][i]}));
+        c.polygon(poly, colors_[s]);
+    }
 }
 
 void StackPlot::contributeToAutoscale(Viewport& v) const {
@@ -120,24 +198,14 @@ void StackPlot::contributeToAutoscale(Viewport& v) const {
         v.x.min = std::min(v.x.min, xv);
         v.x.max = std::max(v.x.max, xv);
     }
-    // Y range is the total stack height.
-    if (!stack_.empty()) {
-        const auto& top = stack_.back();
-        for (float yv : top) {
+    // Y range covers every stack boundary — the baseline can be
+    // negative ('sym', 'wiggle', 'weighted_wiggle' baselines).
+    if (stack_.empty()) computeStack();
+    for (const auto& row : stack_)
+        for (float yv : row) {
             v.y.min = std::min(v.y.min, yv);
             v.y.max = std::max(v.y.max, yv);
         }
-        // Also include baseline (0).
-        v.y.min = std::min(v.y.min, 0.0f);
-        v.y.max = std::max(v.y.max, 0.0f);
-    } else {
-        // If stack not computed yet, compute from raw data.
-        for (const auto& y : ys_)
-            for (float yv : y) {
-                v.y.min = std::min(v.y.min, yv);
-                v.y.max = std::max(v.y.max, yv);
-            }
-    }
 }
 
 } // namespace volcano::plot

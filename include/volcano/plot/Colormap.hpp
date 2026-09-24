@@ -49,7 +49,16 @@ struct Colormap {
     /// a static is created on first lookup).
     static const Colormap& byName(std::string_view name);
 
-    /// List of available colormap names (without the "_r" suffix).
+    /// mpl `matplotlib.cm.register_cmap` — add `cm` to the registry so
+    /// byName() resolves it. The returned reference lives in the
+    /// registry (stable address — safe to hold on plots). Registering
+    /// a builtin name requires `overrideBuiltin` (mpl's
+    /// override_builtin=False raises ValueError on builtin names).
+    static const Colormap& registerCmap(Colormap cm,
+                                        bool overrideBuiltin = false);
+
+    /// List of available colormap names (without the "_r" suffix),
+    /// including registered colormaps.
     static std::vector<std::string> availableNames();
 
     /// ListedColormap equivalent — a colormap from an explicit color list.

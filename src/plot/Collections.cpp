@@ -392,6 +392,7 @@ void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
                               std::span<const float> dash,
                               const std::string& hatchStr,
                               float hatchSpacing, float sketchScale,
+                              float sketchLength,
                               std::span<const Point2D> clipRing) {
     auto& spine = r.spineRenderer();
     // Fill (ear-clipped per closed subpath).
@@ -427,7 +428,8 @@ void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
         for (const auto& sp : subs) {
             auto pts = sp.points;
             if (sketchScale > 0.0f)
-                pts = sketchPolyline(pts, sketchScale * 2.0f);
+                pts = sketchPolyline(pts, sketchScale * 2.0f,
+                                     sketchLength);
             appendStroke(ev, pts, sp.closed, lw, dash, 0.0f);
         }
         if (!clipRing.empty())
@@ -520,9 +522,11 @@ void PatchCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
         std::vector<float> dash = p.style.dashes;
         if (dash.empty())
             dash = dashPattern(p.style.lineStyle, p.style.lineWidth);
-        drawSubpaths(cmd, r, clip, res, subs, p.style.face, p.style.edge,
-                     p.style.lineWidth, dash, p.style.hatch,
-                     p.style.hatchSpacing, axes.style().sketchScale, ring);
+        drawSubpathsFx(cmd, r, clip, res, subs, p.style.face, p.style.edge,
+                       p.style.lineWidth, dash, p.style.hatch,
+                       p.style.hatchSpacing, axes.style().sketchScale,
+                       axes.style().sketchLength, ring,
+                       pathEffects, axes.style().dpi);
     }
 }
 
@@ -605,9 +609,11 @@ void PathCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
             dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
         Color face = at(faceColors, i, defFace);
         if (strokeOnly) face.a = 0.0f;
-        drawSubpaths(cmd, r, clip, res, subs, face,
-                     at(edgeColors, i, defEdge), lw, dash, hatch,
-                     hatchSpacing, axes.style().sketchScale, ring);
+        drawSubpathsFx(cmd, r, clip, res, subs, face,
+                       at(edgeColors, i, defEdge), lw, dash, hatch,
+                       hatchSpacing, axes.style().sketchScale,
+                       axes.style().sketchLength, ring,
+                       pathEffects, axes.style().dpi);
     }
 }
 
@@ -625,22 +631,52 @@ void LineCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
     auto& spine = r.spineRenderer();
     auto ring = clipRingPx(axes, rect);
     Color def{0.121f, 0.466f, 0.705f, 1};
+    const float dpi = axes.style().dpi;
     for (size_t i = 0; i < segments.size(); ++i) {
         std::vector<Point2D> px;
         px.reserve(segments[i].size());
         for (auto p : segments[i]) px.push_back(toPx(axes, rect, p));
-        std::vector<std::vector<Point2D>> pieces{std::move(px)};
-        if (!ring.empty())
-            pieces = clipPolylineToPolygon(pieces[0], ring);
         float lw = at(lineWidths, i, 1.5f);
         std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
                                                  : dashes;
         Color c = at(edgeColors, i, def);
-        for (auto& piece : pieces) {
-            std::vector<Point2D> ev;
-            appendStroke(ev, piece, false, lw, dash, 0.0f);
-            if (!ev.empty() && c.a > 0)
-                spine.drawTriangles(cmd, clip, res, ev, c);
+        // mpl patheffects: one pass per effect (offset/color/width
+        // overrides), plus the normal pass after `withX` effects.
+        auto pass = [&](Point2D off, Color pc, float plw) {
+            std::vector<Point2D> pxs = px;
+            for (auto& q : pxs) { q.x += off.x; q.y += off.y; }
+            std::vector<std::vector<Point2D>> pieces{std::move(pxs)};
+            if (!ring.empty())
+                pieces = clipPolylineToPolygon(pieces[0], ring);
+            for (auto& piece : pieces) {
+                std::vector<Point2D> ev;
+                appendStroke(ev, piece, false, plw, dash, 0.0f);
+                if (!ev.empty() && pc.a > 0)
+                    spine.drawTriangles(cmd, clip, res, ev, pc);
+            }
+        };
+        if (pathEffects.empty()) {
+            pass({0.0f, 0.0f}, c, lw);
+            continue;
+        }
+        for (const auto& e : pathEffects) {
+            Color pc = c; float plw = lw;
+            switch (e.kind) {
+            case PathEffect::Kind::Stroke:
+                pc = e.foreground.value_or(c);
+                plw = e.strokeWidthPx(lw, dpi);
+                break;
+            case PathEffect::Kind::LineShadow:
+            case PathEffect::Kind::PatchShadow:
+                pc = e.shadowColor.value_or(
+                    Color{c.r * e.rho, c.g * e.rho, c.b * e.rho, 1.0f});
+                pc.a = e.shadowAlpha;
+                plw = e.strokeWidthPx(lw, dpi);
+                break;
+            case PathEffect::Kind::Normal: break;
+            }
+            pass(e.offsetPx(dpi), pc, plw);
+            if (e.thenNormal) pass({0.0f, 0.0f}, c, lw);
         }
     }
 }
@@ -668,10 +704,11 @@ void PolyCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
         float lw = at(lineWidths, i, 1.0f);
         std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
                                                  : dashes;
-        drawSubpaths(cmd, r, clip, res, {sp},
-                     at(faceColors, i, defFace), at(edgeColors, i, defEdge),
-                     lw, dash, hatch, hatchSpacing, axes.style().sketchScale,
-                     ring);
+        drawSubpathsFx(cmd, r, clip, res, {sp},
+                       at(faceColors, i, defFace), at(edgeColors, i, defEdge),
+                       lw, dash, hatch, hatchSpacing,
+                       axes.style().sketchScale, axes.style().sketchLength,
+                       ring, pathEffects, axes.style().dpi);
     }
 }
 
@@ -837,6 +874,111 @@ void Collection::emitSubpaths(render::VectorCanvas& c,
     }
 }
 
+namespace {
+
+/// Shift every point of every subpath (pixel space).
+void shiftSubs(std::vector<Path::Subpath>& subs, Point2D off) {
+    for (auto& sp : subs)
+        for (auto& pt : sp.points) { pt.x += off.x; pt.y += off.y; }
+}
+
+/// Per-pass color/width resolution for a path-effect draw. mpl:
+///   Stroke       → gc overrides (foreground/linewidth), face kept
+///   PatchShadow  → fill-only copy, face = shadow_rgbFace or rgbFace*rho
+///   LineShadow   → stroke-only copy, edge = shadow_color or fg*rho
+struct FxPass { Color face, edge; float lw; };
+
+FxPass fxPass(const PathEffect& e, Color face, Color edge, float lw,
+              float dpi) {
+    switch (e.kind) {
+    case PathEffect::Kind::Stroke: {
+        // mpl _update_gc: foreground/linewidth/alpha overrides.
+        Color f = face, ed = e.foreground.value_or(edge);
+        if (e.alpha) { f.a = *e.alpha; ed.a = *e.alpha; }
+        return {f, ed, e.strokeWidthPx(lw, dpi)};
+    }
+    case PathEffect::Kind::PatchShadow: {
+        // mpl: (rgbFace or (1,1,1)) * rho; stroke suppressed.
+        Color base = face.a > 0 ? face : Color::white();
+        Color shadow = e.shadowColor.value_or(
+            Color{base.r * e.rho, base.g * e.rho, base.b * e.rho, 1.0f});
+        shadow.a = e.shadowAlpha;
+        return {shadow, Color::transparent(), 0.0f};
+    }
+    case PathEffect::Kind::LineShadow: {
+        // mpl: shadow_color ('k' default) or gc foreground × rho.
+        Color shadow = e.shadowColor.value_or(
+            Color{edge.r * e.rho, edge.g * e.rho, edge.b * e.rho, 1.0f});
+        shadow.a = e.shadowAlpha;
+        return {Color::transparent(), shadow,
+                e.strokeWidthPx(lw, dpi)};
+    }
+    case PathEffect::Kind::Normal: break;
+    }
+    return {face, edge, lw};
+}
+
+} // namespace
+
+void Collection::drawSubpathsFx(vk::CommandBuffer cmd,
+                                render::Renderer& r,
+                                vk::Rect2D clip, vk::Extent2D res,
+                                std::vector<Path::Subpath> subs,
+                                Color face, Color edge, float lw,
+                                std::span<const float> dash,
+                                const std::string& hatch, float hatchSpacing,
+                                float sketchScale, float sketchLength,
+                                std::span<const Point2D> clipRing,
+                                std::span<const PathEffect> fx, float dpi) {
+    if (fx.empty()) {
+        drawSubpaths(cmd, r, clip, res, subs, face, edge, lw, dash, hatch,
+                     hatchSpacing, sketchScale, sketchLength, clipRing);
+        return;
+    }
+    for (const auto& e : fx) {
+        auto pass = subs;
+        shiftSubs(pass, e.offsetPx(dpi));
+        auto [f2, e2, lw2] = fxPass(e, face, edge, lw, dpi);
+        bool shadow = e.kind == PathEffect::Kind::PatchShadow ||
+                      e.kind == PathEffect::Kind::LineShadow;
+        drawSubpaths(cmd, r, clip, res, pass, f2, e2, lw2, dash,
+                     shadow ? "" : hatch, hatchSpacing,
+                     sketchScale, sketchLength, clipRing);
+        if (e.thenNormal)
+            drawSubpaths(cmd, r, clip, res, subs, face, edge, lw, dash,
+                         hatch, hatchSpacing, sketchScale, sketchLength,
+                         clipRing);
+    }
+}
+
+void Collection::emitSubpathsFx(render::VectorCanvas& c,
+                                std::vector<Path::Subpath> subs,
+                                Color face, Color edge, float lw,
+                                std::span<const float> dash,
+                                const std::string& hatch, float hatchSpacing,
+                                std::span<const Point2D> clipRing,
+                                std::span<const PathEffect> fx, float dpi) {
+    if (fx.empty()) {
+        emitSubpaths(c, subs, face, edge, lw, dash, hatch, hatchSpacing,
+                     clipRing);
+        return;
+    }
+    for (const auto& e : fx) {
+        auto pass = subs;
+        shiftSubs(pass, e.offsetPx(dpi));
+        auto [f2, e2, lw2] = fxPass(e, face, edge, lw, dpi);
+        bool noHatch = e.kind == PathEffect::Kind::PatchShadow ||
+                       e.kind == PathEffect::Kind::LineShadow;
+        emitSubpaths(c, pass, f2, e2, lw2,
+                     e.kind == PathEffect::Kind::Stroke ? dash
+                                                        : std::span<const float>{},
+                     noHatch ? "" : hatch, hatchSpacing, clipRing);
+        if (e.thenNormal)
+            emitSubpaths(c, subs, face, edge, lw, dash, hatch, hatchSpacing,
+                         clipRing);
+    }
+}
+
 void PatchCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
                                  Rect2D rect) {
     auto ring = clipRingPx(axes, rect);
@@ -849,8 +991,10 @@ void PatchCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
         std::vector<float> dash = p.style.dashes;
         if (dash.empty())
             dash = dashPattern(p.style.lineStyle, p.style.lineWidth);
-        emitSubpaths(c, subs, p.style.face, p.style.edge, p.style.lineWidth,
-                     dash, p.style.hatch, p.style.hatchSpacing, ring);
+        emitSubpathsFx(c, subs, p.style.face, p.style.edge,
+                       p.style.lineWidth, dash, p.style.hatch,
+                       p.style.hatchSpacing, ring, pathEffects,
+                       axes.style().dpi);
     }
 }
 
@@ -883,8 +1027,9 @@ void PathCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
             dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
         Color face = at(faceColors, i, defFace);
         if (strokeOnly) face.a = 0.0f;
-        emitSubpaths(c, subs, face, at(edgeColors, i, defEdge), lw, dash,
-                     hatch, hatchSpacing, ring);
+        emitSubpathsFx(c, subs, face, at(edgeColors, i, defEdge), lw, dash,
+                       hatch, hatchSpacing, ring, pathEffects,
+                       axes.style().dpi);
     }
 }
 
@@ -892,21 +1037,51 @@ void LineCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
                                 Rect2D rect) {
     Color def{0.121f, 0.466f, 0.705f, 1};
     auto ring = clipRingPx(axes, rect);
+    const float dpi = axes.style().dpi;
     for (size_t i = 0; i < segments.size(); ++i) {
         std::vector<Point2D> px;
         px.reserve(segments[i].size());
         for (auto p : segments[i]) px.push_back(toPx(axes, rect, p));
-        std::vector<std::vector<Point2D>> pieces{std::move(px)};
-        if (!ring.empty())
-            pieces = clipPolylineToPolygon(pieces[0], ring);
-        if (pieces.empty()) continue;
         float lw = at(lineWidths, i, 1.5f);
-        render::VectorCanvas::Pen pen;
-        pen.color = at(edgeColors, i, def);
-        pen.width = lw;
-        pen.dashes = dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
-        if (pen.color.a > 0)
+        Color col = at(edgeColors, i, def);
+        std::vector<float> dash =
+            dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        auto pass = [&](Point2D off, Color pc, float plw) {
+            std::vector<Point2D> pxs = px;
+            for (auto& q : pxs) { q.x += off.x; q.y += off.y; }
+            std::vector<std::vector<Point2D>> pieces{std::move(pxs)};
+            if (!ring.empty())
+                pieces = clipPolylineToPolygon(pieces[0], ring);
+            if (pieces.empty() || pc.a <= 0) return;
+            render::VectorCanvas::Pen pen;
+            pen.color = pc; pen.width = plw;
+            pen.dashes = dash;
             for (auto& piece : pieces) c.polyline(piece, pen);
+        };
+        if (pathEffects.empty()) {
+            pass({0.0f, 0.0f}, col, lw);
+            continue;
+        }
+        for (const auto& e : pathEffects) {
+            Color pc = col; float plw = lw;
+            switch (e.kind) {
+            case PathEffect::Kind::Stroke:
+                pc = e.foreground.value_or(col);
+                plw = e.strokeWidthPx(lw, dpi);
+                break;
+            case PathEffect::Kind::LineShadow:
+            case PathEffect::Kind::PatchShadow:
+                pc = e.shadowColor.value_or(
+                    Color{col.r * e.rho, col.g * e.rho, col.b * e.rho,
+                          1.0f});
+                pc.a = e.shadowAlpha;
+                plw = e.strokeWidthPx(lw, dpi);
+                break;
+            case PathEffect::Kind::Normal: break;
+            }
+            pass(e.offsetPx(dpi), pc, plw);
+            if (e.thenNormal) pass({0.0f, 0.0f}, col, lw);
+        }
     }
 }
 
@@ -923,9 +1098,9 @@ void PolyCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
         float lw = at(lineWidths, i, 1.0f);
         std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
                                                  : dashes;
-        emitSubpaths(c, {sp}, at(faceColors, i, defFace),
-                     at(edgeColors, i, defEdge), lw, dash, hatch,
-                     hatchSpacing, ring);
+        emitSubpathsFx(c, {sp}, at(faceColors, i, defFace),
+                       at(edgeColors, i, defEdge), lw, dash, hatch,
+                       hatchSpacing, ring, pathEffects, axes.style().dpi);
     }
 }
 

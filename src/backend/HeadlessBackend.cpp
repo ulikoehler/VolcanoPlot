@@ -214,6 +214,23 @@ void HeadlessBackend::createFramebuffer() {
     framebuffer_ = ctx_.device.handle().createFramebufferUnique(ci);
 }
 
+void HeadlessBackend::resize(uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0) return;
+    if (width == extent_.width && height == extent_.height) return;
+    ctx_.device.handle().waitIdle();
+    extent_ = vk::Extent2D{width, height};
+    framebuffer_.reset();
+    colorView_.reset();
+    msaaView_.reset();
+    depthView_.reset();
+    colorImage_ = core::Image{};
+    msaaImage_ = core::Image{};
+    depthImage_ = core::Image{};
+    blitImage_ = core::Image{};
+    blitCaptured_ = false;
+    createFramebuffer();
+}
+
 void HeadlessBackend::createCommandBuffer() {
     vk::CommandBufferAllocateInfo ai{};
     ai.setCommandPool(ctx_.graphicsPool.handle())

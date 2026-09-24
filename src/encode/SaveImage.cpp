@@ -166,7 +166,7 @@ bool saveImage(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
     std::vector<uint8_t> px(rgba.begin(), rgba.end());
     uint32_t w = width, h = height;
 
-    // bbox_inches="tight": crop to content + pad.
+    // bbox_inches="tight": crop to content in canvas pixels.
     if (opts.tight) {
         auto b = contentBBox(px, w, h, opts.transparent);
         if (!b.empty) {
@@ -174,17 +174,22 @@ bool saveImage(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
             w = b.x1 - b.x0 + 1;
             h = b.y1 - b.y0 + 1;
         }
+    }
+
+    // dpi: output = canvas * dpi / canvasDpi (the figure's dpi).
+    if (opts.dpi != opts.canvasDpi) {
+        float k = opts.dpi / opts.canvasDpi;
+        uint32_t nw = std::max(1u, uint32_t(std::lround(w * k)));
+        uint32_t nh = std::max(1u, uint32_t(std::lround(h * k)));
+        px = rescale(px, w, h, nw, nh);
+        w = nw; h = nh;
+    }
+
+    // pad_inches applies at output resolution (mpl pads the saved bbox).
+    if (opts.tight) {
         uint32_t padPx = uint32_t(std::lround(opts.padInches * opts.dpi));
         auto p = pad(std::move(px), w, h, padPx, opts.transparent);
         px = std::move(p.px); w = p.w; h = p.h;
-    }
-
-    // dpi: output = canvas * dpi / 100 (figure.dpi).
-    if (opts.dpi != 100.0f) {
-        uint32_t nw = std::max(1u, uint32_t(std::lround(w * opts.dpi / 100.0f)));
-        uint32_t nh = std::max(1u, uint32_t(std::lround(h * opts.dpi / 100.0f)));
-        px = rescale(px, w, h, nw, nh);
-        w = nw; h = nh;
     }
 
     enc->setMetadata(opts.metadata);

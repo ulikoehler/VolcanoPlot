@@ -113,8 +113,8 @@ void InstancedPathRenderer::init(vk::Device device, VmaAllocator allocator,
        .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
        .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
        .setColorBlendOp(vk::BlendOp::eAdd)
-       .setSrcAlphaBlendFactor(vk::BlendFactor::eZero)
-       .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+       .setDstAlphaBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
        .setColorWriteMask(vk::ColorComponentFlagBits::eR
                         | vk::ColorComponentFlagBits::eG
                         | vk::ColorComponentFlagBits::eB

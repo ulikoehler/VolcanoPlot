@@ -3,6 +3,8 @@
 
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/DataSeries.hpp"
+#include "volcano/plot/Colormap.hpp"
+#include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/PointRenderer.hpp"
 
 namespace volcano::plot {
@@ -80,6 +82,52 @@ public:
     void setData(std::vector<float> x, std::vector<float> y);
     void setOffsets(std::vector<Point2D> points);
 
+    // ── mpl ScalarMappable (scatter c= scalar array) ────────────────
+    /// Scalar array colormapped through `cmap_` + `norm_` — one value
+    /// per point (mpl scatter c=<array>). When empty, all points draw
+    /// in series_.color.
+    std::vector<float> array_;
+    /// Per-point explicit RGBA colors (mpl c=<list of colors>) —
+    /// bypasses norm/cmap entirely. Mutually exclusive with array_.
+    std::vector<Color> colors_;
+    /// Per-point marker diameters in px (mpl scatter s=<array>).
+    /// Empty → uniform series_.size.
+    std::vector<float> sizes_;
+    /// Norm mapping array_ → [0,1] for cmap sampling (mpl norm=;
+    /// default linear, autoscaled from array_). Lazily created by
+    /// ensureNorm() — mutable so const autoscale paths can fill it.
+    mutable std::shared_ptr<Normalize> norm_;
+    /// Colormap for array_ (mpl cmap=; default viridis).
+    const Colormap* cmap_ = &colormaps::viridis();
+
+    [[nodiscard]] std::shared_ptr<Normalize> norm() const override {
+        return norm_;
+    }
+    void setNorm(std::shared_ptr<Normalize> n) override {
+        norm_ = std::move(n);
+        touch();
+    }
+    [[nodiscard]] const Colormap* cmap() const override { return cmap_; }
+    void setCmap(const Colormap& cm) override { cmap_ = &cm; touch(); }
+    /// mpl `set_array` — replace the scalar array.
+    void setArray(std::vector<float> a) override {
+        array_ = std::move(a);
+        touch();
+    }
+    [[nodiscard]] std::vector<float> array() const override {
+        return array_;
+    }
+    /// mpl `set_clim` — explicit norm bounds (nullopt → autoscale).
+    void setClim(std::optional<float> vmin,
+                 std::optional<float> vmax) override;
+    /// Effective scalar range: norm bounds when set, else the array's
+    /// data range (autoscaled at first use). Empty without array_.
+    [[nodiscard]] std::optional<Range> valueRange() const override;
+
+    /// mpl PathCollection.set_sizes / get_sizes (marker diameters, px).
+    void setSizes(std::vector<float> s) { sizes_ = std::move(s); touch(); }
+    [[nodiscard]] const std::vector<float>& sizes() const { return sizes_; }
+
     Series2D& series() noexcept { return series_; }
     [[nodiscard]] const Series2D& series() const noexcept { return series_; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -87,8 +135,21 @@ public:
                     Rect2D rect) override;
 
 private:
+    /// Lazily create the default linear norm (mpl ScalarMappable always
+    /// carries a Normalize — created on first colormapping use).
+    void ensureNorm() const {
+        if (!norm_) norm_ = std::make_shared<NormalizeLinear>();
+    }
+    /// Per-point colors for colormapped/explicit-c scatter; empty when
+    /// the series draws uniformly.
+    [[nodiscard]] std::vector<Color> pointColors() const;
+    /// Per-point marker diameters (sizes_ padded with series_.size).
+    [[nodiscard]] std::vector<float> pointSizes() const;
+
     Series2D series_;
     render::primitives::PointRenderer renderer_;
+    std::vector<Color> pcCache_;    ///< pointColors() scratch (draw path)
+    std::vector<float> psCache_;    ///< pointSizes() scratch
     bool prepared_ = false;
     bool dataDirty_ = false;
 };

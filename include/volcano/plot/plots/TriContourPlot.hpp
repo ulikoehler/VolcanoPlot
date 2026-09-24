@@ -37,6 +37,11 @@ public:
     TriContourPlot(std::vector<float> x, std::vector<float> y,
                    std::vector<float> z, TriContourConfig config = {});
 
+    /// Construct with an explicit triangulation (mpl tricontour(tri, z)).
+    TriContourPlot(std::vector<float> x, std::vector<float> y,
+                   std::vector<Triangle> triangles,
+                   std::vector<float> z, TriContourConfig config = {});
+
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
@@ -64,6 +69,11 @@ class TriContourfPlot : public IPlot {
 public:
     /// Construct from unstructured (x, y, z) points.
     TriContourfPlot(std::vector<float> x, std::vector<float> y,
+                    std::vector<float> z, TriContourConfig config = {});
+
+    /// Construct with an explicit triangulation.
+    TriContourfPlot(std::vector<float> x, std::vector<float> y,
+                    std::vector<Triangle> triangles,
                     std::vector<float> z, TriContourConfig config = {});
 
     void prepare(render::Renderer& r) override;

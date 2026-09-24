@@ -113,6 +113,13 @@ public:
         clearColor_ = {r, g, b, a};
     }
 
+    /// Resize the render target (mpl FigureCanvasBase.resize /
+    /// fig.set_size_inches). Headless recreates the framebuffer; screen
+    /// backends ignore this (the window drives the extent).
+    virtual void resize(uint32_t width, uint32_t height) {
+        (void)width; (void)height;
+    }
+
     /// Window title (screen only; no-op for headless).
     virtual void setWindowTitle(std::string_view) {}
     /// Toggle fullscreen (screen only; no-op for headless).

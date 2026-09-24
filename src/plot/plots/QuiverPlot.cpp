@@ -30,6 +30,35 @@ QuiverPlot::QuiverPlot(std::vector<float> x, std::vector<float> y,
         throw std::invalid_argument("QuiverPlot: x, y, u, v must have the same size");
 }
 
+float QuiverPlot::effectiveScale(const Axes& axes) const {
+    // matplotlib "crude auto-scaling" (quiver.py _make_verts):
+    // scale = 1.8 * amean * sn / span, where amean is the mean vector
+    // magnitude, sn = max(10, sqrt(N)), and span is the axes width in
+    // data units. Arrow data-length is a / scale = a * span /
+    // (1.8 * amean * sn) — typical arrows end up ~1 grid-spacing long.
+    if (cfg_.scale > 0.0f) return cfg_.scale;
+    size_t n = x_.size();
+    if (n == 0) return 1.0f;
+    double amean = 0.0;
+    for (size_t i = 0; i < n; ++i)
+        amean += std::sqrt(double(u_[i]) * u_[i] +
+                           double(v_[i]) * v_[i]);
+    amean /= double(n);
+    float sn = std::max(10.0f, std::sqrt(float(n)));
+    return amean > 0.0
+        ? float(axes.viewport().x.span() / (1.8 * amean * double(sn)))
+        : 1.0f;
+}
+
+float QuiverPlot::shaftWidthPx(float axesWidthPx) const {
+    // mpl default shaft width: 0.06 * span / clip(sqrt(N), 8, 25).
+    float snW = std::clamp(std::sqrt(float(std::max(x_.size(), size_t{1}))),
+                           8.0f, 25.0f);
+    return cfg_.width > 0.0f ? cfg_.width
+         : cfg_.lineWidth != 1.0f ? cfg_.lineWidth
+         : 0.06f * axesWidthPx / snW;
+}
+
 void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
     shaftSegs_.clear();
     headFillPos_.clear();
@@ -39,36 +68,16 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
     size_t n = x_.size();
     if (n == 0) return;
 
-    // Compute auto scale if needed. matplotlib "crude auto-scaling"
-    // (quiver.py _make_verts): scale = 1.8 * amean * sn / span, where
-    // amean is the mean vector magnitude, sn = max(10, sqrt(N)), and
-    // span is the axes width in data units. Arrow data-length is then
-    // a / scale = a * span / (1.8 * amean * sn) — typical arrows end up
-    // ~1 grid-spacing long.
-    float scale = cfg_.scale;
-    if (scale <= 0.0f) {
-        double amean = 0.0;
-        for (size_t i = 0; i < n; ++i)
-            amean += std::sqrt(double(u_[i]) * u_[i] +
-                               double(v_[i]) * v_[i]);
-        amean /= double(n);
-        float sn = std::max(10.0f, std::sqrt(float(n)));
-        scale = amean > 0.0
-            ? float(vp.x.span() / (1.8 * amean * double(sn)))
-            : 1.0f;
-    }
+    float scale = effectiveScale(axes);
 
     // mpl `pivot`: fraction of the arrow placed before the grid point.
     float pivot = cfg_.pivot == QuiverConfig::Pivot::Tip ? 1.0f
                 : cfg_.pivot == QuiverConfig::Pivot::Middle ? 0.5f : 0.0f;
 
-    // mpl default shaft width: 0.06 * span / clip(sqrt(N), 8, 25) in data
-    // units (quiver.py _init); here span_px = rect.width so the width is
-    // in pixels. An explicit cfg_.width/lineWidth overrides it.
-    float snW = std::clamp(std::sqrt(float(n)), 8.0f, 25.0f);
-    float shaftW = cfg_.width > 0.0f ? cfg_.width
-                 : cfg_.lineWidth != 1.0f ? cfg_.lineWidth
-                 : 0.06f * float(rect.width) / snW;
+    // mpl default shaft width: 0.06 * span / clip(sqrt(N), 8, 25);
+    // here span_px = rect.width so the width is in pixels. An explicit
+    // cfg_.width/lineWidth overrides it.
+    float shaftW = shaftWidthPx(float(rect.width));
     shaftWpx_ = shaftW;
     // mpl's default head is the notched polygon (headwidth/headlength/
     // headaxislength in shaft-width units). The pixel headLength/
@@ -163,8 +172,7 @@ void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
     auto& ctx = r.backend().context();
     Transform2D t = axes.transform();
-    vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                     vk::Extent2D{rect.width, rect.height}};
+    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
 
     // Upload shaft segments at the width computed by buildGeometry
     // (mpl default 0.06*span/clip(sqrt(N),8,25) unless overridden).
