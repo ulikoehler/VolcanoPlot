@@ -187,6 +187,7 @@ float markerDist(vec2 c, int code, int nside, float rot) {
     }
     case 38: return sdSpokes(c, max(nside, 3), 0.85, rot, 0.0) - 0.06; // (n,2)
     case 39: return length(c) - 0.85;                    // (n,3) ≈ circle
+    case 41: return sdBox(c, vec2(0.18));                // ',' pixel
     default: return 1.0;                                 // none / unknown
     }
 }

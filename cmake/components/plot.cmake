@@ -17,6 +17,7 @@ set(VOLCANO_PLOT_SOURCES
     ${VOLCANO_ROOT}/src/plot/GridSpec.cpp
     ${VOLCANO_ROOT}/src/plot/Scale.cpp
     ${VOLCANO_ROOT}/src/plot/Projection.cpp
+    ${VOLCANO_ROOT}/src/plot/Mlab.cpp
     ${VOLCANO_ROOT}/src/plot/Cycler.cpp
     ${VOLCANO_ROOT}/src/plot/Ticks.cpp
     ${VOLCANO_ROOT}/src/plot/Units.cpp

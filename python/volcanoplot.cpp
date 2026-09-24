@@ -57,6 +57,7 @@
 #include <volcano/plot/plots/SpectrumPlot.hpp>
 #include <volcano/plot/plots/ReferenceLines.hpp>
 #include <volcano/plot/Triangulation.hpp>
+#include <volcano/plot/Mlab.hpp>
 #include <volcano/plot/Ticks.hpp>
 #include <volcano/plot/Annotation.hpp>
 #include "../src/render/TickLayout.hpp"
@@ -1677,11 +1678,89 @@ struct PySpine {
     std::shared_ptr<PyFigure> owner;
     plot::Axes* ax;
     std::string side;
+    /// mpl spine_type — equals `side` for axis spines; arc spines may
+    /// use 'arc'/'circle'. Empty → `side`.
+    std::string spineType;
     /// mpl free-form Artist properties (gid, url, picker,
     /// sketch params, …) with no dedicated C++ field.
     py::dict props_;
 
+    [[nodiscard]] const std::string& stype() const {
+        return spineType.empty() ? side : spineType;
+    }
+    /// Native spine spec when `side` is a real axes side.
+    [[nodiscard]] plot::Axes::SpineSpec* spec() const {
+        static const std::set<std::string> kSides =
+            {"left", "right", "bottom", "top"};
+        return (ax && kSides.count(side)) ? &ax->spine(side) : nullptr;
+    }
+    [[nodiscard]] const plot::Axes::SpineSpec* cspec() const {
+        return spec();
+    }
 };
+
+/// Per-axes extra spines state for the mpl Spines MutableMapping:
+/// `custom` stores __setitem__-injected entries, `removed` sides
+/// deleted via __delitem__ (mpl removes the spine from the dict, which
+/// also drops it from drawing → we mark visible=False).
+struct SpinesExtra {
+    py::dict custom;
+    std::set<std::string> removed;
+};
+/// Leaked deliberately — holds py::objects that must outlive
+/// interpreter teardown ordering.
+inline auto& spinesExtraMap() {
+    static auto* m = new std::unordered_map<plot::Axes*, SpinesExtra>();
+    return *m;
+}
+
+/// mpl spines.Spines — MutableMapping of side → Spine. `subset`
+/// non-empty marks a SpinesProxy-like restricted view (mpl
+/// SpinesProxy shares the parent's dict; ours shares the Axes).
+struct PySpines {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;   ///< null → standalone from_dict map
+    std::vector<std::string> subset;   ///< empty → all four sides
+    py::dict standalone;              ///< ax==null backing store
+    bool proxy = false;
+
+    [[nodiscard]] std::vector<std::string> sides() const {
+        static const std::vector<std::string> kAll =
+            {"left", "right", "bottom", "top"};
+        if (ax == nullptr) {
+            std::vector<std::string> v;
+            for (auto k : standalone)
+                v.push_back(py::cast<std::string>(k.first));
+            return v;
+        }
+        auto& ex = spinesExtraMap()[ax];
+        std::vector<std::string> v;
+        auto consider = [&](const std::string& s) {
+            if (!ex.removed.count(s)) v.push_back(s);
+        };
+        if (subset.empty()) {
+            for (auto& s : kAll) consider(s);
+            for (auto k : ex.custom) {
+                auto s = py::cast<std::string>(k.first);
+                if (std::ranges::find(v, s) == v.end())
+                    v.push_back(s);
+            }
+        } else {
+            for (auto& s : subset) consider(s);
+        }
+        return v;
+    }
+};
+
+/// mpl spines.SpinesProxy — shares the parent's mapping.
+struct PySpinesProxy : PySpines {};
+
+/// Membership test — sides() returns a temporary, so ranges::find
+/// cannot be applied inline (dangling sentinel).
+inline bool spHasSide(const PySpines& sp, const std::string& s) {
+    auto v = sp.sides();
+    return std::ranges::find(v, s) != v.end();
+}
 
 /// mpl Text artist — wraps an Axes::TextAnnotation (stable: the vector
 /// is append-only within a render cycle; handles are refreshed per
@@ -1832,6 +1911,52 @@ struct PyInsetIndicator {
 
 };
 
+// ═══ vp.legend_handler ═══════════════════════════════════════════════
+
+/// mpl legend_handler.HandlerBase — xpad/ypad padding (fontsize units)
+/// plus an optional update_func that replaces create_artists.
+struct PyHandlerBase {
+    float xpad = 0.0f, ypad = 0.0f;
+    py::object updateFunc = py::none();
+    virtual ~PyHandlerBase() = default;
+};
+/// mpl HandlerNpoints — numpoints markers on the handle.
+struct PyHandlerNpoints : PyHandlerBase {
+    float markerPad = 0.3f;
+    int numpoints = -1;     ///< mpl None → -1 → legend.numpoints
+};
+struct PyHandlerLine2D : PyHandlerNpoints {};
+struct PyHandlerLine2DCompound : PyHandlerNpoints {};
+struct PyHandlerLineCollection : PyHandlerNpoints {};
+/// mpl HandlerNpointsYoffsets — markers at per-point y offsets.
+struct PyHandlerNpointsYoffsets : PyHandlerNpoints {
+    py::object yoffsets = py::none();
+};
+/// mpl HandlerRegularPolyCollection — sized markers (yoffsets+sizes).
+struct PyHandlerRegularPolyCollection : PyHandlerNpointsYoffsets {
+    py::object sizes = py::none();
+};
+struct PyHandlerCircleCollection : PyHandlerRegularPolyCollection {};
+struct PyHandlerPathCollection : PyHandlerRegularPolyCollection {};
+/// mpl HandlerPatch — filled rect handle; patch_func customizes it.
+struct PyHandlerPatch : PyHandlerBase { py::object patchFunc = py::none(); };
+struct PyHandlerStepPatch : PyHandlerBase {};
+/// mpl HandlerTuple — one handle split across a tuple's artists.
+struct PyHandlerTuple : PyHandlerBase {
+    int ndivide = 1;
+    std::optional<float> pad;
+};
+struct PyHandlerPolyCollection : PyHandlerBase {};
+/// mpl HandlerErrorbar — errorbar handle with xerr/yerr bars.
+struct PyHandlerErrorbar : PyHandlerNpoints {
+    float xerrSize = 0.5f, yerrSize = -1.0f;
+};
+/// mpl HandlerStem — stem handle (markerline + stemlines + baseline).
+struct PyHandlerStem : PyHandlerNpoints {
+    float bottom = -1.0f;
+    py::object yoffsets = py::none();
+};
+
 /// mpl Legend artist handle (ax.legend/fig.legend result). The legend
 /// is axes/figure chrome (LegendStyle), so the handle mutates that.
 struct PyLegend {
@@ -1844,7 +1969,49 @@ struct PyLegend {
     /// mpl free-form Artist properties (gid, url, picker,
     /// sketch params, …) with no dedicated C++ field.
     py::dict props_;
+    /// mpl _legend_handler_map — set via set_legend_handler_map; none →
+    /// the class default map.
+    py::object handlerMapObj = py::none();
+    /// Original artist handles passed to legend(handles=...) or
+    /// collected at call time (mpl legendHandles source artists).
+    py::list origHandles;
 
+};
+
+/// mpl legend.get_texts() element — a Text artist over the legend
+/// label. `writable` means the label lives in
+/// `LegendStyle::explicitHandles[index]` so `set_text` writes through
+/// (collected plot labels are snapshots like mpl's Text proxy).
+struct PyLegendText {
+    std::shared_ptr<PyFigure> owner;
+    plot::Axes* ax = nullptr;
+    size_t index = 0;
+    std::string label;
+    bool writable = false;
+    plot::LegendStyle& ls() {
+        return ax ? ax->style().legend : owner->fig().figureLegend();
+    }
+    void touch() { if (ax) ax->touch(); else owner->fig().setStale(true); }
+    py::dict props_;
+};
+
+/// mpl Legend.legendPatch/get_frame() — the FancyBboxPatch frame
+/// behind the legend box.
+struct PyLegendFrame {
+    PyLegend leg;
+    plot::LegendStyle& ls() { return leg.ls(); }
+    void touch() { leg.touch(); }
+    py::dict props_;
+};
+
+/// mpl legend.DraggableLegend — wraps a Legend with drag state.
+struct PyDraggableLegend {
+    py::object legend;
+    bool useBlit = false;
+    std::string update = "loc";   ///< mpl update: 'loc' | 'bbox'
+    bool gotArtist = false;
+    py::tuple mouseCid;
+    py::dict props_;
 };
 
 /// mpl Colorbar handle (fig.colorbar result). The strip is axes chrome
@@ -2665,6 +2832,200 @@ void setAxisScale(PyAxes& a, bool isX, const py::object& value,
         ? py::cast(PyAxis{a.owner, a.ax, true})
         : py::cast(PyAxis{a.owner, a.ax, false});
     set(scaleFromNameAndKwargs(value.cast<std::string>(), axisObj, kw));
+}
+
+// ═══ vp.projections ═══════════════════════════════════════════════════
+
+/// mpl projections.polar.PolarTransform / geo _GeoTransform — wraps the
+/// native plot::Projection map as a Transform.
+struct PyProjectionTransform : plot::Transform {
+    plot::Projection proj;
+    bool inv = false;
+    [[nodiscard]] plot::Point2D apply(plot::Point2D p) const override {
+        return inv ? proj.inverse(p) : proj.forward(p);
+    }
+    [[nodiscard]] plot::TransformPtr inverted() const override {
+        auto t = std::make_shared<PyProjectionTransform>(*this);
+        t->inv = !inv;
+        return t;
+    }
+    [[nodiscard]] plot::TransformPtr clone() const override {
+        return std::make_shared<PyProjectionTransform>(*this);
+    }
+};
+
+/// mpl polar.InvertedPolarTransform — distinct type for pybind.
+struct PyInvertedPolarTransform : PyProjectionTransform {
+    PyInvertedPolarTransform() { inv = true; }
+};
+
+/// mpl polar.PolarAffine: scales the unit circle to the r-limit box.
+struct PyPolarAffine {};
+
+/// mpl polar.ThetaFormatter — degree labels for radian theta ticks.
+struct PyThetaFormatter : plot::Formatter {
+    float vmin_ = 0.0f, vmax_ = 1.0f;
+    void setViewInterval(float vmin, float vmax) override {
+        vmin_ = vmin; vmax_ = vmax;
+    }
+    [[nodiscard]] std::string format(float v, int) const override {
+        // mpl: digits = max(-int(log10(d) - 1.5), 0), d = deg span.
+        double d = std::fabs(double(vmax_ - vmin_)) * 180.0 / 3.141592653589793;
+        int digits = std::max(-int(std::log10(std::max(d, 1e-30)) - 1.5), 0);
+        double deg = double(v) * 180.0 / 3.141592653589793;
+        return std::format("{:.{}f}\xc2\xb0", deg, digits);
+    }
+    // mpl ThetaFormatter.__call__ does not apply fix_minus.
+    [[nodiscard]] bool unicodeMinus() const override { return false; }
+};
+
+/// mpl polar.ThetaLocator — 45°-spaced radian ticks on a full circle,
+/// else delegates to a degree-domain base locator.
+struct PyThetaLocator : plot::Locator {
+    std::shared_ptr<plot::Locator> base;
+    explicit PyThetaLocator(std::shared_ptr<plot::Locator> b = {})
+        : base(b ? std::move(b) : std::make_shared<plot::AutoLocator>()) {}
+    [[nodiscard]] std::vector<float> tickValues(float vmin,
+                                                float vmax) const override {
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr float kDeg = 180.0f / kPi;
+        if ((vmax - vmin) * kDeg >= 360.0f - 1e-4f) {
+            // mpl: deg2rad(min(lim)) + arange(8)*2pi/8.
+            std::vector<float> out(8);
+            for (int i = 0; i < 8; ++i)
+                out[i] = vmin + float(i) * 2.0f * kPi / 8.0f;
+            return out;
+        }
+        auto deg = base->tickValues(vmin * kDeg, vmax * kDeg);
+        for (float& t : deg) t /= kDeg;
+        return deg;
+    }
+};
+
+/// mpl polar.RadialLocator — delegates to the base locator, keeping
+/// only strictly-positive ticks for full-circle annular views.
+struct PyRadialLocator : plot::Locator {
+    std::shared_ptr<plot::Locator> base;
+    float rorigin = 0.0f;
+    explicit PyRadialLocator(std::shared_ptr<plot::Locator> b = {})
+        : base(b ? std::move(b) : std::make_shared<plot::AutoLocator>()) {}
+    [[nodiscard]] std::vector<float> tickValues(float vmin,
+                                                float vmax) const override {
+        auto t = base->tickValues(vmin, vmax);
+        if (rorigin != 0.0f) {
+            std::erase_if(t, [&](float v) { return v <= rorigin; });
+        }
+        return t;
+    }
+};
+
+/// Axes subclasses for the projections module. Each carries the mpl
+/// `name` class attribute and applies its native Projection at
+/// construction time.
+struct PyGeoAxes : PyAxes {};
+struct PyAitoffAxes : PyGeoAxes {};
+struct PyHammerAxes : PyGeoAxes {};
+struct PyLambertAxes : PyGeoAxes {};
+struct PyMollweideAxes : PyGeoAxes {};
+struct PyPolarAxes : PyAxes {};
+
+/// mpl ProjectionRegistry — name → axes-class map. py::object values
+/// are deliberately leaked so teardown never decrefs after the
+/// interpreter is gone.
+struct PyProjectionRegistry {
+    using Map = std::map<std::string, py::object>;
+    [[nodiscard]] static Map& types() {
+        static Map* m = new Map();
+        return *m;
+    }
+};
+
+/// Helper: construct an axes subclass on a figure, mpl signature
+/// (fig, rect, ...). `rect` is a 4-seq figure-fraction list or an
+/// int subplot code like 221.
+template <typename T>
+T makeProjAxes(const std::shared_ptr<PyFigure>& f, const py::object& rect,
+               const std::string& projection, const py::kwargs& kw) {
+    T out;
+    plot::Axes* ax = nullptr;
+    if (rect.is_none()) {
+        ax = f->addAxes();
+    } else if (py::isinstance<py::int_>(rect)) {
+        int code = rect.cast<int>();
+        ax = f->fig().addAxes(uint32_t(code / 100 - 1),
+                              uint32_t((code / 10) % 10 - 1));
+    } else {
+        auto v = rect.cast<std::vector<double>>();
+        if (v.size() != 4)
+            throw py::value_error("rect must have 4 elements [l,b,w,h]");
+        ax = f->addAxesFraction(float(v[0]), float(v[1]),
+                                float(v[2]), float(v[3]));
+    }
+    ax->setProjection(projection);
+    out.owner = f;
+    out.ax = ax;
+    if (projection == "polar" && kw) {
+        if (auto o = kw.attr("get")("theta_offset", py::none());
+            !o.is_none())
+            ax->setThetaOffset(o.cast<float>());
+        if (auto o = kw.attr("get")("theta_direction", py::none());
+            !o.is_none())
+            ax->setThetaDirection(o.cast<int>());
+        if (auto o = kw.attr("get")("rlabel_position", py::none());
+            !o.is_none())
+            ax->setRlabelPosition(o.cast<float>());
+    }
+    return out;
+}
+
+/// mpl projection kwarg resolution: accepts a projection name or a
+/// registered projection *class*. Custom classes resolve through the
+/// registry / their MRO to the nearest known projection base.
+inline std::string projNameFrom(const py::object& proj) {
+    if (proj.is_none()) return "";
+    static const std::set<std::string> known = {
+        "polar", "aitoff", "hammer", "lambert", "mollweide",
+        "rectilinear"};
+    py::object cls = py::none();
+    if (py::isinstance<py::str>(proj)) {
+        auto name = proj.cast<std::string>();
+        if (known.count(name)) return name;
+        auto it = PyProjectionRegistry::types().find(name);
+        if (it == PyProjectionRegistry::types().end()) return name;
+        cls = it->second;
+    } else
+        cls = proj;
+    // Class object: its own `name` wins if it's a known projection,
+    // else inherit the kind from the nearest registered base.
+    auto own = py::getattr(cls, "name", py::none());
+    if (!own.is_none() &&
+        known.count(own.cast<std::string>()))
+        return own.cast<std::string>();
+    for (auto base : py::list(cls.attr("__mro__"))) {
+        auto n = py::getattr(base, "name", py::none());
+        if (!n.is_none() && known.count(n.cast<std::string>()))
+            return n.cast<std::string>();
+    }
+    return own.is_none() ? "" : own.cast<std::string>();
+}
+
+/// Wrap a PyAxes into the projection-specific subclass object (mpl
+/// returns PolarAxes/AitoffAxes/... instances from add_subplot).
+inline py::object typedAxes(const PyAxes& a) {
+    switch (a.ax->projection().kind) {
+    case plot::ProjectionKind::Polar:
+        return py::cast(PyPolarAxes{a});
+    case plot::ProjectionKind::Aitoff:
+        return py::cast(PyAitoffAxes{a});
+    case plot::ProjectionKind::Hammer:
+        return py::cast(PyHammerAxes{a});
+    case plot::ProjectionKind::Lambert:
+        return py::cast(PyLambertAxes{a});
+    case plot::ProjectionKind::Mollweide:
+        return py::cast(PyMollweideAxes{a});
+    default:
+        return py::cast(a);
+    }
 }
 
 // ═══ vp.units / vp.category ══════════════════════════════════════════
@@ -3542,6 +3903,560 @@ struct PyTriAnalyzer {
     }
 };
 
+/// mpl markers.MarkerStyle — parse/inspect/transform marker specs.
+struct PyMarkerStyle {
+    py::object spec;   ///< original marker argument (get_marker)
+    plot::MarkerStyle style = plot::MarkerStyle::None;
+    int numsides = 5;
+    float angle = 0.0f;
+    plot::MarkerFill fill = plot::MarkerFill::Full;
+    std::optional<plot::Path> customPath;  ///< marker=Path/verts
+    std::string capstyle = "butt";
+    std::string joinstyle = "round";
+    double snap = std::numeric_limits<double>::quiet_NaN();  // NaN → None
+    std::shared_ptr<plot::Affine2D> transform =
+        std::make_shared<plot::Affine2D>();
+};
+
+/// mpl Path.unit_circle / unit_circle_righthalf — the exact cubic
+/// approximation matplotlib uses for the 'o' marker.
+inline plot::Path mplCirclePath(bool righthalf) {
+    constexpr float MAGIC = 0.2652031f;
+    constexpr float SQH = 0.7071067811865476f;
+    constexpr float M45 = SQH * MAGIC;
+    plot::Path p;
+    p.moveTo({0.0f, -1.0f});
+    auto c4 = [&](float x1, float y1, float x2, float y2,
+                  float x3, float y3) {
+        p.curve4({x1, y1}, {x2, y2}, {x3, y3});
+    };
+    c4(MAGIC, -1.0f, SQH - M45, -SQH - M45, SQH, -SQH);
+    c4(SQH + M45, -SQH + M45, 1.0f, -MAGIC, 1.0f, 0.0f);
+    c4(1.0f, MAGIC, SQH + M45, SQH - M45, SQH, SQH);
+    c4(SQH - M45, SQH + M45, MAGIC, 1.0f, 0.0f, 1.0f);
+    if (!righthalf) {
+        c4(-MAGIC, 1.0f, -SQH + M45, SQH + M45, -SQH, SQH);
+        c4(-SQH - M45, SQH - M45, -1.0f, MAGIC, -1.0f, 0.0f);
+        c4(-1.0f, -MAGIC, -SQH - M45, -SQH + M45, -SQH, -SQH);
+        c4(-SQH + M45, -SQH - M45, -MAGIC, -1.0f, 0.0f, -1.0f);
+    }
+    // mpl CLOSEPOLY vertex repeats the subpath start.
+    p.vertices.push_back(p.vertices.front());
+    p.codes.push_back(plot::Path::ClosePoly);
+    return p;
+}
+
+/// mpl closed path: MOVETO + LINETO* + CLOSEPOLY (close vertex
+/// repeats the first vertex, matching mpl _create_closed).
+inline plot::Path mplClosed(std::vector<plot::Point2D> v) {
+    plot::Path p;
+    if (v.empty()) return p;
+    p.moveTo(v[0]);
+    for (size_t i = 1; i < v.size(); ++i) p.lineTo(v[i]);
+    p.vertices.push_back(v[0]);
+    p.codes.push_back(plot::Path::ClosePoly);
+    return p;
+}
+
+/// mpl open path with explicit codes (empty → default LINETO codes).
+inline plot::Path mplPath(std::vector<plot::Point2D> v,
+                          std::vector<plot::Path::Code> c) {
+    if (c.empty()) return plot::Path(std::move(v));
+    return plot::Path(std::move(v), std::move(c));
+}
+
+/// mpl Path.unit_regular_polygon — n verts starting at 90°.
+inline plot::Path mplPoly(int n) {
+    std::vector<plot::Point2D> v;
+    v.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        float t = 6.2831853071795865f * i / n + 1.5707963267948966f;
+        v.push_back({std::cos(t), std::sin(t)});
+    }
+    return mplClosed(std::move(v));
+}
+
+/// mpl Path.unit_regular_star / unit_regular_asterisk (inner=0).
+inline plot::Path mplStar(int n, float inner) {
+    std::vector<plot::Point2D> v;
+    v.reserve(2 * n);
+    for (int i = 0; i < 2 * n; ++i) {
+        float t = 3.141592653589793f * i / n + 1.5707963267948966f;
+        float r = (i % 2) ? inner : 1.0f;
+        v.push_back({r * std::cos(t), r * std::sin(t)});
+    }
+    return mplClosed(std::move(v));
+}
+
+/// mpl MarkerStyle._half_fill.
+inline bool markerHalfFill(const PyMarkerStyle& ms) {
+    return ms.fill == plot::MarkerFill::Left ||
+           ms.fill == plot::MarkerFill::Right ||
+           ms.fill == plot::MarkerFill::Top ||
+           ms.fill == plot::MarkerFill::Bottom;
+}
+
+/// The mpl geometry/transform spec for a marker — mirrors
+/// markers.MarkerStyle._set_* for every standard marker.
+struct MplMarkerSpec {
+    plot::Path path;
+    std::optional<plot::Path> altPath;
+    plot::Affine2D transform;
+    std::optional<plot::Affine2D> altTransform;
+    double snap = std::numeric_limits<double>::quiet_NaN();  // NaN → None
+    const char* join = "round";  // mpl default joinstyle
+    bool filled = true;
+};
+
+inline MplMarkerSpec mplMarkerSpec(const PyMarkerStyle& ms) {
+    using plot::Affine2D;
+    using PC = plot::Path::Code;
+    auto A = [](float sx, float sy = 0.0f) {
+        return sy == 0.0f ? Affine2D::scale(sx)
+                          : Affine2D::scale(sx, sy);
+    };
+    MplMarkerSpec s;
+    const bool hf = markerHalfFill(ms);
+    if (ms.customPath) {
+        // mpl _set_custom_marker: scale(0.5/rescale), rescale =
+        // max|vertices|.
+        float mx = 0.0f;
+        for (auto v : ms.customPath->vertices)
+            mx = std::max({mx, std::abs(v.x), std::abs(v.y)});
+        s.transform = A(mx > 0.0f ? 0.5f / mx : 0.5f);
+        s.path = *ms.customPath;
+        return s;
+    }
+    switch (ms.style) {
+    case plot::MarkerStyle::Circle:
+        s.transform = A(0.5f);
+        s.snap = std::numeric_limits<double>::infinity();
+        if (!hf) { s.path = mplCirclePath(false); break; }
+        s.path = mplCirclePath(true); s.altPath = s.path;
+        s.transform = Affine2D::rotateDeg(
+            ms.fill == plot::MarkerFill::Right ? 0.0f :
+            ms.fill == plot::MarkerFill::Top ? 90.0f :
+            ms.fill == plot::MarkerFill::Left ? 180.0f : 270.0f)
+            .concat(s.transform);
+        s.altTransform = Affine2D::rotateDeg(180.0f).concat(s.transform);
+        break;
+    case plot::MarkerStyle::Point:
+        s.transform = A(0.25f);
+        s.snap = std::numeric_limits<double>::infinity();
+        if (!hf) { s.path = mplCirclePath(false); break; }
+        s.path = mplCirclePath(true); s.altPath = s.path;
+        s.transform = Affine2D::rotateDeg(
+            ms.fill == plot::MarkerFill::Right ? 0.0f :
+            ms.fill == plot::MarkerFill::Top ? 90.0f :
+            ms.fill == plot::MarkerFill::Left ? 180.0f : 270.0f)
+            .concat(s.transform);
+        s.altTransform = Affine2D::rotateDeg(180.0f).concat(s.transform);
+        break;
+    case plot::MarkerStyle::Pixel:
+        // mpl _set_pixel: unit rect, offset -0.49999 for snap rounding.
+        s.transform = Affine2D::translate(-0.49999f, -0.49999f);
+        s.path = mplClosed({{0,0},{1,0},{1,1},{0,1}});
+        break;
+    case plot::MarkerStyle::Square:
+        s.transform = Affine2D::translate(-0.5f, -0.5f);
+        s.snap = 2.0; s.join = "miter";
+        if (!hf) {
+            s.path = mplClosed({{0,0},{1,0},{1,1},{0,1}});
+            break;
+        }
+        s.path = mplClosed({{0,0},{1,0},{1,0.5f},{0,0.5f}});
+        s.altPath = mplClosed({{0,0.5f},{1,0.5f},{1,1},{0,1}});
+        s.transform = Affine2D::rotateDeg(
+            ms.fill == plot::MarkerFill::Bottom ? 0.0f :
+            ms.fill == plot::MarkerFill::Right ? 90.0f :
+            ms.fill == plot::MarkerFill::Top ? 180.0f : 270.0f)
+            .concat(s.transform);
+        s.altTransform = s.transform;
+        break;
+    case plot::MarkerStyle::Diamond:
+    case plot::MarkerStyle::ThinDiamond: {
+        s.transform = Affine2D::rotateDeg(45.0f)
+            .concat(Affine2D::translate(-0.5f, -0.5f));
+        s.snap = 5.0; s.join = "miter";
+        if (!hf) {
+            s.path = mplClosed({{0,0},{1,0},{1,1},{0,1}});
+        } else {
+            s.path = mplClosed({{0,0},{1,0},{1,1}});
+            s.altPath = mplClosed({{0,0},{0,1},{1,1}});
+            s.transform = Affine2D::rotateDeg(
+                ms.fill == plot::MarkerFill::Right ? 0.0f :
+                ms.fill == plot::MarkerFill::Top ? 90.0f :
+                ms.fill == plot::MarkerFill::Left ? 180.0f : 270.0f)
+                .concat(s.transform);
+            s.altTransform = s.transform;
+        }
+        if (ms.style == plot::MarkerStyle::ThinDiamond)
+            s.transform = A(0.6f, 1.0f).concat(s.transform);
+        break;
+    }
+    case plot::MarkerStyle::Triangle:
+    case plot::MarkerStyle::TriDown:
+    case plot::MarkerStyle::TriLeft:
+    case plot::MarkerStyle::TriRight: {
+        // mpl _set_triangle(rot, skip).
+        float rot = 0.0f; int skip = 0;
+        if (ms.style == plot::MarkerStyle::TriDown) { rot = 180; skip = 2; }
+        else if (ms.style == plot::MarkerStyle::TriLeft) { rot = 90; skip = 3; }
+        else if (ms.style == plot::MarkerStyle::TriRight) { rot = 270; skip = 1; }
+        s.transform = Affine2D::rotateDeg(rot).concat(A(0.5f));
+        s.snap = 5.0; s.join = "miter";
+        if (!hf) {
+            s.path = mplClosed({{0,1},{-1,-1},{1,-1}});
+            break;
+        }
+        plot::Path qu[4] = {
+            mplClosed({{0,1},{-0.6f,-0.2f},{0.6f,-0.2f}}),   // up
+            mplClosed({{0,1},{0,-1},{-1,-1}}),              // left
+            mplClosed({{-0.6f,-0.2f},{0.6f,-0.2f},{1,-1},{-1,-1}}),  // down
+            mplClosed({{0,1},{0,-1},{1,-1}}),               // right
+        };
+        int idx = ms.fill == plot::MarkerFill::Top ? 0 :
+                  ms.fill == plot::MarkerFill::Left ? 1 :
+                  ms.fill == plot::MarkerFill::Bottom ? 2 : 3;
+        s.path = qu[(idx + skip) % 4];
+        s.altPath = qu[((idx + 2) % 4 + skip) % 4];
+        s.altTransform = s.transform;
+        break;
+    }
+    case plot::MarkerStyle::Tri1:
+    case plot::MarkerStyle::Tri2:
+    case plot::MarkerStyle::Tri3:
+    case plot::MarkerStyle::Tri4: {
+        float rot = ms.style == plot::MarkerStyle::Tri1 ? 0.0f :
+                    ms.style == plot::MarkerStyle::Tri2 ? 180.0f :
+                    ms.style == plot::MarkerStyle::Tri3 ? 270.0f : 90.0f;
+        s.transform = Affine2D::rotateDeg(rot).concat(A(0.5f));
+        s.snap = 5.0; s.filled = false;
+        s.path = mplPath({{0,0},{0,-1},{0,0},{0.8f,0.5f},{0,0},{-0.8f,0.5f}},
+                         {PC::MoveTo, PC::LineTo, PC::MoveTo, PC::LineTo,
+                          PC::MoveTo, PC::LineTo});
+        break;
+    }
+    case plot::MarkerStyle::Plus:
+        s.transform = A(0.5f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{-1,0},{1,0},{0,-1},{0,1}},
+                         {PC::MoveTo, PC::LineTo, PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::X:
+        s.transform = A(0.5f); s.snap = 3.0; s.filled = false;
+        s.path = mplPath({{-1,-1},{1,1},{-1,1},{1,-1}},
+                         {PC::MoveTo, PC::LineTo, PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::VLine:
+        s.transform = A(0.5f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,-1},{0,1}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::HLine:
+        s.transform = Affine2D::rotateDeg(90.0f).concat(A(0.5f));
+        s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,-1},{0,1}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::PlusFilled:
+    case plot::MarkerStyle::XFilled: {
+        s.snap = 5.0; s.join = "miter";
+        bool plus = ms.style == plot::MarkerStyle::PlusFilled;
+        const float k = plus ? 1.0f / 6.0f : 1.0f / 4.0f;
+        std::vector<plot::Point2D> full = plus
+            ? std::vector<plot::Point2D>{
+                {-1,-3},{1,-3},{1,-1},{3,-1},{3,1},{1,1},
+                {1,3},{-1,3},{-1,1},{-3,1},{-3,-1},{-1,-1}}
+            : std::vector<plot::Point2D>{
+                {-1,-2},{0,-1},{1,-2},{2,-1},{1,0},{2,1},
+                {1,2},{0,1},{-1,2},{-2,1},{-1,0},{-2,-1}};
+        for (auto& v : full) { v.x *= k; v.y *= k; }
+        if (!hf) { s.path = mplClosed(std::move(full)); break; }
+        std::vector<plot::Point2D> top = plus
+            ? std::vector<plot::Point2D>{
+                {3,0},{3,1},{1,1},{1,3},{-1,3},{-1,1},{-3,1},{-3,0}}
+            : std::vector<plot::Point2D>{
+                {1,0},{2,1},{1,2},{0,1},{-1,2},{-2,1},{-1,0}};
+        for (auto& v : top) { v.x *= k; v.y *= k; }
+        s.path = mplClosed(std::move(top)); s.altPath = s.path;
+        s.transform = Affine2D::rotateDeg(
+            ms.fill == plot::MarkerFill::Top ? 0.0f :
+            ms.fill == plot::MarkerFill::Left ? 90.0f :
+            ms.fill == plot::MarkerFill::Bottom ? 180.0f : 270.0f);
+        s.altTransform = Affine2D::rotateDeg(180.0f).concat(s.transform);
+        break;
+    }
+    case plot::MarkerStyle::Star: {
+        s.transform = A(0.5f); s.snap = 5.0; s.join = "bevel";
+        auto p = mplStar(5, 0.381966f);
+        if (!hf) { s.path = p; break; }
+        auto& v = p.vertices;
+        auto sub = [&](std::initializer_list<int> ix) {
+            plot::Path q;
+            bool first = true;
+            for (int i : ix) {
+                if (first) { q.moveTo(v[i]); first = false; }
+                else q.lineTo(v[i]);
+            }
+            return q;
+        };
+        plot::Path top = sub({0,1,2,3,7,8,9,0});
+        plot::Path bottom = sub({3,4,5,6,7,3});
+        plot::Path left = sub({0,1,2,3,4,5,0});
+        plot::Path right = sub({0,5,6,7,8,9,0});
+        switch (ms.fill) {
+        case plot::MarkerFill::Top:
+            s.path = top; s.altPath = bottom; break;
+        case plot::MarkerFill::Bottom:
+            s.path = bottom; s.altPath = top; break;
+        case plot::MarkerFill::Left:
+            s.path = left; s.altPath = right; break;
+        default:
+            s.path = right; s.altPath = left; break;
+        }
+        s.altTransform = s.transform;
+        break;
+    }
+    case plot::MarkerStyle::Pentagon: {
+        s.transform = A(0.5f); s.snap = 5.0; s.join = "miter";
+        auto p = mplPoly(5);
+        if (!hf) { s.path = p; break; }
+        auto& v = p.vertices;
+        float y = (1.0f + std::sqrt(5.0f)) / 4.0f;
+        auto sub = [&](std::vector<plot::Point2D> vv) {
+            return mplPath(std::move(vv), {});
+        };
+        plot::Path top = sub({v[0], v[1], v[4], v[0]});
+        plot::Path bottom = sub({v[1], v[2], v[3], v[4], v[1]});
+        plot::Path left = sub({v[0], v[1], v[2], {0,-y}, v[0]});
+        plot::Path right = sub({v[0], v[4], v[3], {0,-y}, v[0]});
+        switch (ms.fill) {
+        case plot::MarkerFill::Top:
+            s.path = top; s.altPath = bottom; break;
+        case plot::MarkerFill::Bottom:
+            s.path = bottom; s.altPath = top; break;
+        case plot::MarkerFill::Left:
+            s.path = left; s.altPath = right; break;
+        default:
+            s.path = right; s.altPath = left; break;
+        }
+        s.altTransform = s.transform;
+        break;
+    }
+    case plot::MarkerStyle::Hexagon1:
+    case plot::MarkerStyle::Hexagon2: {
+        s.transform = A(0.5f); s.join = "miter";  // snap stays None
+        auto p = mplPoly(6);
+        if (ms.style == plot::MarkerStyle::Hexagon2)
+            s.transform = Affine2D::rotateDeg(30.0f).concat(s.transform);
+        if (!hf) { s.path = p; break; }
+        auto& v = p.vertices;
+        plot::Path top, bottom, left, right;
+        if (ms.style == plot::MarkerStyle::Hexagon1) {
+            float x = std::abs(std::cos(5.0f * 3.141592653589793f / 6.0f));
+            top = mplPath({{-x,0}, v[1], v[0], v[5], {x,0}}, {});
+            bottom = mplPath({{-x,0}, v[2], v[3], v[4], {x,0}}, {});
+            left = mplPath({v[0], v[1], v[2], v[3]}, {});
+            right = mplPath({v[0], v[5], v[4], v[3]}, {});
+        } else {
+            float x = std::sqrt(3.0f) / 4.0f, y = 0.75f;
+            top = mplPath({v[1], v[0], v[5], v[4], v[1]}, {});
+            bottom = mplPath({v[1], v[2], v[3], v[4]}, {});
+            left = mplPath({{x,y}, v[0], v[1], v[2], {-x,-y}, {x,y}}, {});
+            right = mplPath({{x,y}, v[5], v[4], v[3], {-x,-y}}, {});
+        }
+        switch (ms.fill) {
+        case plot::MarkerFill::Top:
+            s.path = top; s.altPath = bottom; break;
+        case plot::MarkerFill::Bottom:
+            s.path = bottom; s.altPath = top; break;
+        case plot::MarkerFill::Left:
+            s.path = left; s.altPath = right; break;
+        default:
+            s.path = right; s.altPath = left; break;
+        }
+        s.altTransform = s.transform;
+        break;
+    }
+    case plot::MarkerStyle::Octagon: {
+        s.transform = A(0.5f); s.snap = 5.0; s.join = "miter";
+        if (!hf) {
+            s.transform = Affine2D::rotateDeg(22.5f).concat(s.transform);
+            s.path = mplPoly(8);
+            break;
+        }
+        float x = 1.4142135623730951f / 4.0f;
+        s.path = mplClosed(
+            {{0,-1},{0,1},{-x,1},{-1,x},{-1,-x},{-x,-1}});
+        s.altPath = s.path;
+        s.transform = Affine2D::rotateDeg(
+            ms.fill == plot::MarkerFill::Left ? 0.0f :
+            ms.fill == plot::MarkerFill::Bottom ? 90.0f :
+            ms.fill == plot::MarkerFill::Right ? 180.0f : 270.0f)
+            .concat(s.transform);
+        s.altTransform = Affine2D::rotateDeg(180.0f).concat(s.transform);
+        break;
+    }
+    case plot::MarkerStyle::TickLeft:
+        s.transform = A(-1.0f, 1.0f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,0},{1,0}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::TickRight:
+        s.transform = A(1.0f, 1.0f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,0},{1,0}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::TickUp:
+        s.transform = A(1.0f, 1.0f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,0},{0,1}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::TickDown:
+        s.transform = A(1.0f, -1.0f); s.snap = 1.0; s.filled = false;
+        s.path = mplPath({{0,0},{0,1}}, {PC::MoveTo, PC::LineTo});
+        break;
+    case plot::MarkerStyle::CaretLeft:
+    case plot::MarkerStyle::CaretRight:
+    case plot::MarkerStyle::CaretUp:
+    case plot::MarkerStyle::CaretDown: {
+        float rot = ms.style == plot::MarkerStyle::CaretDown ? 0.0f :
+                    ms.style == plot::MarkerStyle::CaretUp ? 180.0f :
+                    ms.style == plot::MarkerStyle::CaretLeft ? 270.0f : 90.0f;
+        s.transform = Affine2D::rotateDeg(rot).concat(A(0.5f));
+        s.snap = 3.0; s.join = "miter"; s.filled = false;
+        s.path = mplPath({{-1,1.5f},{0,0},{1,1.5f}},
+                         {PC::MoveTo, PC::LineTo, PC::LineTo});
+        break;
+    }
+    case plot::MarkerStyle::CaretLeftBase:
+    case plot::MarkerStyle::CaretRightBase:
+    case plot::MarkerStyle::CaretUpBase:
+    case plot::MarkerStyle::CaretDownBase: {
+        float rot = ms.style == plot::MarkerStyle::CaretDownBase ? 0.0f :
+                    ms.style == plot::MarkerStyle::CaretUpBase ? 180.0f :
+                    ms.style == plot::MarkerStyle::CaretLeftBase ? 270.0f
+                                                                 : 90.0f;
+        s.transform = Affine2D::rotateDeg(rot).concat(A(0.5f));
+        s.snap = 3.0; s.join = "miter"; s.filled = false;
+        s.path = mplPath({{-1,0},{0,-1.5f},{1,0}},
+                         {PC::MoveTo, PC::LineTo, PC::LineTo});
+        break;
+    }
+    case plot::MarkerStyle::Polygon:
+        s.transform = Affine2D::rotateDeg(ms.angle).concat(A(0.5f));
+        s.join = "miter";
+        s.path = mplPoly(ms.numsides);
+        break;
+    case plot::MarkerStyle::StarN:
+        s.transform = Affine2D::rotateDeg(ms.angle).concat(A(0.5f));
+        s.join = "bevel";
+        s.path = mplStar(ms.numsides, 0.5f);
+        break;
+    case plot::MarkerStyle::AsteriskN:
+        s.transform = Affine2D::rotateDeg(ms.angle).concat(A(0.5f));
+        s.join = "bevel"; s.filled = false;
+        s.path = mplStar(ms.numsides, 0.0f);
+        break;
+    case plot::MarkerStyle::CircledN:
+        s.transform = Affine2D::rotateDeg(ms.angle).concat(A(0.5f));
+        s.snap = std::numeric_limits<double>::infinity();
+        s.path = mplCirclePath(false);
+        break;
+    default:
+        s.filled = false;
+        break;
+    }
+    return s;
+}
+
+/// Parse mpl marker specs: chars, ints 0-11 (tick/caret), tuples
+/// (numsides, style, angle), Path/vertex sequences, MarkerStyle.
+inline void markerStyleSet(PyMarkerStyle& ms, const py::object& marker) {
+    if (py::isinstance<PyMarkerStyle>(marker)) {
+        auto src = marker.cast<PyMarkerStyle>();
+        ms = src;
+        return;
+    }
+    ms.spec = marker;
+    ms.style = plot::MarkerStyle::None;
+    ms.customPath.reset();
+    ms.numsides = 5;
+    ms.angle = 0.0f;
+    auto applyDefaults = [&] {
+        // mpl _set_* reset joinstyle/snap_threshold per marker kind.
+        auto spec = mplMarkerSpec(ms);
+        ms.joinstyle = spec.join;
+        ms.snap = spec.snap;
+    };
+    if (marker.is_none()) {
+        ms.spec = py::str("None");
+        applyDefaults();
+        return;
+    }
+    if (py::isinstance<plot::Path>(marker)) {
+        ms.customPath = marker.cast<plot::Path>();
+        applyDefaults();
+        return;
+    }
+    if (py::isinstance<py::str>(marker)) {
+        auto s = marker.cast<std::string>();
+        if (s.empty() || s == "None" || s == "none" || s == " " ||
+            s == "nothing") {
+            applyDefaults();
+            return;  // mpl 'nothing' markers
+        }
+        if (s.size() == 1) {
+            if (auto m = plot::markerFromChar(s[0])) {
+                ms.style = *m;
+                applyDefaults();
+                return;
+            }
+        }
+        throw std::invalid_argument(
+            std::format("Unrecognized marker style '{}'", s));
+    }
+    if (py::isinstance<py::int_>(marker)) {
+        int v = marker.cast<int>();
+        if (v < 0 || v > 11)
+            throw std::invalid_argument(
+                std::format("Unrecognized marker style {}", v));
+        ms.style = static_cast<plot::MarkerStyle>(
+            int(plot::MarkerStyle::TickLeft) + v);
+        applyDefaults();
+        return;
+    }
+    if (py::isinstance<py::tuple>(marker)) {
+        auto t = marker.cast<py::tuple>();
+        if (t.size() < 2)
+            throw std::invalid_argument(
+                "marker tuple must be (numsides, style[, angle])");
+        ms.numsides = t[0].cast<int>();
+        int kind = t[1].cast<int>();
+        ms.angle = t.size() > 2 ? t[2].cast<float>() : 0.0f;
+        switch (kind) {
+        case 0: ms.style = plot::MarkerStyle::Polygon; break;
+        case 1: ms.style = plot::MarkerStyle::StarN; break;
+        case 2: ms.style = plot::MarkerStyle::AsteriskN; break;
+        default:
+            // mpl only accepts symstyle 0..2.
+            throw std::invalid_argument(
+                std::format("Unexpected tuple marker: {}",
+                            py::str(marker).cast<std::string>()));
+        }
+        applyDefaults();
+        return;
+    }
+    // mpl accepts vertex lists (implicit Path).
+    if (PySequence_Check(marker.ptr())) {
+        auto verts = marker.cast<
+            std::vector<std::pair<float, float>>>();
+        plot::Path p;
+        for (auto& [x, y] : verts) p.lineTo({x, y});
+        if (!p.codes.empty()) p.codes[0] = plot::Path::MoveTo;
+        ms.customPath = std::move(p);
+        applyDefaults();
+        return;
+    }
+    throw std::invalid_argument(
+        "Unrecognized marker style");
+}
+
 /// mpl UniformTriRefiner._refine_triangulation_once semantics:
 /// each triangle splits into 4 children at edge-midpoint nodes
 /// (recursed `subdiv` times). Returns the refined triangulation plus,
@@ -4034,6 +4949,117 @@ static void applyTickParams(plot::Axes& ax, bool isX,
     ax.touch();
 }
 
+/// mpl handler_map key resolution: Python artist-class key → native
+/// plot typeids. MRO-matched so subclassed artist classes resolve too.
+static std::vector<std::type_index>
+legendKeyTypes(const py::object& key) {
+    namespace p = volcano::plot;
+    auto vp = py::module_::import("volcanoplot");
+    auto builtins = py::module_::import("builtins");
+    auto isSub = [&](const py::object& cls) {
+        if (key.is(cls)) return true;
+        if (!py::isinstance<py::type>(key)) return false;
+        try {
+            for (auto b : py::list(key.attr("__mro__")))
+                if (py::reinterpret_borrow<py::object>(b).is(cls))
+                    return true;
+        } catch (...) {}
+        return false;
+    };
+    std::vector<std::type_index> out;
+    auto add = [&](std::type_index t) {
+        if (std::ranges::find(out, t) == out.end()) out.push_back(t);
+    };
+    auto colls = vp.attr("collections");
+    auto patches = vp.attr("patches");
+    if (key.is(builtins.attr("tuple"))) {
+        // mpl tuple keys match container-style artists.
+        add(typeid(p::ErrorbarPlot)); add(typeid(p::StemPlot));
+    }
+    if (isSub(vp.attr("Line2D"))) add(typeid(p::LinePlot));
+    if (isSub(vp.attr("PathCollection"))) add(typeid(p::ScatterPlot));
+    else if (isSub(vp.attr("Collection"))) add(typeid(p::ScatterPlot));
+    if (isSub(colls.attr("PolyCollection"))) add(typeid(p::FillBetweenPlot));
+    if (isSub(colls.attr("LineCollection"))) {
+        add(typeid(p::StemPlot)); add(typeid(p::EventPlot));
+    }
+    if (isSub(colls.attr("CircleCollection")) ||
+        (py::hasattr(colls, "RegularPolyCollection") &&
+         isSub(colls.attr("RegularPolyCollection"))))
+        add(typeid(p::ScatterPlot));
+    if (isSub(vp.attr("EventCollection"))) add(typeid(p::EventPlot));
+    if (isSub(vp.attr("Patch"))) {
+        add(typeid(p::BarPlot)); add(typeid(p::HistPlot));
+        add(typeid(p::PiePlot));
+    }
+    if (isSub(vp.attr("QuadMesh"))) add(typeid(p::PcolormeshPlot));
+    if (isSub(vp.attr("ErrorbarContainer"))) add(typeid(p::ErrorbarPlot));
+    if (isSub(vp.attr("StemContainer"))) add(typeid(p::StemPlot));
+    if (isSub(vp.attr("BarContainer"))) add(typeid(p::BarPlot));
+    if (isSub(vp.attr("Quiver"))) add(typeid(p::QuiverPlot));
+    if (isSub(vp.attr("ContourSet"))) add(typeid(p::ContourPlot));
+    if (isSub(vp.attr("AxesImage"))) add(typeid(p::HeatmapPlot));
+    return out;
+}
+
+/// Map a legend_handler instance to the native handler function:
+/// built-in handler params translate to LegendHandle field overrides
+/// (numpoints → points; patch-style handlers → Square marker).
+static std::function<std::vector<plot::LegendHandle>(const plot::IPlot&)>
+legendHandlerFn(const py::object& h) {
+    int pts = -1;      // -1 → keep the plot's own points
+    int marker = -1;   // -1 → keep the plot's own marker
+    if (py::isinstance<PyHandlerNpoints>(h)) {
+        int n = h.cast<const PyHandlerNpoints&>().numpoints;
+        // mpl None → legend.numpoints, which the native collector
+        // already applies — leave points untouched in that case.
+        if (n >= 0) pts = n;
+    }
+    if (py::isinstance<PyHandlerPatch>(h) ||
+        py::isinstance<PyHandlerStepPatch>(h) ||
+        py::isinstance<PyHandlerPolyCollection>(h))
+        marker = int(plot::LegendMarker::Square);
+    return [pts, marker](const plot::IPlot& p) {
+        auto es = p.legendEntries();
+        for (auto& e : es) {
+            if (pts != -1) e.points = pts;
+            if (marker >= 0) e.marker = plot::LegendMarker(marker);
+        }
+        return es;
+    };
+}
+
+/// mpl Legend._default_handler_map — lazily seeded so the handler
+/// classes (bound in the legend_handler submodule) exist by first use.
+static py::dict& legendDefaultHandlerMap() {
+    static auto* m = new py::dict();
+    if (py::len(*m) == 0) {
+        auto vp = py::module_::import("volcanoplot");
+        auto lh = vp.attr("legend_handler");
+        auto bi = py::module_::import("builtins");
+        auto colls = vp.attr("collections");
+        auto container = vp.attr("container");
+        (*m)[bi.attr("tuple")] = lh.attr("HandlerTuple")();
+        (*m)[vp.attr("Line2D")] = lh.attr("HandlerLine2D")();
+        (*m)[vp.attr("Patch")] = lh.attr("HandlerPatch")();
+        (*m)[colls.attr("LineCollection")] =
+            lh.attr("HandlerLineCollection")();
+        (*m)[colls.attr("CircleCollection")] =
+            lh.attr("HandlerCircleCollection")();
+        if (py::hasattr(colls, "RegularPolyCollection"))
+            (*m)[colls.attr("RegularPolyCollection")] =
+                lh.attr("HandlerRegularPolyCollection")();
+        (*m)[vp.attr("PathCollection")] =
+            lh.attr("HandlerPathCollection")();
+        (*m)[colls.attr("PolyCollection")] =
+            lh.attr("HandlerPolyCollection")();
+        (*m)[vp.attr("ErrorbarContainer")] =
+            lh.attr("HandlerErrorbar")();
+        (*m)[vp.attr("StemContainer")] = lh.attr("HandlerStem")();
+    }
+    return *m;
+}
+
 /// Shared mpl legend(**kwargs) → LegendStyle. Handles the full kwarg
 /// set for both ax.legend and fig.legend. `inheritFc`/`inheritEc` are
 /// the colors mpl's facecolor='inherit' resolves to (axes/figure patch).
@@ -4106,6 +5132,18 @@ static void applyLegendKwargs(plot::LegendStyle& ls, const py::dict& kw,
         ls.explicitLabels.clear();
         for (auto l : v.cast<py::sequence>())
             ls.explicitLabels.push_back(l.cast<std::string>());
+    }
+    // mpl handler_map={ArtistClass: handler}: route each key through
+    // the native per-typeid handler table.
+    if (auto v = get("handler_map"); !v.is_none()) {
+        auto d = v.cast<py::dict>();
+        for (auto [k, h] : d) {
+            auto key = py::reinterpret_borrow<py::object>(k);
+            auto hv = py::reinterpret_borrow<py::object>(h);
+            auto fn = legendHandlerFn(hv);
+            for (auto t : legendKeyTypes(key))
+                ls.handlerMap[t] = fn;
+        }
     }
     setI(ls.ncols, "ncols");
     setI(ls.ncols, "ncol");   // mpl legacy alias
@@ -6111,19 +7149,24 @@ PYBIND11_MODULE(volcanoplot, m) {
              py::arg("s"))
         .def("add_axes",
              [](const std::shared_ptr<PyFigure>& f,
-                const py::object& rect) {
+                const py::object& rect, const py::object& projection) {
                  // mpl fig.add_axes([left, bottom, width, height]) in
                  // figure fractions; add_axes() → default full axes.
-                 if (rect.is_none())
-                     return wrapAxes(f, f->addAxes());
-                 auto r = rect.cast<std::vector<float>>();
-                 if (r.size() != 4)
-                     throw std::invalid_argument(
-                         "add_axes: rect must be [left, bottom, w, h]");
-                 return wrapAxes(
-                     f, f->addAxesFraction(r[0], r[1], r[2], r[3]));
+                 PyAxes ax = rect.is_none()
+                     ? wrapAxes(f, f->addAxes())
+                     : [&] {
+                         auto r = rect.cast<std::vector<float>>();
+                         if (r.size() != 4)
+                             throw std::invalid_argument(
+                                 "add_axes: rect must be [left, bottom, w, h]");
+                         return wrapAxes(
+                             f, f->addAxesFraction(r[0], r[1], r[2], r[3]));
+                     }();
+                 if (!projection.is_none())
+                     ax.ax->setProjection(projNameFrom(projection));
+                 return typedAxes(ax);
              },
-             py::arg("rect") = py::none())
+             py::arg("rect") = py::none(), py::arg("projection") = py::none())
         .def("add_axes_fraction",
              [](const std::shared_ptr<PyFigure>& f, float l, float b,
                 float w, float h) {
@@ -6145,8 +7188,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                      ax.gsKeepAlive = ss->gs;
                      if (!projection.is_none())
                          ax.ax->setProjection(
-                             projection.cast<std::string>());
-                     return ax;
+                             projNameFrom(projection));
+                     return typedAxes(ax);
                  }
                  uint32_t nrows, ncols, index;
                  if (a.is_none()) {
@@ -6173,14 +7216,12 @@ PYBIND11_MODULE(volcanoplot, m) {
                  // the existing axes (mpl add_subplot dedup).
                  uint32_t r = (index - 1) / ncols, col = (index - 1) % ncols;
                  auto ax = subplotAt(f, nrows, ncols, r, col,
-                                     projection.is_none()
-                                         ? ""
-                                         : projection.cast<std::string>());
+                                     projNameFrom(projection));
                  if (!sharex.is_none())
                      ax.ax->shareX(*sharex.cast<PyAxes>().ax);
                  if (!sharey.is_none())
                      ax.ax->shareY(*sharey.cast<PyAxes>().ax);
-                 return ax;
+                 return typedAxes(ax);
              },
              py::arg("nrows") = py::none(),
              py::arg("ncols") = py::none(),
@@ -6531,7 +7572,12 @@ PYBIND11_MODULE(volcanoplot, m) {
                          py::reinterpret_borrow<py::object>(args[1]);
                  applyLegendKwargs(ls, kwd, f->fig().style().faceColor,
                                    f->fig().style().edgeColor);
-                 return PyLegend{f, nullptr};
+                 PyLegend leg{f, nullptr};
+                 if (kwd.contains("handles"))
+                     for (auto h : kwd["handles"].cast<py::sequence>())
+                         leg.origHandles.append(
+                             py::reinterpret_borrow<py::object>(h));
+                 return leg;
              },
              "Figure-level legend collecting all axes' handles.")
         .def("tight_layout", [](PyFigure& f) {
@@ -7784,6 +8830,20 @@ PYBIND11_MODULE(volcanoplot, m) {
              });
 
     // ── mpl ticker: Locator / Formatter hierarchies ──
+    // mpl TickHelper bookkeeping — axis/view/data interval + locs state
+    // kept in a side table so every Locator/Formatter gets it.
+    struct TickerState {
+        py::object axis;
+        double vmin = 0.0, vmax = 1.0;
+        double dvmin = 0.0, dvmax = 1.0;
+        py::object locs;
+    };
+    static auto* tickerStates =
+        new std::unordered_map<const void*, TickerState>();
+    auto tsFor = [](const void* p) -> TickerState& {
+        return (*tickerStates)[p];
+    };
+
     py::class_<plot::Locator, std::shared_ptr<plot::Locator>>(m,
                                                             "Locator")
         // mpl Locator.tick_values(vmin, vmax): floats for numeric
@@ -7803,13 +8863,180 @@ PYBIND11_MODULE(volcanoplot, m) {
              },
              py::arg("vmin"), py::arg("vmax"))
         .def("__call__",
-             [](const plot::Locator& l) {
-                 // mpl uses the bound axis's view interval; our
-                 // locators are axis-agnostic — use the unit interval.
-                 return l.tickValuesD(0.0, 1.0);
-             });
+             [tsFor](const plot::Locator& l) {
+                 auto& ts = tsFor(&l);
+                 return l.tickValuesD(ts.vmin, ts.vmax);
+             })
+        .def_property("axis",
+             [tsFor](const plot::Locator& l) -> py::object {
+                 auto& a = tsFor(&l).axis;
+                 return a.ptr() ? a : py::none();
+             },
+             [tsFor](plot::Locator& l, const py::object& a) {
+                 tsFor(&l).axis = a;
+             })
+        .def("set_axis",
+             [tsFor](plot::Locator& l, const py::object& a) {
+                 tsFor(&l).axis = a;
+             }, py::arg("axis"))
+        .def("set_view_interval",
+             [tsFor](plot::Locator& l, double vmin, double vmax) {
+                 tsFor(&l).vmin = vmin;
+                 tsFor(&l).vmax = vmax;
+             }, py::arg("vmin"), py::arg("vmax"))
+        .def("set_data_interval",
+             [tsFor](plot::Locator& l, double vmin, double vmax) {
+                 tsFor(&l).dvmin = vmin;
+                 tsFor(&l).dvmax = vmax;
+             }, py::arg("vmin"), py::arg("vmax"))
+        .def("view_limits",
+             [tsFor](const plot::Locator& l, double vmin, double vmax) {
+                 auto& ts = tsFor(&l);
+                 // mpl Locator.view_limits(vmin, vmax) — union with the
+                 // stored interval, clamped to finite bounds.
+                 if (!std::isfinite(vmin) && !std::isfinite(vmax))
+                     return std::pair{ts.vmin, ts.vmax};
+                 return std::pair{std::min(ts.vmin, vmin),
+                                  std::max(ts.vmax, vmax)};
+             },
+             py::arg("vmin") = -std::numeric_limits<double>::infinity(),
+             py::arg("vmax") = std::numeric_limits<double>::infinity())
+        .def("pan",
+             [tsFor](plot::Locator& l, int numsteps) {
+                 auto& ts = tsFor(&l);
+                 // mpl: step the view interval by numsteps ticks of the
+                 // current stride.
+                 auto ticks = l.tickValuesD(ts.vmin, ts.vmax);
+                 if (ticks.size() < 2) return;
+                 double stride = ticks[1] - ticks[0];
+                 ts.vmin += numsteps * stride;
+                 ts.vmax += numsteps * stride;
+             }, py::arg("numsteps"))
+        .def("zoom",
+             [tsFor](plot::Locator& l, const std::string& direction) {
+                 auto& ts = tsFor(&l);
+                 // mpl: step the view interval by the tick stride
+                 // ("in" zooms toward the data center).
+                 auto ticks = l.tickValuesD(ts.vmin, ts.vmax);
+                 if (ticks.size() < 2) return;
+                 double stride = ticks[1] - ticks[0];
+                 if (direction == "in") {
+                     ts.vmin += stride;
+                     ts.vmax -= stride;
+                 } else if (direction == "out") {
+                     ts.vmin -= stride;
+                     ts.vmax += stride;
+                 } else
+                     throw std::invalid_argument(
+                         "direction must be 'in' or 'out'");
+             }, py::arg("direction"))
+        .def("refresh",
+             [tsFor](plot::Locator& l) {
+                 // mpl: re-read the axis interval; a no-op without one.
+             })
+        .def("raise_if_exceeds",
+             [](const plot::Locator&, const std::vector<double>& locs) {
+                 if (locs.size() > 1000)  // mpl ticker.MAXTICKS
+                     throw std::runtime_error(
+                         std::format(
+                             "Locator attempting to generate {} ticks "
+                             "([{}, ..., {}]), which exceeds "
+                             "Locator.MAXTICKS (1000).",
+                             locs.size(), locs.front(), locs.back()));
+                 return locs;
+             }, py::arg("locs"))
+        .def("set_params",
+             [](plot::Locator&, const py::kwargs&) {
+                 // base mpl Locator.set_params() is a no-op.
+             })
+        .def_static("nonsingular",
+             [](double v0, double v1) {
+                 // mpl ticker.nonsingular: expand zero-width views.
+                 if (v0 == v1) {
+                     v0 -= 0.001 * std::abs(v0);
+                     v1 += 0.001 * std::abs(v1);
+                     if (v0 == v1) { v0 = -1.0; v1 = 1.0; }
+                 }
+                 if (v0 > v1) std::swap(v0, v1);
+                 return std::pair{v0, v1};
+             },
+             py::arg("vmin"), py::arg("vmax"));
+
     py::class_<plot::Formatter, std::shared_ptr<plot::Formatter>>(
-        m, "Formatter");
+        m, "Formatter")
+        .def("__call__",
+             [](const plot::Formatter& f, double x,
+                const py::object& pos) {
+                 std::string s = f.format(float(x), pos.is_none()
+                     ? 0 : pos.cast<int>());
+                 // mpl __call__ wraps in fix_minus (unicode minus).
+                 if (f.unicodeMinus()) {
+                     std::string out;
+                     for (size_t i = 0; i < s.size(); ++i)
+                         if (s[i] == '-') out += "\xe2\x88\x92";
+                         else out += s[i];
+                     return out;
+                 }
+                 return s;
+             }, py::arg("x"), py::arg("pos") = py::none())
+        .def("format_ticks",
+             [](plot::Formatter& f,
+                const std::vector<float>& values) {
+                 f.setLocs(std::span(values));
+                 py::list out;
+                 for (size_t i = 0; i < values.size(); ++i)
+                     out.append(f.format(values[i], int(i)));
+                 return out;
+             }, py::arg("values"))
+        .def("format_data",
+             [](const plot::Formatter& f, double value) {
+                 return f.format(float(value), 0);
+             }, py::arg("value"))
+        .def("format_data_short",
+             [](const plot::Formatter&, double value) {
+                 return py::str(py::float_(value));
+             }, py::arg("value"))
+        .def("get_offset",
+             [](const plot::Formatter& f) { return f.offsetText(); })
+        .def_property("axis",
+             [tsFor](const plot::Formatter& f) -> py::object {
+                 auto& a = tsFor(&f).axis;
+                 return a.ptr() ? a : py::none();
+             },
+             [tsFor](plot::Formatter& f, const py::object& a) {
+                 tsFor(&f).axis = a;
+             })
+        .def("set_axis",
+             [tsFor](plot::Formatter& f, const py::object& a) {
+                 tsFor(&f).axis = a;
+             }, py::arg("axis"))
+        .def("set_view_interval",
+             [tsFor](plot::Formatter& f, double vmin, double vmax) {
+                 tsFor(&f).vmin = vmin;
+                 tsFor(&f).vmax = vmax;
+                 f.setViewInterval(float(vmin), float(vmax));
+             }, py::arg("vmin"), py::arg("vmax"))
+        .def("set_data_interval",
+             [tsFor](plot::Formatter& f, double vmin, double vmax) {
+                 tsFor(&f).dvmin = vmin;
+                 tsFor(&f).dvmax = vmax;
+             }, py::arg("vmin"), py::arg("vmax"))
+        .def("set_locs",
+             [](plot::Formatter& f, const std::vector<float>& locs) {
+                 f.setLocs(std::span(locs));
+             }, py::arg("locs"))
+        .def("set_params",
+             [](plot::Formatter&, const py::kwargs&) {})
+        .def_static("fix_minus",
+             [](const std::string& s) {
+                 // mpl Formatter.fix_minus: '-' → U+2212 (unicode_minus
+                 // rcParam is always on here).
+                 std::string out;
+                 for (char c : s)
+                     if (c == '-') out += "\xe2\x88\x92";
+                     else out += c;
+                 return out;
+             }, py::arg("s"));
 
     py::class_<plot::NullLocator, plot::Locator,
                std::shared_ptr<plot::NullLocator>>(m, "NullLocator")
@@ -13015,10 +14242,14 @@ class LinearSegmentedColormap:
              py::arg("point"))
         .def_property_readonly("vertices",
              [](const plot::Path& p) {
-                 std::vector<std::pair<float,float>> v;
-                 v.reserve(p.vertices.size());
-                 for (auto q : p.vertices) v.push_back({q.x, q.y});
-                 return v;
+                 // mpl Path.vertices → (N, 2) float ndarray.
+                 py::array_t<float> a({p.vertices.size(), size_t(2)});
+                 auto r = a.mutable_unchecked<2>();
+                 for (size_t i = 0; i < p.vertices.size(); ++i) {
+                     r(i, 0) = p.vertices[i].x;
+                     r(i, 1) = p.vertices[i].y;
+                 }
+                 return a;
              });
     // mpl Path code constants (Path.MOVETO etc.).
     {
@@ -13561,20 +14792,36 @@ class LinearSegmentedColormap:
 
     // mpl Spine — visibility proxy for ax.spines['top'].
     py::class_<PySpine>(m, "Spine")
+        // mpl Spine(axes, spine_type, path, **kwargs)
+        .def(py::init([](const PyAxes& a, const std::string& spine_type,
+                         const py::object& path, const py::kwargs& kw) {
+                 PySpine s{a.owner, a.ax, spine_type, spine_type};
+                 if (!path.is_none()) s.props_["_path"] = path;
+                 return s;
+             }),
+             py::arg("axes"), py::arg("spine_type"), py::arg("path"))
         .def("set_visible",
              [](PySpine& s, bool v) {
-                 s.ax->setSpineVisible(s.side, v);
+                 if (auto* sp = s.spec()) {
+                     sp->visible = v; s.ax->touch();
+                 } else
+                     s.props_["_visible"] = py::bool_(v);
              },
              py::arg("visible"))
         .def("get_visible",
              [](const PySpine& s) {
-                 return s.ax->spines().side(s.side).visible;
+                 if (auto* sp = s.spec()) return sp->visible;
+                 return !s.props_.contains("_visible") ||
+                        s.props_["_visible"].cast<bool>();
              })
         // mpl Spine.set_position(('data'|'axes'|'outward', amount))
         // or the 'center'/'zero' shortcuts.
         .def("set_position",
              [](PySpine& s, const py::object& pos) {
-                 auto& sp = s.ax->spine(s.side);
+                 auto* spp = s.spec();
+                 if (!spp) throw std::invalid_argument(
+                     "set_position requires a standard spine_type");
+                 auto& sp = *spp;
                  auto setMode = [&](plot::Axes::SpineSpec::PosMode m,
                                     float amt) {
                      sp.posMode = m; sp.posAmount = amt;
@@ -13614,7 +14861,9 @@ class LinearSegmentedColormap:
              py::arg("position"))
         .def("get_position",
              [](const PySpine& s) {
-                 const auto& sp = s.ax->spines().side(s.side);
+                 const auto* spp = s.cspec();
+                 if (!spp) return py::make_tuple("outward", 0.0f);
+                 const auto& sp = *spp;
                  if (!sp.positionSet) return py::make_tuple("outward", 0.0f);
                  using M = plot::Axes::SpineSpec::PosMode;
                  const char* m = sp.posMode == M::Data ? "data"
@@ -13623,7 +14872,10 @@ class LinearSegmentedColormap:
              })
         .def("set_bounds",
              [](PySpine& s, const py::object& lo, const py::object& hi) {
-                 auto& sp = s.ax->spine(s.side);
+                 auto* spp = s.spec();
+                 if (!spp) throw std::invalid_argument(
+                     "set_bounds requires a standard spine_type");
+                 auto& sp = *spp;
                  if (lo.is_none() && hi.is_none()) {
                      sp.bounds.reset();
                  } else {
@@ -13634,46 +14886,484 @@ class LinearSegmentedColormap:
              py::arg("low"), py::arg("high"))
         .def("get_bounds",
              [](const PySpine& s) {
-                 const auto& sp = s.ax->spines().side(s.side);
+                 const auto* spp = s.cspec();
+                 if (!spp) return py::make_tuple(py::none(), py::none());
+                 const auto& sp = *spp;
                  if (!sp.bounds) return py::make_tuple(py::none(), py::none());
                  return py::make_tuple(sp.bounds->first, sp.bounds->second);
              })
         .def("set_color",
              [](PySpine& s, const py::object& c) {
-                 s.ax->spine(s.side).color = parseColor(c);
-                 s.ax->touch();
+                 if (auto* sp = s.spec()) {
+                     sp->color = parseColor(c); s.ax->touch();
+                 } else
+                     s.props_["_color"] = c;
              })
         .def("get_color",
-             [](const PySpine& s) {
-                 const auto& sp = s.ax->spines().side(s.side);
-                 return colorToPy(sp.color.value_or(
-                     s.ax->style().xAxis.color));
+             [](const PySpine& s) -> py::object {
+                 if (const auto* sp = s.cspec())
+                     return colorToPy(sp->color.value_or(
+                         s.ax->style().xAxis.color));
+                 return s.props_.contains("_color")
+                     ? py::reinterpret_borrow<py::object>(
+                           s.props_["_color"])
+                     : py::none();
              })
         .def("set_linewidth",
              [](PySpine& s, float w) {
-                 s.ax->spine(s.side).lineWidth = w; s.ax->touch();
+                 if (auto* sp = s.spec()) {
+                     sp->lineWidth = w; s.ax->touch();
+                 } else
+                     s.props_["_linewidth"] = py::float_(w);
              })
         .def("get_linewidth",
              [](const PySpine& s) {
-                 return s.ax->spines().side(s.side).lineWidth.value_or(
-                     s.ax->style().xAxis.lineWidth);
+                 if (const auto* sp = s.cspec())
+                     return sp->lineWidth.value_or(
+                         s.ax->style().xAxis.lineWidth);
+                 return s.props_.contains("_linewidth")
+                     ? s.props_["_linewidth"].cast<float>() : 1.0f;
              })
         .def("set_linestyle",
              [](PySpine& s, const std::string& ls) {
                  auto v = plot::lineStyleFromString(ls);
                  if (!v) throw std::invalid_argument("unrecognized linestyle");
-                 s.ax->spine(s.side).lineStyle = *v;
-                 s.ax->spine(s.side).dashes.clear();
-                 s.ax->touch();
+                 if (auto* sp = s.spec()) {
+                     sp->lineStyle = *v;
+                     sp->dashes.clear();
+                     s.ax->touch();
+                 } else
+                     s.props_["_linestyle"] = py::str(ls);
              })
         .def("set_dashes",
              [](PySpine& s, const py::object& seq) {
-                 auto& sp = s.ax->spine(s.side);
-                 sp.dashes.clear();
-                 for (auto d : seq.cast<py::sequence>())
-                     sp.dashes.push_back(d.cast<float>());
+                 if (auto* sp = s.spec()) {
+                     sp->dashes.clear();
+                     for (auto d : seq.cast<py::sequence>())
+                         sp->dashes.push_back(d.cast<float>());
+                     s.ax->touch();
+                 } else
+                     s.props_["_dashes"] = seq;
+             })
+        // ── mpl spines.Spine depth ───────────────────────────────────
+        .def_property_readonly("spine_type",
+             [](const PySpine& s) { return s.stype(); })
+        .def_property_readonly("side",
+             [](const PySpine& s) { return s.side; })
+        .def_property_readonly("axes",
+             [](PySpine& s) -> py::object {
+                 return s.ax ? py::cast(PyAxes{s.owner, s.ax})
+                             : py::none();
+             })
+        .def_property_readonly("figure",
+             [](PySpine& s) { return s.owner; })
+        .def("set_patch_arc",
+             [](PySpine& s, std::pair<float,float> center, float radius,
+                float theta1, float theta2) {
+                 auto* sp = s.spec();
+                 if (!sp) throw std::invalid_argument(
+                     "arc spines require a standard spine_type");
+                 sp->arc = plot::Axes::SpineSpec::ArcSpec{
+                     center.first, center.second, radius, theta1, theta2};
+                 s.spineType = "arc";
                  s.ax->touch();
+             },
+             py::arg("center"), py::arg("radius"), py::arg("theta1"),
+             py::arg("theta2"))
+        .def("set_patch_circle",
+             [](PySpine& s, std::pair<float,float> center, float radius) {
+                 auto* sp = s.spec();
+                 if (!sp) throw std::invalid_argument(
+                     "circular spines require a standard spine_type");
+                 sp->arc = plot::Axes::SpineSpec::ArcSpec{
+                     center.first, center.second, radius, 0.0f, 360.0f};
+                 s.spineType = "circle";
+                 s.ax->touch();
+             },
+             py::arg("center"), py::arg("radius"))
+        .def("set_patch_line",
+             [](PySpine& s) {
+                 if (auto* sp = s.spec()) {
+                     sp->arc.reset();
+                     s.ax->touch();
+                 }
+             })
+        .def_static("linear_spine",
+             [](const PyAxes& a, const std::string& spine_type,
+                const py::kwargs& kw) {
+                 PySpine s{a.owner, a.ax, spine_type, spine_type};
+                 if (kw) {
+                     if (kw.contains("color"))
+                         s.ax->spine(spine_type).color =
+                             parseColor(kw["color"]);
+                     if (kw.contains("linewidth"))
+                         s.ax->spine(spine_type).lineWidth =
+                             kw["linewidth"].cast<float>();
+                     a.ax->touch();
+                 }
+                 return s;
+             },
+             py::arg("axes"), py::arg("spine_type"))
+        .def_static("arc_spine",
+             [](const PyAxes& a, const std::string& spine_type,
+                std::pair<float,float> center, float radius,
+                float theta1, float theta2, const py::kwargs& kw) {
+                 PySpine s{a.owner, a.ax, spine_type, "arc"};
+                 if (auto* sp = s.spec()) {
+                     sp->arc = plot::Axes::SpineSpec::ArcSpec{
+                         center.first, center.second, radius,
+                         theta1, theta2};
+                     a.ax->touch();
+                 }
+                 return s;
+             },
+             py::arg("axes"), py::arg("spine_type"), py::arg("center"),
+             py::arg("radius"), py::arg("theta1"), py::arg("theta2"))
+        .def_static("circular_spine",
+             [](const PyAxes& a, std::pair<float,float> center,
+                float radius, const py::kwargs& kw) {
+                 PySpine s{a.owner, a.ax, "circle", "circle"};
+                 return s;
+             },
+             py::arg("axes"), py::arg("center"), py::arg("radius"))
+        .def("get_spine_transform",
+             [](PySpine& s) {
+                 auto id = std::make_shared<plot::IdentityTransform>();
+                 if (s.side == "left" || s.side == "right")
+                     return plot::blendedTransformFactory(
+                         id, s.ax->transData());
+                 if (s.side == "bottom" || s.side == "top")
+                     return plot::blendedTransformFactory(
+                         s.ax->transData(), id);
+                 throw std::invalid_argument(
+                     "unknown spine_type '" + s.stype() + "'");
+             })
+        .def("get_patch_transform",
+             [](PySpine& s) {
+                 // mpl _patch_transform scales the unit path onto the
+                 // axes bbox.
+                 ensureLayout(*s.owner);
+                 const auto& r = s.ax->rect;
+                 return plot::Affine2D{float(r.width), 0, 0,
+                                       float(r.height),
+                                       float(r.x), float(r.y)};
+             })
+        .def("get_path",
+             [](PySpine& s) {
+                 if (s.spineType == "arc" || s.spineType == "circle") {
+                     auto a = s.spec() && s.spec()->arc
+                         ? *s.spec()->arc
+                         : plot::Axes::SpineSpec::ArcSpec{};
+                     std::vector<plot::Point2D> v;
+                     float span = a.theta2 - a.theta1;
+                     int n = std::max(8, int(std::abs(span) / 2.0f));
+                     for (int i = 0; i <= n; ++i) {
+                         float th = (a.theta1 + span * float(i) /
+                                     float(n)) * 0.017453292519943295f;
+                         v.push_back({std::cos(th), std::sin(th)});
+                     }
+                     return plot::Path(std::move(v));
+                 }
+                 // mpl: unit segment along the spine axis.
+                 if (s.side == "left" || s.side == "right")
+                     return plot::Path({{0.f, 0.f}, {0.f, 1.f}});
+                 return plot::Path({{0.f, 0.f}, {1.f, 0.f}});
+             })
+        .def("get_verts",
+             [](PySpine& s) {
+                 py::list out;
+                 if (!s.ax) return out;
+                 ensureLayout(*s.owner);
+                 const auto& r = s.ax->rect;
+                 float x0 = float(r.x), y0 = float(r.y);
+                 float x1 = x0 + float(r.width);
+                 float y1 = y0 + float(r.height);
+                 if (s.spec() && s.spec()->arc) {
+                     const auto& a = *s.spec()->arc;
+                     float span = a.theta2 - a.theta1;
+                     int n = std::max(8, int(std::abs(span) / 2.0f));
+                     for (int i = 0; i <= n; ++i) {
+                         float th = (a.theta1 + span * float(i) /
+                                     float(n)) * 0.017453292519943295f;
+                         float fx = a.cx + a.radius * 0.5f * std::cos(th);
+                         float fy = a.cy + a.radius * 0.5f * std::sin(th);
+                         out.append(py::make_tuple(
+                             x0 + fx * float(r.width),
+                             y1 - fy * float(r.height)));
+                     }
+                     return out;
+                 }
+                 if (!s.spec()) return out;
+                 auto g = s.ax->spineLine(s.side, r);
+                 bool horiz = s.side == "top" || s.side == "bottom";
+                 out.append(py::make_tuple(
+                     horiz ? g.from : g.pos, horiz ? g.pos : g.from));
+                 out.append(py::make_tuple(
+                     horiz ? g.to : g.pos, horiz ? g.pos : g.to));
+                 return out;
+             })
+        .def("get_extents",
+             [](PySpine& s) {
+                 // mpl Spine.get_extents → tight bbox of the verts.
+                 py::list vs = py::cast(s).attr("get_verts")()
+                     .cast<py::list>();
+                 if (py::len(vs) == 0) return PyBbox{};
+                 double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+                 for (auto v : vs) {
+                     auto t = v.cast<py::tuple>();
+                     double x = t[0].cast<double>(),
+                            y = t[1].cast<double>();
+                     x0 = std::min(x0, x); y0 = std::min(y0, y);
+                     x1 = std::max(x1, x); y1 = std::max(y1, y);
+                 }
+                 return PyBbox{x0, y0, x1, y1};
              });
+
+    // ── mpl spines.Spines — ax.spines MutableMapping ─────────────────
+    // __getitem__ supports str, list (→SpinesProxy), [:] (→SpinesProxy)
+    // and rejects tuple indexing like mpl.
+    py::class_<PySpines>(m, "Spines")
+        .def("__getitem__",
+             [](PySpines& sp, const py::object& key) -> py::object {
+                 if (py::isinstance<py::list>(key)) {
+                     std::vector<std::string> ks;
+                     std::vector<std::string> missing;
+                     for (auto k : key) {
+                         auto s = k.cast<std::string>();
+                         if (!spHasSide(sp, s))
+                             missing.push_back(s);
+                         ks.push_back(s);
+                     }
+                     if (!missing.empty())
+                         throw py::key_error(missing.front());
+                     PySpinesProxy p;
+                     p.owner = sp.owner; p.ax = sp.ax;
+                     p.subset = ks; p.proxy = true;
+                     if (sp.ax == nullptr)
+                         for (auto& s : ks)
+                             if (sp.standalone.contains(s.c_str()))
+                                 p.standalone[s.c_str()] =
+                                     sp.standalone[s.c_str()];
+                     return py::cast(p);
+                 }
+                 if (py::isinstance<py::tuple>(key))
+                     throw std::invalid_argument(
+                         "Multiple spines must be passed as a single "
+                         "list");
+                 if (py::isinstance<py::slice>(key)) {
+                     auto sl = key.cast<py::slice>();
+                     Py_ssize_t start, stop, step, len;
+                     if (!sl.compute(Py_ssize_t(sp.sides().size()),
+                                     &start, &stop, &step, &len))
+                         throw py::error_already_set();
+                     if (step != 1 || len != Py_ssize_t(sp.sides().size()))
+                         throw std::invalid_argument(
+                             "Spines does not support slicing except "
+                             "for the fully open slice [:] to access "
+                             "all spines.");
+                     PySpinesProxy p;
+                     p.owner = sp.owner; p.ax = sp.ax;
+                     p.standalone = sp.standalone; p.proxy = true;
+                     return py::cast(p);
+                 }
+                 auto s = key.cast<std::string>();
+                 if (sp.ax == nullptr) {
+                     if (!sp.standalone.contains(s.c_str()))
+                         throw py::key_error(s);
+                     return py::reinterpret_borrow<py::object>(
+                         sp.standalone[s.c_str()]);
+                 }
+                 auto& ex = spinesExtraMap()[sp.ax];
+                 bool inSubset = sp.subset.empty() ||
+                     std::ranges::find(sp.subset, s) != sp.subset.end();
+                 if (!inSubset) throw py::key_error(s);
+                 if (ex.custom.contains(s.c_str()))
+                     return py::reinterpret_borrow<py::object>(
+                         ex.custom[s.c_str()]);
+                 if (ex.removed.count(s) ||
+                     !spHasSide(sp, s))
+                     throw py::key_error(s);
+                 return py::cast(PySpine{sp.owner, sp.ax, s, s});
+             })
+        .def("__setitem__",
+             [](PySpines& sp, const std::string& key,
+                const py::object& value) {
+                 if (sp.ax == nullptr) {
+                     sp.standalone[key.c_str()] = value;
+                     return;
+                 }
+                 auto& ex = spinesExtraMap()[sp.ax];
+                 ex.removed.erase(key);
+                 static const std::set<std::string> kSides =
+                     {"left", "right", "bottom", "top"};
+                 if (kSides.count(key)) {
+                     // Re-adding a standard side restores it; a
+                     // PySpine bound to the same side stays native.
+                     sp.ax->setSpineVisible(key, true);
+                     if (!(py::isinstance<PySpine>(value) &&
+                           value.cast<PySpine>().ax == sp.ax &&
+                           value.cast<PySpine>().side == key))
+                         ex.custom[key.c_str()] = value;
+                     else if (ex.custom.contains(key.c_str()))
+                         ex.custom.attr("__delitem__")(key);
+                 } else {
+                     ex.custom[key.c_str()] = value;
+                 }
+             })
+        .def("__delitem__",
+             [](PySpines& sp, const std::string& key) {
+                 if (sp.ax == nullptr) {
+                     if (!sp.standalone.contains(key.c_str()))
+                         throw py::key_error(key);
+                     sp.standalone.attr("__delitem__")(key);
+                     return;
+                 }
+                 auto& ex = spinesExtraMap()[sp.ax];
+                 if (ex.custom.contains(key.c_str())) {
+                     ex.custom.attr("__delitem__")(key);
+                     return;
+                 }
+                 if (!spHasSide(sp, key))
+                     throw py::key_error(key);
+                 ex.removed.insert(key);
+                 sp.ax->setSpineVisible(key, false);
+             })
+        .def("__iter__",
+             [](PySpines& sp) {
+                 py::list ks;
+                 for (auto& s : sp.sides()) ks.append(s);
+                 return ks.attr("__iter__")();
+             })
+        .def("__len__",
+             [](PySpines& sp) { return sp.sides().size(); })
+        .def("__contains__",
+             [](PySpines& sp, const std::string& key) {
+                 return spHasSide(sp, key);
+             })
+        .def("keys", [](PySpines& sp) {
+                 py::list ks;
+                 for (auto& s : sp.sides()) ks.append(s);
+                 return ks;
+             })
+        .def("values", [](PySpines& sp) {
+                 py::list vs;
+                 auto m = py::cast(sp);
+                 for (auto& s : sp.sides()) vs.append(m[s.c_str()]);
+                 return vs;
+             })
+        .def("items", [](PySpines& sp) {
+                 py::list vs;
+                 auto m = py::cast(sp);
+                 for (auto& s : sp.sides())
+                     vs.append(py::make_tuple(s, m[s.c_str()]));
+                 return vs;
+             })
+        .def("get", [](PySpines& sp, const std::string& key,
+                       const py::object& def) -> py::object {
+                 if (spHasSide(sp, key))
+                     return py::cast(sp).attr("__getitem__")(key);
+                 return def;
+             }, py::arg("key"), py::arg("default") = py::none())
+        .def("pop", [](PySpines& sp, const std::string& key,
+                       const py::object& def) -> py::object {
+                 if (!spHasSide(sp, key)) {
+                     if (def.is_none()) throw py::key_error(key);
+                     return def;
+                 }
+                 auto v = py::cast(sp).attr("__getitem__")(key);
+                 py::cast(sp).attr("__delitem__")(key);
+                 return v;
+             }, py::arg("key"), py::arg("default") = py::none())
+        .def("popitem", [](PySpines& sp) {
+                 auto ks = sp.sides();
+                 if (ks.empty()) throw py::key_error("popitem(): empty");
+                 auto& k = ks.back();
+                 auto m = py::cast(sp);
+                 auto v = m.attr("__getitem__")(k);
+                 m.attr("__delitem__")(k);
+                 return py::make_tuple(k, v);
+             })
+        .def("setdefault", [](PySpines& sp, const std::string& key,
+                              const py::object& def) -> py::object {
+                 auto m = py::cast(sp);
+                 if (!spHasSide(sp, key)) {
+                     m.attr("__setitem__")(key,
+                         def.is_none() ? py::none() : def);
+                     return def.is_none() ? py::none() : def;
+                 }
+                 return m.attr("__getitem__")(key);
+             }, py::arg("key"), py::arg("default") = py::none())
+        .def("update", [](PySpines& sp, const py::dict& d) {
+                 auto m = py::cast(sp);
+                 for (auto [k, v] : d)
+                     m.attr("__setitem__")(k, v);
+             }, py::arg("other"))
+        .def("clear", [](PySpines& sp) {
+                 auto m = py::cast(sp);
+                 for (auto& s : sp.sides()) m.attr("__delitem__")(s);
+             })
+        .def_static("from_dict",
+             [](const py::dict& d) {
+                 PySpines sp{nullptr, nullptr, {}, py::dict(d), false};
+                 return sp;
+             }, py::arg("d"))
+        .def(py::init([](const py::kwargs& kw) {
+                 PySpines sp{nullptr, nullptr, {}, py::dict(), false};
+                 if (kw)
+                     for (auto [k, v] : kw)
+                         sp.standalone[py::cast<std::string>(k).c_str()]
+                             = py::reinterpret_borrow<py::object>(v);
+                 return sp;
+             }));
+
+    // mpl spines.SpinesProxy — shares the parent's mapping (mutations
+    // propagate); ours shares the Axes-backed side table.
+    py::class_<PySpinesProxy>(m, "SpinesProxy")
+        .def(py::init([](const py::object& spine_dict) {
+                 PySpinesProxy p;
+                 if (py::isinstance<PySpines>(spine_dict)) {
+                     auto s = spine_dict.cast<PySpines>();
+                     p.owner = s.owner; p.ax = s.ax;
+                     p.standalone = s.standalone;
+                     p.subset = s.sides();
+                     p.proxy = true;
+                 } else if (py::isinstance<py::dict>(spine_dict)) {
+                     p.standalone = spine_dict.cast<py::dict>();
+                     p.proxy = true;
+                 }
+                 return p;
+             }), py::arg("spine_dict"))
+        .def("__getitem__", [](PySpinesProxy& p, const py::object& k) {
+                 return py::cast(static_cast<PySpines&>(p))
+                     .attr("__getitem__")(k);
+             })
+        .def("__len__", [](PySpinesProxy& p) {
+                 return p.sides().size();
+             })
+        .def("__iter__", [](PySpinesProxy& p) {
+                 py::list ks;
+                 for (auto& s : p.sides()) ks.append(s);
+                 return ks.attr("__iter__")();
+             })
+        .def("__contains__", [](PySpinesProxy& p, const std::string& k) {
+                 return spHasSide(p, k);
+             });
+
+    // mpl matplotlib.spines submodule.
+    {
+        auto sm = m.def_submodule("spines");
+        sm.attr("Spine") = m.attr("Spine");
+        sm.attr("Spines") = m.attr("Spines");
+        sm.attr("SpinesProxy") = m.attr("SpinesProxy");
+        sm.attr("Spine").attr("arc_spine") =
+            m.attr("Spine").attr("arc_spine");
+        // mpl: Spines is a collections.abc.MutableMapping.
+        py::exec(R"PY(
+import collections.abc as _vp_sp_abc
+_vp_sp_abc.MutableMapping.register(Spines)
+del _vp_sp_abc
+)PY", sm.attr("__dict__"));
+    }
 
     // mpl Text artist (ax.text result; ax.texts children).
     py::class_<PyText>(m, "Text")
@@ -14838,6 +16528,33 @@ class LinearSegmentedColormap:
                  return PyGridSpec{s.owner, std::move(nested), s.gs};
              },
              py::arg("nrows"), py::arg("ncols"));
+    py::class_<PyLegendText>(m, "LegendText")
+        .def("get_text", [](const PyLegendText& t) { return t.label; })
+        .def("set_text",
+             [](PyLegendText& t, const std::string& s) {
+                 t.label = s;
+                 auto& ls = t.ls();
+                 if (t.writable && ls.explicitHandles &&
+                     t.index < ls.explicitHandles->size())
+                     (*ls.explicitHandles)[t.index].label = s;
+                 if (t.index < ls.explicitLabels.size())
+                     ls.explicitLabels[t.index] = s;
+                 t.touch();
+             },
+             py::arg("s"))
+        .def("__repr__",
+             [](const PyLegendText& t) {
+                 return std::format("Text('{}')", t.label);
+             })
+        .def("get_position", [](const PyLegendText&) {
+            return std::pair{0.0f, 0.0f};
+        })
+        .def_property("text",
+                      [](const PyLegendText& t) { return t.label; },
+                      [](PyLegendText& t, const std::string& s) {
+                          t.label = s; t.touch();
+                      });
+
     py::class_<PyLegend>(m, "Legend")
         .def("set_visible",
              [](PyLegend& l, bool v) { l.ls().visible = v; l.touch(); })
@@ -14869,20 +16586,22 @@ class LinearSegmentedColormap:
              [](PyLegend& l) { return l.ls().title; })
         .def("get_texts",
              [](PyLegend& l) {
-                 // mpl legend.get_texts() → label strings (Text artists
-                 // are transient here — expose the resolved labels).
+                 // mpl legend.get_texts() → Text artists over the labels.
                  py::list out;
                  auto& ls = l.ls();
+                 size_t i = 0;
+                 auto append = [&](const std::string& s, bool writable) {
+                     const std::string& lab =
+                         i < ls.explicitLabels.size() ? ls.explicitLabels[i] : s;
+                     out.append(PyLegendText{l.owner, l.ax, i++, lab, writable});
+                 };
                  if (ls.explicitHandles)
                      for (auto& h : *ls.explicitHandles)
-                         out.append(h.label);
+                         append(h.label, true);
                  else if (l.ax)
                      for (auto& p : l.ax->plots())
                          for (auto& h : p->legendEntries())
-                             out.append(h.label);
-                 for (size_t i = 0;
-                      i < ls.explicitLabels.size() && i < py::len(out); ++i)
-                     out[i] = py::str(ls.explicitLabels[i]);
+                             append(h.label, false);
                  return out;
              })
         .def("set_loc",
@@ -14911,7 +16630,625 @@ class LinearSegmentedColormap:
                  }
                  l.touch();
              },
-             py::arg("bbox"));
+             py::arg("bbox"))
+        .def("get_bbox_to_anchor",
+             [](PyLegend& l) {
+                 auto& ls = l.ls();
+                 return PyBbox{ls.anchorX < 0 ? 0.0 : ls.anchorX,
+                               ls.anchorY < 0 ? 0.0 : ls.anchorY,
+                               1.0, 1.0};
+             })
+        .def("set_frame_on",
+             [](PyLegend& l, bool b) { l.ls().frameOn = b; l.touch(); },
+             py::arg("b"))
+        .def("get_frame_on",
+             [](PyLegend& l) { return l.ls().frameOn; })
+        .def("get_frame",
+             [](PyLegend& l) { return PyLegendFrame{l}; })
+        .def("get_window_extent",
+             [](PyLegend& l) {
+                 // mpl Legend.get_window_extent → display-space Bbox.
+                 if (l.ax) {
+                     ensureLayout(*l.owner);
+                     auto b = l.ax->legendBox();
+                     return PyBbox{double(b.x), double(b.y),
+                                   double(b.x) + double(b.width),
+                                   double(b.y) + double(b.height)};
+                 }
+                 return PyBbox{};
+             })
+        // mpl legend.legendHandles — the source artist handles.
+        .def_property_readonly("legendHandles",
+             [](PyLegend& l) { return l.origHandles; })
+        .def_property_readonly("legend_handles",
+             [](PyLegend& l) { return l.origHandles; })
+        .def_property_readonly("legendPatch",
+             [](PyLegend& l) { return py::cast(PyLegendFrame{l}); })
+        .def_property_readonly("axes",
+             [](PyLegend& l) -> py::object {
+                 return l.ax ? py::cast(PyAxes{l.owner, l.ax}) : py::none();
+             })
+        .def_property_readonly("figure",
+             [](PyLegend& l) { return l.owner; })
+        .def("get_children",
+             [](PyLegend& l) {
+                 py::list out;
+                 out.append(py::cast(PyLegendFrame{l}));
+                 for (auto t : l.origHandles) out.append(t);
+                 return out;
+             })
+        // mpl Legend.get_lines/get_patches — legend_handles filtered
+        // by artist type.
+        .def("get_lines",
+             [](PyLegend& l) {
+                 py::list out;
+                 for (auto h : l.origHandles)
+                     if (py::isinstance<PyLine2D>(h)) out.append(h);
+                 return out;
+             })
+        .def("get_patches",
+             [](PyLegend& l) {
+                 py::list out;
+                 for (auto h : l.origHandles)
+                     if (py::isinstance<PyPatch>(h)) out.append(h);
+                 return out;
+             })
+        // mpl Legend handler-map surface.
+        .def("get_legend_handler_map",
+             [](PyLegend& l) -> py::object {
+                 // mpl: {**default, **custom} if custom else default.
+                 if (l.handlerMapObj.is_none())
+                     return legendDefaultHandlerMap();
+                 py::dict merged(legendDefaultHandlerMap());
+                 merged.attr("update")(l.handlerMapObj);
+                 return merged;
+             })
+        .def("set_legend_handler_map",
+             [](PyLegend& l, const py::object& hm) {
+                 l.handlerMapObj = hm;
+                 auto& ls = l.ls();
+                 ls.handlerMap.clear();
+                 if (!hm.is_none())
+                     for (auto [k, h] : hm.cast<py::dict>()) {
+                         auto fn = legendHandlerFn(
+                             py::reinterpret_borrow<py::object>(h));
+                         for (auto t : legendKeyTypes(
+                                  py::reinterpret_borrow<py::object>(k)))
+                             ls.handlerMap[t] = fn;
+                     }
+                 l.touch();
+             }, py::arg("handler_map"))
+        .def_static("get_legend_handler",
+             [](const py::dict& map, const py::object& orig)
+                 -> py::object {
+                 // mpl: exact key, then per-MRO lookup.
+                 if (map.contains(orig)) return map[orig];
+                 for (auto t : py::list(
+                          orig.attr("__class__").attr("mro")()))
+                     if (map.contains(t))
+                         return map[t];
+                 return py::none();
+             },
+             py::arg("legend_handler_map"), py::arg("orig_handle"))
+        .def_static("get_default_handler_map",
+             []() { return legendDefaultHandlerMap(); })
+        .def_static("set_default_handler_map",
+             [](const py::dict& hm) {
+                 // mpl replaces the map reference outright.
+                 auto& m = legendDefaultHandlerMap();
+                 m.attr("clear")();
+                 m.attr("update")(hm);
+             }, py::arg("handler_map"))
+        .def_static("update_default_handler_map",
+             [](const py::dict& hm) {
+                 legendDefaultHandlerMap().attr("update")(hm);
+             }, py::arg("handler_map"));
+    {
+        py::dict codes;
+        codes["best"] = 0; codes["upper right"] = 1;
+        codes["upper left"] = 2; codes["lower left"] = 3;
+        codes["lower right"] = 4; codes["right"] = 5;
+        codes["center left"] = 6; codes["center right"] = 7;
+        codes["lower center"] = 8; codes["upper center"] = 9;
+        codes["center"] = 10;
+        m.attr("Legend").attr("codes") = codes;
+    }
+
+    // mpl Legend.legendPatch — frame artist with the legend's box
+    // styling; mpl FancyBboxPatch surface.
+    py::class_<PyLegendFrame>(m, "LegendFrame")
+        .def("set_facecolor",
+             [](PyLegendFrame& f, const py::object& c) {
+                 f.ls().faceColor = parseColor(c); f.touch();
+             }, py::arg("color"))
+        .def("get_facecolor",
+             [](PyLegendFrame& f) -> py::object {
+                 py::list cs = colorsToPy({f.ls().faceColor});
+                 return py::reinterpret_borrow<py::object>(cs[0]);
+             })
+        .def("set_fc",
+             [](PyLegendFrame& f, const py::object& c) {
+                 f.ls().faceColor = parseColor(c); f.touch();
+             }, py::arg("color"))
+        .def("set_facecolors",
+             [](PyLegendFrame& f, const py::object& c) {
+                 f.ls().faceColor = parseColor(c); f.touch();
+             }, py::arg("c"))
+        .def("set_edgecolor",
+             [](PyLegendFrame& f, const py::object& c) {
+                 f.ls().edgeColor = parseColor(c); f.touch();
+             }, py::arg("color"))
+        .def("get_edgecolor",
+             [](PyLegendFrame& f) -> py::object {
+                 py::list cs = colorsToPy({f.ls().edgeColor});
+                 return py::reinterpret_borrow<py::object>(cs[0]);
+             })
+        .def("set_ec",
+             [](PyLegendFrame& f, const py::object& c) {
+                 f.ls().edgeColor = parseColor(c); f.touch();
+             }, py::arg("color"))
+        .def("set_alpha",
+             [](PyLegendFrame& f, const py::object& a) {
+                 f.ls().frameAlpha = a.is_none() ? 1.0f : a.cast<float>();
+                 f.touch();
+             }, py::arg("alpha"))
+        .def("set_visible",
+             [](PyLegendFrame& f, bool v) {
+                 f.ls().frameOn = v; f.touch();
+             }, py::arg("b"))
+        .def("get_visible",
+             [](PyLegendFrame& f) { return f.ls().frameOn; })
+        .def("set_linewidth",
+             [](PyLegendFrame& f, float w) {
+                 f.props_["linewidth"] = py::float_(w);
+             }, py::arg("w"))
+        .def("get_linewidth",
+             [](const PyLegendFrame& f) {
+                 return f.props_.contains("linewidth")
+                     ? f.props_["linewidth"].cast<float>() : 1.0f;
+             })
+        .def("set_boxstyle",
+             [](PyLegendFrame& f, const std::string& s) {
+                 f.ls().fancyBox = s != "square";
+                 f.touch();
+             }, py::arg("boxstyle"))
+        .def("set_figure", [](PyLegendFrame&) {})
+        .def("set_clip_box", [](PyLegendFrame&, const py::object&) {},
+             py::arg("clipbox"))
+        .def("set_clip_path",
+             [](PyLegendFrame&, const py::object& a,
+                const py::object& b) {},
+             py::arg("path"), py::arg("transform") = py::none())
+        .def("set_transform", [](PyLegendFrame&, const py::object&) {},
+             py::arg("t"))
+        .def("remove", [](PyLegendFrame& f) { f.ls().visible = false; })
+        .def("get_window_extent",
+             [](PyLegendFrame& f) {
+                 if (f.leg.ax) {
+                     ensureLayout(*f.leg.owner);
+                     auto b = f.leg.ax->legendBox();
+                     if (b.width <= 0) {
+                         // mpl needs a draw for extents; legendBox is
+                         // populated during drawLegend.
+                         f.leg.owner->renderer()->renderFrame(
+                             f.leg.owner->fig());
+                         b = f.leg.ax->legendBox();
+                     }
+                     return PyBbox{double(b.x), double(b.y),
+                                   double(b.x) + double(b.width),
+                                   double(b.y) + double(b.height)};
+                 }
+                 return PyBbox{};
+             });
+
+    // ── mpl matplotlib.legend + matplotlib.legend_handler ────────────
+    {
+        auto lm = m.def_submodule("legend");
+        lm.attr("Legend") = m.attr("Legend");
+        py::class_<PyDraggableLegend>(lm, "DraggableLegend")
+            .def(py::init([](const py::object& legend, bool use_blit,
+                             const std::string& update) {
+                     return PyDraggableLegend{legend, use_blit, update};
+                 }),
+                 py::arg("legend"), py::arg("use_blit") = false,
+                 py::arg("update") = "loc")
+            .def_readonly("ref_legend", &PyDraggableLegend::legend)
+            .def_readonly("use_blit", &PyDraggableLegend::useBlit)
+            .def_readonly("update", &PyDraggableLegend::update)
+            .def_readonly("got_artist", &PyDraggableLegend::gotArtist)
+            .def("finalize_offset", [](PyDraggableLegend&) {
+                // mpl: apply the accumulated drag displacement to the
+                // legend's loc/bbox; our legend().draggable already
+                // tracks dragOffset.
+            });
+
+        auto lh = m.def_submodule("legend_handler");
+        py::class_<PyHandlerBase, std::shared_ptr<PyHandlerBase>>
+            hb(lh, "HandlerBase");
+        hb.def(py::init([](float xpad, float ypad,
+                           const py::object& update_func) {
+                   auto h = std::make_shared<PyHandlerBase>();
+                   h->xpad = xpad; h->ypad = ypad;
+                   h->updateFunc = update_func;
+                   return h;
+               }),
+               py::arg("xpad") = 0.0f, py::arg("ypad") = 0.0f,
+               py::arg("update_func") = py::none())
+          .def("legend_artist",
+               [](py::object self, const py::object& legend,
+                  const py::object& orig_handle, float fontsize,
+                  const py::object& handlebox) -> py::object {
+                   // mpl: update_func replaces create_artists.
+                   auto& h = self.cast<PyHandlerBase&>();
+                   if (!h.updateFunc.is_none())
+                       return h.updateFunc(legend, orig_handle,
+                                           fontsize, handlebox);
+                   return self.attr("create_artists")(
+                       legend, orig_handle,
+                       handlebox.attr("xdescent"),
+                       handlebox.attr("ydescent"),
+                       handlebox.attr("width"),
+                       handlebox.attr("height"),
+                       fontsize,
+                       handlebox.attr("_transform"));
+               },
+               py::arg("legend"), py::arg("orig_handle"),
+               py::arg("fontsize"), py::arg("handlebox"))
+          .def("create_artists",
+               [](py::object, const py::object&, const py::object&,
+                  float, float, float, float, float,
+                  const py::object&) -> py::list {
+                   throw std::runtime_error(
+                       "HandlerBase.create_artists() is abstract — "
+                       "use a Handler* subclass");
+               },
+               py::arg("legend"), py::arg("orig_handle"),
+               py::arg("xdescent"), py::arg("ydescent"),
+               py::arg("width"), py::arg("height"),
+               py::arg("fontsize"), py::arg("trans"))
+          .def("update_prop",
+               [](py::object self, const py::object& legend_handle,
+                  const py::object& orig_handle,
+                  const py::object& legend) {
+                   self.attr("_update_prop")(legend_handle, orig_handle);
+                   if (py::hasattr(legend, "_set_artist_props"))
+                       legend.attr("_set_artist_props")(legend_handle);
+                   if (py::hasattr(legend_handle, "set_clip_box"))
+                       legend_handle.attr("set_clip_box")(py::none());
+                   if (py::hasattr(legend_handle, "set_clip_path"))
+                       legend_handle.attr("set_clip_path")(py::none());
+               },
+               py::arg("legend_handle"), py::arg("orig_handle"),
+               py::arg("legend"))
+          .def("_update_prop",
+               [](py::object, const py::object& legend_handle,
+                  const py::object& orig_handle) {
+                   // mpl _update_prop copies visible styling props.
+                   static const char* props[] = {
+                       "color", "linewidth", "linestyle", "marker",
+                       "alpha", "markersize"};
+                   for (const char* p : props) {
+                       std::string g = std::string("get_") + p,
+                                   s = std::string("set_") + p;
+                       if (py::hasattr(orig_handle, g.c_str()) &&
+                           py::hasattr(legend_handle, s.c_str())) {
+                           try {
+                               legend_handle.attr(s.c_str())(
+                                   orig_handle.attr(g.c_str())());
+                           } catch (const py::error_already_set&) {
+                               PyErr_Clear();
+                           }
+                       }
+                   }
+               },
+               py::arg("legend_handle"), py::arg("orig_handle"))
+          .def("adjust_drawing_area",
+               [](const PyHandlerBase& h, const py::object&,
+                  const py::object&, float xdescent, float ydescent,
+                  float width, float height, float fontsize) {
+                   return std::make_tuple(
+                       xdescent - h.xpad * fontsize,
+                       ydescent - h.ypad * fontsize,
+                       width - h.xpad * fontsize,
+                       height - h.ypad * fontsize);
+               },
+               py::arg("legend"), py::arg("orig_handle"),
+               py::arg("xdescent"), py::arg("ydescent"),
+               py::arg("width"), py::arg("height"), py::arg("fontsize"))
+          .def_readwrite("_xpad", &PyHandlerBase::xpad)
+          .def_readwrite("_ypad", &PyHandlerBase::ypad);
+
+        // mpl numpoints-family handlers (share ctor params).
+        auto bindNpoints =
+            [&]<typename T, typename B>(
+                py::class_<T, B, std::shared_ptr<T>>& cls) {
+            // mpl HandlerNpoints(marker_pad=0.3, numpoints=None, **kw)
+            cls.def(py::init([](float marker_pad,
+                                const py::object& numpoints,
+                                float xpad, float ypad,
+                                const py::object& update_func) {
+                        auto h = std::make_shared<T>();
+                        h->markerPad = marker_pad;
+                        h->numpoints = numpoints.is_none()
+                            ? -1 : numpoints.cast<int>();
+                        h->xpad = xpad; h->ypad = ypad;
+                        h->updateFunc = update_func;
+                        return h;
+                    }),
+                    py::arg("marker_pad") = 0.3f,
+                    py::arg("numpoints") = py::none(),
+                    py::kw_only(), py::arg("xpad") = 0.0f,
+                    py::arg("ypad") = 0.0f,
+                    py::arg("update_func") = py::none())
+               .def("create_artists",
+                    [](py::object self, const py::object& legend,
+                       const py::object& orig_handle, float xdescent,
+                       float ydescent, float width, float height,
+                       float fontsize, const py::object& trans) {
+                        py::list out;
+                        out.append(orig_handle);
+                        return out;
+                    },
+                    py::arg("legend"), py::arg("orig_handle"),
+                    py::arg("xdescent"), py::arg("ydescent"),
+                    py::arg("width"), py::arg("height"),
+                    py::arg("fontsize"), py::arg("trans"))
+               .def("get_numpoints",
+                    [](py::object self, const py::object& legend) {
+                        auto& h = self.cast<PyHandlerNpoints&>();
+                        if (h.numpoints >= 0) return h.numpoints;
+                        // mpl None -> legend.numpoints rcParam.
+                        if (py::hasattr(legend, "numpoints"))
+                            return legend.attr("numpoints").cast<int>();
+                        return 1;
+                    }, py::arg("legend"));
+        };
+
+        py::class_<PyHandlerNpoints, PyHandlerBase,
+                   std::shared_ptr<PyHandlerNpoints>> hnp(
+            lh, "HandlerNpoints");
+        bindNpoints(hnp);
+        py::class_<PyHandlerLine2D, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerLine2D>> hl2(lh, "HandlerLine2D");
+        bindNpoints(hl2);
+        py::class_<PyHandlerLine2DCompound, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerLine2DCompound>> hl2c(
+            lh, "HandlerLine2DCompound");
+        bindNpoints(hl2c);
+        py::class_<PyHandlerLineCollection, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerLineCollection>> hlc(
+            lh, "HandlerLineCollection");
+        bindNpoints(hlc);
+        // mpl HandlerNpointsYoffsets(numpoints=None, yoffsets=None, **kw)
+        py::class_<PyHandlerNpointsYoffsets, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerNpointsYoffsets>> hnpy(
+            lh, "HandlerNpointsYoffsets");
+        hnpy.def(py::init([](const py::object& numpoints,
+                             const py::object& yoffsets,
+                             float marker_pad, float xpad, float ypad,
+                             const py::object& update_func) {
+                     auto h = std::make_shared<PyHandlerNpointsYoffsets>();
+                     h->numpoints = numpoints.is_none()
+                         ? -1 : numpoints.cast<int>();
+                     h->yoffsets = yoffsets;
+                     h->markerPad = marker_pad;
+                     h->xpad = xpad; h->ypad = ypad;
+                     h->updateFunc = update_func;
+                     return h;
+                 }),
+                 py::arg("numpoints") = py::none(),
+                 py::arg("yoffsets") = py::none(),
+                 py::kw_only(), py::arg("marker_pad") = 0.3f,
+                 py::arg("xpad") = 0.0f, py::arg("ypad") = 0.0f,
+                 py::arg("update_func") = py::none());
+
+        // mpl (yoffsets=None, sizes=None, **kw) collection handlers.
+        auto bindSized =
+            [&]<typename T, typename B>(
+                py::class_<T, B, std::shared_ptr<T>>& cls) {
+            cls.def(py::init([](const py::object& yoffsets,
+                                const py::object& sizes,
+                                float marker_pad,
+                                const py::object& numpoints,
+                                float xpad, float ypad,
+                                const py::object& update_func) {
+                        auto h = std::make_shared<T>();
+                        h->yoffsets = yoffsets;
+                        h->sizes = sizes;
+                        h->markerPad = marker_pad;
+                        h->numpoints = numpoints.is_none()
+                            ? -1 : numpoints.cast<int>();
+                        h->xpad = xpad; h->ypad = ypad;
+                        h->updateFunc = update_func;
+                        return h;
+                    }),
+                    py::arg("yoffsets") = py::none(),
+                    py::arg("sizes") = py::none(),
+                    py::kw_only(), py::arg("marker_pad") = 0.3f,
+                    py::arg("numpoints") = py::none(),
+                    py::arg("xpad") = 0.0f, py::arg("ypad") = 0.0f,
+                    py::arg("update_func") = py::none());
+        };
+        py::class_<PyHandlerRegularPolyCollection,
+                   PyHandlerNpointsYoffsets,
+                   std::shared_ptr<PyHandlerRegularPolyCollection>> hrc(
+            lh, "HandlerRegularPolyCollection");
+        bindSized(hrc);
+        py::class_<PyHandlerCircleCollection,
+                   PyHandlerRegularPolyCollection,
+                   std::shared_ptr<PyHandlerCircleCollection>> hcc(
+            lh, "HandlerCircleCollection");
+        bindSized(hcc);
+        py::class_<PyHandlerPathCollection,
+                   PyHandlerRegularPolyCollection,
+                   std::shared_ptr<PyHandlerPathCollection>> hpc(
+            lh, "HandlerPathCollection");
+        bindSized(hpc);
+        // mpl HandlerErrorbar(xerr_size=0.5, yerr_size=None,
+        //                     marker_pad=0.3, numpoints=None, **kw)
+        py::class_<PyHandlerErrorbar, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerErrorbar>> heb(
+            lh, "HandlerErrorbar");
+        heb.def(py::init([](float xerr_size,
+                            const py::object& yerr_size,
+                            float marker_pad,
+                            const py::object& numpoints,
+                            float xpad, float ypad,
+                            const py::object& update_func) {
+                    auto h = std::make_shared<PyHandlerErrorbar>();
+                    h->xerrSize = xerr_size;
+                    h->yerrSize = yerr_size.is_none()
+                        ? xerr_size : yerr_size.cast<float>();
+                    h->markerPad = marker_pad;
+                    h->numpoints = numpoints.is_none()
+                        ? -1 : numpoints.cast<int>();
+                    h->xpad = xpad; h->ypad = ypad;
+                    h->updateFunc = update_func;
+                    return h;
+                }),
+                py::arg("xerr_size") = 0.5f,
+                py::arg("yerr_size") = py::none(),
+                py::arg("marker_pad") = 0.3f,
+                py::arg("numpoints") = py::none(),
+                py::kw_only(), py::arg("xpad") = 0.0f,
+                py::arg("ypad") = 0.0f,
+                py::arg("update_func") = py::none());
+        // mpl HandlerStem(marker_pad=0.3, numpoints=None, bottom=None,
+        //                 yoffsets=None, **kw)
+        py::class_<PyHandlerStem, PyHandlerNpoints,
+                   std::shared_ptr<PyHandlerStem>> hs(
+            lh, "HandlerStem");
+        hs.def(py::init([](float marker_pad,
+                           const py::object& numpoints,
+                           const py::object& bottom,
+                           const py::object& yoffsets,
+                           float xpad, float ypad,
+                           const py::object& update_func) {
+                   auto h = std::make_shared<PyHandlerStem>();
+                   h->markerPad = marker_pad;
+                   h->numpoints = numpoints.is_none()
+                       ? -1 : numpoints.cast<int>();
+                   h->bottom = bottom.is_none() ? -1.0f
+                                              : bottom.cast<float>();
+                   h->yoffsets = yoffsets;
+                   h->xpad = xpad; h->ypad = ypad;
+                   h->updateFunc = update_func;
+                   return h;
+               }),
+               py::arg("marker_pad") = 0.3f,
+               py::arg("numpoints") = py::none(),
+               py::arg("bottom") = py::none(),
+               py::arg("yoffsets") = py::none(),
+               py::kw_only(), py::arg("xpad") = 0.0f,
+               py::arg("ypad") = 0.0f,
+               py::arg("update_func") = py::none());
+
+        // mpl HandlerPatch(patch_func=None, **kw)
+        py::class_<PyHandlerPatch, PyHandlerBase,
+                   std::shared_ptr<PyHandlerPatch>> hp(lh, "HandlerPatch");
+        hp.def(py::init([](const py::object& patch_func,
+                           float xpad, float ypad,
+                           const py::object& update_func) {
+                   auto h = std::make_shared<PyHandlerPatch>();
+                   h->patchFunc = patch_func;
+                   h->xpad = xpad; h->ypad = ypad;
+                   h->updateFunc = update_func;
+                   return h;
+               }),
+               py::arg("patch_func") = py::none(),
+               py::kw_only(), py::arg("xpad") = 0.0f,
+               py::arg("ypad") = 0.0f,
+               py::arg("update_func") = py::none());
+        // mpl HandlerStepPatch(xpad=0., ypad=0., update_func=None)
+        py::class_<PyHandlerStepPatch, PyHandlerBase,
+                   std::shared_ptr<PyHandlerStepPatch>> hsp(
+            lh, "HandlerStepPatch");
+        hsp.def(py::init([](float xpad, float ypad,
+                            const py::object& update_func) {
+                    auto h = std::make_shared<PyHandlerStepPatch>();
+                    h->xpad = xpad; h->ypad = ypad;
+                    h->updateFunc = update_func;
+                    return h;
+                }),
+                py::arg("xpad") = 0.0f, py::arg("ypad") = 0.0f,
+                py::arg("update_func") = py::none());
+        py::class_<PyHandlerPolyCollection, PyHandlerBase,
+                   std::shared_ptr<PyHandlerPolyCollection>> hpolyc(
+            lh, "HandlerPolyCollection");
+        hpolyc.def(py::init([](float xpad, float ypad,
+                               const py::object& update_func) {
+                       auto h = std::make_shared<PyHandlerPolyCollection>();
+                       h->xpad = xpad; h->ypad = ypad;
+                       h->updateFunc = update_func;
+                       return h;
+                   }),
+                   py::arg("xpad") = 0.0f, py::arg("ypad") = 0.0f,
+                   py::arg("update_func") = py::none());
+        // mpl HandlerTuple(ndivide=1, pad=None, **kw)
+        py::class_<PyHandlerTuple, PyHandlerBase,
+                   std::shared_ptr<PyHandlerTuple>> ht(lh, "HandlerTuple");
+        ht.def(py::init([](int ndivide, const py::object& pad,
+                           float xpad, float ypad,
+                           const py::object& update_func) {
+                   auto h = std::make_shared<PyHandlerTuple>();
+                   h->ndivide = ndivide;
+                   h->pad = pad.is_none()
+                       ? std::optional<float>{}
+                       : std::optional<float>(pad.cast<float>());
+                   h->xpad = xpad; h->ypad = ypad;
+                   h->updateFunc = update_func;
+                   return h;
+               }),
+               py::arg("ndivide") = 1, py::arg("pad") = py::none(),
+               py::kw_only(), py::arg("xpad") = 0.0f,
+               py::arg("ypad") = 0.0f,
+               py::arg("update_func") = py::none())
+           .def("create_artists",
+                [](const PyHandlerTuple& h, const py::object& legend,
+                   const py::object& orig_handle, float xdescent,
+                   float ydescent, float width, float height,
+                   float fontsize, const py::object& trans) {
+                    py::list out;
+                    // mpl: subdivide the handle box into ndivide slices
+                    // and let the tuple's artists each handle one.
+                    if (h.ndivide > 1)
+                        for (auto a : orig_handle)
+                            out.append(a);
+                    else
+                        out.append(orig_handle);
+                    return out;
+                },
+                py::arg("legend"), py::arg("orig_handle"),
+                py::arg("xdescent"), py::arg("ydescent"),
+                py::arg("width"), py::arg("height"),
+                py::arg("fontsize"), py::arg("trans"));
+        lh.def("update_from_first_child",
+               [](const py::object& tgt, const py::object& src) {
+                   // mpl: copy artist props from src's first child.
+                   py::object first = py::none();
+                   if (py::hasattr(src, "get_children")) {
+                       auto kids = src.attr("get_children")();
+                       if (py::len(kids) > 0)
+                           first = py::reinterpret_borrow<py::object>(
+                               kids[py::int_(0)]);
+                   }
+                   if (!first.is_none() &&
+                       py::hasattr(tgt, "update_from"))
+                       tgt.attr("update_from")(first);
+               },
+               py::arg("tgt"), py::arg("src"));
+        // `vp.legend(*args, **kw)` also serves as the plt.legend
+        // pyplot forward: make the submodule itself callable.
+        py::exec(R"PY(
+import types as _vp_lg_types
+class _CallableLegendModule(_vp_lg_types.ModuleType):
+    def __call__(self, *args, **kw):
+        import volcanoplot as _vp
+        return _vp.gca().legend(*args, **kw)
+del _vp_lg_types
+)PY", m.attr("__dict__"));
+        lm.attr("__class__") = m.attr("_CallableLegendModule");
+    }
 
     // mpl cycler.Cycler — buildable via vp.cycler(...) or
     // vp.cycler('color', [...]); supports + (concat) and * (outer product).
@@ -15948,6 +18285,953 @@ class LinearSegmentedColormap:
              py::arg("rescale") = true);
     triMod.attr("TriRefiner") = triMod.attr("UniformTriRefiner");
 
+    // ── mpl matplotlib.mlab — numerical/spectral helpers ────────────
+    {
+        namespace pm = volcano::plot::mlab;
+        auto mm = m.def_submodule("mlab");
+        // mpl _spectral_helper kwarg parsing — supports named windows,
+        // window sequences, window callables (window(np.ones(NFFT)))
+        // and callable detrenders (applied per segment).
+        auto cfgFrom = [](int nfft, float fs,
+                          const py::object& detrend,
+                          const py::object& window, int noverlap,
+                          int pad_to, const py::object& scale_by_freq,
+                          const py::object& mode) {
+            pm::SpectralConfig c;
+            if (nfft > 0) c.nfft = uint32_t(nfft);
+            if (fs > 0) c.Fs = fs;
+            if (!detrend.is_none()) {
+                if (py::isinstance<py::str>(detrend))
+                    c.detrend = pm::detrendKey(
+                        detrend.cast<std::string>());
+                else if (py::hasattr(detrend, "__call__")) {
+                    c.detrendFn = [fn = py::cast<py::function>(detrend)](
+                        std::span<const float> seg) {
+                        return toFloats(fn(py::cast(
+                            std::vector<float>(seg.begin(),
+                                               seg.end()))));
+                    };
+                }
+            }
+            if (!window.is_none()) {
+                if (py::isinstance<py::str>(window))
+                    c.window = window.cast<std::string>();
+                else if (py::hasattr(window, "__call__")) {
+                    std::vector<float> ones(c.nfft, 1.0f);
+                    c.winVals = toFloats(window(py::cast(ones)));
+                } else
+                    c.winVals = toFloats(window);
+            }
+            if (noverlap > 0) c.noverlap = uint32_t(noverlap);
+            if (pad_to > 0) c.padTo = uint32_t(pad_to);
+            if (!scale_by_freq.is_none())
+                c.scaleByFreq = scale_by_freq.cast<bool>();
+            if (!mode.is_none())
+                c.mode = mode.cast<std::string>();
+            return c;
+        };
+        mm.def("detrend_none",
+               [](const py::object& x) {
+                   return pm::detrendNone(toFloats(x));
+               }, py::arg("x"))
+            .def("detrend_mean",
+                 [](const py::object& x) {
+                     return pm::detrendMean(toFloats(x));
+                 }, py::arg("x"))
+            .def("detrend_linear",
+                 [](const py::object& y) {
+                     return pm::detrendLinear(toFloats(y));
+                 }, py::arg("y"))
+            .def("detrend",
+                 [](const py::object& x, const py::object& key,
+                    const py::object& axis) {
+                     (void)axis;
+                     // mpl: key None/'default'/'constant'/'mean' →
+                     // detrend_mean; 'linear' → detrend_linear;
+                     // 'none' → detrend_none; callable → apply.
+                     if (key.is_none() || py::isinstance<py::str>(key)) {
+                         auto k = key.is_none()
+                             ? pm::Detrend::Mean
+                             : pm::detrendKey(
+                                   key.cast<std::string>());
+                         return py::object(py::cast(
+                             pm::detrend(toFloats(x), k)));
+                     }
+                     // Callable key → key(x) (mpl applies it per axis).
+                     return py::object(key(x));
+                 },
+                 py::arg("x"), py::arg("key") = py::none(),
+                 py::arg("axis") = py::none())
+            .def("window_none",
+                 [](const py::object& x) {
+                     return pm::windowNone(toFloats(x));
+                 }, py::arg("x"))
+            .def("window_hanning",
+                 [](const py::object& x) {
+                     return pm::windowHanning(toFloats(x));
+                 }, py::arg("x"))
+            .def("apply_window",
+                 [](const py::object& x, const py::object& window,
+                    int axis, bool return_window) {
+                     (void)axis;
+                     auto xs = toFloats(x);
+                     std::vector<float> w;
+                     if (py::isinstance<py::str>(window))
+                         w = pm::windowByName(
+                             window.cast<std::string>(), xs.size());
+                     else if (py::hasattr(window, "__call__")) {
+                         // mpl: window(np.ones(N)).
+                         std::vector<float> ones(xs.size(), 1.0f);
+                         auto r = window(py::cast(ones));
+                         w = toFloats(r);
+                     } else {
+                         w = toFloats(window);
+                     }
+                     auto out = pm::applyWindow(xs, w);
+                     if (return_window)
+                         return py::object(py::make_tuple(
+                             py::cast(out), py::cast(w)));
+                     return py::object(py::cast(out));
+                 },
+                 py::arg("x"), py::arg("window"),
+                 py::arg("axis") = 0,
+                 py::arg("return_window") = false)
+            .def("stride_windows",
+                 [](const py::object& x, uint32_t n,
+                    const py::object& noverlap, int axis) {
+                     (void)axis;
+                     uint32_t ov = noverlap.is_none()
+                         ? 0u : noverlap.cast<uint32_t>();
+                     auto segs = pm::strideWindows(toFloats(x), n, ov);
+                     py::list out;
+                     for (auto& s : segs) out.append(py::cast(s));
+                     return out;
+                 },
+                 py::arg("x"), py::arg("n"),
+                 py::arg("noverlap") = py::none(), py::arg("axis") = 0)
+            .def("psd",
+                 [cfgFrom](const py::object& x, const py::object& nfft,
+                    const py::object& fs, const py::object& detrend,
+                    const py::object& window,
+                    const py::object& noverlap,
+                    const py::object& pad_to,
+                    const py::object& sides,
+                    const py::object& scale_by_freq) {
+                     auto c = cfgFrom(
+                         nfft.is_none() ? 0 : nfft.cast<int>(),
+                         fs.is_none() ? 0.0f : fs.cast<float>(),
+                         detrend, window,
+                         noverlap.is_none() ? 0 : noverlap.cast<int>(),
+                         pad_to.is_none() ? 0 : pad_to.cast<int>(),
+                         scale_by_freq, py::none());
+                     auto [v, f] = pm::psd(toFloats(x), c);
+                     return py::make_tuple(py::cast(v), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("NFFT") = py::none(),
+                 py::arg("Fs") = py::none(),
+                 py::arg("detrend") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("noverlap") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none(),
+                 py::arg("scale_by_freq") = py::none())
+            .def("csd",
+                 [cfgFrom](const py::object& x, const py::object& y,
+                    const py::object& nfft, const py::object& fs,
+                    const py::object& detrend,
+                    const py::object& window,
+                    const py::object& noverlap,
+                    const py::object& pad_to,
+                    const py::object& sides,
+                    const py::object& scale_by_freq) {
+                     auto c = cfgFrom(
+                         nfft.is_none() ? 0 : nfft.cast<int>(),
+                         fs.is_none() ? 0.0f : fs.cast<float>(),
+                         detrend, window,
+                         noverlap.is_none() ? 0 : noverlap.cast<int>(),
+                         pad_to.is_none() ? 0 : pad_to.cast<int>(),
+                         scale_by_freq, py::none());
+                     auto [v, f] =
+                         pm::csd(toFloats(x), toFloats(y), c);
+                     py::list out;
+                     for (auto& z : v)
+                         out.append(std::complex<double>(
+                             z.real(), z.imag()));
+                     return py::make_tuple(py::object(out), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("y"),
+                 py::arg("NFFT") = py::none(),
+                 py::arg("Fs") = py::none(),
+                 py::arg("detrend") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("noverlap") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none(),
+                 py::arg("scale_by_freq") = py::none())
+            .def("cohere",
+                 [cfgFrom](const py::object& x, const py::object& y,
+                    const py::object& nfft, const py::object& fs,
+                    const py::object& detrend,
+                    const py::object& window, const py::object& noverlap,
+                    const py::object& pad_to,
+                    const py::object& sides,
+                    const py::object& scale_by_freq) {
+                     auto c = cfgFrom(
+                         nfft.is_none() ? 0 : nfft.cast<int>(),
+                         fs.is_none() ? 0.0f : fs.cast<float>(),
+                         detrend, window,
+                         noverlap.is_none() ? 0
+                                            : noverlap.cast<int>(),
+                         pad_to.is_none() ? 0 : pad_to.cast<int>(),
+                         scale_by_freq, py::none());
+                     auto [v, f] =
+                         pm::cohere(toFloats(x), toFloats(y), c);
+                     return py::make_tuple(py::cast(v), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("y"),
+                 py::arg("NFFT") = py::none(),
+                 py::arg("Fs") = py::none(),
+                 py::arg("detrend") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("noverlap") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none(),
+                 py::arg("scale_by_freq") = py::none())
+            .def("specgram",
+                 [cfgFrom](const py::object& x, const py::object& nfft,
+                    const py::object& fs, const py::object& detrend,
+                    const py::object& window,
+                    const py::object& noverlap,
+                    const py::object& pad_to,
+                    const py::object& sides,
+                    const py::object& scale_by_freq,
+                    const py::object& mode) {
+                     auto c = cfgFrom(
+                         nfft.is_none() ? 0 : nfft.cast<int>(),
+                         fs.is_none() ? 0.0f : fs.cast<float>(),
+                         detrend, window,
+                         noverlap.is_none() ? 0 : noverlap.cast<int>(),
+                         pad_to.is_none() ? 0 : pad_to.cast<int>(),
+                         scale_by_freq, mode);
+                     auto r = pm::specgram(toFloats(x), c);
+                     // mpl returns (spectrum, freqs, t) —
+                     // spectrum is numFreqs × numSegs.
+                     py::list rows;
+                     for (uint32_t k = 0; k < r.numFreqs; ++k) {
+                         std::vector<float> row(r.numSegs);
+                         for (uint32_t s = 0; s < r.numSegs; ++s)
+                             row[s] = r.values[
+                                 size_t(k) * r.numSegs + s].real();
+                         rows.append(py::cast(row));
+                     }
+                     return py::make_tuple(py::object(rows),
+                                           py::cast(r.freqs),
+                                           py::cast(r.t));
+                 },
+                 py::arg("x"), py::arg("NFFT") = py::none(),
+                 py::arg("Fs") = py::none(),
+                 py::arg("detrend") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("noverlap") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none(),
+                 py::arg("scale_by_freq") = py::none(),
+                 py::arg("mode") = py::none())
+            .def("magnitude_spectrum",
+                 [](const py::object& x, const py::object& fs,
+                    const py::object& window, const py::object& pad_to,
+                    const py::object& sides) {
+                     (void)sides;
+                     float fsv = fs.is_none() ? 0.0f
+                                            : fs.cast<float>();
+                     int pad = pad_to.is_none() ? 0
+                                                : pad_to.cast<int>();
+                     auto w = window.is_none()
+                         ? std::string("hann")
+                         : window.cast<std::string>();
+                     auto [v, f] = pm::magnitudeSpectrum(
+                         toFloats(x), fsv > 0 ? fsv : 2.0f,
+                         uint32_t(pad), w);
+                     return py::make_tuple(py::cast(v), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("Fs") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none())
+            .def("angle_spectrum",
+                 [](const py::object& x, const py::object& fs,
+                    const py::object& window, const py::object& pad_to,
+                    const py::object& sides) {
+                     (void)sides;
+                     float fsv = fs.is_none() ? 0.0f
+                                            : fs.cast<float>();
+                     int pad = pad_to.is_none() ? 0
+                                                : pad_to.cast<int>();
+                     auto w = window.is_none()
+                         ? std::string("hann")
+                         : window.cast<std::string>();
+                     auto [v, f] = pm::angleSpectrum(
+                         toFloats(x), fsv > 0 ? fsv : 2.0f,
+                         uint32_t(pad), w);
+                     return py::make_tuple(py::cast(v), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("Fs") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none())
+            .def("phase_spectrum",
+                 [](const py::object& x, const py::object& fs,
+                    const py::object& window, const py::object& pad_to,
+                    const py::object& sides) {
+                     (void)sides;
+                     float fsv = fs.is_none() ? 0.0f
+                                            : fs.cast<float>();
+                     int pad = pad_to.is_none() ? 0
+                                                : pad_to.cast<int>();
+                     auto w = window.is_none()
+                         ? std::string("hann")
+                         : window.cast<std::string>();
+                     auto [v, f] = pm::phaseSpectrum(
+                         toFloats(x), fsv > 0 ? fsv : 2.0f,
+                         uint32_t(pad), w);
+                     return py::make_tuple(py::cast(v), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("Fs") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none())
+            .def("complex_spectrum",
+                 [](const py::object& x, const py::object& fs,
+                    const py::object& window, const py::object& pad_to,
+                    const py::object& sides) {
+                     (void)sides;
+                     float fsv = fs.is_none() ? 0.0f
+                                            : fs.cast<float>();
+                     int pad = pad_to.is_none() ? 0
+                                                : pad_to.cast<int>();
+                     auto w = window.is_none()
+                         ? std::string("hann")
+                         : window.cast<std::string>();
+                     auto [v, f] = pm::complexSpectrum(
+                         toFloats(x), fsv > 0 ? fsv : 2.0f,
+                         uint32_t(pad), w);
+                     py::list out;
+                     for (auto& z : v)
+                         out.append(std::complex<double>(
+                             z.real(), z.imag()));
+                     return py::make_tuple(py::object(out), py::cast(f));
+                 },
+                 py::arg("x"), py::arg("Fs") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none())
+            .def("bivariate_normal",
+                 [](const py::object& X, const py::object& Y,
+                    float sigmax, float sigmay, float mux, float muy,
+                    float sigmaxy) {
+                     // mpl takes meshgrid matrices; extract the axis
+                     // vectors (first row of X, first column of Y).
+                     std::vector<float> xs, ys;
+                     auto rows = [](const py::object& M) {
+                         std::vector<std::vector<float>> out;
+                         for (auto r : M) {
+                             std::vector<float> row;
+                             for (auto v : r)
+                                 row.push_back(py::cast<float>(
+                                     py::reinterpret_borrow<
+                                         py::object>(v)));
+                             out.push_back(std::move(row));
+                         }
+                         return out;
+                     };
+                     auto xr = rows(X), yr = rows(Y);
+                     if (!xr.empty()) xs = xr[0];
+                     for (auto& r : yr)
+                         if (!r.empty()) ys.push_back(r[0]);
+                     if (xs.empty() || ys.empty()) {
+                         xs = toFloats(X); ys = toFloats(Y);
+                     }
+                     auto z = pm::bivariateNormal(
+                         xs, ys, sigmax, sigmay, mux, muy, sigmaxy);
+                     py::list out;
+                     for (size_t j = 0; j < ys.size(); ++j)
+                         out.append(py::cast(std::vector<float>(
+                             z.begin() + j * xs.size(),
+                             z.begin() + (j + 1) * xs.size())));
+                     return out;
+                 },
+                 py::arg("X"), py::arg("Y"), py::arg("sigmax") = 1.0f,
+                 py::arg("sigmay") = 1.0f, py::arg("mux") = 0.0f,
+                 py::arg("muy") = 0.0f, py::arg("sigmaxy") = 0.0f)
+            .def("prctile",
+                 [](const py::object& x, const py::object& p) {
+                     auto pv = p.is_none()
+                         ? std::vector<float>{0.f, 25.f, 50.f, 75.f,
+                                              100.f}
+                         : toFloats(p);
+                     return py::cast(
+                         pm::prctile(toFloats(x), pv));
+                 },
+                 py::arg("x"), py::arg("p") = py::none())
+            .def("rk4",
+                 [](const py::object& derivs, const py::object& y0,
+                    const py::object& t) {
+                     auto y0v = toFloats(y0), tv = toFloats(t);
+                     auto f = [&](const std::vector<float>& y,
+                                  float tt) {
+                         auto r = derivs(py::cast(y), tt);
+                         return toFloats(
+                             py::reinterpret_borrow<py::object>(r));
+                     };
+                     auto out = pm::rk4(
+                         std::function<std::vector<float>(
+                             const std::vector<float>&, float)>(f),
+                         y0v, tv);
+                     py::list rows;
+                     for (auto& r : out) rows.append(py::cast(r));
+                     return rows;
+                 },
+                 py::arg("derivs"), py::arg("y0"), py::arg("t"))
+            .def("griddata",
+                 [](const py::object& x, const py::object& y,
+                    const py::object& z, const py::object& xi,
+                    const py::object& yi,
+                    const std::string& interp) {
+                     // mpl mlab.griddata — Delaunay + linear interp
+                     // over the meshgrid(xi, yi). Outside → NaN.
+                     auto xs = toFloats(x), ys = toFloats(y),
+                          zs = toFloats(z);
+                     auto xv = toFloats(xi), yv = toFloats(yi);
+                     PyTriangulation t;
+                     t.x = xs; t.y = ys;
+                     std::vector<plot::Point2D> pts;
+                     pts.reserve(xs.size());
+                     for (size_t i = 0; i < xs.size(); ++i)
+                         pts.push_back({xs[i], ys[i]});
+                     t.tris = plot::delaunay(pts);
+                     PyLinearTriInterpolator li{
+                         std::make_shared<PyTriangulation>(t), zs};
+                     py::list out;
+                     for (float yy : yv) {
+                         py::list row;
+                         for (float xx : xv) {
+                             int tri = li.tri->find(xx, yy);
+                             if (tri < 0) {
+                                 row.append(std::numeric_limits<
+                                            double>::quiet_NaN());
+                             } else {
+                                 auto [a, b, c] = li.plane(
+                                     size_t(tri));
+                                 row.append(a * xx + b * yy + c);
+                             }
+                         }
+                         out.append(row);
+                     }
+                     return out;
+                 },
+                 py::arg("x"), py::arg("y"), py::arg("z"),
+                 py::arg("xi"), py::arg("yi"),
+                 py::arg("interp") = "nn")
+            .def("_spectral_helper",
+                 [cfgFrom](const py::object& x, const py::object& y,
+                    const py::object& nfft, const py::object& fs,
+                    const py::object& detrend,
+                    const py::object& window,
+                    const py::object& noverlap,
+                    const py::object& pad_to,
+                    const py::object& sides,
+                    const py::object& scale_by_freq,
+                    const py::object& mode) {
+                     auto c = cfgFrom(
+                         nfft.is_none() ? 0 : nfft.cast<int>(),
+                         fs.is_none() ? 0.0f : fs.cast<float>(),
+                         detrend, window,
+                         noverlap.is_none() ? 0 : noverlap.cast<int>(),
+                         pad_to.is_none() ? 0 : pad_to.cast<int>(),
+                         scale_by_freq, mode);
+                     auto r = pm::spectralHelper(
+                         toFloats(x),
+                         y.is_none() ? std::vector<float>{}
+                                     : toFloats(y), c);
+                     py::list rows;
+                     for (uint32_t k = 0; k < r.numFreqs; ++k) {
+                         py::list row;
+                         for (uint32_t s = 0; s < r.numSegs; ++s) {
+                             auto z = r.values[
+                                 size_t(k) * r.numSegs + s];
+                             row.append(std::complex<double>(
+                                 z.real(), z.imag()));
+                         }
+                         rows.append(row);
+                     }
+                     return py::make_tuple(py::object(rows),
+                                           py::cast(r.freqs),
+                                           py::cast(r.t));
+                 },
+                 py::arg("x"), py::arg("y") = py::none(),
+                 py::arg("NFFT") = py::none(),
+                 py::arg("Fs") = py::none(),
+                 py::arg("detrend_func") = py::none(),
+                 py::arg("window") = py::none(),
+                 py::arg("noverlap") = py::none(),
+                 py::arg("pad_to") = py::none(),
+                 py::arg("sides") = py::none(),
+                 py::arg("scale_by_freq") = py::none(),
+                 py::arg("mode") = py::none());
+
+        // mpl mlab.PCA — covariance-eigen PCA over numObs × numVars.
+        py::class_<pm::Pca, std::shared_ptr<pm::Pca>>(mm, "PCA")
+            .def(py::init([](const py::object& a) {
+                     // a: rows of observations.
+                     std::vector<std::vector<float>> rows;
+                     for (auto r : a) {
+                         std::vector<float> row;
+                         for (auto v : r)
+                             row.push_back(py::cast<float>(
+                                 py::reinterpret_borrow<py::object>(
+                                     v)));
+                         rows.push_back(std::move(row));
+                     }
+                     if (rows.empty())
+                         throw std::invalid_argument("PCA: empty data");
+                     uint32_t d = uint32_t(rows[0].size());
+                     std::vector<float> flat;
+                     flat.reserve(rows.size() * d);
+                     for (auto& r : rows) {
+                         if (r.size() != d)
+                             throw std::invalid_argument(
+                                 "PCA pages must be rectangular");
+                         flat.insert(flat.end(), r.begin(), r.end());
+                     }
+                     return std::make_shared<pm::Pca>(
+                         pm::pca(flat, d));
+                 }), py::arg("a"))
+            .def_property_readonly("mu",
+                [](const pm::Pca& p) { return p.mu; })
+            .def_property_readonly("sigma",
+                [](const pm::Pca& p) { return p.sigma; })
+            .def_property_readonly("fracs",
+                [](const pm::Pca& p) { return p.fracs; })
+            .def_property_readonly("evals",
+                [](const pm::Pca& p) { return p.evals; })
+            .def_property_readonly("evecs",
+                [](const pm::Pca& p) {
+                    py::list out;
+                    for (auto& r : p.evecs) out.append(py::cast(r));
+                    return out;
+                })
+            .def_property_readonly("s",
+                [](const pm::Pca& p) { return p.evals; })
+            .def("project",
+                [](const pm::Pca& p, const py::object& a) {
+                    std::vector<float> flat;
+                    for (auto r : a)
+                        for (auto v : r)
+                            flat.push_back(py::cast<float>(
+                                py::reinterpret_borrow<py::object>(
+                                    v)));
+                    auto out = p.project(flat);
+                    py::list rows;
+                    uint32_t d = uint32_t(p.mu.size());
+                    for (size_t i = 0; i * d < out.size(); ++i)
+                        rows.append(py::cast(std::vector<float>(
+                            out.begin() + i * d,
+                            out.begin() + (i + 1) * d)));
+                    return rows;
+                }, py::arg("x"))
+            .def("center",
+                [](const pm::Pca& p, const py::object& x) {
+                    py::list out;
+                    for (auto r : x) {
+                        py::list row;
+                        size_t j = 0;
+                        for (auto v : r)
+                            row.append(
+                                py::cast<float>(
+                                    py::reinterpret_borrow<
+                                        py::object>(v)) -
+                                p.mu[j++ % p.mu.size()]);
+                        out.append(row);
+                    }
+                    return out;
+                }, py::arg("x"));
+
+        // mpl mlab.GaussianKDE — scipy gaussian_kde surface.
+        py::class_<pm::GaussianKde, std::shared_ptr<pm::GaussianKde>>
+            kde(mm, "GaussianKDE");
+        kde.def(py::init([](const py::object& dataset,
+                            const py::object& bw_method,
+                            const py::object& weights) {
+                    // scipy convention: dataset is (d, n) — rows are
+                    // dims, columns are points.
+                    std::vector<std::vector<float>> dims;
+                    for (auto r : dataset) {
+                        std::vector<float> row;
+                        for (auto v : r)
+                            row.push_back(py::cast<float>(
+                                py::reinterpret_borrow<py::object>(
+                                    v)));
+                        dims.push_back(std::move(row));
+                    }
+                    if (dims.empty() || dims[0].empty())
+                        throw std::invalid_argument(
+                            "GaussianKDE: empty dataset");
+                    uint32_t d = uint32_t(dims.size());
+                    uint32_t n = uint32_t(dims[0].size());
+                    std::vector<float> flat;
+                    flat.reserve(size_t(n) * d);
+                    for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t j = 0; j < d; ++j) {
+                            if (dims[j].size() != n)
+                                throw std::invalid_argument(
+                                    "GaussianKDE: ragged dataset");
+                            flat.push_back(dims[j][i]);
+                        }
+                    std::vector<float> w;
+                    if (!weights.is_none()) w = toFloats(weights);
+                    auto k = std::make_shared<pm::GaussianKde>(
+                        std::move(flat), d, std::move(w));
+                    if (!bw_method.is_none()) {
+                        if (py::isinstance<py::str>(bw_method)) {
+                            auto s = bw_method.cast<std::string>();
+                            if (s == "scott") k->scottsFactor();
+                            else if (s == "silverman")
+                                k->silvermanFactor();
+                            else
+                                throw std::invalid_argument(
+                                    "bw_method must be 'scott', "
+                                    "'silverman', a scalar, or "
+                                    "callable");
+                        } else if (py::hasattr(bw_method, "__call__"))
+                            k->setBandwidth(
+                                bw_method(k).cast<float>());
+                        else
+                            k->setBandwidth(
+                                bw_method.cast<float>());
+                    }
+                    return k;
+                }),
+                py::arg("dataset"), py::arg("bw_method") = py::none(),
+                py::arg("weights") = py::none())
+            .def("evaluate",
+                [](const pm::GaussianKde& k, const py::object& points) {
+                    std::vector<std::vector<float>> dims;
+                    for (auto r : points) {
+                        std::vector<float> row;
+                        for (auto v : r)
+                            row.push_back(py::cast<float>(
+                                py::reinterpret_borrow<py::object>(
+                                    v)));
+                        dims.push_back(std::move(row));
+                    }
+                    uint32_t d = k.dims();
+                    uint32_t n = uint32_t(dims.empty() ? 0
+                                          : dims[0].size());
+                    std::vector<float> flat;
+                    flat.reserve(size_t(n) * d);
+                    for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t j = 0; j < d; ++j)
+                            flat.push_back(dims[j][i]);
+                    return k.evaluate(flat, n);
+                }, py::arg("points"))
+            .def("__call__",
+                [](const pm::GaussianKde& k, const py::object& points) {
+                    return py::cast(k).attr("evaluate")(points);
+                }, py::arg("points"))
+            .def("pdf",
+                [](const pm::GaussianKde& k, const py::object& x) {
+                    return py::cast(k).attr("evaluate")(x);
+                }, py::arg("x"))
+            .def("logpdf",
+                [](const pm::GaussianKde& k, const py::object& points) {
+                    auto v = py::cast(k).attr("evaluate")(points)
+                        .cast<std::vector<float>>();
+                    std::vector<float> out;
+                    for (float p : v)
+                        out.push_back(std::log(std::max(p, 1e-30f)));
+                    return out;
+                }, py::arg("points"))
+            .def("resample",
+                [](const pm::GaussianKde& k, int size,
+                   const py::object& seed) {
+                    auto v = k.resample(
+                        uint32_t(size),
+                        seed.is_none()
+                            ? 0x9e3779b97f4a7c15ULL
+                            : seed.cast<uint64_t>());
+                    py::list out;
+                    for (uint32_t i = 0; i < uint32_t(size); ++i)
+                        out.append(py::cast(std::vector<float>(
+                            v.begin() + i * k.dims(),
+                            v.begin() + (i + 1) * k.dims())));
+                    return out;
+                },
+                py::arg("size") = 1, py::arg("seed") = py::none())
+            .def("scotts_factor", &pm::GaussianKde::scottsFactor)
+            .def("silverman_factor", &pm::GaussianKde::silvermanFactor)
+            .def("set_bandwidth",
+                [](pm::GaussianKde& k, const py::object& bw) {
+                    if (py::isinstance<py::str>(bw)) {
+                        auto s = bw.cast<std::string>();
+                        if (s == "scott") k.scottsFactor();
+                        else if (s == "silverman") k.silvermanFactor();
+                        else throw std::invalid_argument(
+                            "unknown bw_method");
+                    } else if (py::hasattr(bw, "__call__"))
+                        k.setBandwidth(bw(py::cast(k)).cast<float>());
+                    else
+                        k.setBandwidth(bw.cast<float>());
+                }, py::arg("bw_method"))
+            .def("covariance_factor",
+                [](const pm::GaussianKde& k) { return k.factor(); })
+            .def_property_readonly("factor",
+                [](const pm::GaussianKde& k) { return k.factor(); })
+            .def_property_readonly("covariance",
+                [](const pm::GaussianKde& k) {
+                    py::list out;
+                    uint32_t d = k.dims();
+                    for (uint32_t j = 0; j < d; ++j)
+                        out.append(py::cast(std::vector<float>(
+                            k.covariance().begin() + j * d,
+                            k.covariance().begin() + (j + 1) * d)));
+                    return out;
+                })
+            .def_property_readonly("d", &pm::GaussianKde::dims)
+            .def_property_readonly("n", &pm::GaussianKde::n);
+    }
+
+    // ── mpl matplotlib.markers — MarkerStyle + constants ────────────
+    {
+        auto mk = m.def_submodule("markers");
+        py::class_<PyMarkerStyle, std::shared_ptr<PyMarkerStyle>>
+            msCls(mk, "MarkerStyle");
+        msCls.def(py::init([](const py::object& marker,
+                              const py::object& fillstyle,
+                              const py::object& transform,
+                              const py::object& capstyle,
+                              const py::object& joinstyle) {
+                 auto ms = std::make_shared<PyMarkerStyle>();
+                 markerStyleSet(*ms, marker);
+                 if (!fillstyle.is_none()) {
+                     auto f = plot::markerFillFromString(
+                         fillstyle.cast<std::string>());
+                     if (!f)
+                         throw std::invalid_argument(std::format(
+                             "Unrecognized fillstyle '{}'",
+                             fillstyle.cast<std::string>()));
+                     ms->fill = *f;
+                 }
+                 if (!transform.is_none())
+                     ms->transform =
+                         transform.cast<
+                             std::shared_ptr<plot::Affine2D>>();
+                 if (!capstyle.is_none())
+                     ms->capstyle = capstyle.cast<std::string>();
+                 if (!joinstyle.is_none())
+                     ms->joinstyle = joinstyle.cast<std::string>();
+                 return ms;
+             }),
+             py::arg("marker"), py::arg("fillstyle") = py::none(),
+             py::arg("transform") = py::none(),
+             py::arg("capstyle") = py::none(),
+             py::arg("joinstyle") = py::none())
+            .def("get_marker",
+                [](const PyMarkerStyle& ms) { return ms.spec; })
+            .def("_set_marker",
+                [](PyMarkerStyle& ms, const py::object& marker) {
+                    markerStyleSet(ms, marker);
+                }, py::arg("marker"))
+            .def("set_marker",
+                [](PyMarkerStyle& ms, const py::object& marker) {
+                    markerStyleSet(ms, marker);
+                }, py::arg("marker"))
+            .def("get_fillstyle",
+                [](const PyMarkerStyle& ms) {
+                    switch (ms.fill) {
+                    case plot::MarkerFill::Left: return "left";
+                    case plot::MarkerFill::Right: return "right";
+                    case plot::MarkerFill::Bottom: return "bottom";
+                    case plot::MarkerFill::Top: return "top";
+                    case plot::MarkerFill::None: return "none";
+                    default: return "full";
+                    }
+                })
+            .def("set_fillstyle",
+                [](PyMarkerStyle& ms, const std::string& fs) {
+                    auto f = plot::markerFillFromString(fs);
+                    if (!f)
+                        throw std::invalid_argument(std::format(
+                            "Unrecognized fillstyle '{}'", fs));
+                    ms.fill = *f;
+                }, py::arg("fillstyle"))
+            .def("is_filled",
+                [](const PyMarkerStyle& ms) {
+                    // mpl is_filled: _filled && fillstyle != 'none'.
+                    return mplMarkerSpec(ms).filled &&
+                           ms.fill != plot::MarkerFill::None;
+                })
+            .def("get_path",
+                [](const PyMarkerStyle& ms) {
+                    // mpl get_path returns _path untransformed.
+                    return mplMarkerSpec(ms).path;
+                })
+            .def("get_alt_path",
+                [](const PyMarkerStyle& ms) {
+                    // mpl: _alt_path set for half/unfilled variants of
+                    // filled markers; None otherwise.
+                    auto spec = mplMarkerSpec(ms);
+                    if (spec.altPath)
+                        return py::object(py::cast(*spec.altPath));
+                    return py::object(py::none());
+                })
+            .def("get_transform",
+                [](const PyMarkerStyle& ms) {
+                    auto spec = mplMarkerSpec(ms);
+                    return std::make_shared<plot::Affine2D>(
+                        spec.transform.concat(*ms.transform));
+                })
+            .def("get_alt_transform",
+                [](const PyMarkerStyle& ms) {
+                    // mpl _alt_transform is None for most markers —
+                    // get_alt_transform() then raises AttributeError.
+                    auto spec = mplMarkerSpec(ms);
+                    if (!spec.altTransform)
+                        throw py::attribute_error(
+                            "'NoneType' object has no attribute "
+                            "'frozen'");
+                    return std::make_shared<plot::Affine2D>(
+                        spec.altTransform->concat(*ms.transform));
+                })
+            .def("get_user_transform",
+                [](const PyMarkerStyle& ms) { return ms.transform; })
+            .def("set_user_transform",
+                [](PyMarkerStyle& ms,
+                   std::shared_ptr<plot::Affine2D> t) {
+                    ms.transform = std::move(t);
+                }, py::arg("transform"))
+            .def("get_capstyle",
+                [](const PyMarkerStyle& ms) { return ms.capstyle; })
+            .def("set_capstyle",
+                [](PyMarkerStyle& ms, const std::string& cs) {
+                    static const char* kOk[] = {"butt", "round",
+                                                "projecting"};
+                    bool ok = std::ranges::any_of(kOk, [&](auto s) {
+                        return cs == s;
+                    });
+                    if (!ok)
+                        throw std::invalid_argument(
+                            "capstyle must be 'butt', 'round' or "
+                            "'projecting'");
+                    ms.capstyle = cs;
+                }, py::arg("capstyle"))
+            .def("get_joinstyle",
+                [](const PyMarkerStyle& ms) { return ms.joinstyle; })
+            .def("set_joinstyle",
+                [](PyMarkerStyle& ms, const std::string& js) {
+                    static const char* kOk[] = {"miter", "round",
+                                                "bevel"};
+                    bool ok = std::ranges::any_of(kOk, [&](auto s) {
+                        return js == s;
+                    });
+                    if (!ok)
+                        throw std::invalid_argument(
+                            "joinstyle must be 'miter', 'round' or "
+                            "'bevel'");
+                    ms.joinstyle = js;
+                }, py::arg("joinstyle"))
+            .def("filled",
+                [](const PyMarkerStyle& ms) {
+                    auto out = std::make_shared<PyMarkerStyle>(ms);
+                    out->fill = plot::MarkerFill::Full;
+                    return out;
+                })
+            .def("rotated",
+                [](const PyMarkerStyle& ms,
+                   const py::object& deg, const py::object& rad) {
+                    auto out = std::make_shared<PyMarkerStyle>(ms);
+                    float angle = !deg.is_none()
+                        ? deg.cast<float>()
+                        : (!rad.is_none()
+                               ? rad.cast<float>() *
+                                     (180.0f / 3.14159265358979f)
+                               : 0.0f);
+                    out->transform = std::make_shared<plot::Affine2D>(
+                        ms.transform->concat(
+                            plot::Affine2D::rotateDeg(angle)));
+                    return out;
+                },
+                py::kw_only(), py::arg("deg") = py::none(),
+                py::arg("rad") = py::none())
+            .def("scaled",
+                [](const PyMarkerStyle& ms, float sx,
+                   const py::object& sy) {
+                    auto out = std::make_shared<PyMarkerStyle>(ms);
+                    float y = sy.is_none() ? sx : sy.cast<float>();
+                    out->transform = std::make_shared<plot::Affine2D>(
+                        ms.transform->concat(
+                            plot::Affine2D::scale(sx, y)));
+                    return out;
+                },
+                py::arg("sx"), py::arg("sy") = py::none())
+            .def("transformed",
+                [](const PyMarkerStyle& ms,
+                   std::shared_ptr<plot::Affine2D> t) {
+                    auto out = std::make_shared<PyMarkerStyle>(ms);
+                    out->transform = std::make_shared<plot::Affine2D>(
+                        t->concat(*ms.transform));
+                    return out;
+                }, py::arg("transform"))
+            .def("get_snap_threshold",
+                [](const PyMarkerStyle& ms) {
+                    if (std::isnan(ms.snap))
+                        return py::object(py::none());
+                    return py::object(py::float_(ms.snap));
+                });
+        // mpl class-level tables.
+        {
+            py::dict marks;
+            static const std::pair<const char*, const char*> k[] = {
+                {".", "point"}, {",", "pixel"}, {"o", "circle"},
+                {"v", "triangle_down"}, {"^", "triangle_up"},
+                {"<", "triangle_left"}, {">", "triangle_right"},
+                {"1", "tri_down"}, {"2", "tri_up"}, {"3", "tri_left"},
+                {"4", "tri_right"}, {"8", "octagon"}, {"s", "square"},
+                {"p", "pentagon"}, {"*", "star"}, {"h", "hexagon1"},
+                {"H", "hexagon2"}, {"+", "plus"}, {"x", "x"},
+                {"D", "diamond"}, {"d", "thin_diamond"},
+                {"|", "vline"}, {"_", "hline"}, {"P", "plus_filled"},
+                {"X", "x_filled"},
+                {"None", "nothing"}, {"none", "nothing"},
+                {" ", "nothing"}, {"", "nothing"},
+            };
+            for (auto& [key, name] : k)
+                marks[py::str(key)] = py::str(name);
+            for (int i = 0; i < 12; ++i) {
+                static const char* names[] = {
+                    "tickleft", "tickright", "tickup", "tickdown",
+                    "caretleft", "caretright", "caretup", "caretdown",
+                    "caretleftbase", "caretrightbase",
+                    "caretupbase", "caretdownbase"};
+                marks[py::int_(i)] = py::str(names[i]);
+            }
+            msCls.attr("markers") = marks;
+            msCls.attr("filled_markers") = py::make_tuple(
+                ".", "o", "v", "^", "<", ">", "8", "s", "p", "*",
+                "h", "H", "D", "d", "P", "X");
+            msCls.attr("fillstyles") = py::make_tuple(
+                "full", "left", "right", "bottom", "top", "none");
+        }
+        // mpl module constants (int marker ids for tick/caret types).
+        static const std::pair<const char*, int> kConsts[] = {
+            {"TICKLEFT", 0}, {"TICKRIGHT", 1}, {"TICKUP", 2},
+            {"TICKDOWN", 3}, {"CARETLEFT", 4}, {"CARETRIGHT", 5},
+            {"CARETUP", 6}, {"CARETDOWN", 7}, {"CARETLEFTBASE", 8},
+            {"CARETRIGHTBASE", 9}, {"CARETUPBASE", 10},
+            {"CARETDOWNBASE", 11},
+        };
+        for (auto& [name, v] : kConsts) mk.attr(name) = v;
+    }
+
     py::class_<PyAxes>(m, "Axes")
         // mpl gca()/subplot() return the identical Axes object — expose
         // pointer-identity equality and hashing so `is`-like checks work.
@@ -16731,7 +20015,12 @@ class LinearSegmentedColormap:
                          py::reinterpret_borrow<py::object>(args[1]);
                  applyLegendKwargs(ls, kwd, a.ax->style().faceColor,
                                    a.ax->style().edgeColor);
-                 return PyLegend{a.owner, a.ax};
+                 PyLegend leg{a.owner, a.ax};
+                 if (kwd.contains("handles"))
+                     for (auto h : kwd["handles"].cast<py::sequence>())
+                         leg.origHandles.append(
+                             py::reinterpret_borrow<py::object>(h));
+                 return leg;
              })
         // ── mpl axis() / aspect / margins / inversion ──
         .def("axis",
@@ -18257,13 +21546,10 @@ class LinearSegmentedColormap:
         .def("set_rorigin",
              [](PyAxes& a, float v) { a.ax->setRorigin(v); },
              py::arg("r"))
-        // mpl ax.spines['top'].set_visible(False) — dict-like proxy.
+        // mpl ax.spines — Spines MutableMapping of side → Spine.
         .def_property_readonly("spines",
              [](PyAxes& a) {
-                 py::dict d;
-                 for (const char* s : {"left", "right", "bottom", "top"})
-                     d[s] = PySpine{a.owner, a.ax, s};
-                 return d;
+                 return PySpines{a.owner, a.ax, {}, py::dict(), false};
              })
         // mpl ax.set_prop_cycle: cycler object or key=[values] kwargs.
         .def("set_prop_cycle",
@@ -20089,6 +23375,350 @@ class LinearSegmentedColormap:
     // (the canonical class lives in the animation submodule).
     m.attr("FuncAnimation") = m.attr("animation").attr("FuncAnimation");
 
+    // ── mpl matplotlib.projections (+ .polar + .geo) ─────────────────
+    {
+        auto pm = m.def_submodule("projections");
+        auto polar = pm.def_submodule("polar");
+        auto geo = pm.def_submodule("geo");
+
+        // --- polar module classes ---
+        py::class_<PyPolarAxes, PyAxes> polAx(polar, "PolarAxes");
+        polAx
+            .def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                             const py::object& rect,
+                             const py::kwargs& kw) {
+                     return makeProjAxes<PyPolarAxes>(fig, rect, "polar",
+                                                      kw);
+                 }),
+                 py::arg("fig"), py::arg("rect") = py::none())
+            .def_property_readonly_static(
+                "name", [](py::object) { return "polar"; })
+            // Polar-specific accessors (mpl PolarAxes methods).
+            .def("set_theta_offset",
+                 [](PyAxes& a, float v) { a.ax->setThetaOffset(v); },
+                 py::arg("offset"))
+            .def("get_theta_offset",
+                 [](const PyAxes& a) {
+                     return a.ax->projection().thetaOffset;
+                 })
+            .def("set_theta_direction",
+                 [](PyAxes& a, int d) { a.ax->setThetaDirection(d); },
+                 py::arg("direction"))
+            .def("get_theta_direction",
+                 [](const PyAxes& a) {
+                     return int(a.ax->projection().thetaDir);
+                 })
+            .def("set_theta_zero_location",
+                 [](PyAxes& a, const std::string& loc,
+                    const py::object& offset) {
+                     a.ax->setThetaZeroLocation(loc);
+                     if (!offset.is_none())
+                         a.ax->setThetaOffset(
+                             a.ax->projection().thetaOffset +
+                             offset.cast<float>() * 0.017453292519943295f);
+                 },
+                 py::arg("location"), py::arg("offset") = py::float_(0.0))
+            .def("get_theta_zero_location",
+                 [](const PyAxes& a) {
+                     // mpl maps thetaOffset back to a cardinal letter.
+                     float off = std::fmod(
+                         a.ax->projection().thetaOffset *
+                             57.29577951308232f + 360.0f, 360.0f);
+                     if (std::abs(off) < 1e-3f) return "E";
+                     if (std::abs(off - 90.0f) < 1e-3f) return "N";
+                     if (std::abs(off - 180.0f) < 1e-3f) return "W";
+                     if (std::abs(off - 270.0f) < 1e-3f) return "S";
+                     return "custom";
+                 })
+            .def("set_thetagrids",
+                 [](PyAxes& a, const std::vector<float>& angles,
+                    const py::object& labels, const py::object& fmt,
+                    const py::kwargs& kw) {
+                     a.ax->setThetagrids(angles);
+                 },
+                 py::arg("angles"), py::arg("labels") = py::none(),
+                 py::kw_only(), py::arg("fmt") = py::none())
+            .def("get_thetagrids",
+                 [](const PyAxes& a) { return a.ax->thetagrids(); })
+            .def("set_rgrids",
+                 [](PyAxes& a, const std::vector<float>& radii,
+                    const py::object& labels, const py::object& angle,
+                    const py::object& fmt, const py::kwargs& kw) {
+                     a.ax->setRgrids(radii);
+                 },
+                 py::arg("radii"), py::arg("labels") = py::none(),
+                 py::arg("angle") = py::none(),
+                 py::arg("fmt") = py::none())
+            .def("get_rgrids",
+                 [](const PyAxes& a) { return a.ax->rgrids(); })
+            .def("set_rlabel_position",
+                 [](PyAxes& a, float p) { a.ax->setRlabelPosition(p); },
+                 py::arg("position"))
+            .def("get_rlabel_position",
+                 [](const PyAxes& a) { return a.ax->rlabelPosition(); })
+            .def("set_rmin",
+                 [](PyAxes& a, float v) { a.ax->setRmin(v); },
+                 py::arg("rmin"))
+            .def("get_rmin",
+                 [](const PyAxes& a) { return a.ax->ylim().min; })
+            .def("set_rmax",
+                 [](PyAxes& a, float v) { a.ax->setRmax(v); },
+                 py::arg("rmax"))
+            .def("get_rmax",
+                 [](const PyAxes& a) { return a.ax->ylim().max; })
+            .def("set_rorigin",
+                 [](PyAxes& a, float v) { a.ax->setRorigin(v); },
+                 py::arg("rorigin"))
+            .def("get_rorigin",
+                 [](const PyAxes& a) { return a.ax->ylim().min; })
+            .def("set_rticks",
+                 [](PyAxes& a, const std::vector<float>& ticks,
+                    const py::object& labels, bool minor,
+                    const py::kwargs& kw) { a.ax->setRgrids(ticks); },
+                 py::arg("ticks"), py::arg("labels") = py::none(),
+                 py::kw_only(), py::arg("minor") = false)
+            .def("set_rscale",
+                 [](PyAxes& a, const py::object& s) {
+                     setAxisScale(a, false, s, py::kwargs());
+                 }, py::arg("scale"))
+            .def("set_thetalim",
+                 [](PyAxes& a, const py::kwargs& kw) {
+                     float mn = a.ax->xlim().min, mx = a.ax->xlim().max;
+                     if (kw && kw.contains("thetamin"))
+                         mn = kw["thetamin"].cast<float>() *
+                              0.017453292519943295f;
+                     if (kw && kw.contains("thetamax"))
+                         mx = kw["thetamax"].cast<float>() *
+                              0.017453292519943295f;
+                     a.ax->setXlim(mn, mx);
+                 });
+
+        py::class_<PyProjectionTransform, plot::Transform,
+                   std::shared_ptr<PyProjectionTransform>>(
+            polar, "PolarTransform")
+            .def(py::init([](const py::object& axis, bool use_rmin,
+                             bool apply_theta_transforms,
+                             const py::object& scale_transform) {
+                     auto t = std::make_shared<PyProjectionTransform>();
+                     t->proj.kind = plot::ProjectionKind::Polar;
+                     return t;
+                 }),
+                 py::arg("axis") = py::none(),
+                 py::arg("use_rmin") = true,
+                 py::arg("apply_theta_transforms") = true,
+                 py::arg("scale_transform") = py::none())
+            .def_property_readonly_static(
+                "input_dims", [](py::object) { return 2; })
+            .def_property_readonly_static(
+                "output_dims", [](py::object) { return 2; })
+            .def_property_readonly_static(
+                "is_affine", [](py::object) { return false; });
+        py::class_<PyInvertedPolarTransform, PyProjectionTransform,
+                   std::shared_ptr<PyInvertedPolarTransform>>(
+            polar, "InvertedPolarTransform")
+            .def(py::init([](const py::object& axis, bool use_rmin,
+                             bool apply_theta_transforms,
+                             const py::object& scale_transform) {
+                     auto t = std::make_shared<PyInvertedPolarTransform>();
+                     t->proj.kind = plot::ProjectionKind::Polar;
+                     return t;
+                 }),
+                 py::arg("axis") = py::none(),
+                 py::arg("use_rmin") = true,
+                 py::arg("apply_theta_transforms") = true,
+                 py::arg("scale_transform") = py::none())
+            .def_property_readonly_static(
+                "input_dims", [](py::object) { return 2; })
+            .def_property_readonly_static(
+                "output_dims", [](py::object) { return 2; })
+            .def_property_readonly_static(
+                "is_affine", [](py::object) { return false; });
+        // mpl PolarAffine(scale_transform, limits) → Affine2D scaling
+        // the unit circle to the limits bbox.
+        polar.def("PolarAffine",
+            [](const py::object& scale_transform,
+               const py::object& limits) {
+                auto a = std::make_shared<plot::Affine2D>();
+                if (py::isinstance<PyBbox>(limits)) {
+                    auto& b = limits.cast<PyBbox&>();
+                    float w = (b.x1 - b.x0) * 0.5f;
+                    float h = (b.y1 - b.y0) * 0.5f;
+                    a->a = w; a->d = h;
+                    a->e = (b.x0 + b.x1) * 0.5f;
+                    a->f = (b.y0 + b.y1) * 0.5f;
+                }
+                return a;
+            },
+            py::arg("scale_transform"), py::arg("limits"));
+        py::class_<PyThetaFormatter, plot::Formatter,
+                   std::shared_ptr<PyThetaFormatter>>(polar, "ThetaFormatter")
+            .def(py::init<>());
+        py::class_<PyThetaLocator, plot::Locator,
+                   std::shared_ptr<PyThetaLocator>>(polar, "ThetaLocator")
+            .def(py::init([](const py::object& base) {
+                     if (py::isinstance<plot::Locator>(base))
+                         return std::make_shared<PyThetaLocator>(
+                             base.cast<std::shared_ptr<plot::Locator>>());
+                     return std::make_shared<PyThetaLocator>();
+                 }),
+                 py::arg("base") = py::none());
+        py::class_<PyRadialLocator, plot::Locator,
+                   std::shared_ptr<PyRadialLocator>>(polar, "RadialLocator")
+            .def(py::init([](const py::object& base,
+                             const py::object& axes) {
+                     return std::make_shared<PyRadialLocator>(
+                         py::isinstance<plot::Locator>(base)
+                             ? base.cast<std::shared_ptr<plot::Locator>>()
+                             : nullptr);
+                 }),
+                 py::arg("base"), py::arg("axes") = py::none());
+        // mpl polar.ThetaAxis/RadialAxis/ThetaTick/RadialTick are Axis/
+        // Tick subclasses — alias the registered types.
+        polar.attr("ThetaAxis") = m.attr("Axis");
+        polar.attr("RadialAxis") = m.attr("Axis");
+        polar.attr("ThetaTick") = m.attr("Tick");
+        polar.attr("RadialTick") = m.attr("Tick");
+        polar.attr("Spine") = m.attr("Spine");
+
+        // --- geo module classes ---
+        py::class_<PyGeoAxes, PyAxes> geoAx(geo, "GeoAxes");
+        geoAx.def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                              const py::object& rect,
+                              const py::kwargs& kw) {
+                      return makeProjAxes<PyGeoAxes>(fig, rect,
+                                                   "aitoff", kw);
+                  }),
+                  py::arg("fig"), py::arg("rect") = py::none())
+             // mpl GeoAxes.set_longitude_grid/set_latitude_grid —
+             // fixed degree-step tick positions in radians.
+             .def("set_longitude_grid",
+                  [](PyAxes& a, float degrees) {
+                      constexpr float kD2R = 0.017453292519943295f;
+                      std::vector<float> t;
+                      for (float d = -180.0f + degrees; d < 180.0f;
+                           d += degrees)
+                          t.push_back(d * kD2R);
+                      a.ax->style().xAxis.ticks.positions = t;
+                  }, py::arg("degrees"))
+             .def("set_latitude_grid",
+                  [](PyAxes& a, float degrees) {
+                      constexpr float kD2R = 0.017453292519943295f;
+                      std::vector<float> t;
+                      for (float d = -90.0f + degrees; d < 90.0f;
+                           d += degrees)
+                          t.push_back(d * kD2R);
+                      a.ax->style().yAxis.ticks.positions = t;
+                  }, py::arg("degrees"))
+             .def("set_longitude_grid_ends",
+                  [](PyAxes& a, float degrees) {
+                      a.ax->setLongitudeGridEnds(degrees);
+                  }, py::arg("degrees"));
+        py::class_<PyAitoffAxes, PyGeoAxes> aitAx(geo, "AitoffAxes");
+        aitAx.def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                              const py::object& rect,
+                              const py::kwargs& kw) {
+                      return makeProjAxes<PyAitoffAxes>(fig, rect,
+                                                      "aitoff", kw);
+                  }),
+                  py::arg("fig"), py::arg("rect") = py::none())
+               .def_property_readonly_static(
+                   "name", [](py::object) { return "aitoff"; });
+        py::class_<PyHammerAxes, PyGeoAxes> hamAx(geo, "HammerAxes");
+        hamAx.def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                              const py::object& rect,
+                              const py::kwargs& kw) {
+                      return makeProjAxes<PyHammerAxes>(fig, rect,
+                                                      "hammer", kw);
+                  }),
+                  py::arg("fig"), py::arg("rect") = py::none())
+               .def_property_readonly_static(
+                   "name", [](py::object) { return "hammer"; });
+        py::class_<PyLambertAxes, PyGeoAxes> lamAx(geo, "LambertAxes");
+        lamAx.def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                              const py::object& rect,
+                              const py::kwargs& kw) {
+                      return makeProjAxes<PyLambertAxes>(fig, rect,
+                                                         "lambert", kw);
+                  }),
+                  py::arg("fig"), py::arg("rect") = py::none())
+               .def_property_readonly_static(
+                   "name", [](py::object) { return "lambert"; });
+        py::class_<PyMollweideAxes, PyGeoAxes> molAx(geo, "MollweideAxes");
+        molAx.def(py::init([](const std::shared_ptr<PyFigure>& fig,
+                              const py::object& rect,
+                              const py::kwargs& kw) {
+                      return makeProjAxes<PyMollweideAxes>(fig, rect,
+                                                           "mollweide", kw);
+                  }),
+                  py::arg("fig"), py::arg("rect") = py::none())
+               .def_property_readonly_static(
+                   "name", [](py::object) { return "mollweide"; });
+
+        // --- registry ---
+        py::class_<PyProjectionRegistry>(pm, "ProjectionRegistry")
+            .def(py::init<>())
+            .def("register",
+                 [](PyProjectionRegistry&, const py::args& args) {
+                     for (auto a : args) {
+                         auto cls = py::reinterpret_borrow<py::object>(a);
+                         std::string n =
+                             py::cast<std::string>(cls.attr("name"));
+                         PyProjectionRegistry::types()[n] = cls;
+                     }
+                 })
+            .def("get_projection_class",
+                 [](PyProjectionRegistry&, const std::string& name) {
+                     auto& t = PyProjectionRegistry::types();
+                     auto it = t.find(name);
+                     if (it == t.end()) throw py::key_error(name);
+                     return it->second;
+                 }, py::arg("name"))
+            .def("get_projection_names",
+                 [](PyProjectionRegistry&) {
+                     py::list out;
+                     for (auto& [k, v] : PyProjectionRegistry::types())
+                         out.append(k);
+                     return out;
+                 });
+        pm.def("register_projection",
+               [](const py::object& cls) {
+                   PyProjectionRegistry::types()[
+                       py::cast<std::string>(cls.attr("name"))] = cls;
+               }, py::arg("projection_class"));
+        pm.def("get_projection_class",
+               [](const std::string& name) {
+                   auto& t = PyProjectionRegistry::types();
+                   auto it = t.find(name);
+                   if (it == t.end()) throw py::key_error(name);
+                   return it->second;
+               }, py::arg("projection"));
+        pm.def("get_projection_names",
+               []() {
+                   py::list out;
+                   for (auto& [k, v] : PyProjectionRegistry::types())
+                       out.append(k);
+                   return out;
+               });
+        pm.attr("projection_registry") = py::cast(PyProjectionRegistry{});
+        pm.attr("polar") = polar;
+        pm.attr("geo") = geo;
+        pm.attr("PolarAxes") = polar.attr("PolarAxes");
+        pm.attr("AitoffAxes") = geo.attr("AitoffAxes");
+        pm.attr("HammerAxes") = geo.attr("HammerAxes");
+        pm.attr("LambertAxes") = geo.attr("LambertAxes");
+        pm.attr("MollweideAxes") = geo.attr("MollweideAxes");
+        // Seed the registry with the built-ins (mpl registers these
+        // plus '3d'/Axes3D which we don't bind).
+        auto& reg = PyProjectionRegistry::types();
+        reg["polar"] = polar.attr("PolarAxes");
+        reg["aitoff"] = geo.attr("AitoffAxes");
+        reg["hammer"] = geo.attr("HammerAxes");
+        reg["lambert"] = geo.attr("LambertAxes");
+        reg["mollweide"] = geo.attr("MollweideAxes");
+        reg["rectilinear"] = m.attr("Axes");
+    }
+
+
     py::class_<plot::LegendStyle>(m, "LegendStyle")
         .def_readwrite("location", &plot::LegendStyle::location)
         .def_readwrite("visible", &plot::LegendStyle::visible)
@@ -20185,18 +23815,18 @@ class LinearSegmentedColormap:
                  // mpl: projection kwarg or subplot_kw={'projection': ...}.
                  std::string proj;
                  if (!projection.is_none())
-                     proj = projection.cast<std::string>();
+                     proj = projNameFrom(projection);
                  else if (!subplot_kw.is_none()) {
                      auto d = subplot_kw.cast<py::dict>();
                      if (d.contains("projection"))
-                         proj = d["projection"].cast<std::string>();
+                         proj = projNameFrom(d["projection"]);
                  }
                  py::list axs;
                  for (uint32_t r = 0; r < nrows; ++r)
                      for (uint32_t c = 0; c < ncols; ++c) {
                          auto* ax = f->fig().subplot2grid({nrows, ncols}, {r, c});
                          if (!proj.empty()) ax->setProjection(proj);
-                         axs.append(wrapAxes(f, ax));
+                         axs.append(typedAxes(wrapAxes(f, ax)));
                      }
                  // mpl sharex/sharey: True → all share with the first
                  // axes; an Axes → share with it; "col"/"row" share per
@@ -20368,31 +23998,8 @@ class LinearSegmentedColormap:
              },
              py::arg("on") = true, py::arg("which") = "major",
              py::arg("axis") = "both")
-        .def("legend",
-             [](py::args args, py::kwargs kw) {
-                 auto a = gca();
-                 auto& ls = a.ax->legend();
-                 py::dict kwd = kw ? py::dict(kw) : py::dict();
-                 if (args.size() >= 1 && !kwd.contains("handles") &&
-                     !kwd.contains("labels")) {
-                     auto v = py::reinterpret_borrow<py::object>(args[0]);
-                     bool labelsForm = py::isinstance<py::sequence>(v) &&
-                         !py::isinstance<py::str>(v);
-                     if (labelsForm && py::len(v) > 0) {
-                         auto first = py::reinterpret_borrow<py::object>(
-                             v[py::int_(0)]);
-                         labelsForm = py::isinstance<py::str>(first);
-                     }
-                     if (labelsForm) kwd["labels"] = v;
-                     else kwd["handles"] = v;
-                 }
-                 if (args.size() >= 2 && !kwd.contains("labels"))
-                     kwd["labels"] =
-                         py::reinterpret_borrow<py::object>(args[1]);
-                 applyLegendKwargs(ls, kwd, a.ax->style().faceColor,
-                                   a.ax->style().edgeColor);
-                 return PyLegend{a.owner, a.ax};
-             })
+        // `vp.legend` is the mpl-shaped submodule (bound earlier); the
+        // old pyplot forward is served by its ModuleType __call__ shim.
         .def("axis",
              [](const py::object& arg) {
                  auto a = gca();
@@ -20526,8 +24133,8 @@ class LinearSegmentedColormap:
                      ax.gsKeepAlive = ss->gs;
                      if (!projection.is_none())
                          ax.ax->setProjection(
-                             projection.cast<std::string>());
-                     return ax;
+                             projNameFrom(projection));
+                     return typedAxes(ax);
                  }
                  uint32_t nrows, ncols, index;
                  if (a.is_none()) {
@@ -20545,10 +24152,9 @@ class LinearSegmentedColormap:
                  }
                  uint32_t r = (index - 1) / ncols,
                           col = (index - 1) % ncols;
-                 return subplotAt(f, nrows, ncols, r, col,
-                                  projection.is_none()
-                                      ? ""
-                                      : projection.cast<std::string>());
+                 return typedAxes(
+                     subplotAt(f, nrows, ncols, r, col,
+                               projNameFrom(projection)));
              },
              py::arg("nrows"), py::arg("ncols") = py::none(),
              py::arg("index") = py::none(),
@@ -20737,8 +24343,8 @@ class LinearSegmentedColormap:
                      out.ax->setProjection("polar");
                  if (!projection.is_none())
                      out.ax->setProjection(
-                         projection.cast<std::string>());
-                 return out;
+                         projNameFrom(projection));
+                 return typedAxes(out);
              },
              py::arg("rect") = py::none(), py::arg("projection") = py::none(),
              py::arg("polar") = false,

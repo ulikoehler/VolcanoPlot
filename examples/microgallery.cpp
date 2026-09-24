@@ -2279,6 +2279,130 @@ void f195_cax_colorbar(Figure& fig) {
     cb.ticks = {0, 4, 8, 12};
 }
 
+// ═══ Tier 24 — projections / legend / spines / mlab / markers ═══════
+
+void f196_polar_theta_grid(Figure& fig) {
+    // mpl: ax = fig.add_subplot(projection='polar'); spiral + 8
+    // thetagrids (degree labels).
+    auto* ax = mfAxes(fig);
+    ax->setProjection("polar");
+    Series2D s;
+    for (int i = 0; i <= 200; ++i) {
+        float th = float(i) * 4.0f * float(M_PI) / 200.0f;
+        float r = 0.15f + 0.85f * th / (4.0f * float(M_PI));
+        s.points.push_back({th, r});
+    }
+    s.color = Color::fromRgba8(31, 119, 180);
+    s.lineWidth = 1.5f * 200.0f / 72.0f;
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setRmax(1.0f);
+    ax->setThetagrids({0, 45, 90, 135, 180, 225, 270, 315});
+}
+
+void f197_mollweide_geo(Figure& fig) {
+    // mpl: ax = fig.add_subplot(projection='mollweide'); ax.grid(True)
+    // + scatter lon/lat points (radian data space).
+    auto* ax = mfAxes(fig);
+    ax->setProjection("mollweide");
+    ax->style().xAxis.grid = true;
+    ax->style().yAxis.grid = true;
+    Series2D s;
+    for (int i = 0; i < 12; ++i) {
+        float lon = -2.8f + float(i) * 0.5f;
+        float lat = std::sin(float(i) * 1.3f) * 1.2f;
+        s.points.push_back({lon, lat});
+    }
+    s.color = Color::fromRgba8(214, 39, 40);
+    s.marker = MarkerStyle::Circle;
+    s.size = 12.0f;   // mpl scatter s=20pt² → ~4.5pt diameter
+    ax->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+}
+
+void f198_spine_positions(Figure& fig) {
+    // mpl: ax.spines['bottom'].set_position(('data', 0));
+    //      ax.spines['left'].set_position(('axes', 0.5));
+    //      ax.spines['top'/'right'].set_visible(False)
+    auto* ax = mfAxes(fig);
+    Series2D s;
+    for (int i = 0; i <= 100; ++i) {
+        float x = -1.5f + float(i) * 0.03f;
+        s.points.push_back({x, std::sin(x * 3.0f) * 0.8f});
+    }
+    s.color = Color::fromRgba8(44, 160, 44);
+    s.lineWidth = 1.5f * 200.0f / 72.0f;
+    ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+    ax->setXlim(-1.5f, 1.5f);
+    ax->setYlim(-1.0f, 1.0f);
+    auto& bottom = ax->spine("bottom");
+    bottom.posMode = Axes::SpineSpec::PosMode::Data;
+    bottom.posAmount = 0.0f;
+    bottom.positionSet = true;
+    auto& left = ax->spine("left");
+    left.posMode = Axes::SpineSpec::PosMode::Axes;
+    left.posAmount = 0.5f;
+    left.positionSet = true;
+    ax->setSpineVisible("top", false);
+    ax->setSpineVisible("right", false);
+    ax->touch();
+}
+
+void f199_legend_numpoints(Figure& fig) {
+    // mpl: ax.plot(marker='o', label='line'); ax.scatter(label='pts');
+    //      ax.fill_between(label='area'); ax.legend(numpoints=2).
+    auto* ax = mfAxes(fig);
+    Series2D l;
+    for (int i = 0; i <= 8; ++i)
+        l.points.push_back({float(i), std::sin(float(i) * 0.7f)});
+    l.color = Color::fromRgba8(31, 119, 180);
+    l.lineWidth = 1.5f * 200.0f / 72.0f;
+    l.marker = MarkerStyle::Circle;
+    l.size = 16.7f;  // mpl markersize=6pt
+    l.label = "line";
+    ax->addPlot(std::make_unique<LinePlot>(std::move(l)));
+    Series2D sc;
+    for (int i = 0; i <= 8; ++i)
+        sc.points.push_back({float(i), -0.5f + 0.2f * std::cos(float(i))});
+    sc.color = Color::fromRgba8(214, 39, 40);
+    sc.marker = MarkerStyle::Circle;
+    sc.size = 11.1f;  // mpl scatter s=16pt² → 4pt diameter
+    sc.label = "pts";
+    ax->addPlot(std::make_unique<ScatterPlot>(std::move(sc)));
+    auto& lg = ax->style().legend;
+    lg.visible = true;
+    lg.location = "lower right";
+    lg.numpoints = 2;
+    lg.scatterpoints = 3;
+}
+
+void f200_marker_styles(Figure& fig) {
+    // mpl: scatter rows with different markers/fillstyles.
+    auto* ax = mfAxes(fig);
+    struct Row { MarkerStyle m; MarkerFill f; const char* tag; };
+    Row rows[] = {
+        {MarkerStyle::Circle,  MarkerFill::Full,  "o"},
+        {MarkerStyle::Circle,  MarkerFill::Left,  "o left"},
+        {MarkerStyle::Square,  MarkerFill::Full,  "s"},
+        {MarkerStyle::Triangle, MarkerFill::None, "^ none"},
+        {MarkerStyle::Star,    MarkerFill::Full,  "*"},
+        {MarkerStyle::X,       MarkerFill::Full,  "x"},
+        {MarkerStyle::Polygon, MarkerFill::Full,  "(5,0)"},
+    };
+    for (size_t r = 0; r < std::size(rows); ++r) {
+        Series2D s;
+        for (int i = 0; i < 5; ++i)
+            s.points.push_back({float(i) * 0.5f,
+                                float(r) * 0.5f});
+        s.color = Color::fromRgba8(31, 119, 180);
+        s.marker = rows[r].m;
+        s.markerFill = rows[r].f;
+        s.markerNumsides = 5;
+        s.size = 19.6f;  // mpl scatter s=50pt² → ~7pt diameter
+        ax->addPlot(std::make_unique<ScatterPlot>(std::move(s)));
+    }
+    ax->setXlim(-0.5f, 2.5f);
+    ax->setYlim(-0.5f, 3.5f);
+}
+
 // ═══ Registry ═══════════════════════════════════════════════════════════
 
 struct Feature {
@@ -2482,6 +2606,11 @@ const Feature kFeatures[] = {
     {"193_sankey",             f193_sankey},
     {"194_colorbar_fmt_extend",f194_colorbar_fmt_extend},
     {"195_cax_colorbar",       f195_cax_colorbar},
+    {"196_polar_theta_grid",   f196_polar_theta_grid},
+    {"197_mollweide_geo",      f197_mollweide_geo},
+    {"198_spine_positions",    f198_spine_positions},
+    {"199_legend_numpoints",   f199_legend_numpoints},
+    {"200_marker_styles",      f200_marker_styles},
 };
 
 } // namespace

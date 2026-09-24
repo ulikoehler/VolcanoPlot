@@ -1413,3 +1413,93 @@ tri_*) are checked off in the sections above.
       `ColorbarStyle::caxMode` (strip fills the axes rect, no
       chrome); raster + vector renderers honor `format`/`alpha`/
       `extendfrac`/`extendrect`/minor ticks.
+- [x] **`vp.projections` package** — `ProjectionRegistry`,
+      `register_projection`, `get_projection_class`/`get_projection_names`,
+      `projection_registry`; submodules `polar` + `geo` (mpl layout)
+      with mpl class names (`PolarAxes`, `GeoAxes`/`AitoffAxes`/
+      `HammerAxes`/`LambertAxes`/`MollweideAxes`, `ThetaFormatter`,
+      `ThetaLocator`, `RadialLocator`, `ThetaAxis`/`RadialAxis`/
+      `ThetaTick`/`RadialTick`, `PolarTransform`/`PolarAffine`/
+      `InvertedPolarTransform`, geo `Spine`, …);
+      `projection=` accepts names **and** projection classes at
+      `add_subplot`/`add_axes`/`subplots`/`plt.subplot`/`plt.axes`/
+      `add_subplot_mosaic`-adjacent sites, returning subclass-typed
+      axes (`projection='polar'` → `PolarAxes` with `set_thetagrids`/
+      `set_thetamin/max`/`set_theta_offset/direction`/`set_rgrids`/
+      `set_rlabel_position`/`set_rticks`/`set_rmin/max`/`set_rorigin`);
+      geo axes get `set_longitude_grid`/`set_latitude_grid`/
+      `set_longitude_grid_ends`; `Locators`/`Formatters` gained mpl
+      `TickHelper` surface (`set_axis`/`axis`/`set_view_interval`/
+      `set_data_interval`/`set_bounds`/`tick_values`/`__call__`/
+      `raise_if_exceeds`). Native `Renderer::drawGeoGrid` draws the
+      elliptical geo frame, graticules, equator lon labels and
+      left-limb lat labels with mpl's `°` formatting; polar renderer
+      honors theta offset/direction and radial label angle.
+- [x] **`vp.legend` + `vp.legend_handler` submodules** — `Legend`
+      gains mpl surface: `get_lines`/`get_patches`/`get_texts`/
+      `legend_handles`/`legendHandles`/`get_legend_handlers_labels`/
+      `get_frame` (frame proxy with face/edge color, alpha, lw),
+      `get_window_extent`, `set_bbox_to_anchor`, `get_bbox_to_anchor`,
+      `set_loc`/`get_loc`, `loc`, `set_draggable`/`get_draggable`,
+      `get_children`, `update_from_first_child`,
+      `get/set/update_default_handler_map` classmethods,
+      `get_legend_handler_map`/`get_legend_handler`/
+      `get_legend_handler_map` instance access; `handler_map=` kwarg
+      in `legend()`/`fig.legend()` resolves `PyLine2D`/`PyPatch`/
+      collection/container keys; `vp.legend_handler` provides
+      `HandlerBase`/`HandlerNpoints`/`HandlerNpointsYoffsets`/
+      `HandlerLine2D`/`HandlerStepPatch`/`HandlerPatch`/
+      `HandlerRegularPolyCollection`/`HandlerCircleCollection`/
+      `HandlerPathCollection`/`HandlerLineCollection`/`HandlerTuple`/
+      `HandlerPolyCollection`/`HandlerStem`/`HandlerErrorbar`/
+      `HandlerLine2DCompound`/`HandlerErrorbar` with mpl ctor
+      signatures (`xpad`/`ypad`/`numpoints`/`marker_pad`/`update_func`/
+      `ndivide`/`pad`/`autoscale`) — callable-module shim preserves
+      the old `vp.legend(...)` pyplot forward.
+- [x] **`vp.spines` submodule** — `Spines` `MutableMapping` bound to
+      `ax.spines` (`__getitem__`/`__setitem__`/`__delitem__`/`__iter__`/
+      `__len__`, tuple keys → `SpinesProxy`, slices `['top':'right']`,
+      `from_dict`/`get_bounds`, custom side names via `__setitem__`);
+      `Spine` gains mpl ctor signature `(axes, spine_type, path)`, 
+      `set_position`/`get_position` accepting `('data',v)`/`('axes',v)`/
+      `'zero'`/`'center'`/floats, `set_bounds`/`get_bounds`,
+      `set_patch_arc`/`set_patch_line`/`set_patch_circle`/`get_patch_transform`,
+      `set_path`/`get_path`, `get_spine_transform`, `linear_width`,
+      `get_window_extent`, `get_extents`, `set_figure`/`get_figure`,
+      `get_children`, `side` alias + `spine_type`; native
+      `Axes::SpineSpec` stores arc specs (`theta1`/`theta2`) and the
+      spine renderer strokes arc spines (`set_patch_arc` → curved
+      spine); non-standard sides degrade gracefully.
+- [x] **`vp.mlab` submodule** — `detrend`/`detrend_mean`/
+      `detrend_linear`/`detrend_none`, `apply_window`, `stride_windows`,
+      `window_none`/`window_hanning`, `psd`/`csd`/`cohere`/
+      `magnitude_spectrum`/`angle_spectrum`/`phase_spectrum`/
+      `complex_spectrum`/`specgram` (mpl `_spectral_helper` semantics:
+      same_freqs validation, single-sided FFT scaling ×2 (DC/Nyquist
+      exempt), pad_to zero-padding via Bluestein FFT for arbitrary n,
+      detrend callables + sequence windows + NFFT > signal tiling —
+      verified numerically against `mpl.mlab`), `prctile`,
+      `bivariate_normal`, `GaussianKDE` (scipy-compatible
+      scott/silverman bw + callable bw — verified against
+      `scipy.stats.gaussian_kde`), `PCA`, `rk4`, `griddata`
+      (linear + nearest over `vp.tri` interpolators).
+- [x] **`vp.markers` submodule** — `MarkerStyle` with mpl ctor
+      `(marker, fillstyle, transform)`; all string markers
+      `.` `,` `o` `v` `^` `<` `>` `1`–`4` `8` `s` `p` `*` `h` `H`
+      `+` `x` `D` `d` `|` `_` `P` `X` (`,` = `MarkerStyle::Pixel=41`
+      with GPU SDF support), `None`/`'none'`/`''`/`' '` aliases,
+      integer codes 0–13, tuple specs `(numsides, symstyle[, angle])`
+      (symstyle 0/1/2 only like mpl), custom `Path` markers;
+      `get_marker`/`set_marker`/`_set_marker`, `get_fillstyle`/
+      `set_fillstyle` (full/left/right/top/bottom/none),
+      `get_path`/`get_alt_path`, `get_transform`/`get_alt_transform`,
+      `get_user_transform`/`set_user_transform`, `is_filled`,
+      `get_snap_threshold`/`set_snap_threshold`, `get_capstyle`/
+      `set_capstyle`, `get_joinstyle`/`set_joinstyle`, `transformed`,
+      `rotated`, `scaled`, `filled`, `copy`. Geometry verified
+      **exactly** against mpl: path vertices/codes for all 26
+      markers (mpl's cubic-Bézier unit circle with `MAGIC`/`SQH`/
+      `M45` constants, CLOSEPOLY repeating the first vertex),
+      transform/path scale separation (`scale(0.5)` lives in the
+      transform), and 75 half-fill combos (alt paths rotated
+      0/90/180/270° for right/top/left/bottom).

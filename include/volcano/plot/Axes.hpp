@@ -180,6 +180,11 @@ public:
     /// which r tick labels are drawn (default 22.5°).
     void setRlabelPosition(float deg) { rlabelPosition_ = deg; touch(); }
     [[nodiscard]] float rlabelPosition() const { return rlabelPosition_; }
+
+    /// mpl GeoAxes.set_longitude_grid_ends: latitude cap (degrees) at
+    /// which meridian grid lines stop (default 75°).
+    void setLongitudeGridEnds(float deg) { geoGridEndsDeg_ = deg; touch(); }
+    [[nodiscard]] float longitudeGridEnds() const { return geoGridEndsDeg_; }
     /// mpl polar `set_rmin`/`set_rmax`/`set_rorigin`: r is the y axis.
     void setRmin(float v) { auto yl = ylim(); setYlim(v, yl.max); }
     void setRmax(float v) { auto yl = ylim(); setYlim(yl.min, v); }
@@ -304,6 +309,17 @@ public:
         /// mpl set_linestyle / set_dashes.
         std::optional<LineStyle> lineStyle;
         std::vector<float> dashes;
+        /// mpl set_patch_arc — the spine draws as an arc segment
+        /// instead of a straight line. `center` is in axes-fraction
+        /// units, `radius` is mpl's patch-transform radius (the arc is
+        /// scaled by radius*0.5 before being placed at `center`), and
+        /// `theta1`/`theta2` are degrees CCW from +x (y-up).
+        struct ArcSpec {
+            float cx = 0.5f, cy = 0.5f;
+            float radius = 1.0f;
+            float theta1 = 0.0f, theta2 = 360.0f;
+        };
+        std::optional<ArcSpec> arc;
     };
     struct SpineSet {
         SpineSpec left, right, bottom, top;
@@ -1021,6 +1037,7 @@ private:
     Projection projection_;
     std::vector<float> rgrids_, thetagrids_;
     float rlabelPosition_ = 22.5f;  // mpl default rlabel_position
+    float geoGridEndsDeg_ = 75.0f;  // mpl set_longitude_grid_ends default
     AspectMode aspect_ = AspectMode::Auto;
     Adjustable adjustable_ = Adjustable::Box;
     std::vector<Axes*> shareXWith_, shareYWith_;

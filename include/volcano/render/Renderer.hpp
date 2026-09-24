@@ -200,6 +200,16 @@ private:
                                  const plot::Axes& axes,
                                  plot::Rect2D rect);
 
+    /// Geo furniture (aitoff/hammer/lambert/mollweide): projected-domain
+    /// boundary frame, graticule grid (meridians + parallels), degree
+    /// longitude labels on the equator and latitude labels on the left
+    /// limb (matplotlib GeoAxes layout).
+    void drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                     plot::Rect2D rect);
+    void drawGeoFrameAndLabels(vk::CommandBuffer cmd,
+                               const plot::Axes& axes,
+                               plot::Rect2D rect);
+
     /// Draw a legend for the axes (if enabled in style).
     void drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
                     plot::Rect2D rect);

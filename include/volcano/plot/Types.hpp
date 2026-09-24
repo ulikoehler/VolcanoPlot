@@ -216,6 +216,7 @@ enum class MarkerStyle {
     AsteriskN = 38,   ///< (numsides, 2, angle) asterisk
     CircledN = 39,    ///< (numsides, 3, angle) circle approx by n-gon
     None = 40,
+    Pixel = 41,       ///< ',' single-pixel square
 };
 
 /// Marker fill style (matplotlib fillstyle).

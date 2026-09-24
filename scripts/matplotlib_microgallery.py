@@ -1617,6 +1617,60 @@ def f195_cax_colorbar(fig, out):
     fig.colorbar(im, cax=cax, ticks=[0, 4, 8, 12])
 
 
+def f196_polar_theta_grid(fig, out):
+    ax = fig.add_subplot(111, projection="polar")
+    th = np.linspace(0, 4 * np.pi, 201)
+    r = 0.15 + 0.85 * th / (4 * np.pi)
+    ax.plot(th, r, color=(31 / 255, 119 / 255, 180 / 255))
+    ax.set_rmax(1.0)
+    ax.set_thetagrids([0, 45, 90, 135, 180, 225, 270, 315])
+
+
+def f197_mollweide_geo(fig, out):
+    ax = fig.add_subplot(111, projection="mollweide")
+    lon = np.array([-2.8 + i * 0.5 for i in range(12)])
+    lat = np.sin(np.arange(12) * 1.3) * 1.2
+    ax.scatter(lon, lat, s=20, color=(214 / 255, 39 / 255, 40 / 255))
+    ax.grid(True)
+
+
+def f198_spine_positions(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(-1.5, 1.5, 101)
+    ax.plot(x, np.sin(x * 3.0) * 0.8,
+            color=(44 / 255, 160 / 255, 44 / 255))
+    ax.set_xlim(-1.5, 1.5); ax.set_ylim(-1.0, 1.0)
+    ax.spines["bottom"].set_position(("data", 0))
+    ax.spines["left"].set_position(("axes", 0.5))
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def f199_legend_numpoints(fig, out):
+    ax = mf_axes(fig)
+    x = np.arange(9)
+    ax.plot(x, np.sin(x * 0.7), marker="o",
+            color=(31 / 255, 119 / 255, 180 / 255), label="line")
+    ax.scatter(x, -0.5 + 0.2 * np.cos(x), s=16,
+               color=(214 / 255, 39 / 255, 40 / 255), label="pts")
+    ax.legend(loc="lower right", numpoints=2, scatterpoints=3)
+
+
+def f200_marker_styles(fig, out):
+    from matplotlib.markers import MarkerStyle
+    ax = mf_axes(fig)
+    marks = [MarkerStyle("o"), MarkerStyle("o", fillstyle="left"),
+             MarkerStyle("s"), MarkerStyle("^", fillstyle="none"),
+             MarkerStyle("*"), MarkerStyle("x"), MarkerStyle((5, 0))]
+    for r, m in enumerate(marks):
+        xs = np.arange(5) * 0.5
+        ys = np.full(5, r * 0.5)
+        ax.scatter(xs, ys, marker=m, s=50,
+                   color=(31 / 255, 119 / 255, 180 / 255),
+                   edgecolors=(31 / 255, 119 / 255, 180 / 255))
+    ax.set_xlim(-0.5, 2.5); ax.set_ylim(-0.5, 3.5)
+
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # ═══ Registry ═══════════════════════════════════════════════════════════

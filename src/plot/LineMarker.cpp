@@ -20,6 +20,7 @@ std::string toLower(std::string_view s) {
 std::optional<MarkerStyle> markerFromChar(char c) {
     switch (c) {
     case '.': return MarkerStyle::Point;
+    case ',': return MarkerStyle::Pixel;
     case 'o': return MarkerStyle::Circle;
     case 's': return MarkerStyle::Square;
     case 'D': return MarkerStyle::Diamond;
@@ -39,6 +40,10 @@ std::optional<MarkerStyle> markerFromChar(char c) {
     case '*': return MarkerStyle::Star;
     case '|': return MarkerStyle::VLine;
     case '_': return MarkerStyle::HLine;
+    case '1': return MarkerStyle::Tri1;
+    case '2': return MarkerStyle::Tri2;
+    case '3': return MarkerStyle::Tri3;
+    case '4': return MarkerStyle::Tri4;
     default:  return std::nullopt;
     }
 }

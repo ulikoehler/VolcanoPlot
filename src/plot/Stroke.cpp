@@ -284,6 +284,7 @@ MarkerGeom markerGeom(MarkerStyle style, int numsides, float angle) {
     switch (style) {
     case MarkerStyle::None: break;
     case MarkerStyle::Point:  g.outlines = {ngon(20, 0.35f)}; break;
+    case MarkerStyle::Pixel:  g.outlines = {ngon(4, 0.3f, -kPi/4.0f)}; break;
     case MarkerStyle::Circle: g.outlines = {ngon(20)}; break;
     case MarkerStyle::Square: g.outlines = {ngon(4, 0.5f, -kPi / 4.0f)}; break;
     case MarkerStyle::Diamond: g.outlines = {ngon(4, 0.6f)}; break;

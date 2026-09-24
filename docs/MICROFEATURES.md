@@ -354,6 +354,16 @@ interpreting any data-carrying tier.
 | 194 | `colorbar_fmt_extend` | `colorbar(extend="both", format="%.1f", extendfrac)` |
 | 195 | `cax_colorbar` | `make_axes` + `colorbar(cax=)` — strip fills the cax |
 
+## Tier 24 — Parity batch 18 (196–200)
+
+| # | Name | Checks |
+|---|------|--------|
+| 196 | `polar_theta_grid` | `projection='polar'` + `set_thetagrids` — degree labels, r-grids |
+| 197 | `mollweide_geo` | `projection='mollweide'` + grid — ellipse frame, graticules, `°` labels |
+| 198 | `spine_positions` | `spines['bottom'].set_position(('data',0))`, left at axes 0.5, top/right hidden |
+| 199 | `legend_numpoints` | `legend(numpoints=2, scatterpoints=3)` — handle marker counts |
+| 200 | `marker_styles` | marker grid: `'o'/'s'/'^'/'*'/'x'/'P'` + `(5,0)` tuple + fillstyle halves |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.py`

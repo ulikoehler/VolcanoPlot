@@ -312,6 +312,18 @@ void Renderer::drawRichTextFx(vk::CommandBuffer cmd, vk::Rect2D scissor,
     }
 }
 
+namespace {
+
+/// Is the projection one of the geographic kinds?
+inline bool isGeoProj(plot::ProjectionKind k) noexcept {
+    return k == plot::ProjectionKind::Aitoff ||
+           k == plot::ProjectionKind::Hammer ||
+           k == plot::ProjectionKind::Lambert ||
+           k == plot::ProjectionKind::Mollweide;
+}
+
+} // namespace
+
 void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                         plot::Rect2D rect) {
     if (!textReady_) return;
@@ -389,8 +401,9 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     if (!axes.axison()) return;
 
     // Polar axes: theta/r labels are drawn with the polar spine
-    // furniture; skip rectilinear tick/axis labels.
-    if (axes.projection().kind == plot::ProjectionKind::Polar) return;
+    // furniture; geo axes draw degree labels on the frame instead.
+    if (axes.projection().kind == plot::ProjectionKind::Polar ||
+        isGeoProj(axes.projection().kind)) return;
 
     // --- Tick labels ---
     // Positioning (matching matplotlib):
@@ -894,9 +907,38 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                              float edge, float dir) {
             const auto& s = sp.side(side);
             if (!s.visible) return;
-            auto g = axes.spineLine(side, rect);
             plot::Color c = s.color.value_or(spineColor);
             float sw = std::max(s.lineWidth.value_or(t), 1.0f);
+            // mpl arc spines (set_patch_arc): stroke an arc through
+            // `scale(radius*0.5).translate(center) + transAxes`.
+            if (s.arc) {
+                const auto& a = *s.arc;
+                std::vector<float> dashes = s.dashes;
+                if (dashes.empty() && s.lineStyle &&
+                    *s.lineStyle != plot::LineStyle::Solid)
+                    dashes = plot::dashPattern(*s.lineStyle, sw);
+                float span = a.theta2 - a.theta1;
+                int n = std::clamp(
+                    int(std::ceil(std::abs(span) / 2.0f)), 8, 720);
+                std::vector<plot::Point2D> pts;
+                pts.reserve(size_t(n) + 1);
+                for (int i = 0; i <= n; ++i) {
+                    float th = (a.theta1 +
+                                span * float(i) / float(n)) * 0.017453292519943295f;
+                    float fx = a.cx + a.radius * 0.5f * std::cos(th);
+                    float fy = a.cy + a.radius * 0.5f * std::sin(th);
+                    pts.push_back({x0 + fx * float(rect.width),
+                                   y1 - fy * float(rect.height)});
+                }
+                plot::StrokeParams sp2;
+                sp2.width = sw;
+                sp2.dashes = std::move(dashes);
+                auto mesh = plot::strokePolyline(pts, sp2);
+                spineRenderer_.drawTriangles(cmd, fullRect, ext,
+                                             mesh.verts, c);
+                return;
+            }
+            auto g = axes.spineLine(side, rect);
             float p = s.positionSet ? g.pos : edge;
             float from = s.positionSet || s.bounds ? g.from
                        : (horiz ? x0 : y0);
@@ -1310,6 +1352,173 @@ void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
                          p.y + m.ascent - m.height * 0.5f,
                          labelColor, rScale * 0.8f,
                          0.0f, plot::HAlign::Center,
+                         &style.yAxis.tickFont);
+        }
+    }
+}
+
+// ─── Geo projection furniture (aitoff/hammer/lambert/mollweide) ─────
+// The axes frame is the projected outline of the (lon, lat) domain —
+// an ellipse for mollweide/aitoff/hammer, a circle for lambert. mpl
+// GeoAxes draws longitude labels along the equator and latitude labels
+// on the left limb; ticks default to 30° longitude / 15° latitude
+// steps (set_longitude_grid/set_latitude_grid overrides).
+
+namespace {
+
+/// Project a (lon, lat) data point to canvas pixels.
+inline plot::Point2D geoToPx(const plot::Axes& axes, plot::Rect2D rect,
+                             float lon, float lat) {
+    auto f = axes.dataToFraction({lon, lat});
+    return {float(rect.x) + f.x * float(rect.width),
+            float(rect.y) + (1.0f - f.y) * float(rect.height)};
+}
+
+/// mpl GeoAxes defaults: longitude ticks at deg2rad(-150..150, step 30),
+/// latitude ticks at deg2rad(-75..75, step 15); explicit positions or a
+/// locator (set_longitude_grid/set_latitude_grid) override.
+std::vector<float> geoLonTicks(const plot::Axes& axes,
+                             plot::Rect2D rect, float figDpi) {
+    const auto& tc = axes.style().xAxis.ticks;
+    if (tc.locator || tc.positions)
+        return axisTicks(tc, axes.xscale(), -3.14159265358979323846f,
+                         3.14159265358979323846f, float(rect.width),
+                         axes.style().xAxis.tickFont.size, figDpi, false);
+    std::vector<float> t;
+    for (int d = -150; d <= 150; d += 30)
+        t.push_back(float(d) * 0.017453292519943295f);
+    return t;
+}
+std::vector<float> geoLatTicks(const plot::Axes& axes,
+                             plot::Rect2D rect, float figDpi) {
+    const auto& tc = axes.style().yAxis.ticks;
+    if (tc.locator || tc.positions)
+        return axisTicks(tc, axes.yscale(), -1.5707963267948966f,
+                         1.5707963267948966f, float(rect.height),
+                         axes.style().yAxis.tickFont.size, figDpi, true);
+    std::vector<float> t;
+    for (int d = -75; d <= 75; d += 15)
+        t.push_back(float(d) * 0.017453292519943295f);
+    return t;
+}
+
+} // namespace
+
+void Renderer::drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+                           plot::Rect2D rect) {
+    const auto& style = axes.style();
+    const float figDpi =
+        axes.figure() ? axes.figure()->dpi() : style.dpi;
+    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
+                    vk::Extent2D{rect.width, rect.height}};
+    auto ext = backend_.extent();
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kHalfPi = 1.5707963267948966f;
+    // mpl set_longitude_grid_ends(75): meridian lines stop at ±75°.
+    const float ends =
+        axes.longitudeGridEnds() * 0.017453292519943295f;
+
+    // Meridians at each longitude tick (x-axis grid).
+    if (style.xAxis.grid) {
+        for (float lon : geoLonTicks(axes, rect, figDpi)) {
+            std::vector<plot::Point2D> pts;
+            pts.reserve(65);
+            for (int i = 0; i <= 64; ++i)
+                pts.push_back(geoToPx(axes, rect, lon,
+                                      -ends + 2.0f * ends *
+                                          float(i) / 64.0f));
+            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+                         style.xAxis.gridColor,
+                         style.xAxis.gridLineWidth * figDpi / 72.0f);
+        }
+    }
+    // Parallels at each latitude tick (y-axis grid).
+    if (style.yAxis.grid) {
+        for (float lat : geoLatTicks(axes, rect, figDpi)) {
+            std::vector<plot::Point2D> pts;
+            pts.reserve(129);
+            for (int i = 0; i <= 128; ++i)
+                pts.push_back(geoToPx(axes, rect,
+                                      -kPi + 2.0f * kPi * float(i) / 128.0f,
+                                      lat));
+            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+                         style.yAxis.gridColor,
+                         style.yAxis.gridLineWidth * figDpi / 72.0f);
+        }
+    }
+}
+
+void Renderer::drawGeoFrameAndLabels(vk::CommandBuffer cmd,
+                                     const plot::Axes& axes,
+                                     plot::Rect2D rect) {
+    const auto& style = axes.style();
+    const float figDpi =
+        axes.figure() ? axes.figure()->dpi() : style.dpi;
+    auto ext = backend_.extent();
+    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kHalfPi = 1.5707963267948966f;
+    constexpr float kDeg = 57.29577951308232f;
+
+    // Projected domain boundary: bottom edge (lat=-π/2) → right limb
+    // (lon=+π) → top edge (lat=+π/2) → left limb (lon=-π). Degenerate
+    // edges (poles collapse to a point for mollweide et al.) just add
+    // coincident vertices.
+    std::vector<plot::Point2D> bd;
+    bd.reserve(4 * 97 + 1);
+    for (int i = 0; i <= 96; ++i)
+        bd.push_back(geoToPx(axes, rect,
+                             -kPi + 2.0f * kPi * float(i) / 96.0f,
+                             -kHalfPi));
+    for (int i = 0; i <= 96; ++i)
+        bd.push_back(geoToPx(axes, rect, kPi,
+                             -kHalfPi + kPi * float(i) / 96.0f));
+    for (int i = 0; i <= 96; ++i)
+        bd.push_back(geoToPx(axes, rect,
+                             kPi - 2.0f * kPi * float(i) / 96.0f,
+                             kHalfPi));
+    for (int i = 0; i <= 96; ++i)
+        bd.push_back(geoToPx(axes, rect, -kPi,
+                             kHalfPi - kPi * float(i) / 96.0f));
+    bd.push_back(bd.front());
+    strokePxPoly(cmd, spineRenderer_, fullRect, ext, bd,
+                 style.xAxis.color,
+                 std::max(style.xAxis.lineWidth * figDpi / 72.0f, 1.0f));
+
+    if (!textReady_) return;
+    const auto& tc = style.xAxis.ticks;
+    float scale = style.xAxis.tickFont.size * figDpi / (72.0f * 16.0f);
+    auto labelColor =
+        style.xAxis.ticks.labelColor.value_or(style.xAxis.color);
+    float pad = (tc.majorPad + tc.majorSize) * figDpi / 72.0f;
+
+    // Longitude labels centered on the equator (mpl _xaxis_text
+    // transforms place them at lat=0 with a ±4px offset).
+    if (style.xAxis.visible) {
+        for (float lon : geoLonTicks(axes, rect, figDpi)) {
+            auto label = std::format(
+                "{}°", int(std::lround(lon * kDeg)));
+            auto m = measureRichText(label, scale);
+            auto p = geoToPx(axes, rect, lon, 0.0f);
+            drawRichText(cmd, fullRect, label,
+                         p.x - m.width * 0.5f,
+                         p.y + m.ascent * 0.5f + pad * 0.25f,
+                         labelColor, scale, 0.0f, plot::HAlign::Center,
+                         &style.xAxis.tickFont);
+        }
+    }
+    // Latitude labels on the left limb, right-aligned just outside
+    // (mpl _yaxis_text1 transform: limb point − 8px).
+    if (style.yAxis.visible) {
+        for (float lat : geoLatTicks(axes, rect, figDpi)) {
+            auto label = std::format(
+                "{}°", int(std::lround(lat * kDeg)));
+            auto m = measureRichText(label, scale);
+            auto p = geoToPx(axes, rect, -kPi, lat);
+            drawRichText(cmd, fullRect, label,
+                         p.x - m.width - pad * 0.5f - 2.0f,
+                         p.y + m.ascent - m.height * 0.5f,
+                         labelColor, scale, 0.0f, plot::HAlign::Left,
                          &style.yAxis.tickFont);
         }
     }
@@ -1857,15 +2066,18 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                 spineRenderer_.drawFilledRect(cmd, vrect, ext, rect, fc);
         }
 
-        const bool polar = p->axes->projection().kind ==
-                           plot::ProjectionKind::Polar;
+        const auto projKind = p->axes->projection().kind;
+        const bool polar = projKind == plot::ProjectionKind::Polar;
+        const bool geo = isGeoProj(projKind);
 
         // Draw tick-aligned grid lines (per-axis enable). axisBelow
         // selects whether the grid sits under or over the plot artists.
-        // Polar axes draw radial spokes + r-circles instead.
+        // Polar axes draw radial spokes + r-circles; geo axes draw a
+        // graticule.
         if (subset != DrawSubset::AnimatedOnly && gridOn &&
             p->axes->style().axisBelow)
             polar ? drawPolarGrid(cmd, *p->axes, rect)
+            : geo ? drawGeoGrid(cmd, *p->axes, rect)
                   : drawGrid(cmd, *p->axes, rect);
 
         // Draw plot layers in zorder, filtered by the blit subset.
@@ -1879,6 +2091,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         if (subset != DrawSubset::AnimatedOnly && gridOn &&
             !p->axes->style().axisBelow)
             polar ? drawPolarGrid(cmd, *p->axes, rect)
+            : geo ? drawGeoGrid(cmd, *p->axes, rect)
                   : drawGrid(cmd, *p->axes, rect);
 
         if (subset == DrawSubset::AnimatedOnly) continue;
@@ -1892,8 +2105,10 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         bool isCax = p->axes->style().colorbar.caxMode;
 
         // Draw axis spines and tick marks. Polar axes get a circular
-        // frame plus theta/r labels instead of rectilinear furniture.
+        // frame plus theta/r labels; geo axes get the projected domain
+        // boundary plus degree labels — instead of rectilinear furniture.
         if (polar) drawPolarSpineAndLabels(cmd, *p->axes, rect);
+        else if (geo) drawGeoFrameAndLabels(cmd, *p->axes, rect);
         else if (!has3D && !isCax) drawSpines(cmd, *p->axes, rect);
         // Draw text (axis labels, tick labels, title).
         if (!isCax && textInited_ && textReady_) {
