@@ -414,6 +414,16 @@ TextRenderer::~TextRenderer() {
     delete static_cast<draw_list*>(batch_);
 }
 
+void TextRenderer::initFonts() {
+    // --- glyb font manager, shaper, renderer ---
+    fontManager_ = std::make_unique<FontManagerShared>();
+    shaper_ = std::make_unique<ShaperGuess>();
+    textRenderer_ = std::make_unique<text_renderer_ft>(fontManager_.get());
+    batch_ = new draw_list();
+
+    loadFont();
+}
+
 void TextRenderer::init(vk::Device device, VmaAllocator allocator,
                         vk::RenderPass renderPass,
                         vk::SampleCountFlagBits samples,
@@ -422,13 +432,7 @@ void TextRenderer::init(vk::Device device, VmaAllocator allocator,
     device_ = device;
     allocator_ = allocator;
 
-    // --- glyb font manager, shaper, renderer ---
-    fontManager_ = std::make_unique<FontManagerShared>();
-    shaper_ = std::make_unique<ShaperGuess>();
-    textRenderer_ = std::make_unique<text_renderer_ft>(fontManager_.get());
-    batch_ = new draw_list();
-
-    loadFont();
+    initFonts();
 
     // --- Vulkan pipeline for textured quads ---
 

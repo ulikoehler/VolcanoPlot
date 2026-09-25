@@ -31,6 +31,8 @@ public:
     float cellFontScale = 0.85f;
     /// Table height as a fraction of the axes height (all rows + header).
     float heightFrac = 0.0f;                          // 0 = auto-fit rows
+    /// mpl Table.scale(xscale, yscale) — per-cell scale factors.
+    float scaleX = 1.0f, scaleY = 1.0f;
 
     void prepare(render::Renderer&) override {}
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

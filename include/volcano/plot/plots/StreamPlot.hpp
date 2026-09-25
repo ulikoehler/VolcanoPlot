@@ -53,6 +53,13 @@ public:
     /// U and V are sampled at grid positions (width × height, row-major).
     StreamPlot(Grid2D gridU, Grid2D gridV,
                StreamConfig config = {});
+    /// mpl StreamplotSet config access (color/lw/arrows mutators).
+    [[nodiscard]] StreamConfig& mutableConfig() noexcept {
+        return config_;
+    }
+    [[nodiscard]] const StreamConfig& config() const noexcept {
+        return config_;
+    }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

@@ -44,6 +44,15 @@ public:
     [[nodiscard]] Config& config() noexcept { return cfg_; }
     [[nodiscard]] const Config& config() const noexcept { return cfg_; }
 
+    /// mpl QuiverKey.X / .Y / .U — anchor (axes fraction) + magnitude.
+    [[nodiscard]] float anchorX() const noexcept { return x_; }
+    [[nodiscard]] float anchorY() const noexcept { return y_; }
+    [[nodiscard]] float keyU() const noexcept { return u_; }
+    /// mpl QuiverKey.Q — the referenced quiver (may be nullptr).
+    [[nodiscard]] const QuiverPlot* ref() const noexcept {
+        return ref_;
+    }
+
     void prepare(render::Renderer&) override {}
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;

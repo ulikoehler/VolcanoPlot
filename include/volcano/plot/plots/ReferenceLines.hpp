@@ -105,6 +105,26 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 
+    /// mpl AxLine accessors (lines.AxLine.get_xy1/get_slope/...).
+    [[nodiscard]] Point2D xy1() const { return xy1_; }
+    [[nodiscard]] Point2D xy2() const { return xy2_; }
+    void setXy1(Point2D p) { xy1_ = p; }
+    void setXy2(Point2D p) { xy2_ = p; }
+    /// mpl AxLine.get_slope — NaN for vertical lines (mpl semantics).
+    [[nodiscard]] float slope() const {
+        const float dx = xy2_.x - xy1_.x;
+        return dx == 0.0f ? std::numeric_limits<float>::quiet_NaN()
+                          : (xy2_.y - xy1_.y) / dx;
+    }
+    void setSlope(float s) {
+        // Keep xy1, move xy2 horizontally one unit (mpl rescales too).
+        xy2_ = {xy1_.x + 1.0f, xy1_.y + s};
+    }
+    [[nodiscard]] Color color() const { return color_; }
+    void setColor(Color c) { color_ = c; }
+    [[nodiscard]] float lineWidth() const { return width_; }
+    void setLineWidth(float w) { width_ = w; }
+
 private:
     Point2D xy1_, xy2_;
     Color color_;

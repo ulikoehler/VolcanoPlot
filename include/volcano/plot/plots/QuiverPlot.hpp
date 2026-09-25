@@ -45,6 +45,22 @@ public:
     QuiverPlot(std::vector<float> x, std::vector<float> y,
                std::vector<float> u, std::vector<float> v,
                QuiverConfig cfg = {});
+    /// mpl Quiver config access (get_UVEC/set_UVEC live elsewhere).
+    [[nodiscard]] QuiverConfig& mutableConfig() noexcept { return cfg_; }
+    [[nodiscard]] const QuiverConfig& config() const noexcept {
+        return cfg_;
+    }
+    /// mpl Quiver.set_UVEC — replace the vector components and force a
+    /// geometry rebuild on the next draw.
+    void setUV(std::vector<float> u, std::vector<float> v) {
+        u_ = std::move(u);
+        v_ = std::move(v);
+        geometryBuilt_ = false;
+        prepared_ = false;
+        touch();
+    }
+    [[nodiscard]] const std::vector<float>& uVec() const { return u_; }
+    [[nodiscard]] const std::vector<float>& vVec() const { return v_; }
 
     void prepare(render::Renderer& r) override;
     void draw(vk::CommandBuffer cmd, render::Renderer& r,

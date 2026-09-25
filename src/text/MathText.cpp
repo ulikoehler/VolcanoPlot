@@ -603,6 +603,28 @@ MathFontset parseMathFontset(std::string_view name) noexcept {
     return MathFontset::DejaVuSans;
 }
 
+int mathSymbolIndex(std::string_view name) noexcept {
+    // Strip a single leading backslash (mpl accepts "\alpha" too).
+    if (!name.empty() && name.front() == '\\') name.remove_prefix(1);
+    auto it = symbolMap().find(name);
+    std::string_view utf8;
+    if (it != symbolMap().end()) utf8 = it->second;
+    else if (name.size() == 1) utf8 = name;
+    else return -1;
+    // Decode the first UTF-8 codepoint.
+    const auto c0 = static_cast<unsigned char>(utf8[0]);
+    if (c0 < 0x80) return c0;
+    int cp = 0; int extra = 0;
+    if ((c0 & 0xE0) == 0xC0)      { cp = c0 & 0x1F; extra = 1; }
+    else if ((c0 & 0xF0) == 0xE0) { cp = c0 & 0x0F; extra = 2; }
+    else if ((c0 & 0xF8) == 0xF0) { cp = c0 & 0x07; extra = 3; }
+    else return -1;
+    if (utf8.size() < size_t(extra) + 1) return -1;
+    for (int i = 1; i <= extra; ++i)
+        cp = (cp << 6) | (utf8[i] & 0x3F);
+    return cp;
+}
+
 MathLayout layoutMathText(std::string_view text, float baseScale,
                           const MeasureFn& measure,
                           MathFontset fontset,

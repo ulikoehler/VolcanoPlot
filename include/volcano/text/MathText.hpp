@@ -34,6 +34,11 @@ namespace volcano::text {
 /// isn't available (vector text backends, TeX markers).
 [[nodiscard]] std::string mathTextToUnicode(std::string_view text);
 
+/// mpl mathtext.get_unicode_index — Unicode codepoint for a math symbol
+/// name (with or without the leading backslash) or a single character.
+/// Returns -1 for unknown names.
+[[nodiscard]] int mathSymbolIndex(std::string_view name) noexcept;
+
 /// mpl `mathtext.fontset` — the font face used inside `$...$` segments.
 enum class MathFontset { DejaVuSans, DejaVuSerif };
 

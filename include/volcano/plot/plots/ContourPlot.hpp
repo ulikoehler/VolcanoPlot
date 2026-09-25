@@ -61,6 +61,18 @@ public:
     /// mpl ContourSet attribute access for clabel & introspection.
     [[nodiscard]] const ContourConfig& config() const { return config_; }
     [[nodiscard]] ContourConfig& mutableConfig() { return config_; }
+    /// mpl ContourSet.extent — the input grid.
+    [[nodiscard]] const Grid2D& grid() const { return grid_; }
+    /// mpl computes levels eagerly at construction.
+    void ensureLevels() { computeLevels(); }
+    /// mpl ContourSet.allsegs — segment endpoints + per-segment level
+    /// (segments_ holds consecutive endpoint pairs).
+    [[nodiscard]] const std::vector<Point2D>& segments() const {
+        return segments_;
+    }
+    [[nodiscard]] const std::vector<float>& segLevels() const {
+        return segLevels_;
+    }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
@@ -108,6 +120,15 @@ public:
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] const ContourConfig& config() const { return config_; }
     [[nodiscard]] ContourConfig& mutableConfig() { return config_; }
+    /// mpl ContourSet.extent — the input grid.
+    [[nodiscard]] const Grid2D& grid() const { return grid_; }
+    /// mpl computes levels eagerly at construction.
+    void ensureLevels() { computeLevels(); }
+    /// mpl ContourSet.allsegs — per-band polygon rings (data space).
+    [[nodiscard]] const std::vector<std::vector<std::vector<Point2D>>>&
+    bandRings() const {
+        return bandRings_;
+    }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;

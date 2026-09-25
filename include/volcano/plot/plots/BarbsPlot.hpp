@@ -50,6 +50,13 @@ public:
     void draw(vk::CommandBuffer cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl Barbs config access (barbcolor/length/flip mutators).
+    [[nodiscard]] BarbsConfig& mutableConfig() noexcept {
+        return config_;
+    }
+    [[nodiscard]] const BarbsConfig& config() const noexcept {
+        return config_;
+    }
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.color; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Circle; }

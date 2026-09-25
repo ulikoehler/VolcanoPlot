@@ -374,6 +374,16 @@ interpreting any data-carrying tier.
 | 204 | `patches_boxstyle` | `FancyBboxPatch(boxstyle='round,pad=0.3')` + `Wedge` + `FancyArrowPatch(-\|>)` |
 | 205 | `tight_layout` | `fig.tight_layout()` — suptitle/title/label margins + inter-axes spacing |
 
+## Tier 26 — Parity batch 20 (206–210)
+
+| # | Name | Checks |
+|---|------|--------|
+| 206 | `contour_xy_ranges` | `ax.contour(X, Y, Z)` — X/Y coords map the grid to data space |
+| 207 | `quiver_meshgrid` | `ax.quiver(x, y, U, V)` — 1-D coords + 2-D field, radial vectors |
+| 208 | `barbs` | `ax.barbs(X, Y, U, V)` — wind barbs with flags/half-barbs |
+| 209 | `table_scaled` | `ax.table(...)` + `t.scale(1.4, 1.6)` — per-cell scale factors |
+| 210 | `axline_slope` | `ax.axline((x,y), slope=s)` + two-point form |
+
 ## Debugging workflow
 
 1. Run the gallery: `./scripts/generate_microgallery.py`

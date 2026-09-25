@@ -56,6 +56,10 @@ public:
               vk::SampleCountFlagBits samples, core::PipelineCache& cache,
               core::DescriptorPool& descPool);
 
+    /// CPU-only font init — loads faces/shaper without a Vulkan pipeline
+    /// so measureText()/faceFor() work headless (mathtext metrics).
+    void initFonts();
+
     /// Pre-render common ASCII glyphs and upload the atlas texture.
     /// Must be called after init() and before any draw() calls.
     /// Uses a one-time command buffer (outside any render pass).

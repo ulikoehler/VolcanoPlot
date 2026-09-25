@@ -39,6 +39,7 @@
 #include <volcano/plot/plots/PcolormeshPlot.hpp>
 #include <volcano/plot/plots/StreamPlot.hpp>
 #include <volcano/plot/plots/ContourPlot.hpp>
+#include <volcano/plot/plots/BarbsPlot.hpp>
 #include <volcano/plot/plots/Scatter3D.hpp>
 #include <volcano/plot/plots/SurfacePlot.hpp>
 #include <volcano/plot/plots/Axes3DPlot.hpp>
@@ -2527,6 +2528,83 @@ void f205_tight_layout(Figure& fig) {
     fig.setTightLayout(true);
 }
 
+// ═══ Tier 26 — parity batch 20 (206–210) ════════════════════════════════
+
+void f206_contour_xy_ranges(Figure& fig) {
+    // mpl: ax.contour(X, Y, Z) — X/Y coordinate ranges map the grid to
+    // data space (x in [-3,3], y in [0,4]) rather than index space.
+    auto* ax = mfAxes(fig);
+    Grid2D g;
+    g.width = 30; g.height = 30;
+    g.xRange = {-3, 3}; g.yRange = {0, 4};
+    g.values.resize(30 * 30);
+    for (uint32_t j = 0; j < 30; ++j)
+        for (uint32_t i = 0; i < 30; ++i) {
+            float x = -3 + float(i) / 29 * 6;
+            float y = float(j) / 29 * 4;
+            g.values[j * 30 + i] =
+                std::sin(x) * std::cos(y - 2.0f);
+        }
+    ContourConfig cfg;
+    cfg.cmap = &colormaps::viridis();
+    cfg.levels = {-0.6f, -0.2f, 0.2f, 0.6f};
+    ax->addPlot(std::make_unique<ContourPlot>(std::move(g), cfg));
+    ax->setXlim(-3, 3); ax->setYlim(0, 4);
+}
+
+void f207_quiver_meshgrid(Figure& fig) {
+    // mpl: ax.quiver(x, y, U, V) — 1-D coord vectors + 2-D field
+    // expanded meshgrid-style; radial outward field.
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, u, v;
+    for (int j = 0; j < 6; ++j)
+        for (int i = 0; i < 8; ++i) {
+            float px = float(i), py = float(j);
+            x.push_back(px); y.push_back(py);
+            u.push_back(px - 3.5f); v.push_back(py - 2.5f);
+        }
+    ax->addPlot(std::make_unique<QuiverPlot>(std::move(x), std::move(y),
+                                             std::move(u), std::move(v)));
+    ax->setXlim(-1, 8); ax->setYlim(-1, 6);
+}
+
+void f208_barbs(Figure& fig) {
+    // mpl: ax.barbs(X, Y, U, V) — wind barbs on a grid.
+    auto* ax = mfAxes(fig);
+    std::vector<float> x, y, u, v;
+    for (int j = 0; j < 5; ++j)
+        for (int i = 0; i < 7; ++i) {
+            x.push_back(float(i)); y.push_back(float(j));
+            u.push_back(5.0f + 10.0f * i);
+            v.push_back(15.0f * float(j) - 30.0f);
+        }
+    ax->addPlot(std::make_unique<BarbsPlot>(std::move(x), std::move(y),
+                                            std::move(u), std::move(v)));
+    ax->setXlim(-1, 7); ax->setYlim(-1, 5);
+}
+
+void f209_table_scaled(Figure& fig) {
+    // mpl: t = ax.table(...); t.scale(1.4, 1.6) — per-cell scale.
+    auto* ax = mfAxes(fig);
+    BarData bd;
+    bd.heights = {3, 7, 5};
+    ax->addPlot(std::make_unique<BarPlot>(std::move(bd)));
+    ax->setXlim(-0.5f, 2.5f); ax->setYlim(0, 9);
+    auto& t = ax->table({{"A", "B", "C"}, {"3", "7", "5"}}, "bottom");
+    t.scaleX = 1.4f;
+    t.scaleY = 1.6f;
+}
+
+void f210_axline_slope(Figure& fig) {
+    // mpl: ax.axline((2,1), slope=0.5) + ax.axline((6,4),(8,7)).
+    auto* ax = mfAxes(fig);
+    ax->axline({2.0f, 1.0f}, 0.5f,
+               Color::fromRgba8(31, 119, 180), 2.0f);
+    ax->axline({6.0f, 4.0f}, {8.0f, 7.0f},
+               Color::fromRgba8(255, 127, 14), 2.0f);
+    ax->setXlim(0, 10); ax->setYlim(0, 8);
+}
+
 // ═══ Registry ═══════════════════════════════════════════════════════════
 
 struct Feature {
@@ -2740,6 +2818,11 @@ const Feature kFeatures[] = {
     {"203_hatch_pie",          f203_hatch_pie},
     {"204_patches_boxstyle",   f204_patches_boxstyle},
     {"205_tight_layout",       f205_tight_layout},
+    {"206_contour_xy_ranges",  f206_contour_xy_ranges},
+    {"207_quiver_meshgrid",    f207_quiver_meshgrid},
+    {"208_barbs",              f208_barbs},
+    {"209_table_scaled",       f209_table_scaled},
+    {"210_axline_slope",       f210_axline_slope},
 };
 
 } // namespace

@@ -1722,6 +1722,53 @@ def f205_tight_layout(fig, out):
     fig.tight_layout()
 
 
+
+def f206_contour_xy_ranges(fig, out):
+    ax = mf_axes(fig)
+    x = np.linspace(-3, 3, 30)
+    y = np.linspace(0, 4, 30)
+    X, Y = np.meshgrid(x, y)
+    Z = np.sin(X) * np.cos(Y - 2.0)
+    ax.contour(X, Y, Z, levels=[-0.6, -0.2, 0.2, 0.6], cmap="viridis")
+    ax.set_xlim(-3, 3); ax.set_ylim(0, 4)
+
+
+def f207_quiver_meshgrid(fig, out):
+    ax = mf_axes(fig)
+    x = np.arange(8); y = np.arange(6)
+    X, Y = np.meshgrid(x, y)
+    ax.quiver(x, y, X - 3.5, Y - 2.5)
+    ax.set_xlim(-1, 8); ax.set_ylim(-1, 6)
+
+
+def f208_barbs(fig, out):
+    ax = mf_axes(fig)
+    x = np.arange(7); y = np.arange(5)
+    X, Y = np.meshgrid(x, y)
+    U = 5.0 + 10.0 * X
+    V = 15.0 * Y - 30.0
+    ax.barbs(X, Y, U, V)
+    ax.set_xlim(-1, 7); ax.set_ylim(-1, 5)
+
+
+def f209_table_scaled(fig, out):
+    ax = mf_axes(fig)
+    ax.bar([0, 1, 2], [3, 7, 5])
+    ax.set_xlim(-0.5, 2.5); ax.set_ylim(0, 9)
+    t = ax.table(cellText=[["A", "B", "C"], ["3", "7", "5"]],
+                 loc="bottom")
+    t.scale(1.4, 1.6)
+
+
+def f210_axline_slope(fig, out):
+    ax = mf_axes(fig)
+    ax.axline((2.0, 1.0), slope=0.5,
+              color=(31 / 255, 119 / 255, 180 / 255), lw=2)
+    ax.axline((6.0, 4.0), (8.0, 7.0),
+              color=(255 / 255, 127 / 255, 14 / 255), lw=2)
+    ax.set_xlim(0, 10); ax.set_ylim(0, 8)
+
+
 # ═══ Registry ═══════════════════════════════════════════════════════════
 
 # ═══ Registry ═══════════════════════════════════════════════════════════

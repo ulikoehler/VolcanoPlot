@@ -29,11 +29,12 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (totalCols == 0 || totalRows == 0) return;
     rows = totalRows;
 
-    float cellW = float(rect.width) / float(totalCols);
-    float cellH = heightFrac > 0
-                      ? float(rect.height) * heightFrac / float(rows)
-                      : std::min(float(rect.height) / float(rows),
-                                 cellFontScale * 16.0f * 1.5f);
+    float cellW = float(rect.width) / float(totalCols) * scaleX;
+    float cellH = (heightFrac > 0
+                       ? float(rect.height) * heightFrac / float(rows)
+                       : std::min(float(rect.height) / float(rows),
+                                  cellFontScale * 16.0f * 1.5f)) *
+                  scaleY;
     float tableH = cellH * float(rows);
     // mpl loc='bottom' attaches the table's top edge to the bottom spine,
     // extending below the axes; 'top' extends above; 'center' overlays
@@ -626,10 +627,12 @@ void TablePlot::emitVector(render::VectorCanvas& c, const Axes&,
     size_t totalRows = cellText.size() + (hasColLabels ? 1 : 0);
     if (totalCols == 0 || totalRows == 0) return;
 
-    float cellW = float(rect.width) / float(totalCols);
-    float cellH = heightFrac > 0
-                      ? float(rect.height) * heightFrac / float(totalRows)
-                      : std::min(float(rect.height) / float(totalRows), 28.0f);
+    float cellW = float(rect.width) / float(totalCols) * scaleX;
+    float cellH = (heightFrac > 0
+                       ? float(rect.height) * heightFrac / float(totalRows)
+                       : std::min(float(rect.height) / float(totalRows),
+                                  28.0f)) *
+                  scaleY;
     float tableH = cellH * float(totalRows);
     float y0 = (loc == "top") ? float(rect.y) - tableH
                : (loc == "center" || loc == "centre")

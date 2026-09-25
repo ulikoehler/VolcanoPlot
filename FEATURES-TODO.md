@@ -1561,3 +1561,56 @@ tri_*) are checked off in the sections above.
       real title/suptitle font sizes, `rect` bounds, and mpl-style
       inter-axes spacing (row gap for titles/xlabels, column gap for
       ylabels).
+- [x] **`vp.axis`/`vp.text`/`vp.figure`/`vp.lines` class modules** —
+      callable-module shims preserving the pyplot forwards; typed
+      `XAxis`/`YAxis` (with `axis_name`), `XTick`/`YTick` (label1/2,
+      pad, loc access), `Ticker` (locator/formatter validated against
+      `ticker.Locator`/`ticker.Formatter`), `SubFigure` results from
+      `fig.subfigures`/`add_subfigure`, `lines.AxLine` with
+      xy1/xy2/slope accessors, `container.*` classes.
+- [x] **`vp.quiver`/`vp.streamplot` modules** — typed `Quiver`
+      (`set_UVEC` mutates geometry via `QuiverPlot::setUV`, config
+      accessors: color/linewidth/scale/pivot/label), `QuiverKey`,
+      `Barbs`, `StreamplotSet` (`lines`/`arrows` channel props),
+      `TerminateWarning` as a real `UserWarning` subclass; quiver and
+      barbs accept 1D or 2D X/Y with meshgrid expansion for
+      1D-coords + 2D-fields.
+- [x] **`vp.contour`/`vp.table` modules** — `contour`/`contourf`
+      accept mpl `[X, Y,] Z[, levels]` signatures (levels as trailing
+      positional or kwarg; X/Y 1D or 2D set the grid data ranges);
+      `QuadContourSet` with `levels` (eagerly computed like mpl),
+      `allsegs`, `collections`, `filled`, `extent`, `clabel`,
+      `find_nearest_contour`, `get_paths`; `table.Cell`/`CustomCell`
+      with `get_text`/`set_text_props`/`get_facecolor`/`set_facecolor`/
+      `get_figure`/`get_axes`, `Table.scale(x, y)` via native
+      `TablePlot::scaleX/scaleY`, `table[row, col]` indexing.
+- [x] **`vp.backend_bases` module** — full event hierarchy (`Event`,
+      `LocationEvent`, `MouseEvent`, `KeyEvent`, `PickEvent`,
+      `DrawEvent`, `ResizeEvent`, `CloseEvent`) with mpl fields
+      (name/canvas/guiEvent/x/y/inaxes/xdata/ydata/button/dblclick/
+      step/key/artist/mouseevent/renderer/width/height);
+      `MouseButton` enum; `FigureCanvasBase` = `Canvas` with
+      `mpl_connect`/`mpl_disconnect` (typed-event dispatch),
+      `figure`/`callbacks`/`events`/`button_pick_id`/`scroll_pick_id`/
+      `manager`, `draw`/`draw_idle`/`blit`/`flush_events`/
+      `start_event_loop`/`stop_event_loop`, `get_width_height`,
+      `filetypes`/`get_supported_filetypes[_grouped]`, `print_figure`,
+      `get_renderer`, headless `dispatch` test hook; `TimerBase`
+      (interval/single_shot/callbacks/start/stop), `FigureManagerBase`,
+      `NavigationToolbar2`, `RendererBase`, `ToolContainerBase`,
+      `StatusbarBase`; canvas singleton per figure (`ev.canvas is
+      fig.canvas`).
+- [x] **`vp.bezier`/`vp.mathtext` modules** — `BezierSegment`
+      (control_points/degree/dimension/point_at_t/
+      polynomial_coefficients/axis_aligned_extrema),
+      `NonIntersectingPathException`, `get_intersection`,
+      `get_normal_points`, `split_de_casteljau`,
+      `find_bezier_t_intersecting_with_closedpath`,
+      `split_path_inout`, `inside_circle`, `check_if_parallel`,
+      `get_cos_sin`, `get_parallels`, `find_control_points`,
+      `make_wedged_bezier2` (ported from mpl's bezier.py);
+      `MathTextParser` (path/agg output modes, `RasterParse`/
+      `VectorParse` results with width/height/depth/glyphs/rectangles),
+      `get_unicode_index` (native `mathSymbolIndex`), `math_to_image`;
+      CPU-side font init via `TextRenderer::initFonts` — no Vulkan
+      needed for measurement.
