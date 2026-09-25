@@ -7,6 +7,7 @@
 #include <volcano/render/Renderer.hpp>
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/Style.hpp>
+#include <volcano/plot/Rc.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Colormap.hpp>
 #include <volcano/plot/DataSeries.hpp>
@@ -1266,6 +1267,93 @@ void plotVoxels(GalleryCtx& ctx) {
     ctx.render(fig, "voxels");
 }
 
+// ── Style comparisons ─────────────────────────────────────────────────────
+// One PNG per built-in style sheet (style_<name>.png), paired with the
+// matplotlib output of the same demo figure under plt.style.use(name).
+void plotStyles(GalleryCtx& ctx) {
+    // Styles present on both sides (mpl 3.10 stylelib). VolcanoPlot extras
+    // not shipped by mpl (petroff6/petroff8) are intentionally excluded.
+    static const std::vector<std::string> kStyles = {
+        "default", "classic", "ggplot", "bmh", "fivethirtyeight",
+        "dark_background", "grayscale", "Solarize_Light2", "fast",
+        "seaborn-v0_8", "seaborn-v0_8-dark", "seaborn-v0_8-darkgrid",
+        "seaborn-v0_8-white", "seaborn-v0_8-whitegrid", "seaborn-v0_8-ticks",
+        "seaborn-v0_8-paper", "seaborn-v0_8-notebook", "seaborn-v0_8-talk",
+        "seaborn-v0_8-poster",
+        "seaborn-v0_8-bright", "seaborn-v0_8-colorblind",
+        "seaborn-v0_8-dark-palette", "seaborn-v0_8-deep",
+        "seaborn-v0_8-muted", "seaborn-v0_8-pastel",
+        "tableau-colorblind10", "petroff10",
+        // mpl-composed sheet: darkgrid theme + pastel palette.
+        "seaborn-v0_8-darkgrid+seaborn-v0_8-pastel",
+    };
+    for (const auto& name : kStyles) {
+        // style::context applies the sheet(s) to the global rc params and
+        // restores them on destruction — Figure/Axes pick them up in their
+        // constructors.
+        std::vector<std::string> sheets;
+        for (size_t pos = 0, next; ; pos = next + 1) {
+            next = name.find('+', pos);
+            sheets.push_back(name.substr(pos, next - pos));
+            if (next == std::string::npos) break;
+        }
+        auto guard = plot::style::context(sheets);
+
+        Figure fig(1, 1);
+        auto* ax = fig.addAxes();
+        fig.style().dpi = 200.0f;
+        ax->style().dpi = 200.0f;
+        ax->setTitle(name);
+        ax->style().xAxis.visible = true;
+        ax->style().yAxis.visible = true;
+        ax->style().xAxis.label = "x";
+        ax->style().yAxis.label = "y";
+
+        auto x = linspace(0, 10, 200);
+
+        // Fill band in the style's first cycle color (mpl: color='C0').
+        // Added first so it draws under the lines (mpl's fill_between
+        // zorder=1 does this regardless of call order).
+        std::vector<float> y1, y2;
+        for (float xi : x) {
+            y1.push_back(std::sin(xi) + 0.5f);
+            y2.push_back(std::sin(xi) - 0.5f);
+        }
+        Color band = ax->style().colorCycle.at(0);
+        band.a = 0.3f; // mpl alpha=0.3
+        ax->addPlot(std::make_unique<FillBetweenPlot>(x, y1, y2, band));
+
+        auto addLine = [&](const char* label, auto&& fn) {
+            Series2D s;
+            s.label = label;
+            for (float xi : x) s.points.push_back({xi, fn(xi)});
+            ax->addPlot(std::make_unique<LinePlot>(std::move(s)));
+        };
+        addLine("sin(x)",      [](float v) { return std::sin(v); });
+        addLine("cos(x)",      [](float v) { return std::cos(v); });
+        addLine("sin(x)*0.6",  [](float v) { return std::sin(v) * 0.6f; });
+        addLine("cos(x)*0.5+0.5",
+                  [](float v) { return std::cos(v) * 0.5f + 0.5f; });
+
+        Series2D sc;
+        sc.marker = MarkerStyle::Circle;
+        // mpl draws collections (scatter/fill_between) from a separate
+        // patch cycler — with explicit fill color the first collection
+        // color is C0.
+        sc.color = ax->style().colorCycle.at(0);
+        // mpl ax.scatter default s=36 pt² → diameter ≈ 18.8 px at dpi=200.
+        sc.size = 18.8f;
+        sc.label = "pts";
+        auto sx = linspace(0.5f, 9.5f, 15);
+        for (float xi : sx)
+            sc.points.push_back({xi, std::sin(xi) + 0.15f});
+        ax->addPlot(std::make_unique<ScatterPlot>(std::move(sc)));
+
+        ax->style().legend.visible = true;
+        ctx.render(fig, "style_" + name);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1348,6 +1436,9 @@ int main(int argc, char** argv) {
     plotErrorbar3D(ctx);
     plotVoxels(ctx);
 
-    std::cout << "Done. Generated " << 62 << " plots.\n";
+    // Style sheet comparisons
+    plotStyles(ctx);
+
+    std::cout << "Done. Generated " << 90 << " plots.\n";
     return 0;
 }

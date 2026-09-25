@@ -28,6 +28,12 @@ public:
         return series_.resolvedColor();
     }
 
+    void applyStyleDefaults(const FigureStyle& s) override {
+        // mpl: rcParams['lines.linewidth'] (points) is the Line2D
+        // default; Series2D::lineWidth is in pixels → scale by dpi/72.
+        if (series_.lineWidth <= 0.0f)
+            series_.lineWidth = s.lines.lineWidth * s.dpi / 72.0f;
+    }
     bool applyCycleProps(const CycleProps& p) override {
         if (!series_.usePropCycle) return false;
         // Only an "auto" color consumes the cycle (matplotlib: an
@@ -38,7 +44,10 @@ public:
             consumed = true;
         }
         if (p.lineStyle) series_.lineStyle = *p.lineStyle;
-        if (p.lineWidth) series_.lineWidth = *p.lineWidth;
+        // Cycle linewidth only fills an auto width — an explicit lw= wins
+        // (mpl: cycle props are defaults for keys not passed explicitly).
+        if (p.lineWidth && series_.lineWidth <= 0.0f)
+            series_.lineWidth = *p.lineWidth;
         if (p.marker) series_.marker = *p.marker;
         if (p.markerTex) series_.markerTex = *p.markerTex;
         return consumed;

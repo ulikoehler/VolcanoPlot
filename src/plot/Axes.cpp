@@ -60,6 +60,9 @@ IPlot* Axes::addPlot(std::shared_ptr<IPlot> plot) {
         const auto& props = cycler_.peek();
         if (raw->applyCycleProps(props)) cycler_.advance();
     }
+    // Style-level defaults (e.g. lines.linewidth) fill anything the
+    // caller and the prop cycle left at auto.
+    raw->applyStyleDefaults(style_);
     plots_.push_back(std::move(plot));
     // mpl: artist add merges into dataLim eagerly (update_datalim).
     auto [fx, fy] = raw->feedsData(*this);

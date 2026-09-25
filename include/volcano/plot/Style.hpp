@@ -326,9 +326,15 @@ struct PatchStyleDefaults {
     bool forceEdgeColor = false;
 };
 
+/// matplotlib's default axes.prop_cycle colors (tab10). Style sheets that
+/// do not set prop_cycle keep this default — matching mpl semantics where
+/// the default rcParam is the tab10 cycle.
+[[nodiscard]] const std::vector<Color>& defaultPropCycle();
+
 /// A color cycle (matplotlib axes.prop_cycle equivalent).
 struct ColorCycleStyle {
-    std::vector<Color> colors;
+    /// mpl default: tab10 (empty vector = take the renderer fallback).
+    std::vector<Color> colors = defaultPropCycle();
     [[nodiscard]] Color at(size_t i) const {
         if (colors.empty()) return Color::black();
         return colors[i % colors.size()];
@@ -428,24 +434,28 @@ namespace styles {
     FigureStyle seabornWhite();
     /// seaborn-v0_8-ticks.
     FigureStyle seabornTicks();
-    /// seaborn-v0_8-paper context (smaller fonts).
-    FigureStyle seabornPaper();
+    /// seaborn-v0_8-paper context (smaller fonts). In mpl these are pure
+    /// context styles applied on top of the current rcParams — pass `base`
+    /// to compose (e.g. seabornPaper(seabornDarkgrid())).
+    FigureStyle seabornPaper(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-notebook context (medium fonts, default).
-    FigureStyle seabornNotebook();
+    FigureStyle seabornNotebook(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-talk context (larger fonts).
-    FigureStyle seabornTalk();
+    FigureStyle seabornTalk(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-poster context (largest fonts).
-    FigureStyle seabornPoster();
-    /// seaborn-v0_8-bright palette.
-    FigureStyle seabornBright();
+    FigureStyle seabornPoster(const FigureStyle& base = defaultStyle());
+    /// seaborn-v0_8-bright palette (axes.prop_cycle only).
+    FigureStyle seabornBright(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-colorblind palette.
-    FigureStyle seabornColorblind();
+    FigureStyle seabornColorblind(const FigureStyle& base = defaultStyle());
+    /// seaborn-v0_8-dark-palette.
+    FigureStyle seabornDarkPalette(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-deep palette.
-    FigureStyle seabornDeep();
+    FigureStyle seabornDeep(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-muted palette.
-    FigureStyle seabornMuted();
+    FigureStyle seabornMuted(const FigureStyle& base = defaultStyle());
     /// seaborn-v0_8-pastel palette.
-    FigureStyle seabornPastel();
+    FigureStyle seabornPastel(const FigureStyle& base = defaultStyle());
     /// dark_background style.
     FigureStyle darkBackground();
     /// grayscale style.
@@ -456,23 +466,27 @@ namespace styles {
     FigureStyle fivethirtyeightStyle();
     /// Solarize_Light2 style.
     FigureStyle solarizeLight2Style();
-    /// fast style (minimal rendering optimizations).
-    FigureStyle fastStyle();
-    /// tableau-colorblind10 palette.
-    FigureStyle tableauColorblind10();
+    /// fast style (path simplification params only — a pure delta in mpl).
+    FigureStyle fastStyle(const FigureStyle& base = defaultStyle());
+    /// tableau-colorblind10 palette (axes.prop_cycle only).
+    FigureStyle tableauColorblind10(const FigureStyle& base = defaultStyle());
     /// petroff6 color cycle.
-    FigureStyle petroff6Style();
+    FigureStyle petroff6Style(const FigureStyle& base = defaultStyle());
     /// petroff8 color cycle.
-    FigureStyle petroff8Style();
+    FigureStyle petroff8Style(const FigureStyle& base = defaultStyle());
     /// petroff10 color cycle.
-    FigureStyle petroff10Style();
+    FigureStyle petroff10Style(const FigureStyle& base = defaultStyle());
     /// xkcd style (plt.xkcd rcParams: Comic Sans-ish font, thicker axes).
     /// Note: the hand-drawn path sketching itself is a separate feature;
     /// this captures the rcParams portion only.
-    FigureStyle xkcdStyle();
+    FigureStyle xkcdStyle(const FigureStyle& base = defaultStyle());
 
-    /// Look up a style by name (returns nullptr if not found).
-    FigureStyle (*byName(const std::string& name))();
+    /// Style-sheet application function: maps the current params to the
+    /// styled params (matplotlib style.use applies a sheet's keys on top
+    /// of the current rcParams; palette/context sheets are pure deltas).
+    using StyleSheet = FigureStyle (*)(const FigureStyle&);
+    /// Look up a style sheet by name (returns nullptr if not found).
+    StyleSheet byName(const std::string& name);
 } // namespace styles
 
 } // namespace volcano::plot

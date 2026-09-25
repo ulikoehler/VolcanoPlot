@@ -61,28 +61,26 @@ const std::vector<Color>& tab10() {
 }
 
 /// Set seaborn common parameters (shared by all seaborn variants).
+/// Matches the "Seaborn common parameters" block of mpl's seaborn-v0_8-*
+/// .mplstyle files: no font sizes, no line widths, no palette, no tick
+/// sizes (those live in the variant/context blocks).
 void seabornCommon(FigureStyle& s) {
     s.styleName = "seaborn";
     s.faceColor = Color::white();
     s.textColor = gray(0.15f);
     s.axisBelow = true;
     s.fontFamily = "sans-serif";
-    s.fontSize = 11.0f;
     s.xAxis.labelColor = gray(0.15f);
     s.yAxis.labelColor = gray(0.15f);
     s.xAxis.color = gray(0.15f);
     s.yAxis.color = gray(0.15f);
+    // mpl xtick.color/ytick.color: .15 (tick marks + tick labels).
+    s.xAxis.ticks.labelColor = gray(0.15f);
+    s.yAxis.ticks.labelColor = gray(0.15f);
     s.xAxis.ticks.direction = "out";
     s.yAxis.ticks.direction = "out";
-    s.xAxis.ticks.majorSize = 0;
-    s.yAxis.ticks.majorSize = 0;
-    s.xAxis.ticks.minorSize = 0;
-    s.yAxis.ticks.minorSize = 0;
     s.legend.frameOn = false;
     s.lines.solidCapStyle = "round";
-    s.lines.lineWidth = 1.75f;
-    s.patch.lineWidth = 0.3f;
-    s.patch.faceColor = hex("4C72B0");
 }
 
 /// Apply seaborn context scaling (paper/notebook/talk/poster).
@@ -101,9 +99,14 @@ void seabornContext(FigureStyle& s, float scale) {
     s.yAxis.ticks.majorWidth = 1.0f * scale;
     s.xAxis.ticks.minorWidth = 0.5f * scale;
     s.yAxis.ticks.minorWidth = 0.5f * scale;
+    // mpl context sheets also set xtick.major.pad / ytick.major.pad: 7*s.
+    s.xAxis.ticks.majorPad = 7.0f * scale;
+    s.yAxis.ticks.majorPad = 7.0f * scale;
 }
 
 } // namespace
+
+const std::vector<Color>& defaultPropCycle() { return tab10(); }
 
 namespace styles {
 
@@ -161,8 +164,11 @@ FigureStyle classicStyle() {
     s.axisBelow = false;
     s.fontSize = 12.0f;
     s.fontFamily = "sans-serif";
-    // classic uses the same tab10 cycle
-    s.colorCycle.colors = tab10();
+    // mpl classic prop_cycle: 'bgrcmyk' single-letter mpl1.x colors.
+    s.colorCycle.colors = {
+        hex("0000FF"), hex("008000"), hex("FF0000"), hex("00BFBF"),
+        hex("BF00BF"), hex("BFBF00"), hex("000000"),
+    };
     s.xAxis.color = Color::black();
     s.yAxis.color = Color::black();
     s.xAxis.lineWidth = 1.0f;
@@ -177,6 +183,26 @@ FigureStyle classicStyle() {
     s.yAxis.labelColor = Color::black();
     s.xAxis.ticks.direction = "in";
     s.yAxis.ticks.direction = "in";
+    // mpl classic: xtick/ytick.major.size 4, minor 2, width 0.5, pad 4;
+    // labelsize 'medium'=12, titlesize 'large'=14.4, legend 'large'.
+    s.xAxis.ticks.majorSize = 4.0f;
+    s.yAxis.ticks.majorSize = 4.0f;
+    s.xAxis.ticks.minorSize = 2.0f;
+    s.yAxis.ticks.minorSize = 2.0f;
+    s.xAxis.ticks.majorWidth = 0.5f;
+    s.yAxis.ticks.majorWidth = 0.5f;
+    s.xAxis.ticks.minorWidth = 0.5f;
+    s.yAxis.ticks.minorWidth = 0.5f;
+    s.xAxis.ticks.majorPad = 4.0f;
+    s.yAxis.ticks.majorPad = 4.0f;
+    s.xAxis.ticks.minorPad = 4.0f;
+    s.yAxis.ticks.minorPad = 4.0f;
+    s.xAxis.tickFont.size = 12.0f;
+    s.yAxis.tickFont.size = 12.0f;
+    s.xAxis.labelFont.size = 12.0f;
+    s.yAxis.labelFont.size = 12.0f;
+    s.title.font.size = 14.4f;
+    s.legend.font.size = 14.4f;
     s.lines.lineWidth = 1.0f;
     s.lines.solidCapStyle = "projecting";
     s.lines.dashCapStyle = "butt";
@@ -221,8 +247,12 @@ FigureStyle ggplotStyle() {
     s.yAxis.labelColor = hex("555555");
     s.xAxis.ticks.direction = "out";
     s.yAxis.ticks.direction = "out";
-    s.title.font.size = 14.0f; // x-large
-    s.title.font.weight = "bold";
+    // mpl ggplot: xtick.color/ytick.color 555555, axes.labelsize 'large'=12.
+    s.xAxis.ticks.labelColor = hex("555555");
+    s.yAxis.ticks.labelColor = hex("555555");
+    s.xAxis.labelFont.size = 12.0f;
+    s.yAxis.labelFont.size = 12.0f;
+    s.title.font.size = 18.0f; // mpl: axes.titlesize 'x-large'
     s.lines.lineWidth = 1.5f;
     s.patch.faceColor = hex("348ABD");
     s.patch.edgeColor = hex("EEEEEE");
@@ -255,18 +285,41 @@ FigureStyle seabornStyle() {
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 0.0f;
     s.yAxis.lineWidth = 0.0f;
+    s.xAxis.ticks.majorSize = 0;
+    s.yAxis.ticks.majorSize = 0;
+    s.xAxis.ticks.minorSize = 0;
+    s.yAxis.ticks.minorSize = 0;
     // deep palette
     s.colorCycle.colors = {
         hex("4C72B0"), hex("55A868"), hex("C44E52"), hex("8172B2"),
         hex("CCB974"), hex("64B5CD"),
     };
+    s.patch.faceColor = hex("4C72B0");
     seabornContext(s, 1.0f); // notebook
     return s;
 }
 
 FigureStyle seabornDarkgrid() {
-    FigureStyle s = seabornStyle();
+    // mpl seaborn-v0_8-darkgrid.mplstyle: common + darkgrid block only —
+    // no palette (default prop_cycle) and no context (default font sizes).
+    FigureStyle s;
+    seabornCommon(s);
     s.styleName = "seaborn-v0_8-darkgrid";
+    s.xAxis.grid = true;
+    s.yAxis.grid = true;
+    s.xAxis.gridColor = Color::white();
+    s.yAxis.gridColor = Color::white();
+    s.xAxis.gridLineStyle = "-";
+    s.yAxis.gridLineStyle = "-";
+    s.faceColor = hex("EAEAF2");
+    s.xAxis.color = Color::white();
+    s.yAxis.color = Color::white();
+    s.xAxis.lineWidth = 0.0f;
+    s.yAxis.lineWidth = 0.0f;
+    s.xAxis.ticks.majorSize = 0;
+    s.yAxis.ticks.majorSize = 0;
+    s.xAxis.ticks.minorSize = 0;
+    s.yAxis.ticks.minorSize = 0;
     return s;
 }
 
@@ -285,11 +338,10 @@ FigureStyle seabornWhitegrid() {
     s.yAxis.gridColor = gray(0.8f);
     s.xAxis.gridLineWidth = 1.0f;
     s.yAxis.gridLineWidth = 1.0f;
-    s.colorCycle.colors = {
-        hex("4C72B0"), hex("55A868"), hex("C44E52"), hex("8172B2"),
-        hex("CCB974"), hex("64B5CD"),
-    };
-    seabornContext(s, 1.0f);
+    s.xAxis.ticks.majorSize = 0;
+    s.yAxis.ticks.majorSize = 0;
+    s.xAxis.ticks.minorSize = 0;
+    s.yAxis.ticks.minorSize = 0;
     return s;
 }
 
@@ -304,11 +356,10 @@ FigureStyle seabornDark() {
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 0.0f;
     s.yAxis.lineWidth = 0.0f;
-    s.colorCycle.colors = {
-        hex("4C72B0"), hex("55A868"), hex("C44E52"), hex("8172B2"),
-        hex("CCB974"), hex("64B5CD"),
-    };
-    seabornContext(s, 1.0f);
+    s.xAxis.ticks.majorSize = 0;
+    s.yAxis.ticks.majorSize = 0;
+    s.xAxis.ticks.minorSize = 0;
+    s.yAxis.ticks.minorSize = 0;
     return s;
 }
 
@@ -323,11 +374,10 @@ FigureStyle seabornWhite() {
     s.yAxis.color = gray(0.15f);
     s.xAxis.lineWidth = 1.25f;
     s.yAxis.lineWidth = 1.25f;
-    s.colorCycle.colors = {
-        hex("4C72B0"), hex("55A868"), hex("C44E52"), hex("8172B2"),
-        hex("CCB974"), hex("64B5CD"),
-    };
-    seabornContext(s, 1.0f);
+    s.xAxis.ticks.majorSize = 0;
+    s.yAxis.ticks.majorSize = 0;
+    s.xAxis.ticks.minorSize = 0;
+    s.yAxis.ticks.minorSize = 0;
     return s;
 }
 
@@ -341,38 +391,42 @@ FigureStyle seabornTicks() {
     return s;
 }
 
-FigureStyle seabornPaper() {
-    FigureStyle s = seabornStyle();
+// mpl context sheets (paper/notebook/talk/poster) are pure deltas on top
+// of the current params — they set only font/line/tick metrics.
+FigureStyle seabornPaper(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-paper";
     seabornContext(s, 0.8f);
     return s;
 }
 
-FigureStyle seabornNotebook() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornNotebook(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-notebook";
     seabornContext(s, 1.0f);
     return s;
 }
 
-FigureStyle seabornTalk() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornTalk(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-talk";
     seabornContext(s, 1.3f);
     return s;
 }
 
-FigureStyle seabornPoster() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornPoster(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-poster";
     seabornContext(s, 1.6f);
     return s;
 }
 
 // ─── seaborn palettes (color-only overrides) ──────────────────────────────
+// mpl palette sheets (bright/colorblind/dark-palette/deep/muted/pastel)
+// set only axes.prop_cycle + patch.facecolor — pure deltas on `base`.
 
-FigureStyle seabornBright() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornBright(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-bright";
     s.colorCycle.colors = {
         hex("003FFF"), hex("03ED3A"), hex("E8000B"), hex("8A2BE2"),
@@ -382,8 +436,8 @@ FigureStyle seabornBright() {
     return s;
 }
 
-FigureStyle seabornColorblind() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornColorblind(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-colorblind";
     s.colorCycle.colors = {
         hex("0072B2"), hex("009E73"), hex("D55E00"), hex("CC79A7"),
@@ -393,8 +447,19 @@ FigureStyle seabornColorblind() {
     return s;
 }
 
-FigureStyle seabornDeep() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornDarkPalette(const FigureStyle& base) {
+    FigureStyle s = base;
+    s.styleName = "seaborn-v0_8-dark-palette";
+    s.colorCycle.colors = {
+        hex("001C7F"), hex("017517"), hex("8C0900"), hex("7600A1"),
+        hex("B8860B"), hex("006374"),
+    };
+    s.patch.faceColor = hex("001C7F");
+    return s;
+}
+
+FigureStyle seabornDeep(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-deep";
     s.colorCycle.colors = {
         hex("4C72B0"), hex("55A868"), hex("C44E52"), hex("8172B2"),
@@ -404,8 +469,8 @@ FigureStyle seabornDeep() {
     return s;
 }
 
-FigureStyle seabornMuted() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornMuted(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-muted";
     s.colorCycle.colors = {
         hex("4878CF"), hex("6ACC65"), hex("D65F5F"), hex("B47CC7"),
@@ -415,8 +480,8 @@ FigureStyle seabornMuted() {
     return s;
 }
 
-FigureStyle seabornPastel() {
-    FigureStyle s = seabornStyle();
+FigureStyle seabornPastel(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "seaborn-v0_8-pastel";
     s.colorCycle.colors = {
         hex("92C6FF"), hex("97F0AA"), hex("FF9F9A"), hex("D0BBFF"),
@@ -466,7 +531,9 @@ FigureStyle darkBackground() {
 FigureStyle grayscaleStyle() {
     FigureStyle s = defaultStyle();
     s.styleName = "grayscale";
-    s.faceColor = gray(0.75f);
+    // mpl: axes.facecolor white; figure.facecolor 0.75 is overridden by
+    // savefig.facecolor white on save — the rendered PNG is all-white.
+    s.faceColor = Color::white();
     s.edgeColor = Color::white();
     s.textColor = Color::black();
     s.colorCycle.colors = {
@@ -511,11 +578,14 @@ FigureStyle bmhStyle() {
     s.xAxis.ticks.direction = "in";
     s.yAxis.ticks.direction = "in";
     s.lines.lineWidth = 2.0f;
-    s.patch.faceColor = hex("348ABD");
+    s.patch.faceColor = hex("0000FF"); // mpl patch.facecolor: blue
     s.patch.edgeColor = hex("EEEEEE");
     s.patch.lineWidth = 0.5f;
     s.legend.frameOn = true;
-    s.title.font.size = 16.0f; // x-large
+    // mpl axes.titlesize 'x-large'=1.44*10, axes.labelsize 'large'=1.2*10.
+    s.title.font.size = 14.4f;
+    s.xAxis.labelFont.size = 12.0f;
+    s.yAxis.labelFont.size = 12.0f;
     return s;
 }
 
@@ -553,7 +623,13 @@ FigureStyle fivethirtyeightStyle() {
     s.patch.edgeColor = hex("F0F0F0");
     s.patch.lineWidth = 0.5f;
     s.legend.frameOn = true;
-    s.title.font.size = 16.0f; // x-large
+    // mpl: axes.titlesize 'x-large'=1.44*font.size(14), labelsize 'large',
+    // tick labels 'medium'=font.size.
+    s.title.font.size = 20.16f;
+    s.xAxis.labelFont.size = 16.8f;
+    s.yAxis.labelFont.size = 16.8f;
+    s.xAxis.tickFont.size = 14.0f;
+    s.yAxis.tickFont.size = 14.0f;
     return s;
 }
 
@@ -561,7 +637,8 @@ FigureStyle fivethirtyeightStyle() {
 FigureStyle solarizeLight2Style() {
     FigureStyle s;
     s.styleName = "Solarize_Light2";
-    s.faceColor = hex("FDF6E3");
+    // mpl: axes.facecolor EEE8D5, figure.facecolor FDF6E3 (edgeColor).
+    s.faceColor = hex("EEE8D5");
     s.edgeColor = hex("FDF6E3");
     s.textColor = hex("657B83");
     s.axisBelow = true;
@@ -585,6 +662,9 @@ FigureStyle solarizeLight2Style() {
     s.yAxis.labelColor = hex("657B83");
     s.xAxis.ticks.direction = "out";
     s.yAxis.ticks.direction = "out";
+    // mpl xtick.color/ytick.color: 657b83.
+    s.xAxis.ticks.labelColor = hex("657B83");
+    s.yAxis.ticks.labelColor = hex("657B83");
     s.title.font.size = 16.0f;
     s.title.color = hex("657B83");
     s.lines.lineWidth = 2.0f;
@@ -595,17 +675,18 @@ FigureStyle solarizeLight2Style() {
 }
 
 // ─── fast ─────────────────────────────────────────────────────────────────
-FigureStyle fastStyle() {
-    // "fast" only changes path simplification settings, which are rendering
-    // optimizations not style parameters. Return default with the name set.
-    FigureStyle s = defaultStyle();
+FigureStyle fastStyle(const FigureStyle& base) {
+    // mpl's fast.mplstyle only sets path.simplify/path.simplify_threshold
+    // and agg.path.chunksize — rendering optimizations not represented as
+    // style params here. Pure delta on `base`, matching mpl semantics.
+    FigureStyle s = base;
     s.styleName = "fast";
     return s;
 }
 
 // ─── tableau-colorblind10 ─────────────────────────────────────────────────
-FigureStyle tableauColorblind10() {
-    FigureStyle s = defaultStyle();
+FigureStyle tableauColorblind10(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "tableau-colorblind10";
     s.colorCycle.colors = {
         hex("006BA4"), hex("FF800E"), hex("ABABAB"), hex("595959"),
@@ -617,8 +698,8 @@ FigureStyle tableauColorblind10() {
 }
 
 // ─── petroff6 ─────────────────────────────────────────────────────────────
-FigureStyle petroff6Style() {
-    FigureStyle s = defaultStyle();
+FigureStyle petroff6Style(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "petroff6";
     s.colorCycle.colors = {
         hex("5790fc"), hex("f89c20"), hex("e42536"), hex("964a8b"),
@@ -629,8 +710,8 @@ FigureStyle petroff6Style() {
 }
 
 // ─── petroff8 ─────────────────────────────────────────────────────────────
-FigureStyle petroff8Style() {
-    FigureStyle s = defaultStyle();
+FigureStyle petroff8Style(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "petroff8";
     s.colorCycle.colors = {
         hex("1845fb"), hex("ff5e02"), hex("c91f16"), hex("c849a9"),
@@ -641,8 +722,8 @@ FigureStyle petroff8Style() {
 }
 
 // ─── petroff10 ────────────────────────────────────────────────────────────
-FigureStyle petroff10Style() {
-    FigureStyle s = defaultStyle();
+FigureStyle petroff10Style(const FigureStyle& base) {
+    FigureStyle s = base;
     s.styleName = "petroff10";
     s.colorCycle.colors = {
         hex("3f90da"), hex("ffa90e"), hex("bd1f01"), hex("94a4a2"),
@@ -654,11 +735,12 @@ FigureStyle petroff10Style() {
 }
 
 // ─── xkcd ─────────────────────────────────────────────────────────────────
-FigureStyle xkcdStyle() {
+FigureStyle xkcdStyle(const FigureStyle& base) {
     // Captures the rcParams portion of plt.xkcd(): hand-drawn-looking font,
     // larger sizes, thicker spines. The actual path-sketch wobble
     // (path.sketch) is a renderer feature, not a style.
-    FigureStyle s = defaultStyle();
+    // plt.xkcd() applies its rc dict over the current params — delta.
+    FigureStyle s = base;
     s.styleName = "xkcd";
     s.fontFamily = "Comic Sans MS";
     s.fontSize = 14.0f;
@@ -677,30 +759,40 @@ FigureStyle xkcdStyle() {
 }
 
 // ─── byName ───────────────────────────────────────────────────────────────
-FigureStyle (*byName(const std::string& name))() {
-    if (name == "default") return defaultStyle;
-    if (name == "classic") return classicStyle;
-    if (name == "ggplot") return ggplotStyle;
-    if (name == "seaborn" || name == "seaborn-v0_8") return seabornStyle;
-    if (name == "seaborn-v0_8-darkgrid" || name == "seaborn-darkgrid") return seabornDarkgrid;
-    if (name == "seaborn-v0_8-whitegrid" || name == "seaborn-whitegrid") return seabornWhitegrid;
-    if (name == "seaborn-v0_8-dark" || name == "seaborn-dark") return seabornDark;
-    if (name == "seaborn-v0_8-white" || name == "seaborn-white") return seabornWhite;
-    if (name == "seaborn-v0_8-ticks" || name == "seaborn-ticks") return seabornTicks;
+// mpl styles are sparse rcParam dicts applied over the current params.
+// Complete sheets (ggplot, dark_background, ...) fully rewrite the style;
+// palette/context sheets (seaborn-v0_8-deep, -talk, tableau-colorblind10,
+// petroff*, fast, xkcd) are deltas applied on top of the current style.
+namespace {
+template<FigureStyle (*F)()>
+FigureStyle applySheet(const FigureStyle&) { return F(); }
+} // namespace
+
+StyleSheet byName(const std::string& name) {
+    if (name == "default") return &applySheet<defaultStyle>;
+    if (name == "classic") return &applySheet<classicStyle>;
+    if (name == "ggplot") return &applySheet<ggplotStyle>;
+    if (name == "seaborn" || name == "seaborn-v0_8") return &applySheet<seabornStyle>;
+    if (name == "seaborn-v0_8-darkgrid" || name == "seaborn-darkgrid") return &applySheet<seabornDarkgrid>;
+    if (name == "seaborn-v0_8-whitegrid" || name == "seaborn-whitegrid") return &applySheet<seabornWhitegrid>;
+    if (name == "seaborn-v0_8-dark" || name == "seaborn-dark") return &applySheet<seabornDark>;
+    if (name == "seaborn-v0_8-white" || name == "seaborn-white") return &applySheet<seabornWhite>;
+    if (name == "seaborn-v0_8-ticks" || name == "seaborn-ticks") return &applySheet<seabornTicks>;
     if (name == "seaborn-v0_8-paper" || name == "seaborn-paper") return seabornPaper;
     if (name == "seaborn-v0_8-notebook" || name == "seaborn-notebook") return seabornNotebook;
     if (name == "seaborn-v0_8-talk" || name == "seaborn-talk") return seabornTalk;
     if (name == "seaborn-v0_8-poster" || name == "seaborn-poster") return seabornPoster;
     if (name == "seaborn-v0_8-bright" || name == "seaborn-bright") return seabornBright;
     if (name == "seaborn-v0_8-colorblind" || name == "seaborn-colorblind") return seabornColorblind;
+    if (name == "seaborn-v0_8-dark-palette" || name == "seaborn-dark-palette") return seabornDarkPalette;
     if (name == "seaborn-v0_8-deep" || name == "seaborn-deep") return seabornDeep;
     if (name == "seaborn-v0_8-muted" || name == "seaborn-muted") return seabornMuted;
     if (name == "seaborn-v0_8-pastel" || name == "seaborn-pastel") return seabornPastel;
-    if (name == "dark_background") return darkBackground;
-    if (name == "grayscale") return grayscaleStyle;
-    if (name == "bmh") return bmhStyle;
-    if (name == "fivethirtyeight") return fivethirtyeightStyle;
-    if (name == "Solarize_Light2") return solarizeLight2Style;
+    if (name == "dark_background") return &applySheet<darkBackground>;
+    if (name == "grayscale") return &applySheet<grayscaleStyle>;
+    if (name == "bmh") return &applySheet<bmhStyle>;
+    if (name == "fivethirtyeight") return &applySheet<fivethirtyeightStyle>;
+    if (name == "Solarize_Light2") return &applySheet<solarizeLight2Style>;
     if (name == "fast") return fastStyle;
     if (name == "tableau-colorblind10") return tableauColorblind10;
     if (name == "petroff6") return petroff6Style;

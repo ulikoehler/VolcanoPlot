@@ -111,6 +111,11 @@ public:
     /// mpl `set_clim(vmin, vmax)` — explicit norm bounds; a nullopt
     /// bound keeps/derives the current one (autoscale).
     virtual void setClim(std::optional<float>, std::optional<float>) {}
+    /// Apply style defaults that mpl resolves at artist construction
+    /// (e.g. `lines.linewidth` as the Line2D lw default). Called by
+    /// Axes::addPlot after applyCycleProps so precedence stays
+    /// explicit > prop_cycle > rcParam default.
+    virtual void applyStyleDefaults(const FigureStyle&) {}
     /// Apply one entry of the axes' property cycler (matplotlib
     /// axes.prop_cycle). Return true when the entry was consumed — the
     /// cycle position only advances for consuming plots. Called by

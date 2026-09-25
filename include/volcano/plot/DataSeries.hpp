@@ -126,7 +126,11 @@ struct Series2D {
     /// lineStyle via dashPattern().
     std::vector<float> dashes;
     float dashOffset = 0.0f;
-    float lineWidth = 1.5f;
+    /// <=0 → auto: resolved to `lines.linewidth` of the axes' style in
+    /// Axes::addPlot (mpl: rcParams['lines.linewidth'] is the Line2D
+    /// default; an explicit lw= always wins, prop_cycle entries override
+    /// the rcParam).
+    float lineWidth = -1.0f;
     DrawStyle drawStyle = DrawStyle::Default;
     JoinStyle joinStyle = JoinStyle::Round;
     CapStyle capStyle = CapStyle::Butt;

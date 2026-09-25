@@ -744,6 +744,54 @@ def gen_voxels(out_dir):
     save(fig, out_dir, "voxels")
 
 
+# ── Style comparisons ─────────────────────────────────────────────────────
+# One PNG per style sheet (style_<name>.png), mirroring the demo figure in
+# examples/gallery.cpp::plotStyles. "+" splits into a sheet list passed to
+# plt.style.context — mpl composes sheets in order (theme + palette).
+_STYLE_SPECS = [
+    "default", "classic", "ggplot", "bmh", "fivethirtyeight",
+    "dark_background", "grayscale", "Solarize_Light2", "fast",
+    "seaborn-v0_8", "seaborn-v0_8-dark", "seaborn-v0_8-darkgrid",
+    "seaborn-v0_8-white", "seaborn-v0_8-whitegrid", "seaborn-v0_8-ticks",
+    "seaborn-v0_8-paper", "seaborn-v0_8-notebook", "seaborn-v0_8-talk",
+    "seaborn-v0_8-poster",
+    "seaborn-v0_8-bright", "seaborn-v0_8-colorblind",
+    "seaborn-v0_8-dark-palette", "seaborn-v0_8-deep",
+    "seaborn-v0_8-muted", "seaborn-v0_8-pastel",
+    "tableau-colorblind10", "petroff10",
+    "seaborn-v0_8-darkgrid+seaborn-v0_8-pastel",
+]
+
+
+def _make_style_gen(name):
+    def gen(out_dir):
+        sheets = name.split("+")
+        with plt.style.context(sheets):
+            fig, ax = plt.subplots(figsize=(WIDTH / DPI, HEIGHT / DPI))
+            x = np.linspace(0, 10, 200)
+            ax.fill_between(x, np.sin(x) - 0.5, np.sin(x) + 0.5,
+                            color="C0", alpha=0.3)
+            ax.plot(x, np.sin(x), label="sin(x)")
+            ax.plot(x, np.cos(x), label="cos(x)")
+            ax.plot(x, np.sin(x) * 0.6, label="sin(x)*0.6")
+            ax.plot(x, np.cos(x) * 0.5 + 0.5, label="cos(x)*0.5+0.5")
+            sx = np.linspace(0.5, 9.5, 15)
+            ax.scatter(sx, np.sin(sx) + 0.15, label="pts")
+            setup_ax(ax, name, "x", "y")
+            ax.legend()
+            path = os.path.join(out_dir, f"style_{name}.png")
+            # No facecolor override: styles like dark_background must keep
+            # their own figure facecolor.
+            fig.savefig(path, dpi=DPI)
+            plt.close(fig)
+            print(f"  wrote {path}")
+    gen.__name__ = f"gen_style_{name}"
+    return gen
+
+
+_style_gens = [_make_style_gen(n) for n in _STYLE_SPECS]
+
+
 GENERATORS = [
     gen_scatter, gen_line, gen_bar, gen_grouped_bar, gen_hist, gen_pie,
     gen_box, gen_violin, gen_stack, gen_stem, gen_step, gen_errorbar,
@@ -760,7 +808,7 @@ GENERATORS = [
     gen_reflines, gen_hlines_vlines, gen_annotate, gen_bar_label,
     gen_figimage, gen_contour3d, gen_quiver3d, gen_errorbar3d,
     gen_voxels,
-]
+] + _style_gens
 
 
 def main():

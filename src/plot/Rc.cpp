@@ -559,7 +559,8 @@ const std::vector<std::string>& available() {
         "default", "classic", "ggplot", "bmh", "fivethirtyeight",
         "dark_background", "grayscale", "Solarize_Light2", "fast", "xkcd",
         "seaborn-v0_8", "seaborn-v0_8-bright", "seaborn-v0_8-colorblind",
-        "seaborn-v0_8-dark", "seaborn-v0_8-darkgrid", "seaborn-v0_8-deep",
+        "seaborn-v0_8-dark", "seaborn-v0_8-dark-palette",
+        "seaborn-v0_8-darkgrid", "seaborn-v0_8-deep",
         "seaborn-v0_8-muted", "seaborn-v0_8-notebook", "seaborn-v0_8-paper",
         "seaborn-v0_8-pastel", "seaborn-v0_8-poster", "seaborn-v0_8-talk",
         "seaborn-v0_8-ticks", "seaborn-v0_8-white", "seaborn-v0_8-whitegrid",
@@ -570,7 +571,10 @@ const std::vector<std::string>& available() {
 
 bool use(const std::string& name) {
     if (auto* fn = styles::byName(name)) {
-        rc::params() = fn();
+        // mpl style.use applies the sheet's params on top of the current
+        // rcParams — complete sheets rewrite everything, palette/context
+        // sheets are deltas that preserve the rest.
+        rc::params() = fn(rc::params());
         return true;
     }
     // Not a builtin name — treat as a path to a .mplstyle/matplotlibrc file.
@@ -579,15 +583,12 @@ bool use(const std::string& name) {
 
 bool use(const std::vector<std::string>& names) {
     // matplotlib applies composable styles on top of the current params,
-    // in order. Builtin sheets replace the whole style; .mplstyle files
-    // apply only the params they set.
+    // in order — e.g. use({"seaborn-v0_8-darkgrid", "seaborn-v0_8-pastel"})
+    // gives the darkgrid theme with the pastel cycle.
     bool ok = true;
     for (const auto& n : names) {
         if (auto* fn = styles::byName(n)) {
-            // Preserve nothing from prior builtins (they're complete styles),
-            // but custom file params applied earlier are lost — match
-            // matplotlib semantics where each sheet fully replaces.
-            rc::params() = fn();
+            rc::params() = fn(rc::params());
         } else if (!rc::loadFile(n)) {
             ok = false;
         }

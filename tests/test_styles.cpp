@@ -105,9 +105,12 @@ TEST(StyleGgplot, TickDirectionOut) {
     EXPECT_EQ(s.xAxis.ticks.direction, "out");
 }
 
-TEST(StyleGgplot, TitleBold) {
+TEST(StyleGgplot, TitleWeight) {
+    // mpl's ggplot.mplstyle does not set axes.titleweight (normal),
+    // but does set axes.titlesize: x-large (18pt).
     auto s = styles::ggplotStyle();
-    EXPECT_EQ(s.title.font.weight, "bold");
+    EXPECT_EQ(s.title.font.weight, "normal");
+    EXPECT_NEAR(s.title.font.size, 18.0f, 0.01f);
 }
 
 // ─── seaborn style ────────────────────────────────────────────────────────
@@ -274,10 +277,11 @@ TEST(StyleGrayscale, FirstColorBlack) {
     EXPECT_NEAR(s.colorCycle.at(0).r, 0.0f, 0.01f);
 }
 
-TEST(StyleGrayscale, FaceColor075) {
+TEST(StyleGrayscale, FaceColorWhite) {
+    // mpl's grayscale.mplstyle: axes.facecolor is white
+    // (0.75 is figure.facecolor, overridden by savefig anyway).
     auto s = styles::grayscaleStyle();
-    // 0.75 → (191, 191, 191)
-    EXPECT_NEAR(s.faceColor.r, 191/255.0f, 0.02f);
+    EXPECT_NEAR(s.faceColor.r, 1.0f, 0.02f);
 }
 
 // ─── bmh ──────────────────────────────────────────────────────────────────
@@ -350,9 +354,11 @@ TEST(StyleFivethirtyeight, FontSize14) {
 }
 
 // ─── Solarize_Light2 ──────────────────────────────────────────────────────
-TEST(StyleSolarize, FaceColorFDF6E3) {
+TEST(StyleSolarize, FaceColorEEE8D5) {
+    // mpl's Solarize_Light2: axes.facecolor is base2 (#eee8d5);
+    // #fdf6e3 (base3) is figure.facecolor.
     auto s = styles::solarizeLight2Style();
-    expectColorHex(s.faceColor, "FDF6E3");
+    expectColorHex(s.faceColor, "EEE8D5");
 }
 
 TEST(StyleSolarize, Has8ColorCycle) {
@@ -440,7 +446,7 @@ TEST(StyleByName, ReturnsNullForUnknown) {
 TEST(StyleByName, ReturnsCorrectStyle) {
     auto fn = styles::byName("dark_background");
     ASSERT_NE(fn, nullptr);
-    auto s = fn();
+    auto s = fn(styles::defaultStyle());
     EXPECT_EQ(s.styleName, "dark_background");
     EXPECT_NEAR(s.faceColor.r, 0.0f, 0.01f);
 }
@@ -457,5 +463,6 @@ TEST(ColorCycleStyle, WrapsAround) {
 
 TEST(ColorCycleStyle, EmptyReturnsBlack) {
     ColorCycleStyle cycle;
+    cycle.colors.clear();
     EXPECT_NEAR(cycle.at(0).r, 0.0f, 0.01f);
 }
