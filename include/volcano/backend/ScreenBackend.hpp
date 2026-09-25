@@ -1,4 +1,4 @@
-// volcano/backend/ScreenBackend.hpp — SDL3 window + Vulkan swapchain
+// volcano/backend/ScreenBackend.hpp — GLFW window + Vulkan swapchain
 #pragma once
 
 #include "volcano/backend/Backend.hpp"
@@ -10,7 +10,7 @@
 
 #include <memory>
 
-struct SDL_Window;
+struct GLFWwindow;
 
 namespace volcano::backend {
 
@@ -41,9 +41,34 @@ private:
     void createFramebuffers();
     void recreateSwapchain();
 
+    // GLFW event plumbing — callbacks trampoline onto these helpers via
+    // the window user pointer.
+    void onFramebufferSize(int w, int h);
+    void onMouseButton(int button, int action, int mods);
+    void onCursorPos(double x, double y);
+    void onScroll(double xoff, double yoff);
+    void onKey(int key, int scancode, int action, int mods);
+    void onChar(unsigned int codepoint);
+    [[nodiscard]] int buttonMask() const;
+    static void fillMods(InputEvent& ev, int mods);
+    static void cbFramebufferSize(GLFWwindow*, int, int);
+    static void cbMouseButton(GLFWwindow*, int, int, int);
+    static void cbCursorPos(GLFWwindow*, double, double);
+    static void cbScroll(GLFWwindow*, double, double);
+    static void cbKey(GLFWwindow*, int, int, int, int);
+    static void cbChar(GLFWwindow*, unsigned int);
+    static void cbClose(GLFWwindow*);
+
     BackendDesc desc_;
-    SDL_Window* window_ = nullptr;
-    void* sdlVkSurface_ = nullptr; // VkSurfaceKHR stored as void* to avoid SDL3 vulkan header coupling
+    GLFWwindow* window_ = nullptr;
+    /// Windowed-mode geometry saved while fullscreen is active.
+    int savedX_ = 0, savedY_ = 0, savedW_ = 0, savedH_ = 0;
+    bool fullscreen_ = false;
+    bool closeRequested_ = false;
+    /// Double-click detection (GLFW reports no click counts).
+    double lastClickTime_ = -1.0;
+    int lastClickButton_ = -1;
+    float lastClickX_ = -1.0f, lastClickY_ = -1.0f;
 
     GpuContext ctx_;
     vk::SurfaceKHR surface_;

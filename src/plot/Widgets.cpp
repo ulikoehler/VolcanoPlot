@@ -263,7 +263,7 @@ bool TextBox::handleEvent(const Event& e) {
             if (!text_.empty()) text_.pop_back();
             return true;
         }
-        // Printable single characters (SDL sends keycodes; test events use
+        // Printable single characters (GLFW sends keycodes; test events use
         // single-char strings).
         if (e.key.size() == 1 && std::isprint(e.key[0])) {
             text_ += e.key[0];

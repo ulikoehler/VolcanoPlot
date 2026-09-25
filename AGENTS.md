@@ -6,7 +6,7 @@ VolcanoPlot is a Vulkan-based GPU-side plotter for C++23, inspired by the
 WebGPU VolcanoPlot prototype. It targets **publication-quality** output with
 matplotlib-style styling and feature parity. It runs in two modes:
 
-- **Screen mode** — SDL3 window with a realtime liveplot (zoom/pan/infinite zoom)
+- **Screen mode** — GLFW window with a realtime liveplot (zoom/pan/infinite zoom)
 - **Headless mode** — offscreen render to a buffer, then GPU-side image encoding
   (PNG/WebP via compute shader) saved to a file
 
@@ -49,9 +49,9 @@ sudo apt-get install -y libvulkan-dev libshaderc-dev glslang-dev \
     libpng-dev libwebp-dev
 ```
 
-Optional: `libsdl3-dev` (screen mode — without it, the screen backend,
-`volcano_screen`, and `example_chirp_liveplot` are skipped at configure
-time with a warning). Also optional: `libfreetype-dev` and
+Screen mode uses GLFW — a system `libglfw3-dev` is used when present,
+otherwise the copy vendored under `dependencies/glyb/third_party/glfw`
+is built automatically. Optional: `libfreetype-dev` and
 `libharfbuzz-dev` (for text rendering via glyb).
 
 ## Architecture
@@ -59,7 +59,7 @@ time with a warning). Also optional: `libfreetype-dev` and
 ### Components (modular)
 
 - `volcano_core` — Vulkan device/queue/command abstraction (Vulkan-Hpp + VMA)
-- `volcano_backend` — Screen (SDL3) and headless offscreen backends
+- `volcano_backend` — Screen (GLFW) and headless offscreen backends
 - `volcano_render` — Render passes, pipelines, MSAA, primitive renderers
 - `volcano_plot` — Plot data model, axes, transforms, styles, plot types
 - `volcano_encode` — GPU-side image encoding (PNG/WebP via compute) + CPU fallback

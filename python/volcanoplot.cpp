@@ -9245,9 +9245,9 @@ PYBIND11_MODULE(volcanoplot, m) {
              [](std::shared_ptr<PyFigure> f) {
                  return canvasFor(f);
              })
-        /// mpl plt.show(): open an SDL window and run the interactive
+        /// mpl plt.show(): open a GLFW window and run the interactive
         /// event loop until the window closes (or 'q'). No-op without a
-        /// display/SDL build.
+        /// display/GLFW build.
         .def("show",
              [](std::shared_ptr<PyFigure> f) {
                  auto ext = f->backend()->extent();
@@ -9259,7 +9259,7 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto win = backend::createScreenBackend(desc);
                  if (!win)
                      throw std::runtime_error(
-                         "screen backend unavailable (no display/SDL)");
+                         "screen backend unavailable (no display/GLFW)");
                  render::Renderer r(*win);
                  r.prepare(f->fig());
                  auto& nav = f->fig().nav();

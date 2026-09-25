@@ -9,7 +9,7 @@ modern C++ reimplementation of the WebGPU VolcanoPlot prototype. It targets
 ## Two Operating Modes
 
 ### Screen Mode
-- SDL3 window with a realtime liveplot
+- GLFW window with a realtime liveplot
 - Vulkan swapchain with MSAA anti-aliasing
 - Zoom/pan/infinite-zoom interaction
 - GPU-side function evaluation for smooth deep-zoom
@@ -25,7 +25,7 @@ modern C++ reimplementation of the WebGPU VolcanoPlot prototype. It targets
 ```
 volcano_core  (Vulkan-Hpp + VMA: device, queues, commands, buffers, images)
     ↑
-volcano_backend  (IBackend: ScreenBackend [SDL3] | HeadlessBackend)
+volcano_backend  (IBackend: ScreenBackend [GLFW] | HeadlessBackend)
     ↑
 volcano_render  (Renderer + primitive renderers: Point, Line, Bar, Pie, Heatmap, Surface, Grid)
     ↑
@@ -88,7 +88,7 @@ CMake 3.22+ with modular component structure (mirrors Tether project):
 - `cmake/components/*.cmake` — per-component source lists + targets
 - `cmake/VolcanoComponent.cmake` — helper for shared+static variants
 - FetchContent: Vulkan-Hpp, VMA, GoogleTest
-- System deps: Vulkan loader, SDL3, shaderc, libpng, libwebp
+- System deps: Vulkan loader, GLFW, shaderc, libpng, libwebp
 
 ## Code Conventions
 

@@ -3,10 +3,11 @@
 
 #include <volcano/core/CommandBuffer.hpp>
 
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <iostream>
 #include <stdexcept>
@@ -28,10 +29,10 @@ vk::PresentModeKHR pickPresentMode(const std::vector<vk::PresentModeKHR>& modes)
     return vk::PresentModeKHR::eFifo;
 }
 
-vk::Extent2D pickExtent(const vk::SurfaceCapabilitiesKHR& caps, SDL_Window* win) {
+vk::Extent2D pickExtent(const vk::SurfaceCapabilitiesKHR& caps, GLFWwindow* win) {
     if (caps.currentExtent.width != UINT32_MAX) return caps.currentExtent;
     int w, h;
-    SDL_GetWindowSizeInPixels(win, &w, &h);
+    glfwGetFramebufferSize(win, &w, &h);
     vk::Extent2D extent;
     extent.width = std::clamp<uint32_t>(w, caps.minImageExtent.width, caps.maxImageExtent.width);
     extent.height = std::clamp<uint32_t>(h, caps.minImageExtent.height, caps.maxImageExtent.height);
@@ -41,30 +42,59 @@ vk::Extent2D pickExtent(const vk::SurfaceCapabilitiesKHR& caps, SDL_Window* win)
 } // namespace
 
 ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        throw std::runtime_error(std::format("SDL_Init failed: {}", SDL_GetError()));
+    glfwSetErrorCallback([](int code, const char* msg) {
+        std::cerr << std::format("GLFW error {}: {}\n", code, msg);
+    });
+    if (!glfwInit()) {
+        throw std::runtime_error("glfwInit failed");
     }
-    window_ = SDL_CreateWindow(desc.windowTitle.c_str(), desc.width, desc.height,
-                               SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
-    if (!window_) throw std::runtime_error(std::format("SDL_CreateWindow failed: {}", SDL_GetError()));
+    // Vulkan window — no GL context.
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    window_ = glfwCreateWindow(int(desc.width), int(desc.height),
+                               desc.windowTitle.c_str(), nullptr, nullptr);
+    if (!window_) throw std::runtime_error("glfwCreateWindow failed");
+
+    glfwSetWindowUserPointer(window_, this);
+    glfwSetFramebufferSizeCallback(window_, &ScreenBackend::cbFramebufferSize);
+    glfwSetMouseButtonCallback(window_, &ScreenBackend::cbMouseButton);
+    glfwSetCursorPosCallback(window_, &ScreenBackend::cbCursorPos);
+    glfwSetScrollCallback(window_, &ScreenBackend::cbScroll);
+    glfwSetKeyCallback(window_, &ScreenBackend::cbKey);
+    glfwSetCharCallback(window_, &ScreenBackend::cbChar);
+    glfwSetWindowCloseCallback(window_, &ScreenBackend::cbClose);
 
     // Instance
     core::InstanceDesc idesc{};
     idesc.applicationName = desc.windowTitle;
     idesc.enableValidation = desc.enableValidation;
-    // SDL3 surface extension
-    idesc.extraExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+    // GLFW reports the platform surface extensions it needs; dedup
+    // against the hardcoded fallbacks below.
+    {
+        std::vector<std::string> exts;
+        auto add = [&exts](const char* e) {
+            if (std::ranges::find(exts, e) == exts.end())
+                exts.emplace_back(e);
+        };
+        uint32_t n = 0;
+        if (const char** req = glfwGetRequiredInstanceExtensions(&n))
+            for (uint32_t i = 0; i < n; ++i) add(req[i]);
+        add(VK_KHR_SURFACE_EXTENSION_NAME);
 #if defined(__linux__)
-    idesc.extraExtensions.push_back("VK_KHR_xlib_surface");
-    idesc.extraExtensions.push_back("VK_KHR_xcb_surface");
-    idesc.extraExtensions.push_back("VK_KHR_wayland_surface");
+        // Fallback surface extensions in case GLFW's hint list is empty.
+        add("VK_KHR_xlib_surface");
+        add("VK_KHR_xcb_surface");
+        add("VK_KHR_wayland_surface");
 #endif
+        idesc.extraExtensions = std::move(exts);
+    }
     ctx_.instance = core::Instance(idesc);
 
     // Surface
     VkSurfaceKHR surf{};
-    if (!SDL_Vulkan_CreateSurface(window_, ctx_.instance.handle(), nullptr, &surf)) {
-        throw std::runtime_error(std::format("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError()));
+    if (glfwCreateWindowSurface(ctx_.instance.handle(), window_,
+                                nullptr, &surf) != VK_SUCCESS) {
+        throw std::runtime_error("glfwCreateWindowSurface failed");
     }
     surface_ = surf;
 
@@ -120,8 +150,8 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
 ScreenBackend::~ScreenBackend() {
     ctx_.device.waitIdle();
     if (surface_) ctx_.instance.handle().destroySurfaceKHR(surface_);
-    if (window_) SDL_DestroyWindow(window_);
-    SDL_Quit();
+    if (window_) glfwDestroyWindow(window_);
+    glfwTerminate();
 }
 
 void ScreenBackend::createSurface() {
@@ -312,168 +342,246 @@ void ScreenBackend::recreateSwapchain() {
 
 namespace {
 
-/// SDL button number → mpl convention (1=left, 2=middle, 3=right).
-int toMplButton(uint8_t b) {
-    if (b == SDL_BUTTON_LEFT) return 1;
-    if (b == SDL_BUTTON_MIDDLE) return 2;
-    if (b == SDL_BUTTON_RIGHT) return 3;
-    return int(b) + 3; // X1/X2 → 4/5
+/// GLFW button index → mpl convention (1=left, 2=middle, 3=right,
+/// 8=back, 9=forward — matching mpl's MouseButton enum).
+int toMplButton(int b) {
+    switch (b) {
+        case GLFW_MOUSE_BUTTON_LEFT: return 1;
+        case GLFW_MOUSE_BUTTON_MIDDLE: return 2;
+        case GLFW_MOUSE_BUTTON_RIGHT: return 3;
+        case GLFW_MOUSE_BUTTON_4: return 8;  // mpl "back"
+        case GLFW_MOUSE_BUTTON_5: return 9;  // mpl "forward"
+        default: return b + 1;
+    }
 }
 
-/// SDL button state mask → bit-per-button mask (bit0=left...).
-int toButtonMask(uint32_t m) {
-    int out = 0;
-    if (m & SDL_BUTTON_LMASK) out |= 1;
-    if (m & SDL_BUTTON_MMASK) out |= 2;
-    if (m & SDL_BUTTON_RMASK) out |= 4;
-    if (m & SDL_BUTTON_X1MASK) out |= 8;
-    if (m & SDL_BUTTON_X2MASK) out |= 16;
-    return out;
-}
-
-void fillMods(InputEvent& ev, SDL_Keymod mod) {
-    ev.shift = (mod & SDL_KMOD_SHIFT) != 0;
-    ev.ctrl = (mod & SDL_KMOD_CTRL) != 0;
-    ev.alt = (mod & SDL_KMOD_ALT) != 0;
-}
-
-/// SDL_Keycode → printable ASCII. SDL3 keycodes for letters are already
-/// the lowercase ASCII codes; digits are the ASCII digits.
-char toAscii(SDL_Keycode kc, bool shift) {
-    if (kc >= SDLK_A && kc <= SDLK_Z) return char(kc);
-    if (kc >= SDLK_0 && kc <= SDLK_9) {
+/// GLFW keycode → printable ASCII. GLFW keycodes for letters are the
+/// uppercase ASCII codes; digits are the ASCII digits.
+char toAscii(int kc, bool shift) {
+    if (kc >= GLFW_KEY_A && kc <= GLFW_KEY_Z)
+        return char('a' + (kc - GLFW_KEY_A));
+    if (kc >= GLFW_KEY_0 && kc <= GLFW_KEY_9) {
         static constexpr char shifted[] = ")!@#$%^&*(";
-        return shift ? shifted[kc - SDLK_0] : char(kc);
+        return shift ? shifted[kc - GLFW_KEY_0] : char(kc);
     }
     switch (kc) {
-        case SDLK_SPACE: return ' ';
-        case SDLK_MINUS: return shift ? '_' : '-';
-        case SDLK_EQUALS: return shift ? '+' : '=';
-        case SDLK_LEFTBRACKET: return shift ? '{' : '[';
-        case SDLK_RIGHTBRACKET: return shift ? '}' : ']';
-        case SDLK_SEMICOLON: return shift ? ':' : ';';
-        case SDLK_APOSTROPHE: return shift ? '"' : '\'';
-        case SDLK_COMMA: return shift ? '<' : ',';
-        case SDLK_PERIOD: return shift ? '>' : '.';
-        case SDLK_SLASH: return shift ? '?' : '/';
-        case SDLK_BACKSLASH: return shift ? '|' : '\\';
-        case SDLK_GRAVE: return shift ? '~' : '`';
+        case GLFW_KEY_SPACE: return ' ';
+        case GLFW_KEY_MINUS: return shift ? '_' : '-';
+        case GLFW_KEY_EQUAL: return shift ? '+' : '=';
+        case GLFW_KEY_LEFT_BRACKET: return shift ? '{' : '[';
+        case GLFW_KEY_RIGHT_BRACKET: return shift ? '}' : ']';
+        case GLFW_KEY_SEMICOLON: return shift ? ':' : ';';
+        case GLFW_KEY_APOSTROPHE: return shift ? '"' : '\'';
+        case GLFW_KEY_COMMA: return shift ? '<' : ',';
+        case GLFW_KEY_PERIOD: return shift ? '>' : '.';
+        case GLFW_KEY_SLASH: return shift ? '?' : '/';
+        case GLFW_KEY_BACKSLASH: return shift ? '|' : '\\';
+        case GLFW_KEY_GRAVE_ACCENT: return shift ? '~' : '`';
         default: return 0;
     }
 }
 
-/// SDL_Keycode → mpl key name for non-printable keys.
-const char* keyName(SDL_Keycode kc) {
+/// GLFW keycode → mpl key name for non-printable keys.
+const char* keyName(int kc) {
     switch (kc) {
-        case SDLK_RETURN: case SDLK_KP_ENTER: return "enter";
-        case SDLK_ESCAPE: return "escape";
-        case SDLK_BACKSPACE: return "backspace";
-        case SDLK_TAB: return "tab";
-        case SDLK_DELETE: return "delete";
-        case SDLK_LEFT: return "left";
-        case SDLK_RIGHT: return "right";
-        case SDLK_UP: return "up";
-        case SDLK_DOWN: return "down";
-        case SDLK_HOME: return "home";
-        case SDLK_END: return "end";
-        case SDLK_PAGEUP: return "pageup";
-        case SDLK_PAGEDOWN: return "pagedown";
-        case SDLK_LSHIFT: case SDLK_RSHIFT: return "shift";
-        case SDLK_LCTRL: case SDLK_RCTRL: return "control";
-        case SDLK_LALT: case SDLK_RALT: return "alt";
+        case GLFW_KEY_ENTER: case GLFW_KEY_KP_ENTER: return "enter";
+        case GLFW_KEY_ESCAPE: return "escape";
+        case GLFW_KEY_BACKSPACE: return "backspace";
+        case GLFW_KEY_TAB: return "tab";
+        case GLFW_KEY_DELETE: return "delete";
+        case GLFW_KEY_LEFT: return "left";
+        case GLFW_KEY_RIGHT: return "right";
+        case GLFW_KEY_UP: return "up";
+        case GLFW_KEY_DOWN: return "down";
+        case GLFW_KEY_HOME: return "home";
+        case GLFW_KEY_END: return "end";
+        case GLFW_KEY_PAGE_UP: return "pageup";
+        case GLFW_KEY_PAGE_DOWN: return "pagedown";
+        case GLFW_KEY_LEFT_SHIFT: case GLFW_KEY_RIGHT_SHIFT: return "shift";
+        case GLFW_KEY_LEFT_CONTROL: case GLFW_KEY_RIGHT_CONTROL: return "control";
+        case GLFW_KEY_LEFT_ALT: case GLFW_KEY_RIGHT_ALT: return "alt";
         default: return nullptr;
     }
 }
 
+/// Unicode codepoint → UTF-8 (GLFW char callback gives codepoints).
+std::string utf8(unsigned int cp) {
+    std::string s;
+    if (cp < 0x80) {
+        s += char(cp);
+    } else if (cp < 0x800) {
+        s += char(0xC0 | (cp >> 6));
+        s += char(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        s += char(0xE0 | (cp >> 12));
+        s += char(0x80 | ((cp >> 6) & 0x3F));
+        s += char(0x80 | (cp & 0x3F));
+    } else {
+        s += char(0xF0 | (cp >> 18));
+        s += char(0x80 | ((cp >> 12) & 0x3F));
+        s += char(0x80 | ((cp >> 6) & 0x3F));
+        s += char(0x80 | (cp & 0x3F));
+    }
+    return s;
+}
+
 } // namespace
 
-bool ScreenBackend::pollEvents() {
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        switch (e.type) {
-        case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            return false;
+int ScreenBackend::buttonMask() const {
+    int out = 0;
+    if (glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) out |= 1;
+    if (glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) out |= 2;
+    if (glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) out |= 4;
+    if (glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_4) == GLFW_PRESS) out |= 8;
+    if (glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_5) == GLFW_PRESS) out |= 16;
+    return out;
+}
 
-        case SDL_EVENT_WINDOW_RESIZED:
-            resized_ = true;
-            {
-                InputEvent ev{};
-                ev.type = InputEvent::Type::Resize;
-                ev.width = uint32_t(e.window.data1);
-                ev.height = uint32_t(e.window.data2);
-                pendingEvents_.push_back(ev);
-            }
-            break;
+void ScreenBackend::fillMods(InputEvent& ev, int mods) {
+    ev.shift = (mods & GLFW_MOD_SHIFT) != 0;
+    ev.ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+    ev.alt = (mods & GLFW_MOD_ALT) != 0;
+}
 
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP: {
-            InputEvent ev{};
-            ev.type = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN
-                ? InputEvent::Type::ButtonPress : InputEvent::Type::ButtonRelease;
-            ev.x = e.button.x;
-            ev.y = e.button.y;
-            ev.button = toMplButton(e.button.button);
-            ev.buttons = toButtonMask(SDL_GetMouseState(nullptr, nullptr));
-            ev.dblclick = e.button.clicks == 2;
-            fillMods(ev, SDL_GetModState());
-            pendingEvents_.push_back(ev);
-            break;
-        }
+void ScreenBackend::onFramebufferSize(int w, int h) {
+    resized_ = true;
+    InputEvent ev{};
+    ev.type = InputEvent::Type::Resize;
+    ev.width = uint32_t(w);
+    ev.height = uint32_t(h);
+    pendingEvents_.push_back(ev);
+}
 
-        case SDL_EVENT_MOUSE_MOTION: {
-            InputEvent ev{};
-            ev.type = InputEvent::Type::Motion;
-            ev.x = e.motion.x;
-            ev.y = e.motion.y;
-            ev.buttons = toButtonMask(e.motion.state);
-            fillMods(ev, SDL_GetModState());
-            pendingEvents_.push_back(ev);
-            break;
-        }
-
-        case SDL_EVENT_MOUSE_WHEEL: {
-            InputEvent ev{};
-            ev.type = InputEvent::Type::Scroll;
-            ev.step = e.wheel.y;
-            float mx, my;
-            ev.buttons = toButtonMask(SDL_GetMouseState(&mx, &my));
-            ev.x = mx; ev.y = my;
-            fillMods(ev, SDL_GetModState());
-            pendingEvents_.push_back(ev);
-            break;
-        }
-
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP: {
-            InputEvent ev{};
-            ev.type = e.type == SDL_EVENT_KEY_DOWN
-                ? InputEvent::Type::KeyPress : InputEvent::Type::KeyRelease;
-            fillMods(ev, e.key.mod);
-            ev.keycode = uint32_t(e.key.key);
-            ev.key = toAscii(e.key.key, ev.shift);
-            if (ev.key == 0)
-                if (const char* n = keyName(e.key.key)) ev.text = n;
-            float mx, my;
-            ev.buttons = toButtonMask(SDL_GetMouseState(&mx, &my));
-            ev.x = mx; ev.y = my;
-            pendingEvents_.push_back(ev);
-            break;
-        }
-
-        case SDL_EVENT_TEXT_INPUT: {
-            InputEvent ev{};
-            ev.type = InputEvent::Type::TextInput;
-            ev.text = e.text.text ? e.text.text : "";
-            pendingEvents_.push_back(ev);
-            break;
-        }
-
-        default:
-            break;
-        }
+void ScreenBackend::onMouseButton(int button, int action, int mods) {
+    double cx, cy;
+    glfwGetCursorPos(window_, &cx, &cy);
+    InputEvent ev{};
+    ev.type = action == GLFW_PRESS ? InputEvent::Type::ButtonPress
+                                   : InputEvent::Type::ButtonRelease;
+    ev.x = float(cx);
+    ev.y = float(cy);
+    ev.button = toMplButton(button);
+    ev.buttons = buttonMask();
+    // GLFW reports no click counts — detect double clicks by timing.
+    if (action == GLFW_PRESS) {
+        double t = glfwGetTime();
+        if (button == lastClickButton_ &&
+            t - lastClickTime_ < 0.3 &&
+            std::abs(float(cx) - lastClickX_) < 5.0f &&
+            std::abs(float(cy) - lastClickY_) < 5.0f)
+            ev.dblclick = true;
+        lastClickTime_ = t;
+        lastClickButton_ = button;
+        lastClickX_ = float(cx);
+        lastClickY_ = float(cy);
     }
-    return true;
+    fillMods(ev, mods);
+    pendingEvents_.push_back(ev);
+}
+
+void ScreenBackend::onCursorPos(double x, double y) {
+    InputEvent ev{};
+    ev.type = InputEvent::Type::Motion;
+    ev.x = float(x);
+    ev.y = float(y);
+    ev.buttons = buttonMask();
+    int mods = 0;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
+        mods |= GLFW_MOD_SHIFT;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)
+        mods |= GLFW_MOD_CONTROL;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS)
+        mods |= GLFW_MOD_ALT;
+    fillMods(ev, mods);
+    pendingEvents_.push_back(ev);
+}
+
+void ScreenBackend::onScroll(double /*xoff*/, double yoff) {
+    double cx, cy;
+    glfwGetCursorPos(window_, &cx, &cy);
+    InputEvent ev{};
+    ev.type = InputEvent::Type::Scroll;
+    ev.step = float(yoff);
+    ev.x = float(cx);
+    ev.y = float(cy);
+    ev.buttons = buttonMask();
+    int mods = 0;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)
+        mods |= GLFW_MOD_SHIFT;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)
+        mods |= GLFW_MOD_CONTROL;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS)
+        mods |= GLFW_MOD_ALT;
+    fillMods(ev, mods);
+    pendingEvents_.push_back(ev);
+}
+
+void ScreenBackend::onKey(int key, int /*scancode*/, int action,
+                          int mods) {
+    InputEvent ev{};
+    ev.type = action == GLFW_RELEASE ? InputEvent::Type::KeyRelease
+                                     : InputEvent::Type::KeyPress;
+    fillMods(ev, mods);
+    ev.keycode = uint32_t(key);
+    ev.key = toAscii(key, ev.shift);
+    if (ev.key == 0)
+        if (const char* n = keyName(key)) ev.text = n;
+    double cx, cy;
+    glfwGetCursorPos(window_, &cx, &cy);
+    ev.x = float(cx);
+    ev.y = float(cy);
+    ev.buttons = buttonMask();
+    pendingEvents_.push_back(ev);
+}
+
+void ScreenBackend::onChar(unsigned int codepoint) {
+    InputEvent ev{};
+    ev.type = InputEvent::Type::TextInput;
+    ev.text = utf8(codepoint);
+    pendingEvents_.push_back(ev);
+}
+
+void ScreenBackend::cbFramebufferSize(GLFWwindow* w, int width,
+                                      int height) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onFramebufferSize(width, height);
+}
+void ScreenBackend::cbMouseButton(GLFWwindow* w, int button, int action,
+                                  int mods) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onMouseButton(button, action, mods);
+}
+void ScreenBackend::cbCursorPos(GLFWwindow* w, double x, double y) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onCursorPos(x, y);
+}
+void ScreenBackend::cbScroll(GLFWwindow* w, double xoff, double yoff) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onScroll(xoff, yoff);
+}
+void ScreenBackend::cbKey(GLFWwindow* w, int key, int scancode,
+                          int action, int mods) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onKey(key, scancode, action, mods);
+}
+void ScreenBackend::cbChar(GLFWwindow* w, unsigned int cp) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->onChar(cp);
+}
+void ScreenBackend::cbClose(GLFWwindow* w) {
+    static_cast<ScreenBackend*>(glfwGetWindowUserPointer(w))
+        ->closeRequested_ = true;
+}
+
+bool ScreenBackend::pollEvents() {
+    glfwPollEvents();
+    return !closeRequested_ && !glfwWindowShouldClose(window_);
 }
 
 std::vector<InputEvent> ScreenBackend::takeEvents() {
@@ -483,12 +591,23 @@ std::vector<InputEvent> ScreenBackend::takeEvents() {
 }
 
 void ScreenBackend::setWindowTitle(std::string_view title) {
-    SDL_SetWindowTitle(window_, std::string(title).c_str());
+    glfwSetWindowTitle(window_, std::string(title).c_str());
 }
 
 void ScreenBackend::toggleFullscreen() {
-    bool full = (SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0;
-    SDL_SetWindowFullscreen(window_, !full);
+    if (!fullscreen_) {
+        glfwGetWindowPos(window_, &savedX_, &savedY_);
+        glfwGetWindowSize(window_, &savedW_, &savedH_);
+        GLFWmonitor* mon = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(mon);
+        glfwSetWindowMonitor(window_, mon, 0, 0, mode->width,
+                             mode->height, mode->refreshRate);
+        fullscreen_ = true;
+    } else {
+        glfwSetWindowMonitor(window_, nullptr, savedX_, savedY_,
+                             savedW_, savedH_, GLFW_DONT_CARE);
+        fullscreen_ = false;
+    }
 }
 
 vk::CommandBuffer ScreenBackend::beginFrame() {

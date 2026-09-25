@@ -1,6 +1,6 @@
 # src/cli/CMakeLists.txt — CLI applications
 
-# Screen liveplot (requires SDL3 screen backend)
+# Screen liveplot (requires GLFW screen backend)
 if(VOLCANO_BUILD_SCREEN_BACKEND)
     add_executable(volcano_screen main_screen.cpp)
     target_link_libraries(volcano_screen PRIVATE

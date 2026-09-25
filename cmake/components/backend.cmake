@@ -1,5 +1,5 @@
 # Component: volcano_backend
-# Screen (SDL3 + swapchain) and headless offscreen backends.
+# Screen (GLFW + swapchain) and headless offscreen backends.
 # Both implement the IBackend interface so plot code is backend-agnostic.
 
 set(VOLCANO_BACKEND_SOURCES
@@ -20,7 +20,7 @@ endif()
 
 set(_public_link volcano_core)
 if(VOLCANO_BUILD_SCREEN_BACKEND)
-    list(APPEND _public_link SDL3::SDL3)
+    list(APPEND _public_link glfw)
 endif()
 
 volcano_add_component(volcano_backend

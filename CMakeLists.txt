@@ -3,7 +3,7 @@
 # Modular CMakeLists.txt inspired by the Tether project layout.
 # Components:
 #   volcano_core:      Vulkan device/queue/command abstraction (Vulkan-Hpp + VMA)
-#   volcano_backend:   Screen (SDL3) and headless offscreen backends
+#   volcano_backend:   Screen (GLFW) and headless offscreen backends
 #   volcano_render:    Render passes, pipelines, MSAA, frame orchestration
 #   volcano_plot:      Plot data model, axes, transforms, styles, plot types
 #   volcano_encode:    GPU-side image encoding (PNG/WebP via compute) + CPU fallback
@@ -44,7 +44,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # among static libraries, so shared libs are OFF by default.
 option(VOLCANO_BUILD_SHARED_LIBS "Build shared library variants (disabled by default due to render<->plot cycle)" OFF)
 option(VOLCANO_BUILD_STATIC_LIBS "Build static library variants" ON)
-option(VOLCANO_BUILD_SCREEN_BACKEND "Build SDL3 screen backend" ON)
+option(VOLCANO_BUILD_SCREEN_BACKEND "Build GLFW screen backend" ON)
 option(VOLCANO_BUILD_HEADLESS_BACKEND "Build headless offscreen backend" ON)
 option(VOLCANO_BUILD_CLI "Build CLI applications" ON)
 option(VOLCANO_BUILD_EXAMPLES "Build example applications" ON)
@@ -85,19 +85,19 @@ endif()
 # Vulkan loader + headers (system)
 find_package(Vulkan REQUIRED)
 
-# SDL3 (system) — optional, for screen backend.
-# If SDL3 is not installed, the screen backend and its binaries are skipped.
+# GLFW — optional, for screen backend.
+# Uses the system package when available, otherwise builds the copy
+# vendored under dependencies/glyb/third_party/glfw.
 if(VOLCANO_BUILD_SCREEN_BACKEND)
-    find_package(SDL3 QUIET)
-    if(NOT SDL3_FOUND)
-        message(WARNING
-            "SDL3 not found — screen backend disabled.\n"
-            "Install SDL3 development packages to enable it:\n"
-            "  Debian/Ubuntu:  sudo apt-get install libsdl3-dev\n"
-            "  Fedora/RHEL:    sudo dnf install SDL3-devel\n"
-            "  Arch Linux:     sudo pacman -S sdl3\n"
-            "Or configure with -DVOLCANO_BUILD_SCREEN_BACKEND=OFF to silence this warning.")
-        set(VOLCANO_BUILD_SCREEN_BACKEND OFF)
+    find_package(glfw3 3.3 QUIET)
+    if(NOT glfw3_FOUND)
+        set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+        add_subdirectory(dependencies/glyb/third_party/glfw
+                         ${CMAKE_BINARY_DIR}/_deps/glfw-build
+                         EXCLUDE_FROM_ALL)
     endif()
 endif()
 
@@ -330,7 +330,7 @@ message(STATUS "  C++ standard:          ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build type:            ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Shared libs:           ${VOLCANO_BUILD_SHARED_LIBS}")
 message(STATUS "  Static libs:           ${VOLCANO_BUILD_STATIC_LIBS}")
-message(STATUS "  Screen backend (SDL3): ${VOLCANO_BUILD_SCREEN_BACKEND}")
+message(STATUS "  Screen backend (GLFW): ${VOLCANO_BUILD_SCREEN_BACKEND}")
 message(STATUS "  Headless backend:      ${VOLCANO_BUILD_HEADLESS_BACKEND}")
 message(STATUS "  GPU image encode:      ${VOLCANO_GPU_ENCODE}")
 message(STATUS "  Runtime shader comp:   ${VOLCANO_RUNTIME_SHADER_COMPILE}")

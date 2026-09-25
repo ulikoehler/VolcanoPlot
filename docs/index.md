@@ -42,7 +42,7 @@ fig.savefig("out.png")
   step, errorbar, pie, polar + map projections, 3D surface/scatter/bar/voxels
 - Matplotlib-parity ticks, legends, colorbars, spines, mathtext
 - GPU tessellation (pcolormesh), GPU autoscale, instanced markers
-- Headless rendering (works on lavapipe), optional SDL3 live window
+- Headless rendering (works on lavapipe), optional GLFW live window
 - Animation: APNG/GIF/WebP writers with GPU PNG filtering
 - Python bindings with numpy/pandas/datetime/categorical ingestion
 

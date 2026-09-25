@@ -129,7 +129,7 @@ protected:
     std::array<float, 4> clearColor_{1.0f, 1.0f, 1.0f, 1.0f};
 };
 
-/// Factory: create a screen backend (SDL3 window + swapchain).
+/// Factory: create a screen backend (GLFW window + swapchain).
 std::unique_ptr<IBackend> createScreenBackend(const BackendDesc& desc);
 
 /// Factory: create a headless offscreen backend.

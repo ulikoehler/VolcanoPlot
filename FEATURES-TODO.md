@@ -613,7 +613,7 @@ Status legend: `[ ]` not started · `[-]` in progress · `[x]` done · `[~]` won
 ---
 
 ## 11. Interactive Features
-- [x] Pan, zoom (basic SDL3 event polling)
+- [x] Pan, zoom (basic GLFW event polling)
 - [x] Navigation toolbar: Home / Back / Forward (Navigation: viewport history)
 - [x] Zoom (x/y constrained), zoom-to-rectangle (ZoomRect mode + rubber band)
 - [x] Save figure button, configure subplots ('s' key → savefig; SubplotTool)
@@ -1113,7 +1113,7 @@ tri_*) are checked off in the sections above.
       `(lo,hi)` tuple, `on_clicked(event)`/`(label)`), `set_val`/`val`,
       `fig.canvas` proxy with `mpl_connect`/`mpl_disconnect` and
       headless `dispatch(name, x, y, button, key, step)` for synthetic
-      event injection; `fig.show()` runs the SDL event loop when a
+      event injection; `fig.show()` runs the GLFW event loop when a
       screen backend is available.
 - [x] **Python polar + spines + cycler** — `projection=` kwarg on
       `subplots`/`subplot`/`add_subplot` (+ `subplot_kw` dict),
