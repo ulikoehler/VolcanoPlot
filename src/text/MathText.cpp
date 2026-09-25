@@ -536,7 +536,8 @@ struct Parser {
             name == "mathsf" || name == "mathtt" || name == "mathcal" ||
             name == "mathbb" || name == "mathfrak" || name == "rm" ||
             name == "bf" || name == "it" || name == "sf" || name == "tt" ||
-            name == "text" || name == "operatorname" || name == "boldsymbol") {
+            name == "text" || name == "operatorname" || name == "boldsymbol" ||
+            name == "mathdefault" || name == "mathregular") {
             return parseArg(rel);
         }
         // Spacing commands.

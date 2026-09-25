@@ -18,6 +18,7 @@
 #include <volcano/text/TextRenderer.hpp>
 #include <volcano/text/MathText.hpp>
 #include <volcano/render/Renderer.hpp>
+#include <volcano/render/MplCanvas.hpp>
 #include <volcano/plot/Animation.hpp>
 #include <volcano/plot/Collections.hpp>
 #include <volcano/plot/Plot.hpp>
@@ -30973,6 +30974,876 @@ del _nt
                py::arg("color") = py::none());
     }
 
+    // ── mpl backend bridge ─────────────────────────────────────
+    // `_mpl.Canvas` exposes the generic Vulkan frame recorder
+    // (render::MplCanvas). The `volcanoplot.mpl_backend` module —
+    // created below and registered in sys.modules — implements
+    // mpl's RendererBase / FigureCanvasBase / FigureManagerBase on
+    // top of it, so `matplotlib.use("module://volcanoplot.mpl_backend")`
+    // rasterizes through Vulkan (savefig) and presents via GLFW
+    // (plt.show()).
+    {
+        auto mp = m.def_submodule("_mpl");
+        auto colorOf = [](py::handle c) -> plot::Color {
+            if (c.is_none()) return {0, 0, 0, 0};
+            auto t = c.cast<py::tuple>();
+            plot::Color out{0, 0, 0, 1};
+            if (t.size() >= 3) {
+                out.r = t[0].cast<float>();
+                out.g = t[1].cast<float>();
+                out.b = t[2].cast<float>();
+            }
+            out.a = t.size() >= 4 ? t[3].cast<float>() : 1.0f;
+            return out;
+        };
+        auto rectOf = [](py::handle r)
+                -> std::optional<plot::Rect2D> {
+            if (r.is_none()) return std::nullopt;
+            auto t = r.cast<py::tuple>();
+            return plot::Rect2D{t[0].cast<int32_t>(), t[1].cast<int32_t>(),
+                                t[2].cast<uint32_t>(), t[3].cast<uint32_t>()};
+        };
+        auto floatsOf = [](py::handle v) -> std::vector<float> {
+            std::vector<float> out;
+            if (v.is_none()) return out;
+            for (auto x : py::cast<py::sequence>(v))
+                out.push_back(x.cast<float>());
+            return out;
+        };
+        auto ringOf = [floatsOf](py::handle r)
+                -> std::vector<plot::Point2D> {
+            std::vector<plot::Point2D> out;
+            if (r.is_none()) return out;
+            auto flat = floatsOf(r);
+            out.reserve(flat.size() / 2);
+            for (size_t i = 0; i + 1 < flat.size(); i += 2)
+                out.push_back({flat[i], flat[i + 1]});
+            return out;
+        };
+        auto joinOf = [](const std::string& s) {
+            return plot::joinStyleFromString(s).value_or(
+                plot::JoinStyle::Round);
+        };
+        auto capOf = [](const std::string& s) {
+            return plot::capStyleFromString(s).value_or(
+                plot::CapStyle::Butt);
+        };
+
+        py::class_<render::MplCanvas>(mp, "Canvas")
+            .def_static("headless",
+                [](uint32_t w, uint32_t h) {
+                    return render::MplCanvas::headless(w, h);
+                },
+                py::arg("width"), py::arg("height"))
+            .def_static("windowed",
+                [](uint32_t w, uint32_t h, const std::string& title)
+                    -> std::unique_ptr<render::MplCanvas> {
+                    return render::MplCanvas::windowed(w, h, title);
+                },
+                py::arg("width"), py::arg("height"),
+                py::arg("title") = "")
+            .def("extent", [](const render::MplCanvas& c) {
+                auto e = c.extent();
+                return py::make_tuple(e.width, e.height);
+            })
+            .def("is_window", &render::MplCanvas::isWindow)
+            .def("resize", &render::MplCanvas::resize,
+                 py::arg("width"), py::arg("height"))
+            .def("begin_frame", &render::MplCanvas::beginFrame)
+            .def("end_frame", &render::MplCanvas::endFrame)
+            .def("clear",
+                 [colorOf](render::MplCanvas& c, py::handle col) {
+                     c.clear(colorOf(col));
+                 },
+                 py::arg("color"))
+            .def("readback", [](const render::MplCanvas& c) {
+                return py::bytes(
+                    reinterpret_cast<const char*>(c.readback().data()),
+                    py::ssize_t(c.readback().size()));
+            })
+            .def("path",
+                 [colorOf, floatsOf, ringOf, joinOf, capOf, rectOf](
+                     render::MplCanvas& c, py::handle verts,
+                     py::handle codes, py::handle face, py::handle edge,
+                     float lw, py::handle dash, const std::string& join,
+                     const std::string& cap, py::handle hatch,
+                     py::handle hatchColor, py::handle clip,
+                     py::handle clipring) {
+                     auto v = floatsOf(verts);
+                     std::vector<uint8_t> cd;
+                     for (auto x : py::cast<py::sequence>(codes))
+                         cd.push_back(x.cast<uint8_t>());
+                     float dashOff = 0;
+                     std::vector<float> seq;
+                     if (!dash.is_none()) {
+                         auto d = dash.cast<py::tuple>();
+                         dashOff = d[0].cast<float>();
+                         for (auto x : py::cast<py::sequence>(d[1]))
+                             seq.push_back(x.cast<float>());
+                     }
+                     c.path(v, cd, colorOf(face), true, colorOf(edge),
+                            lw, dashOff, seq, joinOf(join), capOf(cap),
+                            hatch.is_none()
+                                ? "" : hatch.cast<std::string>(),
+                            colorOf(hatchColor),
+                            rectOf(clip), ringOf(clipring));
+                 },
+                 py::arg("verts"), py::arg("codes"), py::arg("face"),
+                 py::arg("edge"), py::arg("linewidth"), py::arg("dashes"),
+                 py::arg("join"), py::arg("cap"), py::arg("hatch"),
+                 py::arg("hatch_color"), py::arg("clip"),
+                 py::arg("clipring"))
+            .def("image",
+                 [rectOf](render::MplCanvas& c, py::bytes data,
+                          uint32_t w, uint32_t h, py::handle dst,
+                          int interp, py::handle clip) {
+                     std::string d = data;
+                     auto dr = rectOf(dst).value_or(
+                         plot::Rect2D{0, 0, w, h});
+                     c.image({reinterpret_cast<const uint8_t*>(d.data()),
+                              d.size()},
+                             w, h, dr, interp, rectOf(clip));
+                 },
+                 py::arg("rgba"), py::arg("w"), py::arg("h"),
+                 py::arg("dst"), py::arg("interp"), py::arg("clip"))
+            .def("text",
+                 [colorOf, rectOf](render::MplCanvas& c, float x, float y,
+                                   const std::string& s, float sizePx,
+                                   py::handle color, float rotDeg,
+                                   const std::string& family,
+                                   const std::string& style,
+                                   const std::string& weight,
+                                   py::handle clip) {
+                     c.text(x, y, s, sizePx, colorOf(color), rotDeg,
+                            family, style, weight, rectOf(clip));
+                 },
+                 py::arg("x"), py::arg("y"), py::arg("s"),
+                 py::arg("size_px"), py::arg("color"),
+                 py::arg("rotation_deg"), py::arg("family"),
+                 py::arg("style"), py::arg("weight"), py::arg("clip"))
+            .def("math_text",
+                 [colorOf, rectOf](render::MplCanvas& c, float x, float y,
+                                   const std::string& s, float sizePx,
+                                   py::handle color, float rotDeg,
+                                   const std::string& fontset,
+                                   const std::string& family,
+                                   const std::string& style,
+                                   const std::string& weight,
+                                   py::handle clip) {
+                     c.mathText(x, y, s, sizePx, colorOf(color), rotDeg,
+                                fontset, family, style, weight,
+                                rectOf(clip));
+                 },
+                 py::arg("x"), py::arg("y"), py::arg("s"),
+                 py::arg("size_px"), py::arg("color"),
+                 py::arg("rotation_deg"), py::arg("fontset"),
+                 py::arg("family"), py::arg("style"),
+                 py::arg("weight"), py::arg("clip"))
+            .def("gouraud",
+                 [colorOf, rectOf](render::MplCanvas& c, float x0, float y0,
+                                   float x1, float y1, float x2, float y2,
+                                   py::handle c0, py::handle c1,
+                                   py::handle c2, py::handle clip) {
+                     c.gouraud(x0, y0, x1, y1, x2, y2, colorOf(c0),
+                               colorOf(c1), colorOf(c2), rectOf(clip));
+                 },
+                 py::arg("x0"), py::arg("y0"), py::arg("x1"),
+                 py::arg("y1"), py::arg("x2"), py::arg("y2"),
+                 py::arg("c0"), py::arg("c1"), py::arg("c2"),
+                 py::arg("clip"))
+            .def("measure_text",
+                 [](render::MplCanvas& c, const std::string& s,
+                    float sizePx, const std::string& family,
+                    const std::string& style, const std::string& weight) {
+                     auto m = c.measureText(s, sizePx, family, style,
+                                            weight);
+                     return py::make_tuple(m.width, m.height, m.ascent);
+                 },
+                 py::arg("s"), py::arg("size_px"), py::arg("family"),
+                 py::arg("style"), py::arg("weight"))
+            .def("measure_math",
+                 [](render::MplCanvas& c, const std::string& s,
+                    float sizePx, const std::string& fontset,
+                    const std::string& family, const std::string& style,
+                    const std::string& weight) {
+                     auto m = c.measureMath(s, sizePx, fontset, family,
+                                            style, weight);
+                     return py::make_tuple(m.width, m.height, m.ascent);
+                 },
+                 py::arg("s"), py::arg("size_px"), py::arg("fontset"),
+                 py::arg("family"), py::arg("style"), py::arg("weight"))
+            .def("poll_events", &render::MplCanvas::pollEvents)
+            .def("take_events",
+                 [](render::MplCanvas& c) {
+                     py::list out;
+                     for (const auto& e : c.takeEvents()) {
+                         const char* tn = "";
+                         using T = backend::InputEvent::Type;
+                         switch (e.type) {
+                         case T::ButtonPress:   tn = "press"; break;
+                         case T::ButtonRelease: tn = "release"; break;
+                         case T::Motion:        tn = "motion"; break;
+                         case T::Scroll:        tn = "scroll"; break;
+                         case T::KeyPress:      tn = "keypress"; break;
+                         case T::KeyRelease:    tn = "keyrelease"; break;
+                         case T::TextInput:     tn = "text"; break;
+                         case T::Resize:        tn = "resize"; break;
+                         case T::Quit:          tn = "quit"; break;
+                         }
+                         out.append(py::make_tuple(
+                             tn, e.x, e.y, e.button, e.buttons,
+                             e.dblclick, e.step, std::string(1, e.key),
+                             e.keycode, e.text, e.shift, e.ctrl, e.alt,
+                             e.width, e.height));
+                     }
+                     return out;
+                 })
+            .def("set_title", &render::MplCanvas::setTitle,
+                 py::arg("title"))
+            .def("toggle_fullscreen",
+                 &render::MplCanvas::toggleFullscreen);
+    }
+
+    // The Python-side backend module. Written as a real module into
+    // sys.modules so mpl's `module://volcanoplot.mpl_backend` loader
+    // can import it.
+    m.attr("_vp_mpl_backend_source") = py::str(R"PY(
+# volcanoplot.mpl_backend — render real matplotlib through VolcanoPlot.
+#
+# Activated via matplotlib.use("module://volcanoplot.mpl_backend").
+# mpl keeps its full Figure/Artist/layout machinery; this module only
+# implements the rasterizer (RendererBase on the Vulkan MplCanvas),
+# the offscreen canvas (savefig) and a GLFW window manager (show()).
+
+import math
+import sys
+import threading
+import time
+
+import numpy as np
+
+import matplotlib
+from matplotlib import rcParams
+from matplotlib._pylab_helpers import Gcf
+from matplotlib.backend_bases import (
+    CloseEvent, DrawEvent, FigureCanvasBase, FigureManagerBase,
+    GraphicsContextBase, KeyEvent, LocationEvent, MouseButton,
+    MouseEvent, NavigationToolbar2, NonGuiException, PickEvent,
+    RendererBase, ResizeEvent, TimerBase)
+from matplotlib.path import Path
+from matplotlib.transforms import Affine2D
+
+# `_vmpl` (the volcanoplot._mpl submodule) is injected into this
+# module's globals by the extension before exec — `import volcanoplot`
+# would re-enter module init because it is not yet in sys.modules.
+
+
+def _flip_transform(height):
+    return Affine2D().scale(1.0, -1.0).translate(0.0, height)
+
+
+def _gc_colors(gc, rgbFace):
+    rgba = gc.get_rgb()
+    alpha = gc.get_alpha()
+    if alpha is None:
+        alpha = 1.0
+    if gc.get_forced_alpha():
+        edge = (rgba[0], rgba[1], rgba[2], alpha)
+        face = None if rgbFace is None else (
+            rgbFace[0], rgbFace[1], rgbFace[2], alpha)
+    else:
+        edge = rgba
+        face = rgbFace
+    return face, edge
+
+
+def _clip(gc, height):
+    """→ ((x,y,w,h) y-down px scissor | None, flat clip ring | None)."""
+    clip = None
+    rect = gc.get_clip_rectangle()
+    if rect is not None:
+        clip = (max(0, int(rect.x0)), max(0, int(height - rect.y1)),
+                max(1, int(rect.x1 - rect.x0)),
+                max(1, int(rect.y1 - rect.y0)))
+    ring = None
+    tp = gc.get_clip_path()
+    if tp is not None:
+        if isinstance(tp, tuple):
+            # (Path | None, Transform | None) pair.
+            cp, ct = tp
+            if cp is None:
+                return clip, None
+            p = cp.transformed(
+                _flip_transform(height)
+                if ct is None else ct + _flip_transform(height))
+        else:
+            p = tp.get_fully_transformed_path().transformed(
+                _flip_transform(height))
+        codes = p.codes
+        verts = p.vertices
+        best, cur = [], []
+        for i, v in enumerate(verts):
+            c = codes[i] if codes is not None else (
+                Path.MOVETO if i == 0 else Path.LINETO)
+            if c == Path.MOVETO:
+                if len(cur) > len(best):
+                    best = cur
+                cur = [v]
+            elif c == Path.CLOSEPOLY:
+                if len(cur) > len(best):
+                    best = cur
+                cur = []
+            else:
+                cur.append(v)
+        if len(cur) > len(best):
+            best = cur
+        if len(best) >= 3:
+            ring = []
+            for vx, vy in best:
+                ring += [float(vx), float(vy)]
+    return clip, ring
+
+
+def _family_of(prop):
+    fam = prop.get_family()
+    if isinstance(fam, (list, tuple)):
+        fam = fam[0] if fam else 'sans-serif'
+    return str(fam or 'sans-serif')
+
+
+class RendererVolcano(RendererBase):
+    """RendererBase that records mpl draw ops onto a Vulkan canvas."""
+
+    def __init__(self, cv, dpi, width, height):
+        super().__init__()
+        self._cv = cv
+        self.dpi = dpi
+        self.width = float(width)
+        self.height = float(height)
+        self._flip = _flip_transform(height)
+
+    # ── abstract surface ──
+    def draw_path(self, gc, path, transform, rgbFace=None):
+        face, edge = _gc_colors(gc, rgbFace)
+        if face is None and (edge is None or edge[3] <= 0):
+            return
+        try:
+            tpath = path.transformed(transform + self._flip)
+        except Exception:
+            return
+        verts = tpath.vertices
+        codes = tpath.codes
+        if codes is None:
+            codes = np.concatenate(
+                [np.array([Path.MOVETO], dtype=np.uint8),
+                 np.full(max(0, len(verts) - 1), Path.LINETO,
+                         dtype=np.uint8)])
+        lw = self.points_to_pixels(gc.get_linewidth())
+        dashes = gc.get_dashes()
+        if dashes and dashes[1] is not None and len(dashes[1]):
+            dashes = (self.points_to_pixels(dashes[0]),
+                      [self.points_to_pixels(v) for v in dashes[1]])
+        else:
+            dashes = None
+        clip, ring = _clip(gc, self.height)
+        hatch = gc.get_hatch()
+        self._cv.path(
+            np.asarray(verts, dtype=np.float64).ravel().tolist(),
+            np.asarray(codes, dtype=np.uint8).tolist(),
+            face, edge, float(lw), dashes,
+            gc.get_joinstyle(), gc.get_capstyle(),
+            hatch if hatch else None,
+            gc.get_hatch_color() if hatch else None,
+            clip, ring)
+
+    def draw_image(self, gc, x, y, im, transform=None):
+        if im is None or im.size == 0:
+            return
+        im = np.asarray(im)
+        if im.ndim == 2:
+            im = np.stack([im, im, im, np.ones_like(im)], axis=-1)
+        if im.shape[2] == 3:
+            a = np.ones(im.shape[:2] + (1,), dtype=im.dtype)
+            if im.dtype != np.uint8:
+                im = np.concatenate([im, a], axis=-1)
+            else:
+                im = np.concatenate([im, a * 255], axis=-1)
+        if im.dtype != np.uint8:
+            im = (np.clip(im, 0, 1) * 255 + 0.5).astype(np.uint8)
+        alpha = gc.get_alpha()
+        if alpha is not None and alpha < 1.0:
+            im = im.copy()
+            im[..., 3] = np.clip(im[..., 3] * alpha + 0.5,
+                                 0, 255).astype(np.uint8)
+        h, w = im.shape[0], im.shape[1]
+        if transform is not None:
+            pts = (transform + self._flip).transform(
+                [[0, 0], [w, 0], [w, h], [0, h]])
+            x0, y0 = pts[:, 0].min(), pts[:, 1].min()
+            x1, y1 = pts[:, 0].max(), pts[:, 1].max()
+            dst = (int(round(x0)), int(round(y0)),
+                   max(1, int(round(x1 - x0))),
+                   max(1, int(round(y1 - y0))))
+        else:
+            dst = (int(round(x)), int(round(self.height - y - h)), w, h)
+        clip, _ = _clip(gc, self.height)
+        self._cv.image(im.tobytes(), w, h, dst, 1, clip)
+
+    def draw_text(self, gc, x, y, s, prop, angle, ismath=False,
+                  mtext=None):
+        if not s or ismath == 'TeX' and not s:
+            return
+        rgba = gc.get_rgb()
+        alpha = gc.get_alpha()
+        if alpha is None:
+            alpha = 1.0
+        color = ((rgba[0], rgba[1], rgba[2], alpha)
+                 if gc.get_forced_alpha() else rgba)
+        if color[3] <= 0:
+            return
+        size_px = prop.get_size_in_points() * self.dpi / 72.0
+        family = _family_of(prop)
+        style = str(prop.get_style())
+        weight = str(prop.get_weight())
+        clip, _ = _clip(gc, self.height)
+        # mpl Text.draw applies `y = canvash - y` when renderer.flipy()
+        # is True, so `y` arrives already in top-origin (Y-down) pixels
+        # — use it verbatim. mpl angle is CCW in Y-up; the canvas rotates
+        # CW in Y-down, hence -angle for the same visual direction.
+        if ismath:
+            self._cv.math_text(
+                x, y, s, size_px, color, -angle,
+                rcParams['mathtext.fontset'], family, style, weight,
+                clip)
+        else:
+            self._cv.text(x, y, s, size_px, color, -angle,
+                          family, style, weight, clip)
+
+    def draw_gouraud_triangles(self, gc, points, colors, transform):
+        pts = (transform + self._flip).transform(
+            np.asarray(points).reshape(-1, 2)).reshape(-1, 3, 2)
+        clip, _ = _clip(gc, self.height)
+        for tri, col in zip(pts, colors):
+            self._cv.gouraud(
+                float(tri[0][0]), float(tri[0][1]),
+                float(tri[1][0]), float(tri[1][1]),
+                float(tri[2][0]), float(tri[2][1]),
+                tuple(float(c) for c in col[0]),
+                tuple(float(c) for c in col[1]),
+                tuple(float(c) for c in col[2]), clip)
+
+    def get_text_width_height_descent(self, s, prop, ismath):
+        size_px = prop.get_size_in_points() * self.dpi / 72.0
+        family = _family_of(prop)
+        style = str(prop.get_style())
+        weight = str(prop.get_weight())
+        if ismath:
+            w, h, asc = self._cv.measure_math(
+                s, size_px, rcParams['mathtext.fontset'], family,
+                style, weight)
+        else:
+            w, h, asc = self._cv.measure_text(s, size_px, family,
+                                              style, weight)
+        return w, h, max(0.0, h - asc)
+
+    # ── canvas metrics ──
+    def points_to_pixels(self, points):
+        return points / 72.0 * self.dpi
+
+    def get_canvas_width_height(self):
+        return self.width, self.height
+
+    def get_image_magnification(self):
+        return self.dpi / 72.0
+
+    def flipy(self):
+        return True
+
+    def option_image_nocomposite(self):
+        return True
+
+    def new_gc(self):
+        return GraphicsContextBase()
+
+
+class _Timer(TimerBase):
+    """threading.Timer-backed mpl TimerBase."""
+
+    def __init__(self, interval=None, callbacks=None):
+        super().__init__(interval=interval, callbacks=callbacks)
+        self._t = None
+
+    def _timer_start(self):
+        self._schedule()
+
+    def _timer_stop(self):
+        if self._t is not None:
+            self._t.cancel()
+            self._t = None
+
+    def _schedule(self):
+        self._timer_stop()
+        self._t = threading.Timer(max(self.interval, 1) / 1000.0,
+                                  self._fire)
+        self._t.daemon = True
+        self._t.start()
+
+    def _fire(self):
+        try:
+            TimerBase._on_timer(self)
+        finally:
+            if self._t is not None:
+                self._schedule()
+
+
+class FigureCanvasVolcano(FigureCanvasBase):
+    required_interactive_framework = None
+    filetypes = dict(FigureCanvasBase.filetypes)
+    filetypes['png'] = 'Portable Network Graphics'
+    filetypes['jpg'] = 'Joint Photographic Experts Group'
+    filetypes['jpeg'] = 'Joint Photographic Experts Group'
+    filetypes['tif'] = 'Tagged Image File Format'
+    filetypes['tiff'] = 'Tagged Image File Format'
+    filetypes['webp'] = 'WebP Image Format'
+    filetypes['raw'] = 'Raw RGBA bitmap'
+    filetypes['rgba'] = 'Raw RGBA bitmap'
+
+    def __init__(self, figure=None):
+        super().__init__(figure)
+        self._cv = None       # headless canvas (savefig / buffer_rgba)
+        self._cvw = None      # windowed canvas (set by the manager)
+        self._rgba = None
+        self._renderer = None
+        self._force_redraw = False
+        self._cur_key = None
+
+    # ── rendering ──
+    def _canvas_px(self):
+        w, h = self.get_width_height()
+        return int(w), int(h)
+
+    def _headless(self):
+        w, h = self._canvas_px()
+        if self._cv is None or tuple(self._cv.extent()) != (w, h):
+            self._cv = _vmpl.Canvas.headless(w, h)
+        return self._cv
+
+    def _draw_into(self, cv):
+        w, h = self._canvas_px()
+        face = self.figure.get_facecolor()
+        renderer = RendererVolcano(cv, self.figure.dpi, w, h)
+        self._renderer = renderer
+        cv.begin_frame()
+        cv.clear(face if face[3] > 0 else (1, 1, 1, 1))
+        self.figure.draw(renderer)
+        cv.end_frame()
+        rb = cv.readback()
+        self._rgba = rb if rb else None
+        self._force_redraw = False
+        self.callbacks.process(
+            'draw_event', DrawEvent('draw_event', self, renderer))
+
+    def draw(self):
+        cv = self._cvw if self._cvw is not None else self._headless()
+        self._draw_into(cv)
+
+    def draw_idle(self):
+        self.draw()
+
+    def get_renderer(self, cleared=False):
+        w, h = self._canvas_px()
+        cv = self._headless()
+        return RendererVolcano(cv, self.figure.dpi, w, h)
+
+    def buffer_rgba(self):
+        cv = self._headless()
+        self._draw_into(cv)
+        w, h = self._canvas_px()
+        return np.frombuffer(self._rgba, np.uint8).reshape(h, w, 4)
+
+    # ── hardcopy ──
+    def _print_pil(self, filename_or_obj, fmt, pil_kwargs, metadata=None):
+        # Mirror FigureCanvasAgg._print_pil: mpl's PIL-based imsave
+        # handles the uint8 RGBA buffer, dpi and metadata conventions.
+        import matplotlib.image
+        self.draw()
+        matplotlib.image.imsave(
+            filename_or_obj, self.buffer_rgba(), format=fmt,
+            origin="upper", dpi=self.figure.dpi, metadata=metadata,
+            pil_kwargs=pil_kwargs)
+
+    def print_png(self, filename_or_obj, *, metadata=None,
+                  pil_kwargs=None, **kwargs):
+        self._print_pil(filename_or_obj, "png", pil_kwargs, metadata)
+
+    def print_jpg(self, filename_or_obj, *, pil_kwargs=None, **kwargs):
+        self._print_pil(filename_or_obj, "jpeg", pil_kwargs)
+
+    print_jpeg = print_jpg
+
+    def print_tif(self, filename_or_obj, *, pil_kwargs=None, **kwargs):
+        self._print_pil(filename_or_obj, "tiff", pil_kwargs)
+
+    print_tiff = print_tif
+
+    def print_webp(self, filename_or_obj, *, pil_kwargs=None, **kwargs):
+        self._print_pil(filename_or_obj, "webp", pil_kwargs)
+
+    def print_raw(self, filename_or_obj, *args, **kwargs):
+        self.buffer_rgba()
+        if hasattr(filename_or_obj, 'write'):
+            filename_or_obj.write(self._rgba)
+        else:
+            with open(filename_or_obj, 'wb') as f:
+                f.write(self._rgba)
+
+    print_rgba = print_raw
+
+    # ── events / windowing ──
+    def new_timer(self, *args, **kwargs):
+        return _Timer(*args, **kwargs)
+
+    def flush_events(self):
+        if self._cvw is not None:
+            if not self._cvw.poll_events():
+                if self.manager is not None:
+                    self.manager._window_closed()
+            else:
+                self._dispatch_events()
+
+    def start_event_loop(self, timeout=0):
+        deadline = (None if timeout is None or timeout <= 0
+                    else time.monotonic() + timeout)
+        while True:
+            self.flush_events()
+            if self._cvw is None:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+
+    def stop_event_loop(self):
+        pass
+
+    def resize(self, w, h):
+        if self._cvw is not None:
+            self._cvw.resize(int(w), int(h))
+        self._force_redraw = True
+        super().resize(int(w), int(h))
+
+    def _dispatch_events(self):
+        cv = self._cvw
+        if cv is None:
+            return
+        fb_h = self.figure.bbox.height
+        for (t, x, y, btn, btns, dbl, step, kc, code, text, sh, ct, al,
+             ew, eh) in cv.take_events():
+            my = fb_h - y
+            if t == 'press':
+                self._push_mouse('button_press_event', x, my,
+                                 button=btn, dblclick=dbl)
+            elif t == 'release':
+                self._push_mouse('button_release_event', x, my,
+                                 button=btn)
+            elif t == 'motion':
+                b = btn if btn else (
+                    1 if btns & 1 else 2 if btns & 2 else
+                    3 if btns & 4 else None)
+                self._push_mouse('motion_notify_event', x, my,
+                                 button=b)
+            elif t == 'scroll':
+                self._push_mouse('scroll_event', x, my,
+                                 button=MouseButton.UP if step > 0
+                                 else MouseButton.DOWN, step=step)
+            elif t == 'keypress':
+                self._cur_key = self._key_name(kc, code, sh, ct, al)
+                self.callbacks.process(
+                    'key_press_event',
+                    KeyEvent('key_press_event', self, self._cur_key,
+                             x, my))
+            elif t == 'keyrelease':
+                key = self._key_name(kc, code, False, False, False)
+                self._cur_key = None
+                self.callbacks.process(
+                    'key_release_event',
+                    KeyEvent('key_release_event', self, key, x, my))
+            elif t == 'text':
+                pass  # folded into keypress (ascii `key`)
+            elif t == 'resize':
+                self.resize(ew, eh)
+            elif t == 'quit':
+                if self.manager is not None:
+                    self.manager._window_closed()
+
+    def _push_mouse(self, name, x, y, button=None, dblclick=False,
+                    step=0):
+        b = None
+        if button is not None:
+            try:
+                b = MouseButton(button)
+            except (ValueError, TypeError):
+                b = button
+        ev = MouseEvent(name, self, x, y, button=b,
+                        key=self._cur_key, step=step, dblclick=dblclick)
+        self.callbacks.process(name, ev)
+
+    @staticmethod
+    def _key_name(kc, code, shift, ctrl, alt):
+        named = {32: ' ', 256: 'escape', 257: 'enter', 258: 'tab',
+                 259: 'backspace', 260: 'insert', 261: 'delete',
+                 262: 'right', 263: 'left', 264: 'down', 265: 'up',
+                 266: 'pageup', 267: 'pagedown', 268: 'home',
+                 269: 'end', 340: 'shift', 341: 'ctrl', 342: 'alt',
+                 343: 'super', 344: 'shift', 345: 'ctrl',
+                 346: 'alt', 347: 'super'}
+        if 290 <= code <= 301:
+            name = f'f{code - 289}'
+        else:
+            name = named.get(code)
+        if name is None:
+            name = kc if kc and kc != '\x00' else ''
+        mods = ''
+        if ctrl and name != 'ctrl':
+            mods += 'ctrl+'
+        if alt and name != 'alt':
+            mods += 'alt+'
+        if shift and name != 'shift' and len(name) == 1:
+            mods += 'shift+'
+        return mods + name
+
+
+class FigureManagerVolcano(FigureManagerBase):
+    def __init__(self, canvas, num):
+        # mpl's base __init__ calls set_window_title — window must exist.
+        self.window = None
+        super().__init__(canvas, num)
+        self._shown = False
+        try:
+            self.toolbar = NavigationToolbar2(canvas)
+            self.toolbar.set_message = lambda *a, **k: None
+        except Exception:
+            self.toolbar = None
+
+    def show(self):
+        if self._shown:
+            return
+        self._shown = True
+        w, h = self.canvas.get_width_height()
+        cv = _vmpl.Canvas.windowed(int(w), int(h),
+                                   f'Figure {self.num}')
+        if cv is None:
+            raise NonGuiException(
+                'VolcanoPlot backend: cannot open a window '
+                '(no display / GLFW unavailable)')
+        self.canvas._cvw = cv
+        self.window = cv
+        _register(self)
+        self.canvas.draw()
+
+    def destroy(self, *args):
+        _unregister(self)
+        if self.canvas is not None:
+            self.canvas._cvw = None
+        self.window = None
+
+    def _window_closed(self):
+        self.canvas.callbacks.process(
+            'close_event', CloseEvent('close_event', self.canvas))
+        try:
+            Gcf.destroy(self.num)
+        except Exception:
+            self.destroy()
+
+    def _step(self):
+        if self.window is None:
+            return
+        if not self.window.poll_events():
+            self._window_closed()
+            return
+        self.canvas._dispatch_events()
+        if (self.canvas._force_redraw or
+                getattr(self.canvas.figure, 'stale', False)):
+            self.canvas.draw()
+
+    def resize(self, w, h):
+        if self.window is not None:
+            self.window.resize(int(w), int(h))
+
+    def full_screen_toggle(self):
+        if self.window is not None:
+            self.window.toggle_fullscreen()
+
+    def get_window_title(self):
+        return f'Figure {self.num}'
+
+    def set_window_title(self, title):
+        if self.window is not None:
+            self.window.set_title(str(title))
+
+    @classmethod
+    def start_main_loop(cls):
+        _mainloop()
+
+
+FigureCanvasVolcano.manager_class = FigureManagerVolcano
+
+_managers = []
+
+
+def _register(m):
+    if m not in _managers:
+        _managers.append(m)
+
+
+def _unregister(m):
+    if m in _managers:
+        _managers.remove(m)
+
+
+def _mainloop():
+    while _managers:
+        for m in list(_managers):
+            m._step()
+        time.sleep(0.008)
+
+
+def show(*args, **kwargs):
+    """plt.show() entry point: open all figures, then block."""
+    block = kwargs.get('block')
+    managers = Gcf.get_all_fig_managers()
+    if not managers:
+        return
+    for m in managers:
+        m.show()
+    if block is None:
+        block = not matplotlib.is_interactive()
+    if block:
+        _mainloop()
+
+
+def draw_if_interactive():
+    if matplotlib.is_interactive():
+        m = Gcf.get_active()
+        if m is not None:
+            m.canvas.draw_idle()
+
+
+backend_version = 'volcanoplot'
+FigureCanvas = FigureCanvasVolcano
+FigureManager = FigureManagerVolcano
+)PY");
+
+    py::exec(R"PY(
+import sys as _vp_mpl_sys
+import types as _vp_mpl_types
+
+_vp_mpl_backend_mod = _vp_mpl_types.ModuleType("volcanoplot.mpl_backend")
+_vp_mpl_backend_mod.__package__ = "volcanoplot"
+_vp_mpl_backend_mod.__dict__["_vmpl"] = _mpl
+exec(_vp_mpl_backend_source, _vp_mpl_backend_mod.__dict__)
+_vp_mpl_sys.modules["volcanoplot.mpl_backend"] = _vp_mpl_backend_mod
+del _vp_mpl_sys, _vp_mpl_types, _vp_mpl_backend_mod
+)PY", m.attr("__dict__"));
 
         py::module_ plt = m.def_submodule("pyplot");
         py::dict md = m.attr("__dict__").cast<py::dict>();
