@@ -31242,6 +31242,11 @@ def _flip_transform(height):
     return Affine2D().scale(1.0, -1.0).translate(0.0, height)
 
 
+# Headless canvases are pooled by pixel size across all figures —
+# each canvas owns a full Vulkan instance+device (~0.8 s to create).
+_canvas_pool = {}
+
+
 def _gc_colors(gc, rgbFace):
     rgba = gc.get_rgb()
     alpha = gc.get_alpha()
@@ -31510,9 +31515,9 @@ class FigureCanvasVolcano(FigureCanvasBase):
 
     def __init__(self, figure=None):
         super().__init__(figure)
-        self._cv = None       # headless canvas (savefig / buffer_rgba)
         self._cvw = None      # windowed canvas (set by the manager)
         self._rgba = None
+        self._rgba_size = None
         self._renderer = None
         self._force_redraw = False
         self._cur_key = None
@@ -31523,10 +31528,16 @@ class FigureCanvasVolcano(FigureCanvasBase):
         return int(w), int(h)
 
     def _headless(self):
+        # Canvases are pooled across figures: a headless canvas owns a
+        # whole Vulkan instance+device (~0.8 s init), so allocating one
+        # per figure would dominate every savefig. The canvas carries
+        # no inter-frame state — begin_frame clears the op list.
         w, h = self._canvas_px()
-        if self._cv is None or tuple(self._cv.extent()) != (w, h):
-            self._cv = _vmpl.Canvas.headless(w, h)
-        return self._cv
+        cv = _canvas_pool.get((w, h))
+        if cv is None:
+            cv = _vmpl.Canvas.headless(w, h)
+            _canvas_pool[(w, h)] = cv
+        return cv
 
     def _draw_into(self, cv):
         w, h = self._canvas_px()
@@ -31539,6 +31550,7 @@ class FigureCanvasVolcano(FigureCanvasBase):
         cv.end_frame()
         rb = cv.readback()
         self._rgba = rb if rb else None
+        self._rgba_size = (w, h) if rb else None
         self._force_redraw = False
         self.callbacks.process(
             'draw_event', DrawEvent('draw_event', self, renderer))
@@ -31556,9 +31568,14 @@ class FigureCanvasVolcano(FigureCanvasBase):
         return RendererVolcano(cv, self.figure.dpi, w, h)
 
     def buffer_rgba(self):
-        cv = self._headless()
-        self._draw_into(cv)
+        # Reuse the last frame when the figure is unchanged — a render
+        # costs ~100 ms, so savefig must not pay it twice (draw() plus
+        # print_* both funnel through here).
         w, h = self._canvas_px()
+        if (self._rgba is None or self._rgba_size != (w, h)
+                or self._force_redraw
+                or getattr(self.figure, 'stale', True)):
+            self._draw_into(self._headless())
         return np.frombuffer(self._rgba, np.uint8).reshape(h, w, 4)
 
     # ── hardcopy ──
@@ -31566,7 +31583,6 @@ class FigureCanvasVolcano(FigureCanvasBase):
         # Mirror FigureCanvasAgg._print_pil: mpl's PIL-based imsave
         # handles the uint8 RGBA buffer, dpi and metadata conventions.
         import matplotlib.image
-        self.draw()
         matplotlib.image.imsave(
             filename_or_obj, self.buffer_rgba(), format=fmt,
             origin="upper", dpi=self.figure.dpi, metadata=metadata,
