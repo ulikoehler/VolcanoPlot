@@ -45,6 +45,7 @@ public:
         where_ = std::move(where);
         interpolate_ = interpolate;
         prepared_ = false;   // rebuild the triangle list
+        meshBuilt_ = false;
         touch();
     }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -61,6 +62,9 @@ private:
     render::primitives::FillRenderer renderer_;
     std::vector<Point2D> uploadedPoints_;  // for GPU autoscale
     bool prepared_ = false;
+    /// Huge inputs defer the per-segment triangle mesh — draw() emits a
+    /// per-pixel-column envelope instead, or lazily builds on fallback.
+    bool meshBuilt_ = false;
 };
 
 } // namespace volcano::plot

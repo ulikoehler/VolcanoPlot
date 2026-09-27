@@ -48,6 +48,16 @@ dashSplit(std::span<const Point2D> points, std::span<const float> dashes,
 [[nodiscard]] std::vector<std::vector<Point2D>>
 columnDecimate(std::span<const Point2D> pts, int cx0, int cx1);
 
+/// Data-space variant of columnDecimate: the pixel column is computed
+/// from data x via the hoisted affine `px = ax + kx*x` and the min/max
+/// envelope is tracked in *data* y. Emitted vertices carry pixel x and
+/// data y — the caller maps y to pixels afterwards. Interpolation at
+/// column boundaries is exact only for affine x/y mappings (linear
+/// scales); callers must gate accordingly.
+[[nodiscard]] std::vector<std::vector<Point2D>>
+envelopeDecimateData(std::span<const Point2D> pts, float ax, float kx,
+                     int cx0, int cx1);
+
 /// xkcd-style sketch wobble (mpl `Path.sketch`): resample the polyline and
 /// perturb it with smooth correlated perpendicular noise.
 /// `scale` = amplitude in px, `length` = wobble wavelength in px.

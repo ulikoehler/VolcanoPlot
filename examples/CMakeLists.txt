@@ -7,6 +7,11 @@ if(VOLCANO_BUILD_SCREEN_BACKEND)
     )
 endif()
 
+add_executable(bench_line bench_line.cpp)
+target_link_libraries(bench_line PRIVATE
+    volcano_backend volcano_render volcano_plot volcano_text volcano_encode
+)
+
 add_executable(example_headless_scatter headless_scatter.cpp)
 target_link_libraries(example_headless_scatter PRIVATE
     volcano_backend volcano_render volcano_plot volcano_text volcano_encode

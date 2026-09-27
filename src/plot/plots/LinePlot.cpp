@@ -165,13 +165,47 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
     sp.cap = series_.capStyle;
     auto& gpu = r.gpuLineRenderer();
     if (!gpu.inited()) return;
-    auto px = pixelPoints(series_, axes, rect, transform.get());
-    // Massively oversampled x-monotonic polylines: stroke the per-pixel
-    // column min/max envelope instead — raster-equivalent coverage at
-    // ~2 verts per column instead of ~30 per input point.
     const float W = float(r.backend().extent().width);
     const size_t huge =
         size_t(std::max(8192.0f, W * 4.0f));
+    // Massively oversampled x-monotonic polylines on linear scales:
+    // decimate the *data* points into a per-pixel-column envelope before
+    // any data→pixel mapping — O(n) scalar pass instead of transforming
+    // all n points. Only ~2 envelope verts per column get mapped.
+    if (!transform && series_.points.size() > huge &&
+        series_.drawStyle == DrawStyle::Default &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().kind == ScaleKind::Linear &&
+        axes.yscale().kind == ScaleKind::Linear &&
+        std::is_sorted(series_.points.begin(), series_.points.end(),
+                       [](const Point2D& a, const Point2D& b) {
+                           return a.x < b.x;
+                       })) {
+        const auto& vp = axes.viewport();
+        float fx0 = axes.xscale().forward(vp.x.min);
+        float fx1 = axes.xscale().forward(vp.x.max);
+        float kx = (fx1 != fx0) ? float(rect.width) / (fx1 - fx0) : 0.0f;
+        float fy0 = axes.yscale().forward(vp.y.min);
+        float fy1 = axes.yscale().forward(vp.y.max);
+        float ky = (fy1 != fy0) ? 1.0f / (fy1 - fy0) : 0.0f;
+        float pyA = float(rect.y) + float(rect.height);
+        float pyB = float(rect.height) * ky;
+        std::vector<Point2D> px;
+        for (auto& run : plot::envelopeDecimateData(
+                 series_.points, float(rect.x), kx, 0, int(W) - 1)) {
+            if (!px.empty()) px.push_back(
+                {std::numeric_limits<float>::quiet_NaN(),
+                 std::numeric_limits<float>::quiet_NaN()});
+            for (auto p : run)
+                px.push_back({p.x, pyA - (p.y - fy0) * pyB});
+        }
+        gpuMeshes_ = gpu.tessellate(cmd, px, sp, series_.resolvedColor());
+        gpuMeshSeq_ = r.frameSeq();
+        return;
+    }
+    auto px = pixelPoints(series_, axes, rect, transform.get());
+    // Same envelope trick post-transform for the general case (custom
+    // mpl transforms, nonlinear scales, steps draw styles).
     if (px.size() > huge &&
         std::is_sorted(px.begin(), px.end(),
                        [](const Point2D& a, const Point2D& b) {
@@ -229,11 +263,20 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return;
     }
 
-    auto px = pixelPoints(series_, axes, rect, transform.get());
-    // xkcd-style sketch wobble (path.sketch).
-    if (axes.style().sketchScale > 0.0f)
-        px = sketchPolyline(px, axes.style().sketchScale * 2.0f,
-                            axes.style().sketchLength);
+    // Lazily mapped pixel points — massively oversampled lines drawn
+    // from the GPU-tessellated envelope mesh skip the n-point map.
+    std::optional<std::vector<Point2D>> pxHold;
+    auto px = [&]() -> std::vector<Point2D>& {
+        if (!pxHold) {
+            pxHold = pixelPoints(series_, axes, rect, transform.get());
+            // xkcd-style sketch wobble (path.sketch).
+            if (axes.style().sketchScale > 0.0f)
+                *pxHold = sketchPolyline(*pxHold,
+                                         axes.style().sketchScale * 2.0f,
+                                         axes.style().sketchLength);
+        }
+        return *pxHold;
+    };
 
     StrokeParams sp;
     sp.width = series_.lineWidth;
@@ -256,10 +299,10 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     auto linePass = [&](const StrokeParams& ps, Color color,
                         Point2D off) {
         std::vector<Point2D> pts;
-        std::span<const Point2D> src = px;
+        std::span<const Point2D> src = px();
         if (off.x != 0.0f || off.y != 0.0f) {
-            pts.reserve(px.size());
-            for (auto p : px) pts.push_back({p.x + off.x, p.y + off.y});
+            pts.reserve(px().size());
+            for (auto p : px()) pts.push_back({p.x + off.x, p.y + off.y});
             src = pts;
         }
         auto mesh = strokePolyline(src, ps);
@@ -337,7 +380,7 @@ void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
                                    render::Renderer& r,
                                    const Axes& axes, Rect2D rect,
                                    const MarkerFx* fx) {
-    if (series_.size <= 0) return;
+    if (series_.size <= 0 || series_.marker == MarkerStyle::None) return;
     auto eff = clipRect(rect, r.backend().extent());
     vk::Rect2D clip{vk::Offset2D{eff.x, eff.y},
                     vk::Extent2D{eff.width, eff.height}};

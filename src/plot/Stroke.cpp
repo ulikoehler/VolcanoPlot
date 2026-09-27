@@ -203,6 +203,79 @@ columnDecimate(std::span<const Point2D> pts, int cx0, int cx1) {
 }
 
 std::vector<std::vector<Point2D>>
+envelopeDecimateData(std::span<const Point2D> pts, float ax, float kx,
+                     int cx0, int cx1) {
+    int W = cx1 - cx0 + 1;
+    if (W <= 0 || pts.size() < 2) return {};
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> mn(W, inf), mx(W, -inf);
+    auto upd = [&](int c, float lo, float hi) {
+        int i = c - cx0;
+        if (i < 0 || i >= W) return;
+        mn[i] = std::min(mn[i], lo);
+        mx[i] = std::max(mx[i], hi);
+    };
+    for (size_t i = 1; i < pts.size(); ++i) {
+        auto a = pts[i - 1], b = pts[i];
+        if (!std::isfinite(a.x) || !std::isfinite(a.y) ||
+            !std::isfinite(b.x) || !std::isfinite(b.y))
+            continue;
+        float xa = ax + kx * a.x, xb = ax + kx * b.x;
+        float xlo = std::min(xa, xb), xhi = std::max(xa, xb);
+        int s = std::max(cx0, (int)std::floor(xlo));
+        int e = std::min(cx1, (int)std::floor(xhi));
+        if (s == e) {
+            upd(s, std::min(a.y, b.y), std::max(a.y, b.y));
+            continue;
+        }
+        for (int c = s; c <= e; ++c) {
+            float lo, hi;
+            if (xhi - xlo < 1e-6f) {
+                lo = std::min(a.y, b.y);
+                hi = std::max(a.y, b.y);
+            } else {
+                // Column boundary in data x; y interpolation in data
+                // space is exact for affine y mappings.
+                float xl = std::max(xlo, float(c));
+                float xr = std::min(xhi, float(c + 1));
+                float t0 = (xl - xa) / (xb - xa);
+                float t1 = (xr - xa) / (xb - xa);
+                float yl = a.y + (b.y - a.y) * t0;
+                float yr = a.y + (b.y - a.y) * t1;
+                lo = std::min(yl, yr);
+                hi = std::max(yl, yr);
+            }
+            upd(c, lo, hi);
+        }
+    }
+    std::vector<std::vector<Point2D>> runs;
+    std::vector<Point2D>* cur = nullptr;
+    bool high = false;
+    for (int i = 0; i < W; ++i) {
+        if (!std::isfinite(mn[i])) {
+            cur = nullptr;
+            high = false;
+            continue;
+        }
+        if (!cur) {
+            runs.emplace_back();
+            cur = &runs.back();
+            high = false;
+        }
+        float x = float(cx0 + i) + 0.5f;
+        if (!high) {
+            cur->push_back({x, mn[i]});
+            cur->push_back({x, mx[i]});
+        } else {
+            cur->push_back({x, mx[i]});
+            cur->push_back({x, mn[i]});
+        }
+        high = !high;
+    }
+    return runs;
+}
+
+std::vector<std::vector<Point2D>>
 dashSplit(std::span<const Point2D> points, std::span<const float> dashes,
           float dashOffset) {
     std::vector<std::vector<Point2D>> runs;

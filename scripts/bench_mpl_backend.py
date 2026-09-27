@@ -160,6 +160,14 @@ def case_scatter_sizes_200k(ax, rng):
     ax.set_title("scatter 200k sized")
 
 
+def case_scatter_sizes_1M(ax, rng):
+    n = 1_000_000
+    ax.scatter(rng.random(n), rng.random(n),
+               s=rng.random(n) * 36 + 2, c=rng.random(n),
+               cmap="plasma")
+    ax.set_title("scatter 1M sized+colored")
+
+
 def case_bar_50k(ax, rng):
     x = np.arange(50_000)
     ax.bar(x, rng.random(50_000))
@@ -201,7 +209,9 @@ CASES = [
     # ── extreme large-data: where the GPU/texture paths dominate ──
     ("scatter_2M_dpi400",   case_scatter_2M,    dict(dpi=400)),
     ("scatter_sz_200k",     case_scatter_sizes_200k, dict()),
+    ("scatter_sz_1M_dpi400", case_scatter_sizes_1M, dict(dpi=400)),
     ("bar_50k",             case_bar_50k,       dict()),
+    ("imshow_16M_none_dpi300", case_imshow_16M_none, dict(dpi=300)),
     ("imshow_16M_none_dpi400", case_imshow_16M_none, dict(dpi=400)),
     ("pcolormesh_7M_dpi400", case_pcolormesh_7M, dict(dpi=400)),
 ]

@@ -4,9 +4,11 @@
 #include "volcano/render/VectorCanvas.hpp"
 #include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
+#include "volcano/render/primitives/SpineRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace volcano::plot {
 
@@ -158,12 +160,6 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
     renderer_.init(ctx.device.handle(), r.backend().renderPass(),
                    r.backend().sampleCount(), r.pipelineCache());
 
-    // Build triangle list for the fill between area.
-    std::vector<Point2D> positions;
-    std::vector<Color> colors;
-    buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
-                              positions, colors, color_);
-
     // Store the unique data points for GPU autoscale (the triangle vertices
     // include duplicates, so we build a separate list of unique points).
     uploadedPoints_.clear();
@@ -173,10 +169,20 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
         uploadedPoints_.push_back({x_[i], y2_[i]});
     }
 
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{positions.data(), positions.size()},
-                     std::span{colors.data(), colors.size()});
+    // Huge inputs defer the per-segment mesh (O(n) verts) — draw()
+    // emits a per-pixel-column envelope quads path instead, or lazily
+    // builds the mesh if that path does not apply.
+    if (x_.size() < (size_t{1} << 18)) {
+        std::vector<Point2D> positions;
+        std::vector<Color> colors;
+        buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
+                                  positions, colors, color_);
+        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                         std::span{positions.data(), positions.size()},
+                         std::span{colors.data(), colors.size()});
+        meshBuilt_ = true;
+    }
     prepared_ = true;
 }
 
@@ -190,6 +196,67 @@ void FillBetweenPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                      vk::Extent2D{eff.width, eff.height}};
 
     if (!transform && pathEffects.empty()) {
+        // Huge x-monotonic band on linear scales: one vertical quad per
+        // pixel column covering the band's min/max envelope — raster-
+        // equivalent to the per-segment mesh at ~6 verts per column
+        // instead of 6 per input point.
+        const float W = float(r.backend().extent().width);
+        const size_t n = x_.size();
+        if (n > size_t(std::max(8192.0f, W * 4.0f)) && where_.empty() &&
+            axes.projection().kind == ProjectionKind::Rectilinear &&
+            axes.xscale().kind == ScaleKind::Linear &&
+            axes.yscale().kind == ScaleKind::Linear &&
+            std::is_sorted(x_.begin(), x_.end())) {
+            const auto& vp = axes.viewport();
+            float fx0 = axes.xscale().forward(vp.x.min);
+            float fx1 = axes.xscale().forward(vp.x.max);
+            float kx = (fx1 != fx0) ? float(rect.width) / (fx1 - fx0)
+                                    : 0.0f;
+            float fy0 = axes.yscale().forward(vp.y.min);
+            float fy1 = axes.yscale().forward(vp.y.max);
+            float ky = (fy1 != fy0) ? 1.0f / (fy1 - fy0) : 0.0f;
+            const float rh = float(rect.height);
+            const float inf = std::numeric_limits<float>::infinity();
+            std::vector<float> mn(size_t(W), inf), mx(size_t(W), -inf);
+            for (size_t i = 0; i < n; ++i) {
+                float xv = x_[i], a = y1_[i], b = y2_[i];
+                if (!std::isfinite(xv) || !std::isfinite(a) ||
+                    !std::isfinite(b))
+                    continue;
+                int c = int(std::floor(float(rect.x) + (xv - fx0) * kx));
+                if (c < 0 || c >= int(W)) continue;
+                mn[c] = std::min(mn[c], std::min(a, b));
+                mx[c] = std::max(mx[c], std::max(a, b));
+            }
+            std::vector<Point2D> verts;
+            verts.reserve(size_t(W) * 6);
+            for (int c = 0; c < int(W); ++c) {
+                if (!std::isfinite(mn[c])) continue;
+                float yLo = float(rect.y) + (1.0f - (mn[c] - fy0) * ky) * rh;
+                float yHi = float(rect.y) + (1.0f - (mx[c] - fy0) * ky) * rh;
+                float xl = float(c), xr = float(c + 1);
+                verts.insert(verts.end(),
+                             {{xl, yHi}, {xr, yHi}, {xl, yLo},
+                              {xr, yHi}, {xr, yLo}, {xl, yLo}});
+            }
+            r.spineRenderer().drawTriangles(
+                cmd, vrect, r.backend().extent(), verts, color_);
+            return;
+        }
+        if (!meshBuilt_) {
+            auto& ctx = r.backend().context();
+            std::vector<Point2D> positions;
+            std::vector<Color> colors;
+            buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
+                                      positions, colors, color_);
+            renderer_.upload(ctx.device.handle(),
+                             ctx.device.graphicsQueue(),
+                             ctx.graphicsPool.handle(),
+                             ctx.allocator.handle(),
+                             std::span{positions.data(), positions.size()},
+                             std::span{colors.data(), colors.size()});
+            meshBuilt_ = true;
+        }
         renderer_.draw(cmd, vrect, axes.transform());
         return;
     }

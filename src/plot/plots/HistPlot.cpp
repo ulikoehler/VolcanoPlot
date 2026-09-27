@@ -62,17 +62,16 @@ void HistPlot::computeBins() {
         return;
     }
 
-    // Sort samples for quantile computation.
-    std::sort(all.begin(), all.end());
-
-    // Determine data range.
+    // Data range via minmax — sorting all samples is O(n log n) and only
+    // needed when an IQR-based bin rule is in play.
     float dataMin, dataMax;
     if (cfg_.range && cfg_.range->valid()) {
         dataMin = cfg_.range->min;
         dataMax = cfg_.range->max;
     } else {
-        dataMin = all.front();
-        dataMax = all.back();
+        auto [mn, mx] = std::ranges::minmax_element(all);
+        dataMin = *mn;
+        dataMax = *mx;
     }
     if (dataMax <= dataMin) dataMax = dataMin + 1.0f;
 
@@ -85,18 +84,32 @@ void HistPlot::computeBins() {
         // counts for "auto"; shared edges use the max count).
         size_t maxN = 0;
         for (const auto& d : datasets_) maxN = std::max(maxN, d.size());
-        std::vector<float> largest = all; // for IQR use merged samples
+        const bool needIqr = cfg_.bins == HistBinMethod::FD ||
+                             cfg_.bins == HistBinMethod::Auto;
+        std::vector<float> sorted;
+        if (needIqr) {
+            sorted = all;  // for IQR use merged samples
+            // fdBins reads only the Q1/Q3 order statistics — two
+            // nth_element passes (O(n) expected) beat a full sort.
+            size_t m = sorted.size();
+            if (m >= 2) {
+                auto q1 = sorted.begin() + ptrdiff_t(m / 4);
+                auto q3 = sorted.begin() + ptrdiff_t((3 * m) / 4);
+                std::nth_element(sorted.begin(), q1, sorted.end());
+                std::nth_element(q1 + 1, q3, sorted.end());
+            }
+        }
         int nBins;
         switch (cfg_.bins) {
             case HistBinMethod::Sturges: nBins = sturgesBins(maxN); break;
-            case HistBinMethod::FD:      nBins = fdBins(largest, dataMin, dataMax); break;
+            case HistBinMethod::FD:      nBins = fdBins(sorted, dataMin, dataMax); break;
             case HistBinMethod::Rice:    nBins = riceBins(maxN); break;
             case HistBinMethod::Square:  nBins = squareBins(maxN); break;
             case HistBinMethod::Fixed:   nBins = cfg_.binCount; break;
             case HistBinMethod::Auto:
             default:
                 nBins = std::max(sturgesBins(maxN),
-                                 fdBins(largest, dataMin, dataMax));
+                                 fdBins(sorted, dataMin, dataMax));
                 break;
         }
         nBins = std::max(1, nBins);
@@ -106,15 +119,33 @@ void HistPlot::computeBins() {
             binEdges_[i] = dataMin + i * binWidth;
     }
 
-    // Count samples per dataset in the shared bins.
+    // Count samples per dataset in the shared bins. Evenly spaced edges
+    // (the common case) allow a direct O(1) index instead of a binary
+    // search per sample.
     size_t nBins = binEdges_.size() - 1;
+    const float e0 = binEdges_.front(), e1 = binEdges_.back();
+    bool uniform = nBins >= 1 && e1 > e0;
+    if (uniform && nBins > 1) {
+        float w0 = binEdges_[1] - binEdges_[0];
+        for (size_t i = 1; i < nBins && uniform; ++i)
+            uniform = std::abs(binEdges_[i + 1] - binEdges_[i] - w0) <=
+                      w0 * 1e-4f;
+    }
+    const float invW = uniform ? float(nBins) / (e1 - e0) : 0.0f;
     heights_.assign(datasets_.size(), std::vector<float>(nBins, 0.0f));
     for (size_t d = 0; d < datasets_.size(); ++d) {
         for (float s : datasets_[d]) {
-            if (s < binEdges_.front() || s > binEdges_.back()) continue;
-            auto it = std::upper_bound(binEdges_.begin(), binEdges_.end(), s);
-            size_t idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
-            if (idx >= nBins) idx = nBins - 1;  // last bin includes right edge
+            if (s < e0 || s > e1) continue;
+            size_t idx;
+            if (uniform) {
+                idx = static_cast<size_t>((s - e0) * invW);
+                if (idx >= nBins) idx = nBins - 1;  // right edge
+            } else {
+                auto it = std::upper_bound(binEdges_.begin(),
+                                           binEdges_.end(), s);
+                idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
+                if (idx >= nBins) idx = nBins - 1;
+            }
             heights_[d][idx] += 1.0f;
         }
 
