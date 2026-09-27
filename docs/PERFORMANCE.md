@@ -27,7 +27,7 @@ the performance shape is instructive.
 | Scatter ≥ ~10k points | **mpl+VP / native** | ~2× at 10k → **10–18×** at 1M |
 | Scatter with per-point `s=`/`c=` | **mpl+VP / native** | **11–16×** |
 | `fill_between`, `stackplot` | **mpl+VP / native** | ~1.4–3.7× |
-| `pcolormesh` / `quadmesh` ≥ 1M cells | **mpl+VP** | ~1.5–2.7× |
+| `pcolormesh` / `quadmesh` ≥ 1M cells (uniform) | **mpl+VP / native** | ~1.5–2.7× (texture + quad vs per-cell polygons) |
 | `imshow` `interpolation='none'` | **mpl+VP / native** | ~1.0–1.2× (up to ~8× in draw-only) |
 | `imshow` `bilinear` etc. | **Agg** over mpl+VP; **native** over both | mpl resamples CPU-side *before* the backend; native GPU-samples |
 | `bar` / `eventplot` / `stem` via mpl | **Agg** (by ~1.1–1.6×) | Per-artist Python cost dominates both backends |
@@ -158,7 +158,10 @@ backend translates matplotlib draw calls into batched GPU operations:
   upload.** The cell grid becomes a texture + one quad sampled in the
   fragment shader; Agg fills every cell as a polygon. This is also why
   high-DPI renders scale gracefully — upload size depends on the data, not
-  the pixel count.
+  the pixel count. On the *native* API, `pcolormesh` uses the same
+  texture path whenever the grid is uniform (flat shading, no cell
+  borders, no under/over/opaque-bad colormap colors); irregular grids
+  keep the per-cell geometry path.
 
 - **`fill_between`/`stackplot` → column-envelope fills.** An x-monotonic
   band is emitted as one quad per pixel column instead of a megabyte-sized
@@ -195,8 +198,9 @@ backend translates matplotlib draw calls into batched GPU operations:
   the visual difference is small for dense images.
 
 - **`contourf` on dense grids.** The native contour tessellation emits
-  triangles per band per cell on the CPU; Agg's scanline filler is lighter
-  for this geometry. Expect ~2–4× slower — a known optimization target.
+  triangles per band per cell on the CPU (row-parallel across up to 8
+  threads for large grids); Agg's scanline filler is still lighter for
+  this geometry. Expect ~2–4× slower — a known optimization target.
 
 - **Hatches, dashed paths, disjointed path soups** bypass the batching fast
   paths by design (draw-order correctness comes first) and pay per-path
@@ -229,11 +233,16 @@ than trusting this table.
 
 ## When native loses
 
-- **`contourf`** (see above — CPU tessellation, 0.2–0.7×).
-- **`hist` on huge inputs** (~0.5× at 10M): `np.histogram`-scale binning is
-  already C-fast; our auto-bin path adds quantile work on top.
-- **`quadmesh`/`pcolormesh` at extreme DPI** — the mpl+VP texture path beats
-  the native mesh pipeline on the same data (1.4–2.7× vs 0.9–1.2×).
+- **`contourf`** (see above — CPU tessellation, row-parallel but still
+  behind Agg's scanline filler, ~0.2–0.7×).
+- **`hist` on huge inputs**: `np.histogram`-scale binning is already
+  C-fast. Our binning uses `minmax`/`nth_element` quantiles and parallel
+  counting above 1M samples, but the auto-bin (FD) path still does
+  quantile work `np.histogram`'s fixed-width path avoids — roughly
+  parity at 10M, slightly behind.
+- **`quadmesh`/`pcolormesh` on irregular grids** — only uniform grids
+  take the texture path; irregular edges still tessellate per cell
+  (6 verts/cell uploads dominate at multi-million cells).
 - **Mixed small complex figures** (`line_2k`+legend+scatter, `errorbar_50`,
   `boxplot_6`, `violin`): fixed per-figure layout + GPU sync can make native
   ~1.5–2.5× slower than Agg at millisecond scale.

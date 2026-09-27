@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <thread>
 #include <limits>
 #include <map>
 
@@ -485,69 +486,121 @@ void ContourfPlot::marchingSquaresFilled() {
     // Plus below-min and above-max bands.
     const auto& L = config_.levels;
     int numBands = static_cast<int>(L.size()) - 1;
-    if (!config_.hatches.empty())
+    const bool wantRings = !config_.hatches.empty();
+    if (wantRings)
         bandRings_.resize(size_t(numBands) + 1);
 
-    for (uint32_t j = 0; j < g.height - 1; ++j) {
-        for (uint32_t i = 0; i < g.width - 1; ++i) {
-            float vBL = g.values[j * g.width + i];
-            float vBR = g.values[j * g.width + (i + 1)];
-            float vTR = g.values[(j + 1) * g.width + (i + 1)];
-            float vTL = g.values[(j + 1) * g.width + i];
-            float x0 = g.xRange.min + i * dx;
-            float x1 = x0 + dx;
-            float y0 = g.yRange.min + j * dy;
-            float y1 = y0 + dy;
+    // Clip each cell of rows [j0,j1) against every band, emitting
+    // fan-triangulated band-coloured triangles (and optional hatch
+    // rings) into the caller-owned buffers — pure function of the row
+    // range, so disjoint row ranges run on worker threads and merge
+    // afterwards.
+    auto fillRows = [&](uint32_t j0, uint32_t j1,
+                        std::vector<Point2D>& pos,
+                        std::vector<Color>& col,
+                        std::vector<std::vector<std::vector<Point2D>>>* rings) {
+        const Colormap& cmap = config_.cmap ? *config_.cmap
+                                            : defaultColormap();
+        for (uint32_t j = j0; j < j1; ++j) {
+            for (uint32_t i = 0; i < g.width - 1; ++i) {
+                float vBL = g.values[j * g.width + i];
+                float vBR = g.values[j * g.width + (i + 1)];
+                float vTR = g.values[(j + 1) * g.width + (i + 1)];
+                float vTL = g.values[(j + 1) * g.width + i];
+                float x0 = g.xRange.min + i * dx;
+                float x1 = x0 + dx;
+                float y0 = g.yRange.min + j * dy;
+                float y1 = y0 + dy;
 
-            // Cell polygon (BL, BR, TR, TL).
-            ClipVertex cell[] = {
-                {{x0, y0}, vBL},
-                {{x1, y0}, vBR},
-                {{x1, y1}, vTR},
-                {{x0, y1}, vTL},
-            };
-
-            for (int b = 0; b <= numBands; ++b) {
-                float lo = (b == 0) ? (vmin - 1.0f) : L[b - 1];
-                float hi = (b == numBands) ? (vmax + 1.0f) : L[b];
-
-                // Skip bands that don't intersect this cell.
+                // Cell polygon (BL, BR, TR, TL).
+                ClipVertex cell[] = {
+                    {{x0, y0}, vBL},
+                    {{x1, y0}, vBR},
+                    {{x1, y1}, vTR},
+                    {{x0, y1}, vTL},
+                };
                 float cellMin = std::min({vBL, vBR, vTR, vTL});
                 float cellMax = std::max({vBL, vBR, vTR, vTL});
-                if (cellMax < lo || cellMin > hi) continue;
 
-                // Clip cell to [lo, hi] band.
-                auto poly = clipAbove(cell, lo);
-                poly = clipBelow(poly, hi);
-                if (poly.size() < 3) continue;
+                for (int b = 0; b <= numBands; ++b) {
+                    float lo = (b == 0) ? (vmin - 1.0f) : L[b - 1];
+                    float hi = (b == numBands) ? (vmax + 1.0f) : L[b];
 
-                // Record the band ring for hatch overlay (draw()).
-                if (!bandRings_.empty()) {
-                    auto& ring = bandRings_[b].emplace_back();
-                    ring.reserve(poly.size());
-                    for (auto& cv : poly) ring.push_back(cv.pos);
-                }
+                    // Skip bands that don't intersect this cell.
+                    if (cellMax < lo || cellMin > hi) continue;
 
-                // Compute band color.
-                float mid = (lo + hi) * 0.5f;
-                float t = (mid - vmin) / vrange;
-                t = std::clamp(t, 0.0f, 1.0f);
-                Color color = config_.cmap
-                                  ? config_.cmap->sample(t)
-                                  : defaultColormap().sample(t);
+                    // Clip cell to [lo, hi] band.
+                    auto poly = clipAbove(cell, lo);
+                    poly = clipBelow(poly, hi);
+                    if (poly.size() < 3) continue;
 
-                // Fan triangulate.
-                for (size_t k = 1; k + 1 < poly.size(); ++k) {
-                    positions_.push_back(poly[0].pos);
-                    positions_.push_back(poly[k].pos);
-                    positions_.push_back(poly[k + 1].pos);
-                    colors_.push_back(color);
-                    colors_.push_back(color);
-                    colors_.push_back(color);
+                    // Record the band ring for hatch overlay (draw()).
+                    if (rings) {
+                        auto& ring = (*rings)[b].emplace_back();
+                        ring.reserve(poly.size());
+                        for (auto& cv : poly) ring.push_back(cv.pos);
+                    }
+
+                    // Compute band color.
+                    float mid = (lo + hi) * 0.5f;
+                    float t = std::clamp((mid - vmin) / vrange, 0.0f, 1.0f);
+                    Color color = cmap.sample(t);
+
+                    // Fan triangulate.
+                    for (size_t k = 1; k + 1 < poly.size(); ++k) {
+                        pos.push_back(poly[0].pos);
+                        pos.push_back(poly[k].pos);
+                        pos.push_back(poly[k + 1].pos);
+                        col.push_back(color);
+                        col.push_back(color);
+                        col.push_back(color);
+                    }
                 }
             }
         }
+    };
+
+    // Large grids: split rows across worker threads (no redundant
+    // scanning — each thread owns a disjoint row range covering all
+    // bands). Per-band triangles tile disjoint regions, so ordering
+    // across row chunks is visually irrelevant.
+    const uint64_t work =
+        uint64_t(g.width - 1) * (g.height - 1) * (numBands + 1);
+    unsigned nt = std::min<unsigned>(
+        std::thread::hardware_concurrency(), 8u);
+    nt = std::min<unsigned>(nt, g.height - 1);
+    if (work >= 200'000 && nt > 1) {
+        std::vector<std::vector<Point2D>> tpos(nt);
+        std::vector<std::vector<Color>> tcol(nt);
+        std::vector<std::vector<std::vector<std::vector<Point2D>>>>
+            trings(nt);
+        std::vector<std::thread> workers;
+        workers.reserve(nt);
+        for (unsigned t = 0; t < nt; ++t) {
+            uint32_t j0 = (g.height - 1) * t / nt;
+            uint32_t j1 = (g.height - 1) * (t + 1) / nt;
+            if (wantRings) trings[t].resize(size_t(numBands) + 1);
+            workers.emplace_back([&, t, j0, j1] {
+                fillRows(j0, j1, tpos[t], tcol[t],
+                         wantRings ? &trings[t] : nullptr);
+            });
+        }
+        for (auto& w : workers) w.join();
+        for (unsigned t = 0; t < nt; ++t) {
+            positions_.insert(positions_.end(), tpos[t].begin(),
+                              tpos[t].end());
+            colors_.insert(colors_.end(), tcol[t].begin(), tcol[t].end());
+            if (wantRings)
+                for (int b = 0; b <= numBands; ++b) {
+                    auto& src = trings[t][b];
+                    auto& dst = bandRings_[b];
+                    dst.insert(dst.end(), src.begin(), src.end());
+                }
+        }
+        return;
     }
+    fillRows(0, g.height - 1, positions_, colors_,
+             wantRings ? &bandRings_ : nullptr);
 }
 
 void ContourfPlot::prepare(render::Renderer& r) {

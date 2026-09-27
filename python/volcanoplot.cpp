@@ -31348,12 +31348,22 @@ def _flip_transform(height):
 _canvas_pool = {}
 
 
+def _gv(gc, name, meth=None):
+    """Fast gc property read via __dict__ (GraphicsContextBase stores
+    all state as _<name> attrs; ~40ns/get vs ~µs per method call).
+    Falls back to the getter for foreign gc implementations."""
+    d = getattr(gc, '__dict__', None)
+    if d is not None and name in d:
+        return d[name]
+    return getattr(gc, meth or name.lstrip('_'))()
+
+
 def _gc_colors(gc, rgbFace):
-    rgba = gc.get_rgb()
-    alpha = gc.get_alpha()
+    rgba = _gv(gc, '_rgb', 'get_rgb')
+    alpha = _gv(gc, '_alpha', 'get_alpha')
     if alpha is None:
         alpha = 1.0
-    if gc.get_forced_alpha():
+    if _gv(gc, '_forced_alpha', 'get_forced_alpha'):
         edge = (rgba[0], rgba[1], rgba[2], alpha)
         face = None if rgbFace is None else (
             rgbFace[0], rgbFace[1], rgbFace[2], alpha)
@@ -31363,30 +31373,53 @@ def _gc_colors(gc, rgbFace):
     return face, edge
 
 
-def _clip(gc, height):
-    """→ ((x,y,w,h) y-down px scissor | None, flat clip ring | None)."""
+def _clip(gc, height, cache=None):
+    """→ ((x,y,w,h) y-down px scissor | None, flat clip ring | None).
+    `cache`: per-frame dict memoizing the scissor computation — mpl
+    builds a fresh TransformedBbox per patch but the underlying
+    (_bbox, _transform) pair is shared across thousands of calls."""
     clip = None
-    rect = gc.get_clip_rectangle()
+    rect = _gv(gc, '_cliprect', 'get_clip_rectangle')
     if rect is not None:
-        # One get_points() beats four property accesses — each of
-        # x0/y0/x1/y1 re-runs transform_affine internally.
-        (x0, y0), (x1, y1) = rect.get_points()
-        clip = (max(0, int(x0)), max(0, int(height - y1)),
-                max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+        ckey = None
+        if cache is not None:
+            b = getattr(rect, '_bbox', None)
+            if b is not None:
+                # TransformedBbox: the inner (bbox, transform) objects
+                # are stable mpl objects shared by all patches of an
+                # axes — key on their identity.
+                ckey = ('t', id(b),
+                        id(getattr(rect, '_transform', None)))
+            else:
+                pts = getattr(rect, '_points', None)
+                if pts is not None:
+                    ckey = ('b', pts.tobytes())
+            if ckey is not None:
+                clip = cache.get(ckey)
+        if clip is None:
+            # One get_points() beats four property accesses — each of
+            # x0/y0/x1/y1 re-runs transform_affine internally.
+            (x0, y0), (x1, y1) = rect.get_points()
+            clip = (max(0, int(x0)), max(0, int(height - y1)),
+                    max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+            if ckey is not None:
+                cache[ckey] = clip
     ring = None
-    tp = gc.get_clip_path()
+    tp = _gv(gc, '_clippath', 'get_clip_path')
     if tp is not None:
         if isinstance(tp, tuple):
             # (Path | None, Transform | None) pair.
             cp, ct = tp
-            if cp is None:
-                return clip, None
-            p = cp.transformed(
-                _flip_transform(height)
-                if ct is None else ct + _flip_transform(height))
         else:
-            p = tp.get_fully_transformed_path().transformed(
-                _flip_transform(height))
+            # Raw TransformedPath — same split get_clip_path() does.
+            cp, ct = tp.get_transformed_path_and_affine()
+            if cp is not None and not np.all(np.isfinite(cp.vertices)):
+                cp = None
+        if cp is None:
+            return clip, None
+        p = cp.transformed(
+            _flip_transform(height)
+            if ct is None else ct + _flip_transform(height))
         codes = p.codes
         verts = p.vertices
         best, cur = [], []
@@ -31415,6 +31448,14 @@ def _clip(gc, height):
 def _has_clip_path(gc):
     """True when gc carries a real clip Path (mpl 3.10 may return a
     (None, None) tuple for 'no clip path')."""
+    d = getattr(gc, '__dict__', None)
+    if d is not None and '_clippath' in d:
+        tp = d['_clippath']
+        if tp is None:
+            return False
+        # mpl get_clip_path: non-finite transformed verts → no clip.
+        tpath, _ = tp.get_transformed_path_and_affine()
+        return bool(np.all(np.isfinite(tpath.vertices)))
     cp = gc.get_clip_path()
     if cp is None:
         return False
@@ -31553,6 +31594,11 @@ class RendererVolcano(RendererBase):
         # preserves mpl's strict per-patch draw order exactly.
         self._pendSegs = []   # [kind, key, [verts...], [aux...]]
         self._pendN = 0
+        # Per-frame memo for _clip scissor evaluation: bar/eventplot
+        # storms hand us a fresh TransformedBbox per patch but the
+        # underlying (bbox, transform) pair is shared — thousands of
+        # identical get_points() computations become dict hits.
+        self._clip_memo = {}
 
     def _defer(self, kind, key, verts, aux):
         """Accumulate a pure-fill ('t': verts=tris, aux=rgba4) or
@@ -31692,33 +31738,38 @@ class RendererVolcano(RendererBase):
         face, edge = _gc_colors(gc, rgbFace)
         if face is None and (edge is None or edge[3] <= 0):
             return
-        lw = self.points_to_pixels(gc.get_linewidth())
-        dashes = gc.get_dashes()
+        lw = self.points_to_pixels(
+            _gv(gc, '_linewidth', 'get_linewidth'))
+        dashes = _gv(gc, '_dashes', 'get_dashes')
         # Huge x-monotonic stroked polylines: envelope-decimate in data
         # space BEFORE transforming — one numpy reduceat pass over the
         # vertex list instead of a full transform + stroke of every
         # point. Produces the same per-column coverage at ~2·W verts.
         if (face is None and (dashes[1] is None or len(dashes[1]) == 0)
-                and len(path.vertices) > 65536 and gc.get_hatch() is None
+                and len(path.vertices) > 65536
+                and _gv(gc, '_hatch', 'get_hatch') is None
                 and not _has_clip_path(gc)):
             dec = self._decimate_polyline(path, transform)
             if dec is not None:
                 verts, codes = dec
-                clip, ring = _clip(gc, self.height)
+                clip, ring = _clip(gc, self.height, self._clip_memo)
                 self._flush_pending()
+                js = _gv(gc, '_joinstyle', 'get_joinstyle')
+                cs = _gv(gc, '_capstyle', 'get_capstyle')
                 self._cv.path(
                     verts.ravel(), codes, face, edge, float(lw), None,
-                    gc.get_joinstyle(), gc.get_capstyle(), None, None,
-                    clip, ring)
+                    js.name if hasattr(js, 'name') else js,
+                    cs.name if hasattr(cs, 'name') else cs,
+                    None, None, clip, ring)
                 return
         # Small paths (bar/hist rectangles are emitted one draw_path
         # call per patch): defer same-style strokes and filled convex
         # quads into merged batches.
         nverts = len(path.vertices)
-        if nverts <= 64 and gc.get_hatch() is None:
+        if nverts <= 64 and _gv(gc, '_hatch', 'get_hatch') is None:
             ds = dashes[1] if dashes else None
             if ds is None or len(ds) == 0:
-                clip, ring = _clip(gc, self.height)
+                clip, ring = _clip(gc, self.height, self._clip_memo)
                 if ring is None:
                     hasF = face is not None and face[3] > 0
                     hasS = edge is not None and edge[3] > 0
@@ -31752,9 +31803,15 @@ class RendererVolcano(RendererBase):
                                      np.full(max(0, nverts - 1),
                                              Path.LINETO,
                                              dtype=np.uint8)])
+                            js = _gv(gc, '_joinstyle', 'get_joinstyle')
+                            cs = _gv(gc, '_capstyle', 'get_capstyle')
                             self._defer(
-                                's', (edge, lw, gc.get_joinstyle(),
-                                      gc.get_capstyle(), clip),
+                                's', (edge, lw,
+                                      js.name if hasattr(js, 'name')
+                                      else js,
+                                      cs.name if hasattr(cs, 'name')
+                                      else cs,
+                                      clip),
                                 np.asarray(tv, np.float64),
                                 np.asarray(codes, np.uint8))
                             return
@@ -31770,24 +31827,28 @@ class RendererVolcano(RendererBase):
                 [np.array([Path.MOVETO], dtype=np.uint8),
                  np.full(max(0, len(verts) - 1), Path.LINETO,
                          dtype=np.uint8)])
-        lw = self.points_to_pixels(gc.get_linewidth())
-        dashes = gc.get_dashes()
+        lw = self.points_to_pixels(
+            _gv(gc, '_linewidth', 'get_linewidth'))
+        dashes = _gv(gc, '_dashes', 'get_dashes')
         if dashes and dashes[1] is not None and len(dashes[1]):
             dashes = (self.points_to_pixels(dashes[0]),
                       [self.points_to_pixels(v) for v in dashes[1]])
         else:
             dashes = None
-        clip, ring = _clip(gc, self.height)
-        hatch = gc.get_hatch()
+        clip, ring = _clip(gc, self.height, self._clip_memo)
+        hatch = _gv(gc, '_hatch', 'get_hatch')
+        js = _gv(gc, '_joinstyle', 'get_joinstyle')
+        cs = _gv(gc, '_capstyle', 'get_capstyle')
         # Arrays go through the pybind buffer fast path — never tolist()
         # million-point arrays (per-element casts dominate otherwise).
         self._cv.path(
             np.asarray(verts, dtype=np.float64).ravel(),
             np.asarray(codes, dtype=np.uint8),
             face, edge, float(lw), dashes,
-            gc.get_joinstyle(), gc.get_capstyle(),
+            js.name if hasattr(js, 'name') else js,
+            cs.name if hasattr(cs, 'name') else cs,
             hatch if hatch else None,
-            gc.get_hatch_color() if hatch else None,
+            _gv(gc, '_hatch_color', 'get_hatch_color') if hatch else None,
             clip, ring)
 
     def draw_image(self, gc, x, y, im, transform=None):
@@ -31825,7 +31886,7 @@ class RendererVolcano(RendererBase):
         else:
             dst = (int(round(x)), int(round(self.height - y - h)), w, h)
             interp = 1
-        clip, _ = _clip(gc, self.height)
+        clip, _ = _clip(gc, self.height, self._clip_memo)
         self._cv.image(im.tobytes(), w, h, dst, interp, clip)
 
     def draw_text(self, gc, x, y, s, prop, angle, ismath=False,
@@ -31844,7 +31905,7 @@ class RendererVolcano(RendererBase):
         family = _family_of(prop)
         style = str(prop.get_style())
         weight = str(prop.get_weight())
-        clip, _ = _clip(gc, self.height)
+        clip, _ = _clip(gc, self.height, self._clip_memo)
         self._flush_pending()
         # mpl Text.draw applies `y = canvash - y` when renderer.flipy()
         # is True, so `y` arrives already in top-origin (Y-down) pixels
@@ -31863,7 +31924,7 @@ class RendererVolcano(RendererBase):
         self._flush_pending()
         pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
         cols = np.asarray(colors, dtype=np.float64).reshape(-1, 4)
-        clip, _ = _clip(gc, self.height)
+        clip, _ = _clip(gc, self.height, self._clip_memo)
         # Regular structured grid -> a bilinear image reproduces gouraud
         # interpolation to sub-pixel accuracy (node colours become
         # texels), replacing millions of sub-pixel triangles by one
@@ -31972,7 +32033,7 @@ class RendererVolcano(RendererBase):
         # at every path vertex via the GPU instancer. Falls back to the
         # generic path-per-marker implementation for polygon clip paths
         # or hatches, which instancing cannot express.
-        if _has_clip_path(gc) or gc.get_hatch() is not None:
+        if _has_clip_path(gc) or _gv(gc, '_hatch', 'get_hatch') is not None:
             self._flush_pending()
             return super().draw_markers(gc, marker_path, marker_trans,
                                         path, trans, rgbFace)
@@ -32004,8 +32065,9 @@ class RendererVolcano(RendererBase):
         inst_xy = inst_xy[finite]
         if len(inst_xy) == 0:
             return
-        clip, _ = _clip(gc, self.height)
-        lw = self.points_to_pixels(gc.get_linewidth())
+        clip, _ = _clip(gc, self.height, self._clip_memo)
+        lw = self.points_to_pixels(
+            _gv(gc, '_linewidth', 'get_linewidth'))
         # Marker paths are authored Y-up; mirror the template so it
         # appears upright in our Y-down canvas (as Agg does).
         tpl = marker_path.transformed(
@@ -32082,7 +32144,7 @@ class RendererVolcano(RendererBase):
             n_lw = 1
         dashed = any(ls is not None and ls[1] is not None and len(ls[1])
                      for ls in linestyles)
-        if (gc.get_hatch() is not None
+        if (_gv(gc, '_hatch', 'get_hatch') is not None
                 or _has_clip_path(gc) or dashed or n_lw > 1
                 or (len(facecolors) == 0 and len(edgecolors) == 0)):
             return super().draw_path_collection(
@@ -32094,14 +32156,17 @@ class RendererVolcano(RendererBase):
             toffs = ((offset_trans + self._flip).transform(offsets)
                      if Noffsets else np.zeros((1, 2)))
             flipv = Affine2D().scale(1.0, -1.0)
-            alpha = gc.get_alpha()
-            clip, _ = _clip(gc, self.height)
+            alpha = _gv(gc, '_alpha', 'get_alpha')
+            clip, _ = _clip(gc, self.height, self._clip_memo)
             lw = (self.points_to_pixels(float(linewidths[0]))
                   if len(linewidths)
-                  else self.points_to_pixels(gc.get_linewidth()))
+                  else self.points_to_pixels(
+                      _gv(gc, '_linewidth', 'get_linewidth')))
             lw = float(lw)
-            join = gc.get_joinstyle()
-            cap = gc.get_capstyle()
+            join = _gv(gc, '_joinstyle', 'get_joinstyle')
+            join = join.name if hasattr(join, 'name') else join
+            cap = _gv(gc, '_capstyle', 'get_capstyle')
+            cap = cap.name if hasattr(cap, 'name') else cap
 
             def sel_colors(arr, idx):
                 if not len(arr):
@@ -32393,7 +32458,7 @@ class RendererVolcano(RendererBase):
                     img = np.ascontiguousarray(img[:, ::-1])
                 if ys[-1] < ys[0]:
                     img = np.ascontiguousarray(img[::-1])
-                clip, _ = _clip(gc, self.height)
+                clip, _ = _clip(gc, self.height, self._clip_memo)
                 x0 = min(xs[0], xs[-1]) + offs[0, 0, 0]
                 y0 = min(ys[0], ys[-1]) + offs[0, 0, 1]
                 x1 = max(xs[0], xs[-1]) + offs[0, 0, 0]
@@ -32413,7 +32478,7 @@ class RendererVolcano(RendererBase):
         quads = np.stack([a, b, c, a, c, d], axis=2).reshape(-1, 6, 2)
         ok = np.isfinite(quads).all(axis=(1, 2))
         cols = np.repeat(fc, 6, axis=0).reshape(-1, 6, 4)
-        clip, _ = _clip(gc, self.height)
+        clip, _ = _clip(gc, self.height, self._clip_memo)
         self._flush_pending()
         self._cv.tris(quads[ok].reshape(-1, 2),
                       cols[ok].reshape(-1, 4), clip)

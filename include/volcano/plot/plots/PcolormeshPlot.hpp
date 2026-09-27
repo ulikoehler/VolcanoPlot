@@ -6,6 +6,7 @@
 #include "volcano/plot/Colormap.hpp"
 #include "volcano/plot/Normalize.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
+#include "volcano/render/primitives/HeatmapRenderer.hpp"
 #include <memory>
 #include <vector>
 #include <string>
@@ -123,12 +124,23 @@ private:
     std::vector<Color> fillColors_;
     bool prepared_ = false;
 
+    /// Uniform-grid flat shading draws as a single textured quad via
+    /// HeatmapRenderer (O(texture) instead of O(6 verts/cell)).
+    render::primitives::HeatmapRenderer texRenderer_;
+    bool texInit_ = false;
+    bool useTex_ = false;
+
     void computeValueRange();
     void buildGeometry();
     /// Compute-shader tessellation into VertexStorage buffers adopted by
     /// fillRenderer_. Returns false when the GPU path can't be used
     /// (caller falls back to buildGeometry()).
     bool buildGeometryGpu(render::Renderer& r);
+    /// True when flat shading + uniform edges + no cell borders and the
+    /// colormap needs no under/over/opaque-bad handling.
+    [[nodiscard]] bool eligibleForTexture() const;
+    /// Build the Grid2D (norm-applied values) and upload it as a texture.
+    void uploadTexture(render::Renderer& r);
 };
 
 } // namespace volcano::plot

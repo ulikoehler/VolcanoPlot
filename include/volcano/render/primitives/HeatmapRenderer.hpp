@@ -16,7 +16,8 @@ public:
               core::DescriptorPool& descPool);
     void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                 VmaAllocator allocator, const plot::Grid2D& grid,
-                const plot::Colormap& cmap);
+                const plot::Colormap& cmap,
+                bool nanTransparent = false);
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Transform2D& transform) const;
 private:
     vk::Device device_;
@@ -41,6 +42,9 @@ private:
     /// RGB(A) imshow: the grid texture holds RGBA8 texels and is
     /// sampled directly (no colormap LUT).
     bool rgbaMode_ = false;
+    /// pcolormesh-style NaN cells: sample as transparent instead of
+    /// clamping to a LUT edge color.
+    bool nanTransparent_ = false;
     bool inited_ = false;
 };
 } // namespace volcano::render::primitives

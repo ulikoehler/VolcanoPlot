@@ -78,6 +78,7 @@ layout(push_constant) uniform PC {
     vec2 u_valueRange;
     float u_interp;  // 0 = nearest, 1 = bilinear, 2 = bicubic
     float u_rgba;    // 1 = grid texture is RGBA8 (sampled directly)
+    float u_nanSkip; // 1 = NaN grid values render transparent
 } pc;
 
 // Catmull-Rom bicubic weights for fractional offset f (taps at -1..2).
@@ -163,6 +164,10 @@ void main() {
     // bicubic fetches texels explicitly.
     float v = pc.u_interp > 1.5 ? bicubicSample(uv)
                                 : texture(u_grid, uv).r;
+    if (pc.u_nanSkip > 0.5 && isnan(v)) {
+        outColor = vec4(0.0);
+        return;
+    }
     float t = (v - pc.u_valueRange.x) / max(pc.u_valueRange.y - pc.u_valueRange.x, 1e-30);
     t = clamp(t, 0.0, 1.0);
     outColor = texture(u_cmap, vec2(t, 0.5));
@@ -282,7 +287,9 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
 
 void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                              VmaAllocator allocator, const plot::Grid2D& grid,
-                             const plot::Colormap& cmap) {
+                             const plot::Colormap& cmap,
+                             bool nanTransparent) {
+    nanTransparent_ = nanTransparent;
     rgbaMode_ = !grid.rgba.empty();
     const vk::Format gridFmt = rgbaMode_ ? vk::Format::eR8G8B8A8Unorm
                                          : vk::Format::eR32Sfloat;
@@ -487,7 +494,8 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.valueMax = valueMax_;
     pc.interp = static_cast<float>(interpMode_);
     pc.rgba = rgbaMode_ ? 1.0f : 0.0f;
-    pc.pad0 = pc.pad1 = 0.0f;
+    pc.pad0 = nanTransparent_ ? 1.0f : 0.0f;
+    pc.pad1 = 0.0f;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout_.get(), 0, descSet_, {});

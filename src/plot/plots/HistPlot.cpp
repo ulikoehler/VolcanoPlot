@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <thread>
 
 namespace volcano::plot {
 
@@ -134,19 +135,52 @@ void HistPlot::computeBins() {
     const float invW = uniform ? float(nBins) / (e1 - e0) : 0.0f;
     heights_.assign(datasets_.size(), std::vector<float>(nBins, 0.0f));
     for (size_t d = 0; d < datasets_.size(); ++d) {
-        for (float s : datasets_[d]) {
-            if (s < e0 || s > e1) continue;
-            size_t idx;
-            if (uniform) {
-                idx = static_cast<size_t>((s - e0) * invW);
-                if (idx >= nBins) idx = nBins - 1;  // right edge
-            } else {
-                auto it = std::upper_bound(binEdges_.begin(),
-                                           binEdges_.end(), s);
-                idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
-                if (idx >= nBins) idx = nBins - 1;
+        const auto& data = datasets_[d];
+        // Uniform bins + huge sample count: count in parallel — each
+        // worker accumulates a private bin vector, merged afterwards.
+        // Float partials are exact: increments of 1 stay integral well
+        // past any realistic chunk size.
+        constexpr size_t kPar = 1'000'000;
+        unsigned nt = std::min<unsigned>(std::thread::hardware_concurrency(),
+                                         8u);
+        if (uniform && data.size() >= kPar && nt > 1) {
+            std::vector<std::vector<float>> parts(
+                nt, std::vector<float>(nBins, 0.0f));
+            std::vector<std::thread> workers;
+            workers.reserve(nt);
+            for (unsigned t = 0; t < nt; ++t) {
+                size_t lo = data.size() * t / nt;
+                size_t hi = data.size() * (t + 1) / nt;
+                workers.emplace_back([&, lo, hi, t] {
+                    auto& hp = parts[t];
+                    for (size_t i = lo; i < hi; ++i) {
+                        float s = data[i];
+                        if (s < e0 || s > e1) continue;
+                        size_t idx = static_cast<size_t>((s - e0) * invW);
+                        if (idx >= nBins) idx = nBins - 1;
+                        hp[idx] += 1.0f;
+                    }
+                });
             }
-            heights_[d][idx] += 1.0f;
+            for (auto& w : workers) w.join();
+            for (auto& p : parts)
+                for (size_t i = 0; i < nBins; ++i)
+                    heights_[d][i] += p[i];
+        } else {
+            for (float s : data) {
+                if (s < e0 || s > e1) continue;
+                size_t idx;
+                if (uniform) {
+                    idx = static_cast<size_t>((s - e0) * invW);
+                    if (idx >= nBins) idx = nBins - 1;  // right edge
+                } else {
+                    auto it = std::upper_bound(binEdges_.begin(),
+                                               binEdges_.end(), s);
+                    idx = static_cast<size_t>(it - binEdges_.begin()) - 1;
+                    if (idx >= nBins) idx = nBins - 1;
+                }
+                heights_[d][idx] += 1.0f;
+            }
         }
 
         // Apply normalization (per dataset, like matplotlib).

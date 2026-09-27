@@ -398,9 +398,70 @@ bool PcolormeshPlot::buildGeometryGpu(render::Renderer& r) {
     return true;
 }
 
+bool PcolormeshPlot::eligibleForTexture() const {
+    if (config_.shading != PcmShading::Flat) return false;
+    if (config_.edgeColor.a > 0.0f) return false;
+    if (nCols_ == 0 || nRows_ == 0) return false;
+    // Custom under/over or an opaque bad color need the LUT path.
+    const Colormap& cmap = config_.cmap ? *config_.cmap : defaultColormap();
+    if (cmap.under || cmap.over) return false;
+    if (cmap.bad && cmap.bad->a > 0.0f) return false;
+    // Only regular rectangular grids map to a texture quad.
+    auto uniform = [](const std::vector<float>& e) {
+        float d0 = e[1] - e[0];
+        float tol = std::max(std::abs(e.back() - e.front()), 1.0f) * 1e-5f;
+        for (size_t i = 1; i + 1 < e.size(); ++i)
+            if (std::abs(e[i + 1] - e[i] - d0) > tol) return false;
+        return true;
+    };
+    return uniform(x_) && uniform(y_);
+}
+
+void PcolormeshPlot::uploadTexture(render::Renderer& r) {
+    auto& ctx = r.backend().context();
+    Grid2D g;
+    g.width = nCols_;
+    g.height = nRows_;
+    // Edges verbatim — reversed ranges are handled by the span sign.
+    g.xRange = {x_.front(), x_.back()};
+    g.yRange = {y_.front(), y_.back()};
+    // Row 0 sits at y_[0] (the grid-range origin side).
+    g.origin = "lower";
+    g.interpolation = "nearest";
+    g.values = C_;
+    bool hasNaN = false;
+    if (config_.norm) {
+        config_.norm->autoscale(C_);
+        for (auto& v : g.values) {
+            if (std::isnan(v)) { hasNaN = true; continue; }
+            v = (*config_.norm)(v);
+        }
+        g.valueRange = {0.0f, 1.0f};
+    } else {
+        for (float v : g.values) hasNaN |= std::isnan(v);
+        g.valueRange = valueRange_;
+    }
+    const Colormap& cmap = config_.cmap ? *config_.cmap : defaultColormap();
+    texRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                        ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                        g, cmap, config_.skipNaN && hasNaN);
+}
+
 void PcolormeshPlot::prepare(render::Renderer& r) {
     computeValueRange();
     auto& ctx = r.backend().context();
+    useTex_ = eligibleForTexture();
+    if (useTex_) {
+        if (!texInit_) {
+            texRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
+                              r.backend().sampleCount(), r.pipelineCache(),
+                              r.descriptorPool());
+            texInit_ = true;
+        }
+        uploadTexture(r);
+        prepared_ = true;
+        return;
+    }
     fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
                        r.backend().sampleCount(), r.pipelineCache());
     const bool gouraud = config_.shading == PcmShading::Gouraud;
@@ -423,9 +484,14 @@ void PcolormeshPlot::prepare(render::Renderer& r) {
 
 void PcolormeshPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
-    if (!prepared_ || fillRenderer_.pointCount() == 0) return;
+    if (!prepared_) return;
     Transform2D t = axes.transform();
     vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    if (useTex_) {
+        texRenderer_.draw(cmd, vrect, t);
+        return;
+    }
+    if (fillRenderer_.pointCount() == 0) return;
     fillRenderer_.draw(cmd, vrect, t);
 }
 
