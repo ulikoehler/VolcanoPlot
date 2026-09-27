@@ -31368,9 +31368,11 @@ def _clip(gc, height):
     clip = None
     rect = gc.get_clip_rectangle()
     if rect is not None:
-        clip = (max(0, int(rect.x0)), max(0, int(height - rect.y1)),
-                max(1, int(rect.x1 - rect.x0)),
-                max(1, int(rect.y1 - rect.y0)))
+        # One get_points() beats four property accesses — each of
+        # x0/y0/x1/y1 re-runs transform_affine internally.
+        (x0, y0), (x1, y1) = rect.get_points()
+        clip = (max(0, int(x0)), max(0, int(height - y1)),
+                max(1, int(x1 - x0)), max(1, int(y1 - y0)))
     ring = None
     tp = gc.get_clip_path()
     if tp is not None:
@@ -31419,6 +31421,46 @@ def _has_clip_path(gc):
     if isinstance(cp, tuple):
         return cp[0] is not None
     return True
+
+
+def _convex_tris(v, codes):
+    """Closed convex LINETO polygon → fan-triangulated (3k,2) verts for
+    the tris batch, else None. Accepts the CLOSEPOLY form (n+1 verts,
+    last code CLOSEPOLY) or the coincident-vertex form (v[-1]==v[0]).
+    Scalar cross products on the small vertex list beat np.roll/np.any
+    machinery at these sizes."""
+    n = len(v)
+    if n < 4 or n > 257:
+        return None
+    if codes is not None:
+        if (len(codes) != n or codes[0] != Path.MOVETO or
+                codes[-1] != Path.CLOSEPOLY or
+                np.any(codes[1:-1] != Path.LINETO)):
+            return None
+        pts = v[:-1].tolist()
+    else:
+        if not (v[0] == v[-1]).all():
+            return None
+        pts = v[:-1].tolist()
+    m = len(pts)
+    if m < 3:
+        return None
+    sign = 0
+    for i in range(m):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % m]
+        x2, y2 = pts[(i + 2) % m]
+        z = (x1 - x0) * (y2 - y1) - (y1 - y0) * (x2 - x1)
+        if z != 0:
+            s = 1 if z > 0 else -1
+            if sign == 0:
+                sign = s
+            elif s != sign:
+                return None
+    out = np.empty((3 * (m - 2), 2))
+    for i in range(1, m - 1):
+        out[3 * i - 3:3 * i] = (pts[0], pts[i], pts[i + 1])
+    return out
 
 
 # ── marker sprite classification ──────────────────────────────────
@@ -31504,6 +31546,68 @@ class RendererVolcano(RendererBase):
         self.width = float(width)
         self.height = float(height)
         self._flip = _flip_transform(height)
+        # Deferred small-op batching: mpl issues thousands of individual
+        # draw_path/draw_path_collection calls for bar()/eventplot().
+        # Pending segments are kept in ARRIVAL ORDER — only consecutive
+        # same-kind, same-style ops merge — so the emitted op sequence
+        # preserves mpl's strict per-patch draw order exactly.
+        self._pendSegs = []   # [kind, key, [verts...], [aux...]]
+        self._pendN = 0
+
+    def _defer(self, kind, key, verts, aux):
+        """Accumulate a pure-fill ('t': verts=tris, aux=rgba4) or
+        pure-stroke ('s': verts=verts, aux=codes) op. Consecutive
+        compatible ops merge into the tail segment; anything else
+        opens a new segment so draw order is never reordered."""
+        segs = self._pendSegs
+        if segs and segs[-1][0] is kind and segs[-1][1] == key:
+            segs[-1][2].append(verts)
+            segs[-1][3].append(aux)
+        else:
+            segs.append([kind, key, [verts], [aux]])
+        self._pendN += len(verts)
+        if self._pendN >= 262144:
+            self._flush_pending()
+
+    def _flush_pending(self):
+        """Emit pending segments in order: 't' → one tris op per
+        segment, 's' → one stroke path op per segment."""
+        segs = self._pendSegs
+        self._pendSegs = []
+        self._pendN = 0
+        for kind, key, vl, al in segs:
+            verts = np.concatenate(vl)
+            if kind == 't':
+                self._cv.tris(
+                    np.ascontiguousarray(verts, np.float64).ravel(),
+                    np.ascontiguousarray(np.concatenate(al),
+                                         np.float32), key)
+            else:
+                edge, lw, join, cap, clip = key
+                self._cv.path(
+                    np.ascontiguousarray(verts, np.float64).ravel(),
+                    np.ascontiguousarray(np.concatenate(al), np.uint8),
+                    None, edge, float(lw), None, join, cap, None,
+                    None, clip, None)
+
+    def _emit_path_op(self, verts, codes, face, edge, lw, join, cap,
+                      clip):
+        """Emit a no-dash/no-hatch path op; small stroke-only paths
+        defer into the pending batch instead (identical rendering —
+        strokes of concatenated subpaths are order-independent)."""
+        if face is None or face[3] <= 0:
+            v = np.asarray(verts)
+            if v.ndim == 1:
+                v = v.reshape(-1, 2)
+            if len(v) <= 65536:
+                self._defer('s', (edge, lw, join, cap, clip), v,
+                            np.asarray(codes, np.uint8))
+                return
+        self._flush_pending()
+        self._cv.path(np.asarray(verts, np.float64).ravel(),
+                      np.asarray(codes, np.uint8), face, edge,
+                      float(lw), None, join, cap, None, None,
+                      clip, None)
 
     # ── abstract surface ──
     def _decimate_polyline(self, path, transform):
@@ -31601,11 +31705,60 @@ class RendererVolcano(RendererBase):
             if dec is not None:
                 verts, codes = dec
                 clip, ring = _clip(gc, self.height)
+                self._flush_pending()
                 self._cv.path(
                     verts.ravel(), codes, face, edge, float(lw), None,
                     gc.get_joinstyle(), gc.get_capstyle(), None, None,
                     clip, ring)
                 return
+        # Small paths (bar/hist rectangles are emitted one draw_path
+        # call per patch): defer same-style strokes and filled convex
+        # quads into merged batches.
+        nverts = len(path.vertices)
+        if nverts <= 64 and gc.get_hatch() is None:
+            ds = dashes[1] if dashes else None
+            if ds is None or len(ds) == 0:
+                clip, ring = _clip(gc, self.height)
+                if ring is None:
+                    hasF = face is not None and face[3] > 0
+                    hasS = edge is not None and edge[3] > 0
+                    # Only PURE fills and PURE strokes may batch — a
+                    # fill+stroke patch must emit fill and edge together
+                    # or a later patch's fill could wrongly cover this
+                    # patch's edge (draw-order reordering).
+                    if hasF != hasS:
+                        try:
+                            # transform + in-place y-flip: avoids
+                            # building a composite Transform per patch.
+                            tv = transform.transform(path.vertices)
+                            tv[:, 1] = self.height - tv[:, 1]
+                        except Exception:
+                            return
+                        codes = path.codes
+                        if hasF:
+                            tris = _convex_tris(tv, codes)
+                            if tris is not None:
+                                self._defer(
+                                    't', clip, tris,
+                                    np.broadcast_to(
+                                        np.asarray(face, np.float32),
+                                        (len(tris), 4)))
+                                return
+                        else:
+                            if codes is None:
+                                codes = np.concatenate(
+                                    [np.array([Path.MOVETO],
+                                              dtype=np.uint8),
+                                     np.full(max(0, nverts - 1),
+                                             Path.LINETO,
+                                             dtype=np.uint8)])
+                            self._defer(
+                                's', (edge, lw, gc.get_joinstyle(),
+                                      gc.get_capstyle(), clip),
+                                np.asarray(tv, np.float64),
+                                np.asarray(codes, np.uint8))
+                            return
+        self._flush_pending()
         try:
             tpath = path.transformed(transform + self._flip)
         except Exception:
@@ -31656,6 +31809,7 @@ class RendererVolcano(RendererBase):
             im = im.copy()
             im[..., 3] = np.clip(im[..., 3] * alpha + 0.5,
                                  0, 255).astype(np.uint8)
+        self._flush_pending()
         h, w = im.shape[0], im.shape[1]
         if transform is not None:
             # Unsampled path (interpolation='none'): transform maps the
@@ -31691,6 +31845,7 @@ class RendererVolcano(RendererBase):
         style = str(prop.get_style())
         weight = str(prop.get_weight())
         clip, _ = _clip(gc, self.height)
+        self._flush_pending()
         # mpl Text.draw applies `y = canvash - y` when renderer.flipy()
         # is True, so `y` arrives already in top-origin (Y-down) pixels
         # — use it verbatim. mpl angle is CCW in Y-up; the canvas rotates
@@ -31705,6 +31860,7 @@ class RendererVolcano(RendererBase):
                           family, style, weight, clip)
 
     def draw_gouraud_triangles(self, gc, points, colors, transform):
+        self._flush_pending()
         pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
         cols = np.asarray(colors, dtype=np.float64).reshape(-1, 4)
         clip, _ = _clip(gc, self.height)
@@ -31817,6 +31973,7 @@ class RendererVolcano(RendererBase):
         # generic path-per-marker implementation for polygon clip paths
         # or hatches, which instancing cannot express.
         if _has_clip_path(gc) or gc.get_hatch() is not None:
+            self._flush_pending()
             return super().draw_markers(gc, marker_path, marker_trans,
                                         path, trans, rgbFace)
         face, edge = _gc_colors(gc, rgbFace)
@@ -31882,6 +32039,7 @@ class RendererVolcano(RendererBase):
                 fillmode = 0.0 if (face is not None
                                    and face[3] > 0) else 5.0
                 ucol = face if fillmode == 0.0 else edge
+                self._flush_pending()
                 self._cv.points(
                     np.ascontiguousarray(inst_xy).ravel(),
                     None, np.array([diam]), ucol,
@@ -31893,6 +32051,7 @@ class RendererVolcano(RendererBase):
                 [np.array([Path.MOVETO], dtype=np.uint8),
                  np.full(len(tpl.vertices) - 1, Path.LINETO,
                          dtype=np.uint8)])
+        self._flush_pending()
         self._cv.instances(
             np.asarray(tpl.vertices, dtype=np.float64).ravel(),
             np.asarray(tc, dtype=np.uint8),
@@ -32006,10 +32165,10 @@ class RendererVolcano(RendererBase):
                     m = np.array([1, 1, 1, alpha])
                     fc = None if fc is None else tuple(np.asarray(fc) * m)
                     ec = None if ec is None else tuple(np.asarray(ec) * m)
-                self._cv.path(
-                    np.asarray(tv, np.float64).ravel(),
+                self._emit_path_op(
+                    np.asarray(tv, np.float64),
                     np.concatenate([pc[j] for j in order]),
-                    fc, ec, lw, None, join, cap, None, None, clip, None)
+                    fc, ec, lw, join, cap, clip)
                 return
             # Many DISTINCT small paths (eventplot, bar/hist rects,
             # LineCollections): concatenating per (face, edge) colour
@@ -32073,13 +32232,12 @@ class RendererVolcano(RendererBase):
                         if alpha is not None:
                             fc = fc * np.array([1, 1, 1, alpha])
                             ec = ec * np.array([1, 1, 1, alpha])
-                        self._cv.path(
-                            np.asarray(tv, np.float64).ravel(),
+                        self._emit_path_op(
+                            np.asarray(tv, np.float64),
                             np.concatenate(cparts),
                             tuple(fc) if len(facecolors) else None,
                             tuple(ec) if len(edgecolors) else None,
-                            lw, None, join, cap, None, None, clip,
-                            None)
+                            lw, join, cap, clip)
                     return
             if N < 32:
                 return super().draw_path_collection(
@@ -32143,11 +32301,13 @@ class RendererVolcano(RendererBase):
                                 sizes.max() <= self._cv.max_point_size:
                             fill = 0.0 if not fc_dead else 5.0
                             cols = (fc if not fc_dead else ec).ravel()
+                            self._flush_pending()
                             self._cv.points(
                                 np.ascontiguousarray(toff).ravel(),
                                 cols, sizes, (0, 0, 0, 0),
                                 float(mcode), fill, 5.0, 0.0, clip)
                             continue
+                self._flush_pending()
                 self._cv.instances(
                     np.asarray(tpl.vertices, dtype=np.float64).ravel(),
                     np.asarray(tc, dtype=np.uint8),
@@ -32241,6 +32401,7 @@ class RendererVolcano(RendererBase):
                 dst = (int(round(x0)), int(round(y0)),
                        max(1, int(round(x1 - x0))),
                        max(1, int(round(y1 - y0))))
+                self._flush_pending()
                 self._cv.image(img.tobytes(), img.shape[1],
                                img.shape[0], dst, 0, clip)
                 return
@@ -32253,6 +32414,7 @@ class RendererVolcano(RendererBase):
         ok = np.isfinite(quads).all(axis=(1, 2))
         cols = np.repeat(fc, 6, axis=0).reshape(-1, 6, 4)
         clip, _ = _clip(gc, self.height)
+        self._flush_pending()
         self._cv.tris(quads[ok].reshape(-1, 2),
                       cols[ok].reshape(-1, 4), clip)
 
@@ -32373,6 +32535,7 @@ class FigureCanvasVolcano(FigureCanvasBase):
         cv.begin_frame()
         cv.clear(face if face[3] > 0 else (1, 1, 1, 1))
         self.figure.draw(renderer)
+        renderer._flush_pending()
         cv.end_frame()
         rb = cv.readback()
         self._rgba = rb if rb else None
