@@ -94,8 +94,9 @@ Instance::Instance(const InstanceDesc& desc) {
         ci.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
     }
 
-    instance_ = vk::createInstanceUnique(ci);
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(instance_.get());
+    impl_ = std::make_shared<Impl>();
+    impl_->instance = vk::createInstanceUnique(ci);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(impl_->instance.get());
 
     if (validation_) {
         using Sev = vk::DebugUtilsMessageSeverityFlagBitsEXT;
@@ -104,13 +105,8 @@ Instance::Instance(const InstanceDesc& desc) {
         mci.setMessageSeverity(Sev::eError | Sev::eWarning | Sev::eInfo)
            .setMessageType(Type::eGeneral | Type::eValidation | Type::ePerformance)
            .setPfnUserCallback(debugCallback);
-        messenger_ = instance_.get().createDebugUtilsMessengerEXT(mci);
-    }
-}
-
-Instance::~Instance() {
-    if (messenger_ && instance_) {
-        instance_.get().destroyDebugUtilsMessengerEXT(messenger_);
+        impl_->messenger =
+            impl_->instance.get().createDebugUtilsMessengerEXT(mci);
     }
 }
 

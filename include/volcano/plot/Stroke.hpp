@@ -38,6 +38,16 @@ struct TriMesh {
 dashSplit(std::span<const Point2D> points, std::span<const float> dashes,
           float dashOffset);
 
+/// Per-pixel-column min/max envelope of a polyline: for every covered
+/// x-column records the lowest/highest y the line reaches, then emits
+/// an alternating (min,max)/(max,min) zigzag so adjacent columns link
+/// edge-to-edge. Raster-equivalent to stroking all original segments
+/// for massively oversampled data, at ~2 vertices per column.
+/// Returns one polyline per contiguous run of covered columns.
+/// Callers should only use this for x-monotonic data.
+[[nodiscard]] std::vector<std::vector<Point2D>>
+columnDecimate(std::span<const Point2D> pts, int cx0, int cx1);
+
 /// xkcd-style sketch wobble (mpl `Path.sketch`): resample the polyline and
 /// perturb it with smooth correlated perpendicular noise.
 /// `scale` = amplitude in px, `length` = wobble wavelength in px.

@@ -22,10 +22,11 @@ std::vector<const char*> filterExtensions(const std::vector<std::string>& wanted
 
 } // namespace
 
-Device::Device(PhysicalDevice physical, const DeviceDesc& desc)
-    : physical_(std::move(physical)) {
+Device::Device(PhysicalDevice physical, const DeviceDesc& desc) {
+    impl_ = std::make_shared<Impl>();
+    impl_->physical = std::move(physical);
 
-    auto availExts = physical_.supportedExtensions();
+    auto availExts = impl_->physical.supportedExtensions();
 
     // Always request swapchain if surface present.
     std::vector<std::string> wanted = desc.extensions;
@@ -37,7 +38,7 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc)
 
     // Unique queue families
     std::set<uint32_t> families;
-    const auto& fam = physical_.queueFamilies();
+    const auto& fam = impl_->physical.queueFamilies();
     families.insert(fam.graphics.value_or(0));
     families.insert(fam.compute.value_or(0));
     families.insert(fam.transfer.value_or(0));
@@ -67,20 +68,16 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc)
         ci.pEnabledFeatures = &desc.features.features;
     }
 
-    device_ = physical_.handle().createDeviceUnique(ci);
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(device_.get());
+    impl_->device = impl_->physical.handle().createDeviceUnique(ci);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(impl_->device.get());
 
-    graphicsQueue_ = device_->getQueue(fam.graphics.value_or(0), 0);
-    computeQueue_  = device_->getQueue(fam.compute.value_or(0), 0);
-    transferQueue_ = device_->getQueue(fam.transfer.value_or(0), 0);
-}
-
-Device::~Device() {
-    if (device_) device_->waitIdle();
+    impl_->graphicsQueue = impl_->device->getQueue(fam.graphics.value_or(0), 0);
+    impl_->computeQueue  = impl_->device->getQueue(fam.compute.value_or(0), 0);
+    impl_->transferQueue = impl_->device->getQueue(fam.transfer.value_or(0), 0);
 }
 
 void Device::waitIdle() const {
-    device_->waitIdle();
+    if (impl_ && impl_->device) impl_->device->waitIdle();
 }
 
 } // namespace volcano::core

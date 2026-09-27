@@ -1,6 +1,8 @@
 // volcano/backend/Backend.cpp — factory
 #include "volcano/backend/Backend.hpp"
 
+#include <mutex>
+
 #ifdef VOLCANO_HAS_SCREEN_BACKEND
 #include "volcano/backend/ScreenBackend.hpp"
 #endif
@@ -24,6 +26,49 @@ std::unique_ptr<IBackend> createHeadlessBackend(const BackendDesc& desc) {
     return std::make_unique<HeadlessBackend>(desc);
 #else
     (void)desc;
+    return nullptr;
+#endif
+}
+
+std::unique_ptr<IBackend> createHeadlessBackend(
+    const BackendDesc& desc, std::shared_ptr<GpuContext> shared) {
+#ifdef VOLCANO_HAS_HEADLESS_BACKEND
+    if (!shared) return std::make_unique<HeadlessBackend>(desc);
+    return std::make_unique<HeadlessBackend>(desc, std::move(shared));
+#else
+    (void)desc; (void)shared;
+    return nullptr;
+#endif
+}
+
+std::shared_ptr<GpuContext> sharedGpuContext() {
+#ifdef VOLCANO_HAS_HEADLESS_BACKEND
+    static std::mutex mu;
+    static std::weak_ptr<GpuContext> weak;
+    std::lock_guard lk(mu);
+    if (auto s = weak.lock()) return s;
+    auto c = std::make_shared<GpuContext>();
+    core::InstanceDesc idesc{};
+    idesc.applicationName = "VolcanoPlot Headless";
+    c->instance = core::Instance(idesc);
+    c->physical =
+        core::PhysicalDevice(c->instance.handle(), nullptr);
+    core::DeviceDesc ddesc{};
+    ddesc.hasSurface = false;
+    ddesc.features.features.wideLines = VK_TRUE;
+    c->device = core::Device(c->physical, ddesc);
+    c->allocator = core::Allocator(c->instance.handle(),
+                                 c->physical.handle(),
+                                 c->device.handle());
+    c->graphicsPool = core::CommandPool(
+        c->device.handle(), c->device.graphicsFamily(),
+        vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
+    c->computePool = core::CommandPool(
+        c->device.handle(), c->device.computeFamily(),
+        vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
+    weak = c;
+    return c;
+#else
     return nullptr;
 #endif
 }

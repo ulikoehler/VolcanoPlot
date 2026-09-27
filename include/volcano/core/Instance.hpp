@@ -20,18 +20,32 @@ struct InstanceDesc {
 };
 
 /// Owns a vk::Instance and (optionally) a debug messenger.
+/// share() produces a handle whose underlying Vulkan objects are kept
+/// alive by shared ownership — the last Instance destroys them.
 class Instance {
 public:
     Instance() = default;
     explicit Instance(const InstanceDesc& desc);
-    ~Instance();
+    ~Instance() = default;
 
     Instance(Instance&&) noexcept = default;
     Instance& operator=(Instance&&) noexcept = default;
     Instance(const Instance&) = delete;
     Instance& operator=(const Instance&) = delete;
 
-    [[nodiscard]] vk::Instance handle() const noexcept { return instance_.get(); }
+    /// A second Instance sharing this one's Vulkan handles; the
+    /// underlying objects die with the last holder.
+    [[nodiscard]] Instance share() const {
+        Instance s;
+        s.impl_ = impl_;
+        s.validation_ = validation_;
+        s.enabledExtensions_ = enabledExtensions_;
+        return s;
+    }
+
+    [[nodiscard]] vk::Instance handle() const noexcept {
+        return impl_ ? impl_->instance.get() : vk::Instance{};
+    }
     [[nodiscard]] bool validationEnabled() const noexcept { return validation_; }
 
     /// Available instance extensions (queried at construction).
@@ -40,8 +54,15 @@ public:
     }
 
 private:
-    vk::UniqueInstance instance_;
-    vk::DebugUtilsMessengerEXT messenger_;  // raw handle, destroyed manually
+    struct Impl {
+        vk::UniqueInstance instance;
+        vk::DebugUtilsMessengerEXT messenger = nullptr;
+        ~Impl() {
+            if (messenger && instance)
+                instance.get().destroyDebugUtilsMessengerEXT(messenger);
+        }
+    };
+    std::shared_ptr<Impl> impl_;
     bool validation_ = false;
     std::vector<std::string> enabledExtensions_;
 };

@@ -10,11 +10,12 @@ Allocator::Allocator(vk::Instance instance, vk::PhysicalDevice physical, vk::Dev
     ci.physicalDevice = physical;
     ci.device = device;
     ci.vulkanApiVersion = VK_API_VERSION_1_3;
-    vmaCreateAllocator(&ci, &allocator_);
-}
-
-Allocator::~Allocator() {
-    if (allocator_) vmaDestroyAllocator(allocator_);
+    allocator_ = std::shared_ptr<VmaAllocator>(
+        new VmaAllocator(VK_NULL_HANDLE), [](VmaAllocator* a) {
+            if (*a) vmaDestroyAllocator(*a);
+            delete a;
+        });
+    vmaCreateAllocator(&ci, allocator_.get());
 }
 
 } // namespace volcano::core

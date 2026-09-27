@@ -18,6 +18,7 @@
 #include <volcano/render/primitives/GpuLineRenderer.hpp>
 #include <volcano/render/primitives/HeatmapRenderer.hpp>
 #include <volcano/render/primitives/InstancedPathRenderer.hpp>
+#include <volcano/render/primitives/PointRenderer.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
 #include <volcano/core/PipelineCache.hpp>
@@ -138,7 +139,28 @@ public:
                    float lwPx, plot::JoinStyle join, plot::CapStyle cap,
                    std::span<const float> edgeRGBA,
                    plot::Color uniformEdge,
+                   std::span<const float> instScale,
                    std::optional<plot::Rect2D> clip = {});
+
+    /// Point-sprite fast path for marker collections (scatter,
+    /// draw_markers): ONE vertex per marker, SDF-shaded in the fragment
+    /// shader — orders of magnitude cheaper than instanced polygon
+    /// templates for tiny markers at million-point scale.
+    ///   xy    : canvas px per marker (Y-down)
+    ///   rgba  : r,g,b,a per marker (empty → `uniform` for all)
+    ///   sizes : marker diameter px — n entries or a single value
+    ///   code/fill/sides/angle : plot::MarkerStyle / MarkerFill params
+    void points(std::span<const float> xy, std::span<const float> rgba,
+                std::span<const float> sizes, plot::Color uniform,
+                float markerCode, float markerFill, float markerSides,
+                float markerAngle,
+                std::optional<plot::Rect2D> clip = {});
+
+    /// Largest gl_PointSize the device supports — marker templates with
+    /// a bigger pixel extent must use instanced polygon rendering.
+    [[nodiscard]] float maxPointSize() const noexcept {
+        return maxPointSize_;
+    }
 
     // ── metrics (mpl get_text_width_height_descent / layout) ────────
     struct TextMetrics { float width, height, ascent; };
@@ -231,10 +253,19 @@ private:
         plot::CapStyle cap = plot::CapStyle::Butt;
         std::vector<float> edgeRGBA;   // per-instance edge or empty
         plot::Color uniformEdge{};
+        std::vector<float> instScale;  // sx,sy per instance or empty → 1,1
+        std::optional<plot::Rect2D> clip;
+    };
+    struct PointsOp {
+        std::vector<float> xy;
+        std::vector<float> rgba;       // per-marker or empty
+        std::vector<float> sizes;      // per-marker or single entry
+        plot::Color uniform{0, 0, 0, 1};
+        float code = 1.0f, fill = 0.0f, sides = 5.0f, angle = 0.0f;
         std::optional<plot::Rect2D> clip;
     };
     using Op = std::variant<PathOp, ImageOp, TextOp, GouraudOp,
-                            TrisOp, InstanceOp>;
+                            TrisOp, InstanceOp, PointsOp>;
 
     void initRenderers();
     void execute(vk::CommandBuffer cmd);
@@ -249,6 +280,7 @@ private:
     void execGouraud(vk::CommandBuffer cmd, const GouraudOp& op);
     void execTris(vk::CommandBuffer cmd, const TrisOp& op);
     void execInstances(vk::CommandBuffer cmd, const InstanceOp& op);
+    void execPoints(vk::CommandBuffer cmd, const PointsOp& op);
     /// Resolve family/style/weight → glyb face + faux-style flags.
     font_face* faceFor(const TextOp& op);
 
@@ -262,6 +294,9 @@ private:
     primitives::HeatmapRenderer heat_;
     primitives::InstancedPathRenderer instFill_, instEdge_;
     primitives::GpuLineRenderer gpuLine_;
+    primitives::PointRenderer pointR_;
+    bool pointInit_ = false;
+    float maxPointSize_ = 64.0f;
     std::optional<core::CommandBuffer> preCmd_;
     text::TextRenderer text_;
 

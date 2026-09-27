@@ -140,6 +140,69 @@ void strokeRun(TriMesh& m, std::span<const Point2D> pts,
 } // namespace
 
 std::vector<std::vector<Point2D>>
+columnDecimate(std::span<const Point2D> pts, int cx0, int cx1) {
+    int W = cx1 - cx0 + 1;
+    if (W <= 0 || pts.size() < 2) return {};
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> mn(W, inf), mx(W, -inf);
+    auto upd = [&](int c, float lo, float hi) {
+        int i = c - cx0;
+        if (i < 0 || i >= W) return;
+        mn[i] = std::min(mn[i], lo);
+        mx[i] = std::max(mx[i], hi);
+    };
+    for (size_t i = 1; i < pts.size(); ++i) {
+        auto a = pts[i - 1], b = pts[i];
+        if (!std::isfinite(a.x) || !std::isfinite(a.y) ||
+            !std::isfinite(b.x) || !std::isfinite(b.y))
+            continue;
+        float xlo = std::min(a.x, b.x), xhi = std::max(a.x, b.x);
+        int s = std::max(cx0, (int)std::floor(xlo));
+        int e = std::min(cx1, (int)std::floor(xhi));
+        for (int c = s; c <= e; ++c) {
+            float lo, hi;
+            if (xhi - xlo < 1e-6f) {
+                lo = std::min(a.y, b.y);
+                hi = std::max(a.y, b.y);
+            } else {
+                float xl = std::max(xlo, float(c));
+                float xr = std::min(xhi, float(c + 1));
+                float yl = a.y + (b.y - a.y) * (xl - a.x) / (b.x - a.x);
+                float yr = a.y + (b.y - a.y) * (xr - a.x) / (b.x - a.x);
+                lo = std::min(yl, yr);
+                hi = std::max(yl, yr);
+            }
+            upd(c, lo, hi);
+        }
+    }
+    std::vector<std::vector<Point2D>> runs;
+    std::vector<Point2D>* cur = nullptr;
+    bool high = false;
+    for (int i = 0; i < W; ++i) {
+        if (!std::isfinite(mn[i])) {
+            cur = nullptr;
+            high = false;
+            continue;
+        }
+        if (!cur) {
+            runs.emplace_back();
+            cur = &runs.back();
+            high = false;
+        }
+        float x = float(cx0 + i) + 0.5f;
+        if (!high) {
+            cur->push_back({x, mn[i]});
+            cur->push_back({x, mx[i]});
+        } else {
+            cur->push_back({x, mx[i]});
+            cur->push_back({x, mn[i]});
+        }
+        high = !high;
+    }
+    return runs;
+}
+
+std::vector<std::vector<Point2D>>
 dashSplit(std::span<const Point2D> points, std::span<const float> dashes,
           float dashOffset) {
     std::vector<std::vector<Point2D>> runs;

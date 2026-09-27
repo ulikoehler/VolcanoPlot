@@ -41,13 +41,16 @@ public:
         uint32_t vertexCount = 0;
     };
 
-    /// Record the tessellation dispatch on `cmd` (a pre-pass command
-    /// buffer recorded outside/before the render pass). Returns the
-    /// buffer+range to draw with SpineRenderer::drawTrianglesGpu.
-    Mesh tessellate(vk::CommandBuffer cmd,
-                    std::span<const plot::Point2D> px,
-                    const plot::StrokeParams& sp,
-                    plot::Color color);
+    /// Record the tessellation dispatch(es) on `cmd` (a pre-pass
+    /// command buffer recorded outside/before the render pass).
+    /// Returns the buffer+range spans to draw with
+    /// SpineRenderer::drawTrianglesGpu — usually one entry; huge inputs
+    /// are chunked so no single output buffer exceeds the device
+    /// allocation limit (seam points get caps instead of joins).
+    std::vector<Mesh> tessellate(vk::CommandBuffer cmd,
+                               std::span<const plot::Point2D> px,
+                               const plot::StrokeParams& sp,
+                               plot::Color color);
 
     [[nodiscard]] bool inited() const noexcept { return inited_; }
 
@@ -58,6 +61,19 @@ private:
     // verts per input point: (n-1) quads in region A + n join/cap slots
     // in region B → total = kSegVerts*(n-1) + kJoinVerts*n.
 
+    /// Upper bound for a single out/in buffer allocation — physical
+    /// devices cap vkAllocateMemory (often ~4 GB), and geometric growth
+    /// of the bump buffer would otherwise cross it.
+    static constexpr vk::DeviceSize kMaxBufferBytes =
+        vk::DeviceSize(3) << 30;
+    /// Max input points per tessellate chunk so the output stays
+    /// comfortably under kMaxBufferBytes (~720 MB per chunk).
+    static constexpr size_t kMaxChunkPoints = 1'000'000;
+
+    Mesh tessellateChunk(vk::CommandBuffer cmd,
+                         std::span<const plot::Point2D> px,
+                         const plot::StrokeParams& sp,
+                         plot::Color color);
     void ensureIn(size_t points);
     void ensureOut(size_t verts);
     void rebind();

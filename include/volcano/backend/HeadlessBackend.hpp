@@ -13,6 +13,10 @@ namespace volcano::backend {
 class HeadlessBackend : public IBackend {
 public:
     explicit HeadlessBackend(const BackendDesc& desc);
+    /// Backend on a shared GPU context: framebuffers/render passes are
+    /// private, instance/device/allocator are shared.
+    HeadlessBackend(const BackendDesc& desc,
+                    std::shared_ptr<GpuContext> shared);
     ~HeadlessBackend() override;
 
     bool pollEvents() override { return true; }
@@ -45,6 +49,12 @@ private:
     /// color attachment (clear for fresh frames, load for blit frames).
     vk::UniqueRenderPass makeRenderPass(vk::AttachmentLoadOp colorLoad,
                                         vk::ImageLayout colorInitial);
+
+    /// Instance/device/pool init when no shared context is given.
+    void createContext();
+    /// Render pass + framebuffer + command buffer on the (possibly
+    /// shared) context.
+    void createTargets();
 
     BackendDesc desc_;
     GpuContext ctx_;

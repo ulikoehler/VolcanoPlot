@@ -120,75 +120,6 @@ std::vector<plot::Point2D> bridgeHole(std::span<const plot::Point2D> outer,
     return out;
 }
 
-/// Per-pixel-column min/max envelope of a polyline: for every covered
-/// x-column records the lowest/highest y the line reaches, then emits
-/// an alternating (min,max)/(max,min) zigzag so adjacent columns link
-/// edge-to-edge. Raster-equivalent to drawing all original segments
-/// for massively oversampled data, at ~2 vertices per column.
-/// Returns one polyline per contiguous run of covered columns.
-std::vector<std::vector<plot::Point2D>>
-columnDecimate(std::span<const plot::Point2D> pts, int cx0, int cx1) {
-    int W = cx1 - cx0 + 1;
-    if (W <= 0 || pts.size() < 2) return {};
-    const float inf = std::numeric_limits<float>::infinity();
-    std::vector<float> mn(W, inf), mx(W, -inf);
-    auto upd = [&](int c, float lo, float hi) {
-        int i = c - cx0;
-        if (i < 0 || i >= W) return;
-        mn[i] = std::min(mn[i], lo);
-        mx[i] = std::max(mx[i], hi);
-    };
-    for (size_t i = 1; i < pts.size(); ++i) {
-        auto a = pts[i - 1], b = pts[i];
-        if (!std::isfinite(a.x) || !std::isfinite(a.y) ||
-            !std::isfinite(b.x) || !std::isfinite(b.y))
-            continue;
-        float xlo = std::min(a.x, b.x), xhi = std::max(a.x, b.x);
-        int s = std::max(cx0, (int)std::floor(xlo));
-        int e = std::min(cx1, (int)std::floor(xhi));
-        for (int c = s; c <= e; ++c) {
-            float lo, hi;
-            if (xhi - xlo < 1e-6f) {
-                lo = std::min(a.y, b.y);
-                hi = std::max(a.y, b.y);
-            } else {
-                float xl = std::max(xlo, float(c));
-                float xr = std::min(xhi, float(c + 1));
-                float yl = a.y + (b.y - a.y) * (xl - a.x) / (b.x - a.x);
-                float yr = a.y + (b.y - a.y) * (xr - a.x) / (b.x - a.x);
-                lo = std::min(yl, yr);
-                hi = std::max(yl, yr);
-            }
-            upd(c, lo, hi);
-        }
-    }
-    std::vector<std::vector<plot::Point2D>> runs;
-    std::vector<plot::Point2D>* cur = nullptr;
-    bool high = false;
-    for (int i = 0; i < W; ++i) {
-        if (!std::isfinite(mn[i])) {
-            cur = nullptr;
-            high = false;
-            continue;
-        }
-        if (!cur) {
-            runs.emplace_back();
-            cur = &runs.back();
-            high = false;
-        }
-        float x = float(cx0 + i) + 0.5f;
-        if (!high) {
-            cur->push_back({x, mn[i]});
-            cur->push_back({x, mx[i]});
-        } else {
-            cur->push_back({x, mx[i]});
-            cur->push_back({x, mn[i]});
-        }
-        high = !high;
-    }
-    return runs;
-}
-
 } // namespace
 
 // ═══ construction / teardown ═══════════════════════════════════════
@@ -203,7 +134,8 @@ MplCanvas::headless(uint32_t width, uint32_t height,
     backend::BackendDesc d{};
     d.width = width; d.height = height; d.samples = samples;
     d.windowTitle = "volcanoplot-mpl";
-    auto b = std::make_unique<backend::HeadlessBackend>(d);
+    auto b = std::make_unique<backend::HeadlessBackend>(
+        d, backend::sharedGpuContext());
     auto c = std::unique_ptr<MplCanvas>(new MplCanvas(std::move(b), false));
     c->initRenderers();
     return c;
@@ -254,6 +186,10 @@ void MplCanvas::initRenderers() {
                    *pipelineCache_, *descPool_);
     gpuLine_.init(ctx.device.handle(), ctx.allocator.handle(),
                   *descPool_, *pipelineCache_);
+    pointR_.init(ctx.device.handle(), backend_->renderPass(),
+                 backend_->sampleCount(), *descPool_, *pipelineCache_);
+    maxPointSize_ =
+        ctx.device.physical().getProperties().limits.pointSizeRange[1];
     heat_.init(ctx.device.handle(), backend_->renderPass(),
                backend_->sampleCount(), *pipelineCache_, *descPool_);
     text_.init(ctx.device.handle(), ctx.allocator.handle(),
@@ -295,6 +231,7 @@ void MplCanvas::endFrame() {
         spine_.resetScratch();
         instFill_.resetScratch();
         instEdge_.resetScratch();
+        pointR_.resetScratch();
         text_.resetScratch();
         execute(cmd);
         backend_->endFrame();
@@ -406,6 +343,7 @@ void MplCanvas::instances(std::span<const float> tplVerts,
                           plot::CapStyle cap,
                           std::span<const float> edgeRGBA,
                           plot::Color uniformEdge,
+                          std::span<const float> instScale,
                           std::optional<plot::Rect2D> clip) {
     InstanceOp op;
     op.tplVerts.assign(tplVerts.begin(), tplVerts.end());
@@ -416,6 +354,25 @@ void MplCanvas::instances(std::span<const float> tplVerts,
     op.lwPx = lwPx; op.join = join; op.cap = cap;
     op.edgeRGBA.assign(edgeRGBA.begin(), edgeRGBA.end());
     op.uniformEdge = uniformEdge;
+    op.instScale.assign(instScale.begin(), instScale.end());
+    op.clip = clip;
+    ops_.emplace_back(std::move(op));
+}
+
+void MplCanvas::points(std::span<const float> xy,
+                       std::span<const float> rgba,
+                       std::span<const float> sizes,
+                       plot::Color uniform,
+                       float markerCode, float markerFill,
+                       float markerSides, float markerAngle,
+                       std::optional<plot::Rect2D> clip) {
+    PointsOp op;
+    op.xy.assign(xy.begin(), xy.end());
+    op.rgba.assign(rgba.begin(), rgba.end());
+    op.sizes.assign(sizes.begin(), sizes.end());
+    op.uniform = uniform;
+    op.code = markerCode; op.fill = markerFill;
+    op.sides = markerSides; op.angle = markerAngle;
     op.clip = clip;
     ops_.emplace_back(std::move(op));
 }
@@ -484,6 +441,8 @@ void MplCanvas::execute(vk::CommandBuffer cmd) {
             else if constexpr (std::is_same_v<T, TrisOp>) execTris(cmd, o);
             else if constexpr (std::is_same_v<T, InstanceOp>)
                 execInstances(cmd, o);
+            else if constexpr (std::is_same_v<T, PointsOp>)
+                execPoints(cmd, o);
             else execGouraud(cmd, o);
         }, op);
 }
@@ -569,8 +528,10 @@ void MplCanvas::gpuPrepass() {
         sp.cap = op->cap;
         for (auto& sub : op->subsCache) {
             if (sub.points.size() < 2) continue;
-            op->edgeMeshes.push_back(gpuLine_.tessellate(
-                preCmd_->handle(), sub.points, sp, op->edge));
+            auto ms = gpuLine_.tessellate(preCmd_->handle(), sub.points,
+                                          sp, op->edge);
+            op->edgeMeshes.insert(op->edgeMeshes.end(), ms.begin(),
+                                  ms.end());
         }
         op->gpuStroke = true;
         recorded = true;
@@ -615,14 +576,30 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         // containment depth), then bridge-merge holes into their
         // parent ring before ear-clipping.
         std::vector<std::vector<plot::Point2D>> closed;
-        for (auto& sp : subs)
-            if (auto r = ringPoints(sp))
+        size_t closedVerts = 0;
+        for (auto& sp : subs) {
+            if (auto r = ringPoints(sp)) {
+                closedVerts += r->size();
                 closed.push_back(std::move(*r));
+            }
+        }
+        std::vector<plot::Point2D> tris;
+        if (closedVerts > 4096) {
+            // earClip is O(n²); scanline-fill per pixel column instead
+            // (even-odd parity across all rings = mpl's fill rule).
+            int cx0 = op.clip ? op.clip->x : 0;
+            int cx1 = (op.clip ? op.clip->x + int(op.clip->width)
+                               : int(res.width)) - 1;
+            tris = plot::columnFill(closed, cx0, cx1);
+            if (!op.clipRing.empty())
+                tris = plot::clipTrianglesToPolygon(tris, op.clipRing);
+            if (!tris.empty())
+                spine_.drawTriangles(cmd, clip, res, tris, op.face);
+        } else {
         // Largest first so outers precede their holes.
         std::ranges::sort(closed, {}, [](const auto& s) {
             return -std::abs(ringArea(s));
         });
-        std::vector<plot::Point2D> tris;
         std::vector<std::pair<std::vector<plot::Point2D>, int>> rings; // ring, depth
         for (auto& sp : closed) {
             int depth = 0;
@@ -647,6 +624,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
             tris = plot::clipTrianglesToPolygon(tris, op.clipRing);
         if (!tris.empty())
             spine_.drawTriangles(cmd, clip, res, tris, op.face);
+        }
     }
 
     // ── hatch (mpl: pattern drawn in edge/hatch color, clipped to fill) ──
@@ -687,7 +665,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
             for (auto& sub : subs) {
                 if (sub.points.size() < 2) continue;
                 for (auto& run :
-                     columnDecimate(sub.points, cx0, cx1)) {
+                     plot::columnDecimate(sub.points, cx0, cx1)) {
                     auto mesh = plot::strokePolyline(run, sp);
                     ev.insert(ev.end(), mesh.verts.begin(),
                               mesh.verts.end());
@@ -870,6 +848,7 @@ void MplCanvas::execInstances(vk::CommandBuffer cmd,
         : std::clamp(int(std::lround(tplMax / 1.5f)), 2, 16);
     auto subs = p.toPolylines(curveSteps);
 
+    bool perInstScale = op.instScale.size() >= n * 2;
     auto fillInsts = [&](std::span<const float> rgba,
                          plot::Color uniform) {
         instScratch_.resize(n);
@@ -877,7 +856,12 @@ void MplCanvas::execInstances(vk::CommandBuffer cmd,
             auto& pi = instScratch_[i];
             pi.ox = op.instXY[2 * i];
             pi.oy = op.instXY[2 * i + 1];
-            pi.sx = 1.0f; pi.sy = 1.0f;
+            if (perInstScale) {
+                pi.sx = op.instScale[2 * i];
+                pi.sy = op.instScale[2 * i + 1];
+            } else {
+                pi.sx = 1.0f; pi.sy = 1.0f;
+            }
             if (!rgba.empty()) {
                 pi.r = rgba[4 * i];     pi.g = rgba[4 * i + 1];
                 pi.b = rgba[4 * i + 2]; pi.a = rgba[4 * i + 3];
@@ -951,6 +935,56 @@ void MplCanvas::execInstances(vk::CommandBuffer cmd,
                 fillInsts(op.edgeRGBA, op.uniformEdge));
         }
     }
+}
+
+void MplCanvas::execPoints(vk::CommandBuffer cmd, const PointsOp& op) {
+    size_t n = op.xy.size() / 2;
+    if (!n || op.sizes.empty()) return;
+    auto* pts = reinterpret_cast<const plot::Point2D*>(op.xy.data());
+    std::span<const plot::Point2D> pspan{pts, n};
+
+    std::span<const plot::Color> cols;
+    std::vector<plot::Color> colScratch;
+    if (op.rgba.size() >= n * 4) {
+        cols = {reinterpret_cast<const plot::Color*>(op.rgba.data()), n};
+    } else {
+        colScratch.assign(n, op.uniform);
+        cols = colScratch;
+    }
+    std::vector<float> szScratch;
+    std::span<const float> sz = op.sizes;
+    if (sz.size() == 1 && n > 1) {
+        szScratch.assign(n, sz[0]);
+        sz = szScratch;
+    } else if (sz.size() < n) {
+        szScratch.resize(n);
+        for (size_t i = 0; i < n; ++i) szScratch[i] = sz[i % sz.size()];
+        sz = szScratch;
+    }
+
+    auto& ctx = backend_->context();
+    if (!pointInit_) {
+        pointR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
+                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
+                       pspan, cols, sz);
+        pointInit_ = true;
+    } else {
+        pointR_.updatePoints(pspan, cols, sz);
+    }
+
+    // Canvas-pixel view: x spans [0,W]; y is given the reversed range
+    // [H,0] so canvas Y-down coords land correctly after the shader's
+    // Y-flip (viewMin=H, span=-H).
+    auto res = backend_->extent();
+    plot::Transform2D t;
+    t.view.x = {0.0f, static_cast<float>(res.width)};
+    t.view.y = {static_cast<float>(res.height), 0.0f};
+    primitives::MarkerParams m;
+    m.code = op.code; m.fill = op.fill;
+    m.numsides = op.sides; m.angle = op.angle;
+    vk::Rect2D vp{vk::Offset2D{0, 0}, res};
+    pointR_.draw(cmd, vp, clipVk(op.clip, res), t,
+                 static_cast<uint32_t>(n), m);
 }
 
 } // namespace volcano::render

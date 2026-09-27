@@ -94,7 +94,19 @@ public:
 /// Triangulate a simple (non-self-intersecting) polygon by ear clipping.
 /// `ring` is a closed or open point list (closing vertex optional).
 /// Returns triangle soup vertices (3 per tri), empty on failure.
+/// O(n²) — do not use for very large rings; see columnFill.
 [[nodiscard]] std::vector<Point2D> earClip(std::span<const Point2D> ring);
+
+/// Scanline fill for very large polygons where earClip is too slow.
+/// Casts a vertical ray through each pixel-column centre in
+/// [col0, col1] (canvas pixel coordinates, Y-down or Y-up agnostic)
+/// and emits one quad per even-odd inside span — the same fill rule
+/// mpl/Agg applies to paths, so holes and nested rings resolve
+/// naturally by crossing parity across all supplied rings.
+/// O(N + W·K log K). Returns triangle soup vertices (3 per tri).
+[[nodiscard]] std::vector<Point2D>
+columnFill(std::span<const std::vector<Point2D>> rings,
+           int col0, int col1);
 
 /// Clip a line segment to a polygon; returns the inside sub-segments.
 [[nodiscard]] std::vector<std::pair<Point2D, Point2D>>

@@ -129,7 +129,7 @@ private:
     Series2D series_;
     render::primitives::LineRenderer renderer_;
     /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).
-    render::primitives::GpuLineRenderer::Mesh gpuMesh_;
+    std::vector<render::primitives::GpuLineRenderer::Mesh> gpuMeshes_;
     uint64_t gpuMeshSeq_ = 0;
     bool prepared_ = false;
     bool dataDirty_ = false;

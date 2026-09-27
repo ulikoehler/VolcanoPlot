@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.hpp>
 
 #include <memory>
+#include <vector>
 
 namespace volcano::core { class Device; class DescriptorPool; }
 namespace volcano::render { struct RenderContext; }
@@ -37,6 +38,11 @@ public:
                 std::span<const plot::Color> colors, std::span<const float> sizes);
     void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Transform2D& transform,
               uint32_t pointCount, MarkerParams marker = {}) const;
+    /// Same as draw() but with a scissor rect distinct from the viewport
+    /// (e.g. canvas-space viewport + axes clip).
+    void draw(vk::CommandBuffer cmd, vk::Rect2D viewport, vk::Rect2D scissor,
+              const plot::Transform2D& transform,
+              uint32_t pointCount, MarkerParams marker = {}) const;
 
     /// GPU handle to the uploaded point buffer (vec2 data), for GPU autoscale.
     [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
@@ -44,10 +50,15 @@ public:
     [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
     /// In-place data update: memcpy into the host-visible point buffer
     /// when the new count fits the existing allocation, else reallocate
-    /// all three attribute buffers.
+    /// all three attribute buffers. Reallocated buffers are retired (not
+    /// destroyed) until the next resetScratch() so recorded draw commands
+    /// from the same frame stay valid.
     void updatePoints(std::span<const plot::Point2D> points,
                       std::span<const plot::Color> colors,
                       std::span<const float> sizes);
+    /// Free buffers retired by updatePoints() reallocations — call once
+    /// per frame before recording draw commands.
+    void resetScratch() { retired_.clear(); pendingDraw_ = false; }
 
 private:
     vk::Device device_;
@@ -59,11 +70,16 @@ private:
     core::Buffer pointBuffer_;
     core::Buffer colorBuffer_;
     core::Buffer sizeBuffer_;
+    std::vector<core::Buffer> retired_;
     vk::UniqueDescriptorSet descSet_;
     VmaAllocator allocator_ = nullptr;
     uint32_t count_ = 0;
     uint32_t capacity_ = 0;
     bool inited_ = false;
+    /// Set once a draw command referencing the current buffers has been
+    /// recorded this frame — updatePoints() must then allocate fresh
+    /// buffers instead of overwriting data the pending draw reads.
+    mutable bool pendingDraw_ = false;
 };
 
 } // namespace volcano::render::primitives

@@ -308,6 +308,48 @@ std::vector<Point2D> earClip(std::span<const Point2D> ringIn) {
     return out;
 }
 
+std::vector<Point2D> columnFill(
+    std::span<const std::vector<Point2D>> rings, int col0, int col1) {
+    std::vector<Point2D> out;
+    if (col1 < col0) return out;
+    std::vector<std::vector<float>> cross(size_t(col1 - col0 + 1));
+    for (const auto& ring : rings) {
+        size_t n = ring.size();
+        if (n < 3) continue;
+        for (size_t i = 0, j = n - 1; i < n; j = i++) {
+            float ax = ring[j].x, bx = ring[i].x;
+            float lo = std::min(ax, bx), hi = std::max(ax, bx);
+            int cMin = std::max(int(std::ceil(lo - 0.5f)), col0);
+            int cMax = std::min(int(std::ceil(hi - 0.5f)), col1 + 1);
+            float dx = bx - ax;
+            if (std::abs(dx) < 1e-12f) continue;
+            float ay = ring[j].y, by = ring[i].y;
+            for (int c = cMin; c < cMax; ++c) {
+                float t = (float(c) + 0.5f - ax) / dx;
+                cross[size_t(c - col0)].push_back(ay + t * (by - ay));
+            }
+        }
+    }
+    for (int c = col0; c <= col1; ++c) {
+        auto& ys = cross[size_t(c - col0)];
+        if (ys.size() < 2) continue;
+        std::ranges::sort(ys);
+        // Even-odd: inside between crossing pairs.
+        for (size_t k = 0; k + 1 < ys.size(); k += 2) {
+            float y0 = ys[k], y1 = ys[k + 1];
+            if (y1 - y0 <= 0.0f) continue;
+            float x0 = float(c), x1 = x0 + 1.0f;
+            out.push_back({x0, y0});
+            out.push_back({x1, y0});
+            out.push_back({x1, y1});
+            out.push_back({x0, y0});
+            out.push_back({x1, y1});
+            out.push_back({x0, y1});
+        }
+    }
+    return out;
+}
+
 // ─── segment-in-polygon clipping ──────────────────────────────────────────
 
 std::vector<std::pair<Point2D, Point2D>>

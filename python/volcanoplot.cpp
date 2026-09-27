@@ -103,6 +103,7 @@
 #include <limits>
 #include <fstream>
 #include <sstream>
+#include <mutex>
 #include <unordered_map>
 
 namespace py = pybind11;
@@ -1415,6 +1416,37 @@ plot::Viewport gridRange3(const plot::Grid2D& g) {
     return v;
 }
 
+/// Pooled backend + renderer shared by same-size figures. Vulkan
+/// instance/device creation and renderer pipeline init dominate figure
+/// setup (~1s), so figures of one size reuse a bundle. All bundles run
+/// on the process-wide sharedGpuContext, so a figure can migrate to a
+/// different-size bundle on resize and its prepared plot resources
+/// stay valid (same device; render passes are format-compatible).
+struct PyGpuBundle {
+    std::unique_ptr<backend::IBackend> backend;
+    std::unique_ptr<render::Renderer> renderer;
+};
+
+static std::shared_ptr<PyGpuBundle> gpuBundleFor(uint32_t w,
+                                                 uint32_t h) {
+    static std::mutex mu;
+    static std::unordered_map<uint64_t, std::weak_ptr<PyGpuBundle>>
+        pool;
+    std::lock_guard lk(mu);
+    const uint64_t key = (uint64_t(w) << 32) | h;
+    if (auto s = pool[key].lock()) return s;
+    auto b = std::make_shared<PyGpuBundle>();
+    backend::BackendDesc desc;
+    desc.width = w;
+    desc.height = h;
+    desc.samples = vk::SampleCountFlagBits::e4;
+    b->backend =
+        backend::createHeadlessBackend(desc, backend::sharedGpuContext());
+    b->renderer = std::make_unique<render::Renderer>(*b->backend);
+    pool[key] = b;
+    return b;
+}
+
 /// Owns the headless backend + renderer + figure.
 class PyFigure {
 public:
@@ -1423,12 +1455,7 @@ public:
     explicit PyFigure(SubviewTag) {}
 
     PyFigure(uint32_t w, uint32_t h, float dpi) {
-        backend::BackendDesc desc;
-        desc.width = w;
-        desc.height = h;
-        desc.samples = vk::SampleCountFlagBits::e4;
-        backend_ = backend::createHeadlessBackend(desc);
-        renderer_ = std::make_unique<render::Renderer>(*backend_);
+        bundle_ = gpuBundleFor(w, h);
         figure_.style().dpi = dpi;
     }
     /// mpl SubFigure view: a child `plot::Figure` living inside the
@@ -1456,25 +1483,35 @@ public:
     }
     /// Backend/renderer always live on the root figure.
     backend::IBackend* backend() {
-        return root_ ? root_->backend() : backend_.get();
+        return root_ ? root_->backend() : bundle_->backend.get();
     }
     render::Renderer* renderer() {
-        return root_ ? root_->renderer() : renderer_.get();
+        return root_ ? root_->renderer() : bundle_->renderer.get();
     }
     vk::Extent2D extent() { return backend()->extent(); }
+
+    /// Resize the canvas. The figure migrates to the pooled bundle for
+    /// the target size — all bundles share the device, so prepared
+    /// plot resources and pipelines remain valid (compatible passes).
+    void resizeBackend(uint32_t w, uint32_t h) {
+        // Subfigures resize their root (mpl semantics: the canvas).
+        if (root_) { root_->resizeBackend(w, h); return; }
+        auto e = backend()->extent();
+        if (e.width == w && e.height == h) return;
+        bundle_ = gpuBundleFor(w, h);
+    }
 
     bool savefig(const std::string& path,
                  const encode::SaveOptions& opts = {}) {
         // mpl renders the whole canvas — a subfigure saves its root.
         if (root_) return root_->savefig(path, opts);
-        return renderer_->savefig(figure_, path, opts);
+        return renderer()->savefig(figure_, path, opts);
     }
 
-    // Declaration order = destruction order (reversed): renderer dies
-    // first, then the figure (plots hold GPU buffers), then the device.
-    std::unique_ptr<backend::IBackend> backend_;
+    // Declaration order = destruction order (reversed): the figure
+    // (whose plots hold GPU buffers) dies before the pooled bundle.
+    std::shared_ptr<PyGpuBundle> bundle_;
     plot::Figure figure_;
-    std::unique_ptr<render::Renderer> renderer_;
     /// Subfigure view state (nullptr for root figures).
     std::shared_ptr<PyFigure> root_;
     plot::Figure* sub_ = nullptr;
@@ -9086,8 +9123,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  }
                  if (forward) {
                      float dpi = f.fig().style().dpi;
-                     f.backend()->resize(uint32_t(wi * dpi + 0.5f),
-                                        uint32_t(hi * dpi + 0.5f));
+                     f.resizeBackend(uint32_t(wi * dpi + 0.5f),
+                                     uint32_t(hi * dpi + 0.5f));
                  }
                  f.fig().markStale();
              },
@@ -9110,8 +9147,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto e = f.backend()->extent();
                  float dpi = f.fig().style().dpi;
                  if (forward)
-                     f.backend()->resize(uint32_t(val * dpi + 0.5f),
-                                        e.height);
+                     f.resizeBackend(uint32_t(val * dpi + 0.5f),
+                                     e.height);
                  f.fig().markStale();
              },
              py::arg("val"), py::arg("forward") = true)
@@ -9120,8 +9157,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto e = f.backend()->extent();
                  float dpi = f.fig().style().dpi;
                  if (forward)
-                     f.backend()->resize(e.width,
-                                        uint32_t(val * dpi + 0.5f));
+                     f.resizeBackend(e.width,
+                                     uint32_t(val * dpi + 0.5f));
                  f.fig().markStale();
              },
              py::arg("val"), py::arg("forward") = true)
@@ -9135,8 +9172,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  float old = f.fig().style().dpi;
                  float wi = e.width / old, hi = e.height / old;
                  f.fig().style().dpi = val;
-                 f.backend()->resize(uint32_t(wi * val + 0.5f),
-                                    uint32_t(hi * val + 0.5f));
+                 f.resizeBackend(uint32_t(wi * val + 0.5f),
+                                 uint32_t(hi * val + 0.5f));
                  f.fig().markStale();
              },
              py::arg("val"))
@@ -9146,8 +9183,8 @@ PYBIND11_MODULE(volcanoplot, m) {
                  auto e = f.backend()->extent();
                  float old = f.fig().style().dpi;
                  f.fig().style().dpi = val;
-                 f.backend()->resize(uint32_t(e.width / old * val + 0.5f),
-                                    uint32_t(e.height / old * val + 0.5f));
+                 f.resizeBackend(uint32_t(e.width / old * val + 0.5f),
+                                 uint32_t(e.height / old * val + 0.5f));
                  f.fig().markStale();
              })
         // ── mpl figure patch: facecolor / edgecolor / frameon ──
@@ -21483,8 +21520,7 @@ del _vp_lg_types
         .def("resize",
              [](PyFigureManager& m, int w, int h) {
                  if (m.fig) {
-                     m.fig->backend()->resize(uint32_t(w),
-                                              uint32_t(h));
+                     m.fig->resizeBackend(uint32_t(w), uint32_t(h));
                      m.fig->fig().markStale();
                  }
              },
@@ -31186,18 +31222,36 @@ del _nt
                      py::handle uniform, float lw,
                      const std::string& join, const std::string& cap,
                      py::handle ergba, py::handle euniform,
-                     py::handle clip) {
+                     py::handle iscale, py::handle clip) {
                      c.instances(floatsOf(tplv), u8sOf(tplc),
                                  floatsOf(xy), floatsOf(rgba),
                                  colorOf(uniform), lw, joinOf(join),
                                  capOf(cap), floatsOf(ergba),
-                                 colorOf(euniform), rectOf(clip));
+                                 colorOf(euniform), floatsOf(iscale),
+                                 rectOf(clip));
                  },
                  py::arg("tpl_verts"), py::arg("tpl_codes"),
                  py::arg("inst_xy"), py::arg("inst_rgba"),
                  py::arg("uniform_face"), py::arg("linewidth"),
                  py::arg("join"), py::arg("cap"), py::arg("edge_rgba"),
-                 py::arg("uniform_edge"), py::arg("clip"))
+                 py::arg("uniform_edge"), py::arg("inst_scale"),
+                 py::arg("clip"))
+            .def("points",
+                 [colorOf, floatsOf, rectOf](
+                     render::MplCanvas& c, py::handle xy,
+                     py::handle rgba, py::handle sizes,
+                     py::handle uniform, float code, float fill,
+                     float sides, float angle, py::handle clip) {
+                     c.points(floatsOf(xy), floatsOf(rgba),
+                              floatsOf(sizes), colorOf(uniform),
+                              code, fill, sides, angle,
+                              rectOf(clip));
+                 },
+                 py::arg("xy"), py::arg("rgba"), py::arg("sizes"),
+                 py::arg("uniform"), py::arg("code"), py::arg("fill"),
+                 py::arg("sides"), py::arg("angle"), py::arg("clip"))
+            .def_property_readonly("max_point_size",
+                 &render::MplCanvas::maxPointSize)
             .def("measure_text",
                  [](render::MplCanvas& c, const std::string& s,
                     float sizePx, const std::string& family,
@@ -31367,6 +31421,72 @@ def _has_clip_path(gc):
     return True
 
 
+# ── marker sprite classification ──────────────────────────────────
+# mpl hands markers to the renderer as Path objects; the GPU
+# point-sprite path needs a plot::MarkerStyle code. Classify by
+# (nverts, codes, verts) signature against mpl's canonical marker paths
+# (built lazily — half-filled/alt paths simply won't match and fall
+# back to instanced polygon rendering).
+_MARKER_SDF_CODES = {
+    '.': 0, 'o': 1, 's': 2, 'D': 3, 'd': 4, '^': 5, 'v': 6, '<': 7,
+    '>': 8, '1': 9, '2': 10, '3': 11, '4': 12, '+': 13, 'x': 14,
+    'P': 15, 'X': 16, '*': 17, 'p': 18, 'h': 19, 'H': 20, '8': 21,
+    '|': 22, '_': 23,
+    # NOTE: ',' (pixel) is intentionally absent — its transformed path
+    # is a unit square identical to 's' after normalisation. Mapping it
+    # to the Square SDF is also more correct: mpl never scales ',' by
+    # markersize, so its silhouette stays ~1px either way.
+}
+_marker_sigs = None
+
+
+def _marker_sig(path):
+    v = np.asarray(path.vertices, dtype=np.float64)
+    if len(v):
+        # mpl scales marker paths before handing them to the renderer
+        # (e.g. scatter bakes the 0.5 unit transform into the path) —
+        # normalize to a centred unit box so only the SHAPE matters.
+        lo = v.min(axis=0)
+        ext = np.maximum(v.max(axis=0) - lo, 1e-12)
+        v = (v - (lo + 0.5 * ext)) / ext.max()
+    c = path.codes
+    # +0.0 normalises -0.0 which survives np.round and would break
+    # the byte-wise comparison.
+    return (len(v), c.tobytes() if c is not None else None,
+            (np.round(v, 5) + 0.0).tobytes())
+
+
+def _marker_sdf_code(path):
+    """plot::MarkerStyle code for a canonical mpl marker Path, else None."""
+    global _marker_sigs
+    if _marker_sigs is None:
+        from matplotlib.markers import MarkerStyle
+        _marker_sigs = {}
+        for ch, code in _MARKER_SDF_CODES.items():
+            try:
+                m = MarkerStyle(ch)
+                # get_path() alone is the RAW unit shape ('s' and 'D'
+                # share it); get_transform() carries the rotation /
+                # scale that makes the real marker silhouette.
+                p = m.get_path().transformed(m.get_transform())
+                _marker_sigs[_marker_sig(p)] = code
+            except Exception:
+                pass
+    return _marker_sigs.get(_marker_sig(path))
+
+
+def _marker_rotation(t):
+    """Rotation of a marker transform, or None when rotated/sheared —
+    the sprite path only handles axis-aligned markers."""
+    try:
+        m = t.get_matrix()
+    except Exception:
+        return None
+    if abs(m[0, 1]) > 1e-9 or abs(m[1, 0]) > 1e-9:
+        return None
+    return 0.0
+
+
 def _family_of(prop):
     fam = prop.get_family()
     if isinstance(fam, (list, tuple)):
@@ -31386,10 +31506,106 @@ class RendererVolcano(RendererBase):
         self._flip = _flip_transform(height)
 
     # ── abstract surface ──
+    def _decimate_polyline(self, path, transform):
+        """Per-pixel-column min/max envelope of a path, in pixel space.
+
+        Only valid for x-monotonic open polylines under a near-diagonal
+        affine transform — returns None otherwise. The zigzag
+        (ymin,ymax)/(ymax,ymin) emission keeps adjacent columns
+        connected edge-to-edge, matching stroke coverage."""
+        vs = path.vertices
+        n = len(vs)
+        if path.codes is not None:
+            cs = np.asarray(path.codes)
+            if np.any((cs != Path.MOVETO) & (cs != Path.LINETO)):
+                return None
+        try:
+            t = (transform + self._flip).frozen()
+            p = t.transform(
+                np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]))
+        except Exception:
+            return None
+        a = p[1, 0] - p[0, 0]   # d(px)/dx
+        b = p[2, 0] - p[0, 0]   # d(px)/dy — must be ~0
+        c = p[1, 1] - p[0, 1]   # d(py)/dx — must be ~0
+        if (not np.isfinite([a, b, c]).all() or a == 0
+                or abs(b) > 1e-6 or abs(c) > 1e-6):
+            return None
+        xs = vs[:, 0]
+        ys = vs[:, 1]
+        dxs = np.diff(xs)
+        if not np.all((dxs >= 0) | ~np.isfinite(dxs)):
+            return None
+        fin = np.isfinite(xs) & np.isfinite(ys)
+        xf = xs[fin]
+        yf = ys[fin]
+        if len(xf) < 4:
+            return None
+        # Pixel column per finite point.
+        cf = np.floor(a * xf + p[0, 0]).astype(np.int64)
+        if a < 0:  # keep group order ascending
+            cf = -cf
+        span = int(cf.max() - cf.min() + 1)
+        if len(xf) <= 4 * span:   # not actually oversampled
+            return None
+        gs = np.concatenate(
+            ([0], np.flatnonzero(np.diff(cf) != 0) + 1))
+        cols = cf[gs]
+        ymin = np.minimum.reduceat(yf, gs)
+        ymax = np.maximum.reduceat(yf, gs)
+        # runs of adjacent columns (a missing column breaks the line)
+        brk = np.concatenate(
+            ([0], np.flatnonzero(np.diff(cols) != 1) + 1,
+             [len(cols)]))
+        out_v = []
+        out_c = []
+        e0 = p[0, 0]
+        for r in range(len(brk) - 1):
+            s, e = brk[r], brk[r + 1]
+            rn = e - s
+            xcd = (cols[s:e] + 0.5 - e0) / a
+            lo = ymin[s:e]
+            hi = ymax[s:e]
+            evx = np.repeat(xcd, 2)
+            evy = np.empty(2 * rn)
+            evy[0::2] = lo
+            evy[1::2] = hi
+            out_v.append(np.column_stack([evx, evy]))
+            oc = np.full(2 * rn, Path.LINETO, dtype=np.uint8)
+            oc[0] = Path.MOVETO
+            out_c.append(oc)
+        if not out_v:
+            return None
+        verts = np.vstack(out_v)
+        try:
+            verts = t.transform(verts)
+        except Exception:
+            return None
+        return (np.ascontiguousarray(verts, dtype=np.float64),
+                np.concatenate(out_c))
+
     def draw_path(self, gc, path, transform, rgbFace=None):
         face, edge = _gc_colors(gc, rgbFace)
         if face is None and (edge is None or edge[3] <= 0):
             return
+        lw = self.points_to_pixels(gc.get_linewidth())
+        dashes = gc.get_dashes()
+        # Huge x-monotonic stroked polylines: envelope-decimate in data
+        # space BEFORE transforming — one numpy reduceat pass over the
+        # vertex list instead of a full transform + stroke of every
+        # point. Produces the same per-column coverage at ~2·W verts.
+        if (face is None and (dashes[1] is None or len(dashes[1]) == 0)
+                and len(path.vertices) > 65536 and gc.get_hatch() is None
+                and not _has_clip_path(gc)):
+            dec = self._decimate_polyline(path, transform)
+            if dec is not None:
+                verts, codes = dec
+                clip, ring = _clip(gc, self.height)
+                self._cv.path(
+                    verts.ravel(), codes, face, edge, float(lw), None,
+                    gc.get_joinstyle(), gc.get_capstyle(), None, None,
+                    clip, ring)
+                return
         try:
             tpath = path.transformed(transform + self._flip)
         except Exception:
@@ -31442,6 +31658,8 @@ class RendererVolcano(RendererBase):
                                  0, 255).astype(np.uint8)
         h, w = im.shape[0], im.shape[1]
         if transform is not None:
+            # Unsampled path (interpolation='none'): transform maps the
+            # unit image to pixels; render nearest like Agg.
             pts = (transform + self._flip).transform(
                 [[0, 0], [w, 0], [w, h], [0, h]])
             x0, y0 = pts[:, 0].min(), pts[:, 1].min()
@@ -31449,10 +31667,12 @@ class RendererVolcano(RendererBase):
             dst = (int(round(x0)), int(round(y0)),
                    max(1, int(round(x1 - x0))),
                    max(1, int(round(y1 - y0))))
+            interp = 0
         else:
             dst = (int(round(x)), int(round(self.height - y - h)), w, h)
+            interp = 1
         clip, _ = _clip(gc, self.height)
-        self._cv.image(im.tobytes(), w, h, dst, 1, clip)
+        self._cv.image(im.tobytes(), w, h, dst, interp, clip)
 
     def draw_text(self, gc, x, y, s, prop, angle, ismath=False,
                   mtext=None):
@@ -31485,16 +31705,110 @@ class RendererVolcano(RendererBase):
                           family, style, weight, clip)
 
     def draw_gouraud_triangles(self, gc, points, colors, transform):
-        # Batched: one vertex-colored triangle soup = one draw call.
-        pts = (transform + self._flip).transform(
-            np.asarray(points, dtype=np.float64).reshape(-1, 2))
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
         cols = np.asarray(colors, dtype=np.float64).reshape(-1, 4)
+        clip, _ = _clip(gc, self.height)
+        # Regular structured grid -> a bilinear image reproduces gouraud
+        # interpolation to sub-pixel accuracy (node colours become
+        # texels), replacing millions of sub-pixel triangles by one
+        # texture upload. mpl triangulates each cell with a centre node
+        # (4 tris), so the detected grid may be at half-cell spacing —
+        # in that case only the even-even corner nodes carry data.
+        # For axis-aligned (diagonal) transforms the grid check runs in
+        # data space and only the two bbox corners are transformed.
+        try:
+            m = transform.get_matrix()
+            diag = (abs(m[0, 1]) < 1e-9 and abs(m[1, 0]) < 1e-9)
+            gpts = pts if diag else \
+                (transform + self._flip).transform(pts)
+            xs, ys = gpts[:, 0], gpts[:, 1]
+            # Grid spacing from a sample; all verts verified below.
+            ns = min(xs.size, 65536)
+            ux, uy = np.unique(xs[:ns]), np.unique(ys[:ns])
+            if len(ux) > 1 and len(uy) > 1:
+                dxs, dys = np.diff(ux), np.diff(uy)
+                dx, dy = dxs.min(), dys.min()
+                if (dx > 0 and dy > 0
+                        and np.allclose(dxs, dx, atol=1e-6)
+                        and np.allclose(dys, dy, atol=1e-6)):
+                    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max(), ys.max()
+                    nx = int(round((x1 - x0) / dx)) + 1
+                    ny = int(round((y1 - y0) / dy)) + 1
+                    # Fused index + residual: fx = fractional grid
+                    # coordinate, ix = rounded index; the residual check
+                    # verifies every vertex actually sits on a node.
+                    fx = (xs - x0) * (1.0 / dx)
+                    fy = (ys - y0) * (1.0 / dy)
+                    ix = np.rint(fx).astype(np.int32)
+                    iy = np.rint(fy).astype(np.int32)
+                    snap = max(dx * 1e-4, 1e-3 if diag else 0.05)
+                    snapf = max(1e-4, snap / dx), max(1e-4, snap / dy)
+                    if (0 <= ix.min() and 0 <= iy.min()
+                            and ix.max() < nx and iy.max() < ny
+                            and np.abs(fx - ix).max() < snapf[0]
+                            and np.abs(fy - iy).max() < snapf[1]):
+                        flat = iy * nx + ix
+                        if np.bincount(flat,
+                                       minlength=nx * ny).min() > 0:
+                            gnx, gny = nx, ny
+                            six, siy, gcols = flat % nx, flat // nx, cols
+                        else:
+                            # Centre-node triangulation: corner nodes
+                            # sit at even indices on the fine grid.
+                            gnx, gny = (nx + 1) // 2, (ny + 1) // 2
+                            even = (ix % 2 == 0) & (iy % 2 == 0)
+                            six = ix[even] // 2
+                            siy = iy[even] // 2
+                            if np.bincount(siy * gnx + six,
+                                           minlength=gnx * gny
+                                           ).min() <= 0:
+                                raise ValueError("incomplete grid")
+                            gcols = cols[even]
+                        if gnx >= 128 and gny >= 128:
+                            alpha = gc.get_alpha()
+                            img = np.empty((gnx * gny, 4))
+                            img[siy * gnx + six] = gcols
+                            if alpha is not None:
+                                img[:, 3] *= alpha
+                            img = np.clip(img * 255.0 + 0.5, 0, 255)
+                            img = np.ascontiguousarray(
+                                img.astype(np.uint8).reshape(
+                                    gny, gnx, 4))
+                            if diag:
+                                # Data-space iy/ix increase with data
+                                # y/x; image rows run top-down, so a
+                                # positive y scale (or negative x)
+                                # requires flipping the texel order.
+                                if m[1, 1] > 0:
+                                    img = img[::-1]
+                                if m[0, 0] < 0:
+                                    img = img[:, ::-1]
+                                img = np.ascontiguousarray(img)
+                                lo = transform.transform(
+                                    [[x0, y0]])[0]
+                                hi = transform.transform(
+                                    [[x1, y1]])[0]
+                                px0 = min(lo[0], hi[0])
+                                px1 = max(lo[0], hi[0])
+                                py0 = self.height - max(lo[1], hi[1])
+                                py1 = self.height - min(lo[1], hi[1])
+                            else:
+                                px0, py0, px1, py1 = x0, y0, x1, y1
+                            dst = (int(round(px0)), int(round(py0)),
+                                   max(1, int(round(px1 - px0))),
+                                   max(1, int(round(py1 - py0))))
+                            self._cv.image(img.tobytes(), gnx, gny,
+                                           dst, 1, clip)
+                            return
+        except Exception:
+            pass
+        # Generic path: one vertex-colored triangle soup, one draw call.
         alpha = gc.get_alpha()
         if alpha is not None:
             cols = cols.copy()
             cols[:, 3] *= alpha
-        clip, _ = _clip(gc, self.height)
-        self._cv.tris(pts, cols, clip)
+        pts = (transform + self._flip).transform(pts).astype(np.float32)
+        self._cv.tris(pts, cols.astype(np.float32), clip)
 
     def draw_markers(self, gc, marker_path, marker_trans, path,
                      trans, rgbFace=None):
@@ -31539,6 +31853,40 @@ class RendererVolcano(RendererBase):
         # appears upright in our Y-down canvas (as Agg does).
         tpl = marker_path.transformed(
             marker_trans + Affine2D().scale(1.0, -1.0))
+        # ── sprite fast path: a recognised marker within the point-size
+        # limit renders as one vertex per marker. marker_trans carries
+        # the marker's own shape transform (e.g. 'D' is a rotated 's'
+        # path), so the signature must be taken of the fully
+        # transformed silhouette — any residual rotation would change
+        # the normalised verts and simply fail the match. An edge in
+        # the same colour as the face is folded into the diameter
+        # (a stroke of width lw extends the silhouette by lw/2 per
+        # side); a genuinely different edge colour needs the instanced
+        # polygon path to keep the visible outline.
+        try:
+            # Y-up silhouette (same space the canonical signatures use).
+            mcode = _marker_sdf_code(marker_path.transformed(marker_trans))
+        except Exception:
+            mcode = None
+        if mcode is not None and len(tpl.vertices):
+            diam = 2.0 * float(np.abs(tpl.vertices).max())
+            stroke_face = (edge is not None and face is not None
+                           and edge[3] > 0
+                           and np.allclose(edge, face))
+            no_edge = edge is None or edge[3] <= 0
+            if (stroke_face or no_edge) and \
+                    diam + (lw if stroke_face else 0) \
+                    <= self._cv.max_point_size:
+                if stroke_face:
+                    diam += lw
+                fillmode = 0.0 if (face is not None
+                                   and face[3] > 0) else 5.0
+                ucol = face if fillmode == 0.0 else edge
+                self._cv.points(
+                    np.ascontiguousarray(inst_xy).ravel(),
+                    None, np.array([diam]), ucol,
+                    float(mcode), fillmode, 5.0, 0.0, clip)
+                return
         tc = tpl.codes
         if tc is None:
             tc = np.concatenate(
@@ -31554,6 +31902,7 @@ class RendererVolcano(RendererBase):
             float(lw), gc.get_joinstyle(), gc.get_capstyle(),
             None,
             edge if edge is not None else (0, 0, 0, 0),
+            None,
             clip)
 
     def draw_path_collection(self, gc, master_transform, paths,
@@ -31574,7 +31923,7 @@ class RendererVolcano(RendererBase):
             n_lw = 1
         dashed = any(ls is not None and ls[1] is not None and len(ls[1])
                      for ls in linestyles)
-        if (N < 32 or gc.get_hatch() is not None
+        if (gc.get_hatch() is not None
                 or _has_clip_path(gc) or dashed or n_lw > 1
                 or (len(facecolors) == 0 and len(edgecolors) == 0)):
             return super().draw_path_collection(
@@ -31582,9 +31931,9 @@ class RendererVolcano(RendererBase):
                 offset_trans, facecolors, edgecolors, linewidths,
                 linestyles, antialiaseds, urls, offset_position)
         try:
-            toffs = (offset_trans.transform(offsets)
+            # offsets -> display -> canvas y-flip in a single transform
+            toffs = ((offset_trans + self._flip).transform(offsets)
                      if Noffsets else np.zeros((1, 2)))
-            toffs = self._flip.transform(np.asarray(toffs))
             flipv = Affine2D().scale(1.0, -1.0)
             alpha = gc.get_alpha()
             clip, _ = _clip(gc, self.height)
@@ -31607,7 +31956,150 @@ class RendererVolcano(RendererBase):
                 # mpl treats alpha==0 entries as 'none'.
                 return np.ascontiguousarray(c)
 
-            order = np.arange(N) % Npaths
+            # order[i] = the PATH index of item i (mpl cycles paths,
+            # not transforms — Npaths counts all_transforms too).
+            order = np.arange(N) % max(len(paths), 1)
+            pv = [p.vertices for p in paths]
+            plens = np.array([v.shape[0] for v in pv], dtype=np.int64)
+            pc = [None] * len(paths)
+            simple = True
+            code_cache = {}
+            for i, (p, n) in enumerate(zip(paths, plens)):
+                c0 = p.codes
+                if c0 is None:
+                    c0 = code_cache.get(n)
+                    if c0 is None:
+                        c0 = np.empty(n, dtype=np.uint8)
+                        c0[0] = Path.MOVETO
+                        c0[1:] = Path.LINETO
+                        code_cache[n] = c0
+                elif np.any((c0 != Path.MOVETO)
+                            & (c0 != Path.LINETO)
+                            & (c0 != Path.CLOSEPOLY)):
+                    simple = False
+                    break
+                pc[i] = c0
+            n_groups = len(np.unique(order))
+            # Lean path: one (face, edge) style and a uniform transform —
+            # the common case (eventplot rows, single-colour LineCollections,
+            # bar/hist rects). Skip the grouping machinery entirely and
+            # emit a single concatenated path op.
+            if (simple and len(facecolors) <= 1
+                    and len(edgecolors) <= 1
+                    and len(all_transforms) <= 1
+                    and n_groups > 1 and plens.max() <= 4096):
+                t0 = (all_transforms[0]
+                      if len(all_transforms) else None)
+                t0 = ((t0 if isinstance(t0, Affine2D)
+                       else Affine2D(t0))
+                      if t0 is not None else Affine2D())
+                tall = t0 + master_transform + flipv
+                tv = tall.transform(np.concatenate([pv[j] for j in order]))
+                if Noffsets:
+                    tv = tv + np.repeat(toffs[np.arange(N) % Noffsets],
+                                        plens[order], axis=0)
+                fc = (tuple(np.asarray(facecolors, np.float64)[0])
+                      if len(facecolors) else None)
+                ec = (tuple(np.asarray(edgecolors, np.float64)[0])
+                      if len(edgecolors) else None)
+                if alpha is not None:
+                    m = np.array([1, 1, 1, alpha])
+                    fc = None if fc is None else tuple(np.asarray(fc) * m)
+                    ec = None if ec is None else tuple(np.asarray(ec) * m)
+                self._cv.path(
+                    np.asarray(tv, np.float64).ravel(),
+                    np.concatenate([pc[j] for j in order]),
+                    fc, ec, lw, None, join, cap, None, None, clip, None)
+                return
+            # Many DISTINCT small paths (eventplot, bar/hist rects,
+            # LineCollections): concatenating per (face, edge) colour
+            # group into a handful of path ops beats both per-path
+            # draw_path calls and per-group instancing. Curved paths
+            # are excluded (they need per-path flattening anyway).
+            # Distinct small paths (or a small collection) concat into
+            # one path op per style group; a single path repeated many
+            # times is better served by instancing below.
+            batch_ok = (n_groups > 1 or N < 32)
+            if batch_ok and simple and plens.size and plens.max() <= 4096:
+                items = np.arange(N)
+                # Per-item style key: (face, edge) pair. mpl treats
+                # missing colours as 'none'.
+                fca = (np.asarray(facecolors, np.float64)
+                       .reshape(-1, 4) if len(facecolors)
+                       else np.zeros((1, 4)))
+                eca = (np.asarray(edgecolors, np.float64)
+                       .reshape(-1, 4) if len(edgecolors)
+                       else np.zeros((1, 4)))
+                keys = np.concatenate(
+                    [fca[items % len(fca)],
+                     eca[items % len(eca)]], axis=1)
+                uniq = np.unique(keys, axis=0)
+                if len(uniq) <= 32:
+                    t0 = (all_transforms[0]
+                          if len(all_transforms) else None)
+                    uniform_t = (len(all_transforms) == 0
+                                 or all(t is t0
+                                        for t in all_transforms))
+                    for uc in uniq:
+                        sel = items[np.all(keys == uc, axis=1)]
+                        selp = order[sel]
+                        vparts = [pv[j] for j in selp]
+                        cparts = [pc[j] for j in selp]
+                        if uniform_t:
+                            tall = (((t0 if isinstance(t0, Affine2D)
+                                      else Affine2D(t0))
+                                     if t0 is not None
+                                     else Affine2D())
+                                    + master_transform + flipv)
+                            tv = tall.transform(
+                                np.concatenate(vparts))
+                            if Noffsets:
+                                tv = tv + np.repeat(
+                                    toffs[sel % len(toffs)],
+                                    plens[selp], axis=0)
+                        else:
+                            vs = []
+                            for i, j in zip(sel, selp):
+                                t = all_transforms[
+                                    i % len(all_transforms)]
+                                v = ((t if isinstance(t, Affine2D)
+                                      else Affine2D(t))
+                                     + master_transform +
+                                     flipv).transform(pv[j])
+                                vs.append(
+                                    v + toffs[i % len(toffs)])
+                            tv = np.concatenate(vs)
+                        fc = uc[:4]; ec = uc[4:]
+                        if alpha is not None:
+                            fc = fc * np.array([1, 1, 1, alpha])
+                            ec = ec * np.array([1, 1, 1, alpha])
+                        self._cv.path(
+                            np.asarray(tv, np.float64).ravel(),
+                            np.concatenate(cparts),
+                            tuple(fc) if len(facecolors) else None,
+                            tuple(ec) if len(edgecolors) else None,
+                            lw, None, join, cap, None, None, clip,
+                            None)
+                    return
+            if N < 32:
+                return super().draw_path_collection(
+                    gc, master_transform, paths, all_transforms,
+                    offsets, offset_trans, facecolors, edgecolors,
+                    linewidths, linestyles, antialiaseds, urls,
+                    offset_position)
+            # Per-item marker transforms (variable-size scatter etc.):
+            # diagonal entries become per-instance template scales;
+            # rotated/sheared markers cannot be instanced.
+            ta = (np.asarray(all_transforms, dtype=np.float64)
+                  if len(all_transforms) else None)
+            if ta is not None and (
+                    np.abs(ta[:, 0, 1]).max() > 1e-9
+                    or np.abs(ta[:, 1, 0]).max() > 1e-9):
+                return super().draw_path_collection(
+                    gc, master_transform, paths, all_transforms,
+                    offsets, offset_trans, facecolors, edgecolors,
+                    linewidths, linestyles, antialiaseds, urls,
+                    offset_position)
             for pid in np.unique(order):
                 sel = np.nonzero(order == pid)[0]
                 toff = toffs[sel % len(toffs)]
@@ -31616,19 +32108,46 @@ class RendererVolcano(RendererBase):
                 if len(sel) == 0:
                     continue
                 path = paths[pid % len(paths)]
-                t = (Affine2D(all_transforms[pid % len(all_transforms)])
-                     if len(all_transforms) else Affine2D())
-                tpl = path.transformed(t + master_transform + flipv)
+                # Identity item transform: per-instance scales carry
+                # the per-item marker size.
+                tpl = path.transformed(master_transform + flipv)
                 tc = tpl.codes
                 if tc is None:
                     tc = np.concatenate(
                         [np.array([Path.MOVETO], dtype=np.uint8),
                          np.full(len(tpl.vertices) - 1, Path.LINETO,
                                  dtype=np.uint8)])
+                scale = None
+                if ta is not None:
+                    tsel = ta[sel % len(ta)]
+                    scale = np.stack([tsel[:, 0, 0], tsel[:, 1, 1]],
+                                     axis=1)
                 fc = sel_colors(facecolors, sel)
                 ec = sel_colors(edgecolors, sel)
                 no_face = len(facecolors) == 0
                 no_edge = len(edgecolors) == 0 or lw <= 0
+                # ── point-sprite path: one vertex per marker ──
+                mcode = _marker_sdf_code(path)
+                if mcode is not None and len(tpl.vertices):
+                    diam0 = 2.0 * float(np.abs(tpl.vertices).max())
+                    ec_dead = ec is None or not np.any(ec[:, 3] > 0)
+                    fc_dead = fc is None or not np.any(fc[:, 3] > 0)
+                    same_ec = (not ec_dead and not fc_dead
+                               and np.allclose(ec, fc))
+                    if ec_dead or same_ec:
+                        sx = (np.abs(scale[:, 0])
+                              if scale is not None
+                              else np.ones(len(sel)))
+                        sizes = diam0 * sx + (lw if same_ec else 0.0)
+                        if sizes.size and \
+                                sizes.max() <= self._cv.max_point_size:
+                            fill = 0.0 if not fc_dead else 5.0
+                            cols = (fc if not fc_dead else ec).ravel()
+                            self._cv.points(
+                                np.ascontiguousarray(toff).ravel(),
+                                cols, sizes, (0, 0, 0, 0),
+                                float(mcode), fill, 5.0, 0.0, clip)
+                            continue
                 self._cv.instances(
                     np.asarray(tpl.vertices, dtype=np.float64).ravel(),
                     np.asarray(tc, dtype=np.uint8),
@@ -31637,6 +32156,7 @@ class RendererVolcano(RendererBase):
                     lw, join, cap,
                     None if no_edge else ec,
                     (0, 0, 0, 0),
+                    scale.ravel() if scale is not None else None,
                     clip)
         except Exception:
             return super().draw_path_collection(
@@ -31678,19 +32198,37 @@ class RendererVolcano(RendererBase):
         # Image fast path: a flat-shaded, regular, axis-aligned grid is
         # pixel-identical to a nearest-neighbour image — upload one
         # texture instead of rasterizing 2*N sub-pixel triangles (the
-        # dominant cost on the GPU for dense meshes).
+        # dominant cost on the GPU for dense meshes). mpl enumerates
+        # cells row-major over (dim0, dim1); the x axis may lie along
+        # either dimension, so detect which one carries x.
         if (coords.shape[:2] == (meshHeight + 1, meshWidth + 1)
                 and len(fc) == N and np.all(offs == offs[0, 0])):
-            xs = pts[0, :, 0]
-            ys = pts[:, 0, 1]
-            if (np.allclose(pts[:, :, 0], xs[None, :], atol=1e-3)
-                    and np.allclose(pts[:, :, 1], ys[:, None], atol=1e-3)
-                    and np.allclose(np.diff(xs), xs[1] - xs[0], atol=1e-3)
+            D0, D1 = meshHeight, meshWidth
+            # x along axis1 (xs = row-0 x profile) vs axis0 (col-0).
+            if (abs(pts[-1, 0, 0] - pts[0, 0, 0])
+                    > abs(pts[0, -1, 0] - pts[0, 0, 0])):
+                # x varies along axis0 → cell (i,j): x∈[xs_i,xs_{i+1}],
+                # y∈[ys_j,ys_{j+1}]; fc[i*D1+j] → img[j, i].
+                xs, ys = pts[:, 0, 0], pts[0, :, 1]
+                ok = (np.allclose(pts[:, :, 0], xs[:, None], atol=1e-3)
+                      and np.allclose(pts[:, :, 1], ys[None, :],
+                                      atol=1e-3))
+                def mkimg(fc8):
+                    return fc8.reshape(D0, D1, 4).transpose(1, 0, 2)
+            else:
+                xs, ys = pts[0, :, 0], pts[:, 0, 1]
+                ok = (np.allclose(pts[:, :, 0], xs[None, :], atol=1e-3)
+                      and np.allclose(pts[:, :, 1], ys[:, None],
+                                      atol=1e-3))
+                def mkimg(fc8):
+                    return fc8.reshape(D0, D1, 4)
+            if (ok
+                    and np.allclose(np.diff(xs), xs[1] - xs[0],
+                                    atol=1e-3)
                     and np.allclose(np.diff(ys), ys[1] - ys[0],
                                     atol=1e-3)):
                 img = np.clip(fc * 255.0 + 0.5, 0, 255).astype(np.uint8)
-                img = np.ascontiguousarray(
-                    img.reshape(meshHeight, meshWidth, 4))
+                img = np.ascontiguousarray(mkimg(img))
                 if xs[-1] < xs[0]:
                     img = np.ascontiguousarray(img[:, ::-1])
                 if ys[-1] < ys[0]:
@@ -31703,8 +32241,8 @@ class RendererVolcano(RendererBase):
                 dst = (int(round(x0)), int(round(y0)),
                        max(1, int(round(x1 - x0))),
                        max(1, int(round(y1 - y0))))
-                self._cv.image(img.tobytes(), meshWidth, meshHeight,
-                               dst, 0, clip)
+                self._cv.image(img.tobytes(), img.shape[1],
+                               img.shape[0], dst, 0, clip)
                 return
 
         a = pts[:-1, :-1] + offs
@@ -31746,6 +32284,13 @@ class RendererVolcano(RendererBase):
         return True
 
     def option_image_nocomposite(self):
+        return True
+
+    def option_scale_image(self):
+        # We handle the affine transform ourselves (GPU-side sampling),
+        # so mpl can hand us the UNSAMPLED image when interpolation is
+        # 'none' — avoids its software resample and shrinks uploads
+        # (source-size instead of output-size textures).
         return True
 
     def new_gc(self):

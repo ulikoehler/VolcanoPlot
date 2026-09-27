@@ -2,7 +2,9 @@
 #include "volcano/core/ShaderModule.hpp"
 
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #ifdef VOLCANO_RUNTIME_SHADER_COMPILE
@@ -48,6 +50,23 @@ std::vector<uint32_t> ShaderModule::compileGlsl(std::string_view source,
     else if (stage == "tese") kind = shaderc_tess_evaluation_shader;
     else throw std::runtime_error("Unknown shader stage: " + std::string(stage));
 
+    // Process-wide memo: GLSL→SPIR-V is deterministic and most
+    // renderers compile identical sources (every plot layer owns its
+    // primitive renderer), so repeats across figures are cache hits.
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::vector<uint32_t>> cache;
+    std::string key;
+    key.reserve(source.size() + stage.size() + entryPoint.size() + 2);
+    key += stage;
+    key += '\x1f';
+    key += entryPoint;
+    key += '\x1f';
+    key += source;
+    {
+        std::lock_guard lk(mu);
+        if (auto it = cache.find(key); it != cache.end())
+            return it->second;
+    }
     shaderc::Compiler compiler;
     shaderc::CompileOptions opts;
     opts.SetOptimizationLevel(shaderc_optimization_level_performance);
@@ -55,7 +74,12 @@ std::vector<uint32_t> ShaderModule::compileGlsl(std::string_view source,
     if (res.GetCompilationStatus() != shaderc_compilation_status_success) {
         throw std::runtime_error("shaderc compile failed: " + res.GetErrorMessage());
     }
-    return {res.cbegin(), res.cend()};
+    std::vector<uint32_t> spirv{res.cbegin(), res.cend()};
+    {
+        std::lock_guard lk(mu);
+        cache.emplace(std::move(key), spirv);
+    }
+    return spirv;
 }
 #else
 std::vector<uint32_t> ShaderModule::compileGlsl(std::string_view, std::string_view, std::string_view) {

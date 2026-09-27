@@ -7,9 +7,12 @@ CommandPool::CommandPool(vk::Device device, uint32_t queueFamily, vk::CommandPoo
     vk::CommandPoolCreateInfo ci{};
     ci.setFlags(flags)
        .setQueueFamilyIndex(queueFamily);
-    pool_ = device.createCommandPoolUnique(ci);
+    pool_ = std::shared_ptr<vk::CommandPool>(
+        new vk::CommandPool(device.createCommandPool(ci)),
+        [device](vk::CommandPool* p) {
+            if (*p) device.destroyCommandPool(*p);
+            delete p;
+        });
 }
-
-CommandPool::~CommandPool() = default;
 
 } // namespace volcano::core

@@ -238,6 +238,10 @@ void GpuLineRenderer::ensureIn(size_t points) {
     if (inOff_ + points <= inBuf_.size() / sizeof(float) / 2) return;
     retiredIn_.push_back(std::move(inBuf_));
     size_t cap = std::max<size_t>(points + inOff_, 4096) * 2;
+    // Don't grow past the device allocation limit — chunking keeps the
+    // requirement bounded; use an exact fit for huge calls.
+    if (vk::DeviceSize(cap * sizeof(float) * 2) > kMaxBufferBytes)
+        cap = points + inOff_;
     core::BufferDesc d{};
     d.size = cap * sizeof(float) * 2;
     d.usage = core::BufferUsage::Storage;
@@ -250,6 +254,8 @@ void GpuLineRenderer::ensureOut(size_t verts) {
     if (outOff_ + verts <= outBuf_.size() / (sizeof(float) * 6)) return;
     retiredOut_.push_back(std::move(outBuf_));
     size_t cap = std::max<size_t>(verts + outOff_, 16384) * 2;
+    if (vk::DeviceSize(cap * sizeof(float) * 6) > kMaxBufferBytes)
+        cap = verts + outOff_;
     core::BufferDesc d{};
     d.size = cap * sizeof(float) * 6;
     d.usage = core::BufferUsage::VertexStorage;
@@ -270,11 +276,35 @@ void GpuLineRenderer::rebind() {
     device_.updateDescriptorSets(writes, {});
 }
 
-GpuLineRenderer::Mesh
+std::vector<GpuLineRenderer::Mesh>
 GpuLineRenderer::tessellate(vk::CommandBuffer cmd,
                             std::span<const plot::Point2D> px,
                             const plot::StrokeParams& sp,
                             plot::Color color) {
+    std::vector<Mesh> out;
+    if (px.size() < 2) return out;
+    // Huge inputs are split so each chunk's output stays under the
+    // device single-allocation limit. Chunks share ONE boundary point
+    // (px[e]) so the bridging segment is drawn exactly once — by the
+    // left chunk — while the seam point gets caps instead of a join
+    // wedge (invisible at these densities). Non-finite boundaries are
+    // harmless: segments touching a NaN are dropped either way.
+    size_t b = 0;
+    const size_t last = px.size() - 1;
+    while (b < last) {
+        size_t e = std::min(last, b + kMaxChunkPoints - 1);
+        out.push_back(tessellateChunk(cmd, px.subspan(b, e - b + 1),
+                                      sp, color));
+        b = e;
+    }
+    return out;
+}
+
+GpuLineRenderer::Mesh
+GpuLineRenderer::tessellateChunk(vk::CommandBuffer cmd,
+                                 std::span<const plot::Point2D> px,
+                                 const plot::StrokeParams& sp,
+                                 plot::Color color) {
     const uint32_t n = uint32_t(px.size());
     if (n < 2) return {};
     const uint32_t nSeg = n - 1;

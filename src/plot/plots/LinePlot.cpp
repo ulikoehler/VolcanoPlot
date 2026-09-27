@@ -166,7 +166,27 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
     auto& gpu = r.gpuLineRenderer();
     if (!gpu.inited()) return;
     auto px = pixelPoints(series_, axes, rect, transform.get());
-    gpuMesh_ = gpu.tessellate(cmd, px, sp, series_.resolvedColor());
+    // Massively oversampled x-monotonic polylines: stroke the per-pixel
+    // column min/max envelope instead — raster-equivalent coverage at
+    // ~2 verts per column instead of ~30 per input point.
+    const float W = float(r.backend().extent().width);
+    const size_t huge =
+        size_t(std::max(8192.0f, W * 4.0f));
+    if (px.size() > huge &&
+        std::is_sorted(px.begin(), px.end(),
+                       [](const Point2D& a, const Point2D& b) {
+                           return a.x < b.x;
+                       })) {
+        std::vector<Point2D> env;
+        for (auto& run : plot::columnDecimate(px, 0, int(W) - 1)) {
+            if (!env.empty()) env.push_back(
+                {std::numeric_limits<float>::quiet_NaN(),
+                 std::numeric_limits<float>::quiet_NaN()});
+            env.insert(env.end(), run.begin(), run.end());
+        }
+        px = std::move(env);
+    }
+    gpuMeshes_ = gpu.tessellate(cmd, px, sp, series_.resolvedColor());
     gpuMeshSeq_ = r.frameSeq();
 }
 
@@ -252,10 +272,11 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             solid.dashes.clear();
             linePass(solid, series_.gapColor, {});
         }
-        if (gpuMeshSeq_ == r.frameSeq() && gpuMesh_.buffer) {
-            spine.drawTrianglesGpu(cmd, clip, res, gpuMesh_.buffer,
-                                   gpuMesh_.firstVertex * 6 * sizeof(float),
-                                   gpuMesh_.vertexCount);
+        if (gpuMeshSeq_ == r.frameSeq() && !gpuMeshes_.empty()) {
+            for (auto& m : gpuMeshes_)
+                spine.drawTrianglesGpu(cmd, clip, res, m.buffer,
+                                       m.firstVertex * 6 * sizeof(float),
+                                       m.vertexCount);
         } else {
             linePass(sp, series_.resolvedColor(), {});
         }

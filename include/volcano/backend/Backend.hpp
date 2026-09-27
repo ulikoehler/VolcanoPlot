@@ -34,6 +34,20 @@ struct GpuContext {
     core::Allocator allocator;
     core::CommandPool graphicsPool;
     core::CommandPool computePool;
+
+    /// A GpuContext whose members share this one's Vulkan objects —
+    /// they die with the last holder. Lets many backends run on one
+    /// device without paying instance/device creation per backend.
+    [[nodiscard]] GpuContext share() const {
+        GpuContext c;
+        c.instance = instance.share();
+        c.physical = physical;
+        c.device = device.share();
+        c.allocator = allocator.share();
+        c.graphicsPool = graphicsPool.share();
+        c.computePool = computePool.share();
+        return c;
+    }
 };
 
 /// Backend-agnostic raw input event (windowing-layer level). The render
@@ -134,6 +148,14 @@ std::unique_ptr<IBackend> createScreenBackend(const BackendDesc& desc);
 
 /// Factory: create a headless offscreen backend.
 std::unique_ptr<IBackend> createHeadlessBackend(const BackendDesc& desc);
+/// Headless backend on a shared GPU context — skips instance/device
+/// creation (the expensive part) and builds only per-backend targets.
+std::unique_ptr<IBackend> createHeadlessBackend(
+    const BackendDesc& desc, std::shared_ptr<GpuContext> shared);
+/// Process-wide GPU context for headless rendering: one
+/// vkInstance/vkDevice shared by all headless backends created with
+/// the overload above. Created lazily on first call.
+std::shared_ptr<GpuContext> sharedGpuContext();
 
 /// Find a supported depth format for the given physical device.
 /// Tries D32Sfloat, D32SfloatS8Uint, D24UnormS8Uint in order.

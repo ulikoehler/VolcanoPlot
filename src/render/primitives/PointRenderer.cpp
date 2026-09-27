@@ -355,7 +355,7 @@ void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool p
 void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
                                  std::span<const plot::Color> colors,
                                  std::span<const float> sizes) {
-    if (points.size() <= capacity_) {
+    if (!pendingDraw_ && points.size() <= capacity_) {
         std::memcpy(pointBuffer_.mappedData(), points.data(),
                     points.size_bytes());
         std::memcpy(colorBuffer_.mappedData(), colors.data(),
@@ -367,6 +367,9 @@ void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
     }
     auto reallocUpload = [&](core::Buffer& buf, core::BufferUsage usage,
                              std::span<const std::byte> bytes) {
+        // Retire instead of destroying: draw commands recorded earlier in
+        // this frame may still reference the old buffer.
+        retired_.push_back(std::move(buf));
         core::BufferDesc d{};
         d.size = bytes.size();
         d.usage = usage;
@@ -387,6 +390,13 @@ void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
 void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                          const plot::Transform2D& transform, uint32_t pointCount,
                          MarkerParams marker) const {
+    draw(cmd, rect, rect, transform, pointCount, marker);
+}
+
+void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+                         vk::Rect2D scissor,
+                         const plot::Transform2D& transform,
+                         uint32_t pointCount, MarkerParams marker) const {
     if (!inited_ || pointCount == 0) return;
 
     struct PC {
@@ -434,12 +444,13 @@ void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
        .setHeight(static_cast<float>(rect.extent.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, scissor);
 
     std::array<vk::Buffer, 3> buffers = { pointBuffer_.handle(), colorBuffer_.handle(), sizeBuffer_.handle() };
     std::array<vk::DeviceSize, 3> offsets = {0,0,0};
     cmd.bindVertexBuffers(0, buffers, offsets);
     cmd.draw(pointCount, 1, 0, 0);
+    pendingDraw_ = true;
 }
 
 } // namespace volcano::render::primitives

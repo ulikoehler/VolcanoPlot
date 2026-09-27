@@ -13,26 +13,30 @@ HeadlessBackend::HeadlessBackend(const BackendDesc& desc) : desc_(desc) {
     colorFormat_ = (desc.colorFormat == vk::Format::eUndefined)
                        ? vk::Format::eR8G8B8A8Unorm : desc.colorFormat;
     samples_ = desc.samples;
+    createContext();
+    createTargets();
+}
 
+HeadlessBackend::HeadlessBackend(const BackendDesc& desc,
+                                 std::shared_ptr<GpuContext> shared)
+    : desc_(desc) {
+    extent_ = vk::Extent2D{desc.width, desc.height};
+    colorFormat_ = (desc.colorFormat == vk::Format::eUndefined)
+                       ? vk::Format::eR8G8B8A8Unorm : desc.colorFormat;
+    samples_ = desc.samples;
+    ctx_ = shared->share();
+    createTargets();
+}
+
+void HeadlessBackend::createContext() {
     // Instance — no surface, no validation by default.
     core::InstanceDesc idesc{};
     idesc.applicationName = "VolcanoPlot Headless";
-    idesc.enableValidation = desc.enableValidation;
+    idesc.enableValidation = desc_.enableValidation;
     ctx_.instance = core::Instance(idesc);
 
     // Physical device — no surface.
     ctx_.physical = core::PhysicalDevice(ctx_.instance.handle(), nullptr);
-
-    // Cap MSAA to device-supported samples.
-    auto props = ctx_.physical.properties();
-    auto maxSamples = props.limits.framebufferColorSampleCounts;
-    if (!(maxSamples & samples_)) {
-        for (auto s : {vk::SampleCountFlagBits::e16, vk::SampleCountFlagBits::e8,
-                       vk::SampleCountFlagBits::e4, vk::SampleCountFlagBits::e2,
-                       vk::SampleCountFlagBits::e1}) {
-            if (maxSamples & s) { samples_ = s; break; }
-        }
-    }
 
     core::DeviceDesc ddesc{};
     ddesc.hasSurface = false;
@@ -43,6 +47,19 @@ HeadlessBackend::HeadlessBackend(const BackendDesc& desc) : desc_(desc) {
                                           vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
     ctx_.computePool = core::CommandPool(ctx_.device.handle(), ctx_.device.computeFamily(),
                                          vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
+}
+
+void HeadlessBackend::createTargets() {
+    // Cap MSAA to device-supported samples.
+    auto props = ctx_.physical.properties();
+    auto maxSamples = props.limits.framebufferColorSampleCounts;
+    if (!(maxSamples & samples_)) {
+        for (auto s : {vk::SampleCountFlagBits::e16, vk::SampleCountFlagBits::e8,
+                       vk::SampleCountFlagBits::e4, vk::SampleCountFlagBits::e2,
+                       vk::SampleCountFlagBits::e1}) {
+            if (maxSamples & s) { samples_ = s; break; }
+        }
+    }
 
     createRenderPass();
     createFramebuffer();
