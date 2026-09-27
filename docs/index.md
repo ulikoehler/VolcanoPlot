@@ -46,5 +46,7 @@ fig.savefig("out.png")
 - Animation: APNG/GIF/WebP writers with GPU PNG filtering
 - Python bindings with numpy/pandas/datetime/categorical ingestion
 
-See [Gallery](gallery.md) for side-by-side matplotlib comparisons and
-[Microfeatures](MICROFEATURES.md) for the per-feature parity checklist.
+See [Gallery](gallery.md) for side-by-side matplotlib comparisons,
+[Microfeatures](MICROFEATURES.md) for the per-feature parity checklist, and
+[Performance](PERFORMANCE.md) for a measured guide to when VolcanoPlot is
+faster or slower than stock matplotlib (Agg vs. mpl-backend vs. native API).
