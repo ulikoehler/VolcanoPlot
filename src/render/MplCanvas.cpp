@@ -584,9 +584,11 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
             }
         }
         std::vector<plot::Point2D> tris;
-        if (closedVerts > 4096) {
-            // earClip is O(n²); scanline-fill per pixel column instead
-            // (even-odd parity across all rings = mpl's fill rule).
+        if (closedVerts > 512) {
+            // earClip rescans the ring per ear (O(n²)-worse on
+            // reflex-heavy boundaries like stackplot's jagged polys);
+            // scanline-fill per pixel column instead (even-odd parity
+            // across all rings = mpl's fill rule).
             int cx0 = op.clip ? op.clip->x : 0;
             int cx1 = (op.clip ? op.clip->x + int(op.clip->width)
                                : int(res.width)) - 1;

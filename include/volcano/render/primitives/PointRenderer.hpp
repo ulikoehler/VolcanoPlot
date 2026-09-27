@@ -48,6 +48,9 @@ public:
     [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
     /// Number of uploaded points (0 until upload() is called).
     [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
+    /// True once attribute buffers have been allocated (upload() or
+    /// updatePoints()) — updatePoints() is safe to call only then.
+    [[nodiscard]] bool hasData() const noexcept { return capacity_ > 0; }
     /// In-place data update: memcpy into the host-visible point buffer
     /// when the new count fits the existing allocation, else reallocate
     /// all three attribute buffers. Reallocated buffers are retired (not

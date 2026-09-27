@@ -432,8 +432,15 @@ void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
         if (face && face->a == 0)
             filled = false;
         if (!filled) g.filled = false;
+        std::optional<render::primitives::MarkerParams> sdf;
+        if (g.filled && series_.markerFill == MarkerFill::Full)
+            sdf = render::primitives::MarkerParams{
+                static_cast<float>(series_.marker),
+                static_cast<float>(series_.markerFill),
+                static_cast<float>(series_.markerNumsides),
+                series_.markerAngle};
         drawMarkersPx(r, cmd, clip, px, g, series_.size, lineC,
-                      mew, face, edge);
+                      mew, face, edge, {}, {}, sdf);
     }
 }
 void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,

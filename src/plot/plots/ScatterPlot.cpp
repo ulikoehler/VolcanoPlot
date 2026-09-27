@@ -177,11 +177,18 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                 if (series_.markerFill == MarkerFill::None ||
                     (series_.applyAlpha(series_.markerFaceColor) && series_.applyAlpha(series_.markerFaceColor)->a == 0))
                     g.filled = false;
+                std::optional<render::primitives::MarkerParams> sdf;
+                if (g.filled && series_.markerFill == MarkerFill::Full)
+                    sdf = render::primitives::MarkerParams{
+                        static_cast<float>(series_.marker),
+                        static_cast<float>(series_.markerFill),
+                        static_cast<float>(series_.markerNumsides),
+                        series_.markerAngle};
                 drawMarkersPx(r, cmd, vrect, px, g, series_.size,
                               series_.resolvedColor(), mew,
                               series_.applyAlpha(series_.markerFaceColor),
                               series_.applyAlpha(series_.markerEdgeColor),
-                              pcCache_, psCache_);
+                              pcCache_, psCache_, sdf);
             }
         };
         if (pathEffects.empty()) {
@@ -228,11 +235,19 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                 if (series_.markerFill == MarkerFill::None ||
                     (series_.applyAlpha(series_.markerFaceColor) && series_.applyAlpha(series_.markerFaceColor)->a == 0))
                     g.filled = false;
+                std::optional<render::primitives::MarkerParams> sdf;
+                if (g.filled && !faceOv &&
+                    series_.markerFill == MarkerFill::Full)
+                    sdf = render::primitives::MarkerParams{
+                        static_cast<float>(series_.marker),
+                        static_cast<float>(series_.markerFill),
+                        static_cast<float>(series_.markerNumsides),
+                        series_.markerAngle};
                 drawMarkersPx(r, cmd, vrect, opx, g, series_.size,
                               series_.resolvedColor(), ew,
                               faceOv ? faceOv : series_.applyAlpha(series_.markerFaceColor),
                               edgeOv ? edgeOv : series_.applyAlpha(series_.markerEdgeColor),
-                              {}, psCache_);
+                              {}, psCache_, sdf);
             }
             if (fx.thenNormal) normalPass({});
         }

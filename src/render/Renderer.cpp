@@ -170,6 +170,9 @@ void Renderer::prepare(plot::Figure& figure) {
                                     *pipelineCache_, *descriptorPool_);
         gpuLineRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
                               *descriptorPool_, *pipelineCache_);
+        pointRenderer_.init(ctx.device.handle(), backend_.renderPass(),
+                            backend_.sampleCount(), *descriptorPool_,
+                            *pipelineCache_);
         spineInited_ = true;
     }
     // Init GPU autoscale reduce pipeline once.
@@ -2034,6 +2037,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     textRenderer_.resetScratch();
     spineRenderer_.resetScratch();
     instancedPathRenderer_.resetScratch();
+    pointRenderer_.resetScratch();
 
     // Figure patch (figure.facecolor) fills the canvas under everything.
     const auto& figFc = figure.style().faceColor;
@@ -2970,6 +2974,7 @@ bool Renderer::savefigVector(plot::Figure& figure,
             auto cmd = backend_.beginFrame();
             spineRenderer_.resetScratch();
             instancedPathRenderer_.resetScratch();
+            pointRenderer_.resetScratch();
             textRenderer_.resetScratch();
             for (auto* p : plots)
                 if (p->visible)

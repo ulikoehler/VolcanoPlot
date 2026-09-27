@@ -5,6 +5,8 @@
 #include "../VectorEmitHelpers.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
+#include <map>
+#include <tuple>
 
 namespace volcano::plot {
 
@@ -395,16 +397,32 @@ void EventPlot::buildRows() {
 void EventPlot::prepare(render::Renderer& r) {
     buildRows();
     auto& ctx = r.backend().context();
-    renderers_.clear();
+    groups_.clear();
+    // Rows sharing (color, width) concatenate into one buffer/upload.
+    std::map<std::tuple<float, float, float, float, float>, size_t> gidx;
+    std::vector<std::vector<Point2D>> gverts;
+    std::vector<std::pair<Color, float>> gstyle;
     for (size_t i = 0; i < rowSegs_.size(); ++i) {
         if (rowSegs_[i].empty()) continue;
+        auto key = std::tuple{rowColors_[i].r, rowColors_[i].g,
+                              rowColors_[i].b, rowColors_[i].a,
+                              rowWidths_[i]};
+        auto [it, ins] = gidx.try_emplace(key, gverts.size());
+        if (ins) {
+            gverts.emplace_back();
+            gstyle.emplace_back(rowColors_[i], rowWidths_[i]);
+        }
+        gverts[it->second].insert(gverts[it->second].end(),
+                                  rowSegs_[i].begin(), rowSegs_[i].end());
+    }
+    for (size_t g = 0; g < gverts.size(); ++g) {
         auto sr = std::make_unique<render::primitives::LineSegmentRenderer>();
         sr->init(ctx.device.handle(), r.backend().renderPass(),
                  r.backend().sampleCount(), r.pipelineCache());
         sr->upload(ctx.device.handle(), ctx.device.graphicsQueue(),
                    ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                   std::span{rowSegs_[i]}, rowColors_[i], rowWidths_[i]);
-        renderers_.push_back(std::move(sr));
+                   std::span{gverts[g]}, gstyle[g].first, gstyle[g].second);
+        groups_.push_back({std::move(sr), uint32_t(gverts[g].size())});
     }
     prepared_ = true;
 }
@@ -414,12 +432,8 @@ void EventPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!prepared_) return;
     Transform2D t = axes.transform();
     vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    size_t row = 0;
-    for (auto& sr : renderers_) {
-        while (row < rowSegs_.size() && rowSegs_[row].empty()) ++row;
-        if (row >= rowSegs_.size()) break;
-        sr->draw(cmd, vrect, t, uint32_t(rowSegs_[row++].size()));
-    }
+    for (auto& g : groups_)
+        g.r->draw(cmd, vrect, t, g.count);
 }
 
 void EventPlot::emitVector(render::VectorCanvas& c, const Axes& axes,

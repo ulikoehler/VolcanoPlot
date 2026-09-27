@@ -340,8 +340,13 @@ private:
     std::vector<std::vector<Point2D>> rowSegs_;
     std::vector<Color> rowColors_;
     std::vector<float> rowWidths_;
-    std::vector<std::unique_ptr<render::primitives::LineSegmentRenderer>>
-        renderers_;
+    // One renderer + one uploaded buffer per distinct (color, width)
+    // group — NOT per row (20k rows × VMA upload = minutes).
+    struct SegGroup {
+        std::unique_ptr<render::primitives::LineSegmentRenderer> r;
+        uint32_t count = 0;
+    };
+    std::vector<SegGroup> groups_;
     bool prepared_ = false;
 
     void buildRows();

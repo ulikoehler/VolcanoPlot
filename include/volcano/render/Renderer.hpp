@@ -7,6 +7,7 @@
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/InstancedPathRenderer.hpp>
 #include <volcano/render/primitives/GpuLineRenderer.hpp>
+#include <volcano/render/primitives/PointRenderer.hpp>
 #include <volcano/core/CommandBuffer.hpp>
 #include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
@@ -100,6 +101,10 @@ public:
     [[nodiscard]] primitives::GpuLineRenderer& gpuLineRenderer() noexcept {
         return gpuLineRenderer_;
     }
+    /// SDF point-sprite renderer — lazily inited with the spine renderer.
+    [[nodiscard]] primitives::PointRenderer& pointRenderer() noexcept {
+        return pointRenderer_;
+    }
     /// Monotonically increasing draw-cycle counter — plots use it to
     /// invalidate GPU meshes produced in a previous frame's preDraw.
     [[nodiscard]] uint64_t frameSeq() const noexcept { return frameSeq_; }
@@ -164,6 +169,7 @@ private:
     primitives::SpineRenderer spineRenderer_;
     primitives::InstancedPathRenderer instancedPathRenderer_;
     primitives::GpuLineRenderer gpuLineRenderer_;
+    primitives::PointRenderer pointRenderer_;
     /// Pre-pass command buffer for IPlot::preDraw compute work — recorded
     /// and submitted before beginFrame() each renderFrameSubset.
     std::optional<core::CommandBuffer> preCmd_;
