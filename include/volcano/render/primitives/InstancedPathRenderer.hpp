@@ -56,6 +56,7 @@ public:
     void resetScratch() {
         scratchOffset_ = 0;
         retiredScratch_.clear();
+        retiredTemplates_.clear();
     }
 
 private:
@@ -69,6 +70,9 @@ private:
 
     core::Buffer templateVB_;
     uint32_t templateVerts_ = 0;
+    /// Templates replaced mid-frame; draws recorded earlier may still
+    /// reference them — freed on resetScratch().
+    std::vector<core::Buffer> retiredTemplates_;
 
     core::Buffer scratchVB_;
     std::vector<core::Buffer> retiredScratch_;

@@ -151,6 +151,10 @@ void InstancedPathRenderer::setTemplate(vk::Device device, vk::Queue queue,
                                         std::span<const plot::Point2D> triVerts) {
     templateVerts_ = uint32_t(triVerts.size());
     if (triVerts.empty()) { templateVB_ = {}; return; }
+    // A draw recorded earlier this frame may still reference the old
+    // template buffer — retire it instead of freeing.
+    if (templateVB_.handle() != VK_NULL_HANDLE)
+        retiredTemplates_.push_back(std::move(templateVB_));
     core::BufferDesc bdesc{};
     bdesc.size = triVerts.size() * sizeof(plot::Point2D);
     bdesc.usage = core::BufferUsage::Vertex;

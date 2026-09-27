@@ -120,6 +120,75 @@ std::vector<plot::Point2D> bridgeHole(std::span<const plot::Point2D> outer,
     return out;
 }
 
+/// Per-pixel-column min/max envelope of a polyline: for every covered
+/// x-column records the lowest/highest y the line reaches, then emits
+/// an alternating (min,max)/(max,min) zigzag so adjacent columns link
+/// edge-to-edge. Raster-equivalent to drawing all original segments
+/// for massively oversampled data, at ~2 vertices per column.
+/// Returns one polyline per contiguous run of covered columns.
+std::vector<std::vector<plot::Point2D>>
+columnDecimate(std::span<const plot::Point2D> pts, int cx0, int cx1) {
+    int W = cx1 - cx0 + 1;
+    if (W <= 0 || pts.size() < 2) return {};
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> mn(W, inf), mx(W, -inf);
+    auto upd = [&](int c, float lo, float hi) {
+        int i = c - cx0;
+        if (i < 0 || i >= W) return;
+        mn[i] = std::min(mn[i], lo);
+        mx[i] = std::max(mx[i], hi);
+    };
+    for (size_t i = 1; i < pts.size(); ++i) {
+        auto a = pts[i - 1], b = pts[i];
+        if (!std::isfinite(a.x) || !std::isfinite(a.y) ||
+            !std::isfinite(b.x) || !std::isfinite(b.y))
+            continue;
+        float xlo = std::min(a.x, b.x), xhi = std::max(a.x, b.x);
+        int s = std::max(cx0, (int)std::floor(xlo));
+        int e = std::min(cx1, (int)std::floor(xhi));
+        for (int c = s; c <= e; ++c) {
+            float lo, hi;
+            if (xhi - xlo < 1e-6f) {
+                lo = std::min(a.y, b.y);
+                hi = std::max(a.y, b.y);
+            } else {
+                float xl = std::max(xlo, float(c));
+                float xr = std::min(xhi, float(c + 1));
+                float yl = a.y + (b.y - a.y) * (xl - a.x) / (b.x - a.x);
+                float yr = a.y + (b.y - a.y) * (xr - a.x) / (b.x - a.x);
+                lo = std::min(yl, yr);
+                hi = std::max(yl, yr);
+            }
+            upd(c, lo, hi);
+        }
+    }
+    std::vector<std::vector<plot::Point2D>> runs;
+    std::vector<plot::Point2D>* cur = nullptr;
+    bool high = false;
+    for (int i = 0; i < W; ++i) {
+        if (!std::isfinite(mn[i])) {
+            cur = nullptr;
+            high = false;
+            continue;
+        }
+        if (!cur) {
+            runs.emplace_back();
+            cur = &runs.back();
+            high = false;
+        }
+        float x = float(cx0 + i) + 0.5f;
+        if (!high) {
+            cur->push_back({x, mn[i]});
+            cur->push_back({x, mx[i]});
+        } else {
+            cur->push_back({x, mx[i]});
+            cur->push_back({x, mn[i]});
+        }
+        high = !high;
+    }
+    return runs;
+}
+
 } // namespace
 
 // ═══ construction / teardown ═══════════════════════════════════════
@@ -177,6 +246,14 @@ void MplCanvas::initRenderers() {
     spine_.init(ctx.device.handle(), ctx.allocator.handle(),
                 backend_->renderPass(), backend_->sampleCount(),
                 *pipelineCache_, *descPool_);
+    instFill_.init(ctx.device.handle(), ctx.allocator.handle(),
+                   backend_->renderPass(), backend_->sampleCount(),
+                   *pipelineCache_, *descPool_);
+    instEdge_.init(ctx.device.handle(), ctx.allocator.handle(),
+                   backend_->renderPass(), backend_->sampleCount(),
+                   *pipelineCache_, *descPool_);
+    gpuLine_.init(ctx.device.handle(), ctx.allocator.handle(),
+                  *descPool_, *pipelineCache_);
     heat_.init(ctx.device.handle(), backend_->renderPass(),
                backend_->sampleCount(), *pipelineCache_, *descPool_);
     text_.init(ctx.device.handle(), ctx.allocator.handle(),
@@ -209,10 +286,15 @@ void MplCanvas::beginFrame() {
 }
 
 void MplCanvas::endFrame() {
+    // GPU pre-pass: tessellate large solid edge strokes on the GPU —
+    // CPU stroking dominates replay for ≥~1k-vertex polylines.
+    gpuPrepass();
     for (int pass = 0; pass < 2; ++pass) {
         backend_->setClearColor(clear_.r, clear_.g, clear_.b, clear_.a);
         auto cmd = backend_->beginFrame();
         spine_.resetScratch();
+        instFill_.resetScratch();
+        instEdge_.resetScratch();
         text_.resetScratch();
         execute(cmd);
         backend_->endFrame();
@@ -305,6 +387,39 @@ void MplCanvas::gouraud(float x0, float y0, float x1, float y1,
     ops_.emplace_back(std::move(op));
 }
 
+void MplCanvas::tris(std::span<const float> verts,
+                     std::span<const float> colors,
+                     std::optional<plot::Rect2D> clip) {
+    TrisOp op;
+    op.verts.assign(verts.begin(), verts.end());
+    op.colors.assign(colors.begin(), colors.end());
+    op.clip = clip;
+    ops_.emplace_back(std::move(op));
+}
+
+void MplCanvas::instances(std::span<const float> tplVerts,
+                          std::span<const uint8_t> tplCodes,
+                          std::span<const float> instXY,
+                          std::span<const float> instRGBA,
+                          plot::Color uniform,
+                          float lwPx, plot::JoinStyle join,
+                          plot::CapStyle cap,
+                          std::span<const float> edgeRGBA,
+                          plot::Color uniformEdge,
+                          std::optional<plot::Rect2D> clip) {
+    InstanceOp op;
+    op.tplVerts.assign(tplVerts.begin(), tplVerts.end());
+    op.tplCodes.assign(tplCodes.begin(), tplCodes.end());
+    op.instXY.assign(instXY.begin(), instXY.end());
+    op.instRGBA.assign(instRGBA.begin(), instRGBA.end());
+    op.uniform = uniform;
+    op.lwPx = lwPx; op.join = join; op.cap = cap;
+    op.edgeRGBA.assign(edgeRGBA.begin(), edgeRGBA.end());
+    op.uniformEdge = uniformEdge;
+    op.clip = clip;
+    ops_.emplace_back(std::move(op));
+}
+
 // ═══ metrics ════════════════════════════════════════════════════════
 
 MplCanvas::TextMetrics
@@ -366,18 +481,18 @@ void MplCanvas::execute(vk::CommandBuffer cmd) {
             if constexpr (std::is_same_v<T, PathOp>) execPath(cmd, o);
             else if constexpr (std::is_same_v<T, ImageOp>) execImage(cmd, o);
             else if constexpr (std::is_same_v<T, TextOp>) execText(cmd, o);
+            else if constexpr (std::is_same_v<T, TrisOp>) execTris(cmd, o);
+            else if constexpr (std::is_same_v<T, InstanceOp>)
+                execInstances(cmd, o);
             else execGouraud(cmd, o);
         }, op);
 }
 
-void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
-    auto res = backend_->extent();
-    auto clip = clipVk(op.clip, res);
-    // Rebuild the path, then flatten to subpaths. mpl may emit more
-    // codes than vertices (e.g. QuadMesh paths where the CLOSEPOLY
-    // code has no vertex): iterate over the codes and synthesize the
-    // closing vertex from the current subpath start so `toPolylines`
-    // still marks the ring closed.
+plot::Path MplCanvas::pathFromOp(const PathOp& op) {
+    // Rebuild the path. mpl may emit more codes than vertices (e.g.
+    // QuadMesh paths where the CLOSEPOLY code has no vertex): iterate
+    // over the codes and synthesize the closing vertex from the
+    // current subpath start so `toPolylines` still marks it closed.
     plot::Path p;
     size_t nv = op.verts.size() / 2;
     p.vertices.reserve(std::max(nv, op.codes.size()));
@@ -404,7 +519,80 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         p.codes.push_back(p.codes.empty() ? plot::Path::MoveTo
                                           : plot::Path::LineTo);
     }
-    auto subs = p.toPolylines();
+    return p;
+}
+
+void MplCanvas::gpuPrepass() {
+    if (!gpuLine_.inited()) return;
+    auto& ctx = backend_->context();
+    bool recorded = false;
+    if (!preCmd_)
+        preCmd_.emplace(ctx.device.handle(), ctx.graphicsPool.handle());
+    preCmd_->reset();
+    preCmd_->begin();
+    gpuLine_.resetScratch();
+    for (auto& v : ops_) {
+        auto* op = std::get_if<PathOp>(&v);
+        if (!op || op->edge.a <= 0.0f || op->lwPx <= 0.0f ||
+            !op->dashSeq.empty() || !op->clipRing.empty())
+            continue;
+        op->subsCache = pathFromOp(*op).toPolylines();
+        size_t total = 0;
+        bool anyClosed = false;
+        for (auto& sp : op->subsCache) {
+            anyClosed |= sp.closed;
+            total += sp.points.size();
+        }
+        if (anyClosed) {
+            op->subsCache.clear();
+            continue;
+        }
+        // Massively oversampled polylines: replay strokes the per-
+        // pixel-column min/max envelope instead — raster-equivalent
+        // coverage at ~2 verts per column.
+        auto ext = backend_->extent();
+        float clipW = op->clip ? float(op->clip->width)
+                               : float(ext.width);
+        size_t huge = size_t(std::max(8192.0f, clipW * 4.0f));
+        if (total > huge) {
+            op->decimateEdge = true;
+            continue;
+        }
+        // CPU stroking wins for small paths (dispatch overhead).
+        if (total < 1024) {
+            op->subsCache.clear();
+            continue;
+        }
+        plot::StrokeParams sp;
+        sp.width = op->lwPx;
+        sp.join = op->join;
+        sp.cap = op->cap;
+        for (auto& sub : op->subsCache) {
+            if (sub.points.size() < 2) continue;
+            op->edgeMeshes.push_back(gpuLine_.tessellate(
+                preCmd_->handle(), sub.points, sp, op->edge));
+        }
+        op->gpuStroke = true;
+        recorded = true;
+    }
+    preCmd_->end();
+    // Same-queue ordering makes the tessellated meshes visible to the
+    // render-pass submission (same mechanism as staging uploads).
+    if (recorded) {
+        vk::SubmitInfo si{};
+        vk::CommandBuffer pcb = preCmd_->handle();
+        si.setCommandBuffers(pcb);
+        ctx.device.graphicsQueue().submit(si);
+    }
+}
+
+void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
+    auto res = backend_->extent();
+    auto clip = clipVk(op.clip, res);
+    std::vector<plot::Path::Subpath> localSubs;
+    if (op.subsCache.empty())
+        localSubs = pathFromOp(op).toPolylines();
+    const auto& subs = !op.subsCache.empty() ? op.subsCache : localSubs;
 
     // mpl closes some paths by repeating the first vertex as LINETO
     // (e.g. QuadMesh quads) without a CLOSEPOLY code — treat a subpath
@@ -479,7 +667,12 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
     }
 
     // ── edge ──
-    if (op.edge.a > 0.0f && op.lwPx > 0.0f) {
+    if (op.gpuStroke) {
+        for (auto& m : op.edgeMeshes)
+            spine_.drawTrianglesGpu(cmd, clip, res, m.buffer,
+                                    m.firstVertex * 6 * sizeof(float),
+                                    m.vertexCount);
+    } else if (op.edge.a > 0.0f && op.lwPx > 0.0f) {
         plot::StrokeParams sp;
         sp.width = op.lwPx;
         sp.dashes = op.dashSeq;
@@ -487,15 +680,31 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         sp.join = op.join;
         sp.cap = op.cap;
         std::vector<plot::Point2D> ev;
-        for (auto& sub : subs) {
-            if (sub.points.size() < 2) continue;
-            auto pts = sub.points;
-            if (sub.closed &&
-                (pts.front().x != pts.back().x ||
-                 pts.front().y != pts.back().y))
-                pts.push_back(pts.front());
-            auto mesh = plot::strokePolyline(pts, sp);
-            ev.insert(ev.end(), mesh.verts.begin(), mesh.verts.end());
+        if (op.decimateEdge) {
+            int cx0 = op.clip ? op.clip->x : 0;
+            int cx1 = (op.clip ? op.clip->x + int(op.clip->width)
+                               : int(res.width)) - 1;
+            for (auto& sub : subs) {
+                if (sub.points.size() < 2) continue;
+                for (auto& run :
+                     columnDecimate(sub.points, cx0, cx1)) {
+                    auto mesh = plot::strokePolyline(run, sp);
+                    ev.insert(ev.end(), mesh.verts.begin(),
+                              mesh.verts.end());
+                }
+            }
+        } else {
+            for (auto& sub : subs) {
+                if (sub.points.size() < 2) continue;
+                auto pts = sub.points;
+                if (sub.closed &&
+                    (pts.front().x != pts.back().x ||
+                     pts.front().y != pts.back().y))
+                    pts.push_back(pts.front());
+                auto mesh = plot::strokePolyline(pts, sp);
+                ev.insert(ev.end(), mesh.verts.begin(),
+                          mesh.verts.end());
+            }
         }
         if (!op.clipRing.empty())
             ev = plot::clipTrianglesToPolygon(ev, op.clipRing);
@@ -591,17 +800,157 @@ void MplCanvas::execText(vk::CommandBuffer cmd, const TextOp& op) {
 }
 
 void MplCanvas::execGouraud(vk::CommandBuffer cmd, const GouraudOp& op) {
-    // v1: average vertex color, single triangle.
-    plot::Color avg{
-        (op.c[0].r + op.c[1].r + op.c[2].r) / 3.0f,
-        (op.c[0].g + op.c[1].g + op.c[2].g) / 3.0f,
-        (op.c[0].b + op.c[1].b + op.c[2].b) / 3.0f,
-        (op.c[0].a + op.c[1].a + op.c[2].a) / 3.0f};
     plot::Point2D tri[3] = {{op.x[0], op.y[0]}, {op.x[1], op.y[1]},
-                      {op.x[2], op.y[2]}};
+                            {op.x[2], op.y[2]}};
     auto res = backend_->extent();
-    spine_.drawTriangles(cmd, clipVk(op.clip, res), res,
-                         std::span{tri, 3}, avg);
+    spine_.drawTrianglesVC(cmd, clipVk(op.clip, res), res,
+                           std::span{tri, 3}, std::span{op.c, 3});
+}
+
+void MplCanvas::execTris(vk::CommandBuffer cmd, const TrisOp& op) {
+    size_t n = op.verts.size() / 2;
+    if (n < 3 || op.colors.size() < n * 4) return;
+    trisScratch_.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        trisScratch_[i] = {op.verts[2 * i], op.verts[2 * i + 1]};
+    auto res = backend_->extent();
+    spine_.drawTrianglesVC(
+        cmd, clipVk(op.clip, res), res, trisScratch_,
+        std::span{reinterpret_cast<const plot::Color*>(op.colors.data()),
+                  n});
+}
+
+void MplCanvas::execInstances(vk::CommandBuffer cmd,
+                              const InstanceOp& op) {
+    auto res = backend_->extent();
+    auto clip = clipVk(op.clip, res);
+    size_t n = op.instXY.size() / 2;
+    if (n == 0) return;
+    bool perInstFace = op.instRGBA.size() >= n * 4;
+    bool perInstEdge = op.edgeRGBA.size() >= n * 4;
+
+    // Rebuild the template path (orphan CLOSEPOLY tolerated, as in
+    // execPath), then split into subpaths.
+    plot::Path p;
+    size_t nv = op.tplVerts.size() / 2;
+    p.vertices.reserve(std::max(nv, op.tplCodes.size()));
+    p.codes.reserve(std::max(nv, op.tplCodes.size()));
+    size_t subStart = 0;
+    for (size_t i = 0; i < op.tplCodes.size(); ++i) {
+        auto code = static_cast<plot::Path::Code>(op.tplCodes[i]);
+        plot::Point2D pt;
+        if (i < nv) {
+            pt = {op.tplVerts[2 * i], op.tplVerts[2 * i + 1]};
+        } else if (code == plot::Path::ClosePoly &&
+                   !p.vertices.empty()) {
+            pt = p.vertices[subStart];
+        } else {
+            break;
+        }
+        if (code == plot::Path::MoveTo) subStart = p.vertices.size();
+        p.vertices.push_back(pt);
+        p.codes.push_back(code);
+    }
+    for (size_t i = p.vertices.size(); i < nv; ++i) {
+        p.vertices.push_back({op.tplVerts[2 * i], op.tplVerts[2 * i + 1]});
+        p.codes.push_back(p.codes.empty() ? plot::Path::MoveTo
+                                          : plot::Path::LineTo);
+    }
+    // Templates are already in pixel units (marker size is baked into
+    // the verts and instance scale is 1). Tessellating every curve at
+    // the default 16 steps gives ~130 verts for a 3px marker — pure
+    // waste of rasterizer throughput. Scale the subdivision count to
+    // the template's on-screen extent (~1px chords).
+    float tplMax = 1.0f;
+    for (auto& v : p.vertices) {
+        tplMax = std::max(tplMax, std::max(std::abs(v.x), std::abs(v.y)));
+    }
+    int curveSteps = tplMax <= 3.0f
+        ? 1
+        : std::clamp(int(std::lround(tplMax / 1.5f)), 2, 16);
+    auto subs = p.toPolylines(curveSteps);
+
+    auto fillInsts = [&](std::span<const float> rgba,
+                         plot::Color uniform) {
+        instScratch_.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            auto& pi = instScratch_[i];
+            pi.ox = op.instXY[2 * i];
+            pi.oy = op.instXY[2 * i + 1];
+            pi.sx = 1.0f; pi.sy = 1.0f;
+            if (!rgba.empty()) {
+                pi.r = rgba[4 * i];     pi.g = rgba[4 * i + 1];
+                pi.b = rgba[4 * i + 2]; pi.a = rgba[4 * i + 3];
+            } else {
+                pi.r = uniform.r; pi.g = uniform.g;
+                pi.b = uniform.b; pi.a = uniform.a;
+            }
+        }
+        return std::span<const primitives::PathInstance>(instScratch_);
+    };
+
+    // ── fill: ear-clip each closed subpath, then ONE instanced draw ──
+    bool wantFill = perInstFace
+        ? ([&] { for (size_t i = 0; i < n; ++i)
+                     if (op.instRGBA[4 * i + 3] > 0) return true;
+                 return false; }())
+        : op.uniform.a > 0.0f;
+    if (wantFill) {
+        tplScratch_.clear();
+        for (auto& sp : subs) {
+            if (!sp.closed || sp.points.size() < 3) continue;
+            auto pts = sp.points;
+            if (pts.size() >= 4 && pts.front().x == pts.back().x &&
+                pts.front().y == pts.back().y)
+                pts.pop_back();
+            if (pts.size() < 3) continue;
+            auto t = earClip(pts);
+            tplScratch_.insert(tplScratch_.end(), t.begin(), t.end());
+        }
+        if (!tplScratch_.empty()) {
+            auto& ctx = backend_->context();
+            instFill_.setTemplate(ctx.device.handle(),
+                                  ctx.device.graphicsQueue(),
+                                  ctx.graphicsPool.handle(), tplScratch_);
+            instFill_.drawInstanced(
+                cmd, clip, res,
+                fillInsts(op.instRGBA, op.uniform));
+        }
+    }
+
+    // ── edge: stroke template, then ONE instanced draw ──
+    bool anyEdge = perInstEdge
+        ? ([&] { for (size_t i = 0; i < n; ++i)
+                     if (op.edgeRGBA[4 * i + 3] > 0) return true;
+                 return false; }())
+        : op.uniformEdge.a > 0.0f;
+    if (anyEdge && op.lwPx > 0.0f) {
+        plot::StrokeParams sp;
+        sp.width = op.lwPx;
+        sp.join = op.join;
+        sp.cap = op.cap;
+        tplScratch_.clear();
+        for (auto& sub : subs) {
+            if (sub.points.size() < 2) continue;
+            auto pts = sub.points;
+            if (sub.closed &&
+                (pts.front().x != pts.back().x ||
+                 pts.front().y != pts.back().y))
+                pts.push_back(pts.front());
+            auto mesh = plot::strokePolyline(pts, sp);
+            tplScratch_.insert(tplScratch_.end(), mesh.verts.begin(),
+                               mesh.verts.end());
+        }
+        if (!tplScratch_.empty()) {
+            auto& ctx = backend_->context();
+            instEdge_.setTemplate(ctx.device.handle(),
+                                  ctx.device.graphicsQueue(),
+                                  ctx.graphicsPool.handle(), tplScratch_);
+            instEdge_.drawInstanced(
+                cmd, clip, res,
+                fillInsts(op.edgeRGBA, op.uniformEdge));
+        }
+    }
 }
 
 } // namespace volcano::render

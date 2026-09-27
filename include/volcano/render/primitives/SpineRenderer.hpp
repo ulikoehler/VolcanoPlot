@@ -75,6 +75,13 @@ public:
                        std::span<const plot::Point2D> triVerts,
                        plot::Color color);
 
+    /// Like drawTriangles, but each vertex carries its own color
+    /// (per-vertex interpolation — Gouraud-style fills, color meshes).
+    void drawTrianglesVC(vk::CommandBuffer cmd, vk::Rect2D clip,
+                         vk::Extent2D resolution,
+                         std::span<const plot::Point2D> triVerts,
+                         std::span<const plot::Color> colors);
+
     /// Draw a GPU-generated LineVertex triangle soup produced by
     /// GpuLineRenderer (compute-stroked polylines). `byteOffset` selects
     /// the first vertex inside `buffer`.

@@ -31006,8 +31006,30 @@ del _nt
         auto floatsOf = [](py::handle v) -> std::vector<float> {
             std::vector<float> out;
             if (v.is_none()) return out;
+            // Fast path for numpy arrays: one bulk C-side conversion
+            // (float64→float32, any layout→contiguous) instead of a
+            // per-element Python object cast — matters at 1M+ points.
+            if (py::isinstance<py::array>(v)) {
+                auto a = py::cast<py::array_t<float,
+                    py::array::c_style | py::array::forcecast>>(v);
+                out.assign(a.data(), a.data() + a.size());
+                return out;
+            }
             for (auto x : py::cast<py::sequence>(v))
                 out.push_back(x.cast<float>());
+            return out;
+        };
+        auto u8sOf = [](py::handle v) -> std::vector<uint8_t> {
+            std::vector<uint8_t> out;
+            if (v.is_none()) return out;
+            if (py::isinstance<py::array>(v)) {
+                auto a = py::cast<py::array_t<uint8_t,
+                    py::array::c_style | py::array::forcecast>>(v);
+                out.assign(a.data(), a.data() + a.size());
+                return out;
+            }
+            for (auto x : py::cast<py::sequence>(v))
+                out.push_back(x.cast<uint8_t>());
             return out;
         };
         auto ringOf = [floatsOf](py::handle r)
@@ -31062,7 +31084,7 @@ del _nt
                     py::ssize_t(c.readback().size()));
             })
             .def("path",
-                 [colorOf, floatsOf, ringOf, joinOf, capOf, rectOf](
+                 [colorOf, floatsOf, u8sOf, ringOf, joinOf, capOf, rectOf](
                      render::MplCanvas& c, py::handle verts,
                      py::handle codes, py::handle face, py::handle edge,
                      float lw, py::handle dash, const std::string& join,
@@ -31070,9 +31092,7 @@ del _nt
                      py::handle hatchColor, py::handle clip,
                      py::handle clipring) {
                      auto v = floatsOf(verts);
-                     std::vector<uint8_t> cd;
-                     for (auto x : py::cast<py::sequence>(codes))
-                         cd.push_back(x.cast<uint8_t>());
+                     auto cd = u8sOf(codes);
                      float dashOff = 0;
                      std::vector<float> seq;
                      if (!dash.is_none()) {
@@ -31151,6 +31171,33 @@ del _nt
                  py::arg("y1"), py::arg("x2"), py::arg("y2"),
                  py::arg("c0"), py::arg("c1"), py::arg("c2"),
                  py::arg("clip"))
+            .def("tris",
+                 [floatsOf, rectOf](render::MplCanvas& c,
+                                    py::handle verts, py::handle colors,
+                                    py::handle clip) {
+                     c.tris(floatsOf(verts), floatsOf(colors),
+                            rectOf(clip));
+                 },
+                 py::arg("verts"), py::arg("colors"), py::arg("clip"))
+            .def("instances",
+                 [colorOf, floatsOf, u8sOf, joinOf, capOf, rectOf](
+                     render::MplCanvas& c, py::handle tplv,
+                     py::handle tplc, py::handle xy, py::handle rgba,
+                     py::handle uniform, float lw,
+                     const std::string& join, const std::string& cap,
+                     py::handle ergba, py::handle euniform,
+                     py::handle clip) {
+                     c.instances(floatsOf(tplv), u8sOf(tplc),
+                                 floatsOf(xy), floatsOf(rgba),
+                                 colorOf(uniform), lw, joinOf(join),
+                                 capOf(cap), floatsOf(ergba),
+                                 colorOf(euniform), rectOf(clip));
+                 },
+                 py::arg("tpl_verts"), py::arg("tpl_codes"),
+                 py::arg("inst_xy"), py::arg("inst_rgba"),
+                 py::arg("uniform_face"), py::arg("linewidth"),
+                 py::arg("join"), py::arg("cap"), py::arg("edge_rgba"),
+                 py::arg("uniform_edge"), py::arg("clip"))
             .def("measure_text",
                  [](render::MplCanvas& c, const std::string& s,
                     float sizePx, const std::string& family,
@@ -31309,6 +31356,17 @@ def _clip(gc, height):
     return clip, ring
 
 
+def _has_clip_path(gc):
+    """True when gc carries a real clip Path (mpl 3.10 may return a
+    (None, None) tuple for 'no clip path')."""
+    cp = gc.get_clip_path()
+    if cp is None:
+        return False
+    if isinstance(cp, tuple):
+        return cp[0] is not None
+    return True
+
+
 def _family_of(prop):
     fam = prop.get_family()
     if isinstance(fam, (list, tuple)):
@@ -31352,9 +31410,11 @@ class RendererVolcano(RendererBase):
             dashes = None
         clip, ring = _clip(gc, self.height)
         hatch = gc.get_hatch()
+        # Arrays go through the pybind buffer fast path — never tolist()
+        # million-point arrays (per-element casts dominate otherwise).
         self._cv.path(
-            np.asarray(verts, dtype=np.float64).ravel().tolist(),
-            np.asarray(codes, dtype=np.uint8).tolist(),
+            np.asarray(verts, dtype=np.float64).ravel(),
+            np.asarray(codes, dtype=np.uint8),
             face, edge, float(lw), dashes,
             gc.get_joinstyle(), gc.get_capstyle(),
             hatch if hatch else None,
@@ -31425,17 +31485,238 @@ class RendererVolcano(RendererBase):
                           family, style, weight, clip)
 
     def draw_gouraud_triangles(self, gc, points, colors, transform):
+        # Batched: one vertex-colored triangle soup = one draw call.
         pts = (transform + self._flip).transform(
-            np.asarray(points).reshape(-1, 2)).reshape(-1, 3, 2)
+            np.asarray(points, dtype=np.float64).reshape(-1, 2))
+        cols = np.asarray(colors, dtype=np.float64).reshape(-1, 4)
+        alpha = gc.get_alpha()
+        if alpha is not None:
+            cols = cols.copy()
+            cols[:, 3] *= alpha
         clip, _ = _clip(gc, self.height)
-        for tri, col in zip(pts, colors):
-            self._cv.gouraud(
-                float(tri[0][0]), float(tri[0][1]),
-                float(tri[1][0]), float(tri[1][1]),
-                float(tri[2][0]), float(tri[2][1]),
-                tuple(float(c) for c in col[0]),
-                tuple(float(c) for c in col[1]),
-                tuple(float(c) for c in col[2]), clip)
+        self._cv.tris(pts, cols, clip)
+
+    def draw_markers(self, gc, marker_path, marker_trans, path,
+                     trans, rgbFace=None):
+        # Instanced fast path: tessellate the marker once and place it
+        # at every path vertex via the GPU instancer. Falls back to the
+        # generic path-per-marker implementation for polygon clip paths
+        # or hatches, which instancing cannot express.
+        if _has_clip_path(gc) or gc.get_hatch() is not None:
+            return super().draw_markers(gc, marker_path, marker_trans,
+                                        path, trans, rgbFace)
+        face, edge = _gc_colors(gc, rgbFace)
+        if face is None and (edge is None or edge[3] <= 0):
+            return
+        codes = path.codes
+        n = len(path.vertices)
+        if n == 0:
+            return
+        # mpl places a marker at each segment's endpoint — every vertex
+        # except curve control points (a CURVE3/CURVE4 vertex followed
+        # by the same curve code is a control point).
+        if codes is None:
+            mask = np.ones(n, dtype=bool)
+        else:
+            codes = np.asarray(codes)
+            nxt = np.empty(n, dtype=np.uint8)
+            nxt[:-1] = codes[1:]
+            nxt[-1] = 0
+            mask = ~(((codes == Path.CURVE3) & (nxt == Path.CURVE3)) |
+                     ((codes == Path.CURVE4) & (nxt == Path.CURVE4)) |
+                     (codes == Path.CLOSEPOLY))
+        verts = trans.transform(path.vertices[mask])
+        if len(verts) == 0:
+            return
+        inst_xy = self._flip.transform(verts)
+        finite = np.isfinite(inst_xy).all(axis=1)
+        inst_xy = inst_xy[finite]
+        if len(inst_xy) == 0:
+            return
+        clip, _ = _clip(gc, self.height)
+        lw = self.points_to_pixels(gc.get_linewidth())
+        # Marker paths are authored Y-up; mirror the template so it
+        # appears upright in our Y-down canvas (as Agg does).
+        tpl = marker_path.transformed(
+            marker_trans + Affine2D().scale(1.0, -1.0))
+        tc = tpl.codes
+        if tc is None:
+            tc = np.concatenate(
+                [np.array([Path.MOVETO], dtype=np.uint8),
+                 np.full(len(tpl.vertices) - 1, Path.LINETO,
+                         dtype=np.uint8)])
+        self._cv.instances(
+            np.asarray(tpl.vertices, dtype=np.float64).ravel(),
+            np.asarray(tc, dtype=np.uint8),
+            inst_xy.ravel(),
+            None,
+            face if face is not None else (0, 0, 0, 0),
+            float(lw), gc.get_joinstyle(), gc.get_capstyle(),
+            None,
+            edge if edge is not None else (0, 0, 0, 0),
+            clip)
+
+    def draw_path_collection(self, gc, master_transform, paths,
+                             all_transforms, offsets, offset_trans,
+                             facecolors, edgecolors, linewidths,
+                             linestyles, antialiaseds, urls,
+                             offset_position):
+        # Instanced fast path: one tessellated template + one instance
+        # array per distinct (path, transform, linewidth) group instead
+        # of one fill+stroke per marker. Falls back to the per-item
+        # path calls for anything instancing cannot express.
+        Npaths = max(len(paths), len(all_transforms))
+        Noffsets = len(offsets)
+        N = max(Npaths, Noffsets)
+        try:
+            n_lw = len(set(float(v) for v in linewidths))
+        except Exception:
+            n_lw = 1
+        dashed = any(ls is not None and ls[1] is not None and len(ls[1])
+                     for ls in linestyles)
+        if (N < 32 or gc.get_hatch() is not None
+                or _has_clip_path(gc) or dashed or n_lw > 1
+                or (len(facecolors) == 0 and len(edgecolors) == 0)):
+            return super().draw_path_collection(
+                gc, master_transform, paths, all_transforms, offsets,
+                offset_trans, facecolors, edgecolors, linewidths,
+                linestyles, antialiaseds, urls, offset_position)
+        try:
+            toffs = (offset_trans.transform(offsets)
+                     if Noffsets else np.zeros((1, 2)))
+            toffs = self._flip.transform(np.asarray(toffs))
+            flipv = Affine2D().scale(1.0, -1.0)
+            alpha = gc.get_alpha()
+            clip, _ = _clip(gc, self.height)
+            lw = (self.points_to_pixels(float(linewidths[0]))
+                  if len(linewidths)
+                  else self.points_to_pixels(gc.get_linewidth()))
+            lw = float(lw)
+            join = gc.get_joinstyle()
+            cap = gc.get_capstyle()
+
+            def sel_colors(arr, idx):
+                if not len(arr):
+                    return None
+                c = np.asarray(arr, dtype=np.float64)
+                c = c[idx % len(c)]
+                if c.ndim == 1:
+                    c = c.reshape(-1, 4)
+                if alpha is not None:
+                    c = c * np.array([1, 1, 1, alpha])
+                # mpl treats alpha==0 entries as 'none'.
+                return np.ascontiguousarray(c)
+
+            order = np.arange(N) % Npaths
+            for pid in np.unique(order):
+                sel = np.nonzero(order == pid)[0]
+                toff = toffs[sel % len(toffs)]
+                ok = np.isfinite(toff).all(axis=1)
+                sel, toff = sel[ok], toff[ok]
+                if len(sel) == 0:
+                    continue
+                path = paths[pid % len(paths)]
+                t = (Affine2D(all_transforms[pid % len(all_transforms)])
+                     if len(all_transforms) else Affine2D())
+                tpl = path.transformed(t + master_transform + flipv)
+                tc = tpl.codes
+                if tc is None:
+                    tc = np.concatenate(
+                        [np.array([Path.MOVETO], dtype=np.uint8),
+                         np.full(len(tpl.vertices) - 1, Path.LINETO,
+                                 dtype=np.uint8)])
+                fc = sel_colors(facecolors, sel)
+                ec = sel_colors(edgecolors, sel)
+                no_face = len(facecolors) == 0
+                no_edge = len(edgecolors) == 0 or lw <= 0
+                self._cv.instances(
+                    np.asarray(tpl.vertices, dtype=np.float64).ravel(),
+                    np.asarray(tc, dtype=np.uint8),
+                    toff.ravel(),
+                    fc, (0, 0, 0, 0) if no_face else (0, 0, 0, 0),
+                    lw, join, cap,
+                    None if no_edge else ec,
+                    (0, 0, 0, 0),
+                    clip)
+        except Exception:
+            return super().draw_path_collection(
+                gc, master_transform, paths, all_transforms, offsets,
+                offset_trans, facecolors, edgecolors, linewidths,
+                linestyles, antialiaseds, urls, offset_position)
+
+    def draw_quad_mesh(self, gc, master_transform, meshWidth, meshHeight,
+                       coordinates, offsets, offsetTrans, facecolors,
+                       antialiased, edgecolors):
+        # Batched: expand the mesh into one vertex-colored triangle soup
+        # (2 tris per quad). Edges fall back to the generic path when
+        # they carry a distinct color + nonzero linewidth.
+        lw = gc.get_linewidth()
+        if len(edgecolors) and lw > 0:
+            return super().draw_quad_mesh(
+                gc, master_transform, meshWidth, meshHeight,
+                coordinates, offsets, offsetTrans, facecolors,
+                antialiased, edgecolors)
+        coords = np.ma.getdata(coordinates)
+        pts = (master_transform + self._flip).transform(
+            np.asarray(coords, dtype=np.float64).reshape(-1, 2))
+        pts = pts.reshape(tuple(coords.shape[:2]) + (2,))
+        N = meshWidth * meshHeight
+        offs = np.zeros((meshHeight, meshWidth, 2))
+        if offsets is not None and len(offsets):
+            # mpl cycles offsets over cells (often a single [0,0]).
+            # Offsets are DELTAS: flip the Y sign only — the height
+            # translate in self._flip does not apply to offsets.
+            o = offsetTrans.transform(np.asarray(offsets))
+            o = Affine2D().scale(1.0, -1.0).transform(o)
+            offs = o[np.arange(N) % len(o)].reshape(
+                meshHeight, meshWidth, 2)
+        fc = np.asarray(facecolors, dtype=np.float64).reshape(-1, 4)
+        alpha = gc.get_alpha()
+        if alpha is not None:
+            fc = fc * np.array([1, 1, 1, alpha])
+
+        # Image fast path: a flat-shaded, regular, axis-aligned grid is
+        # pixel-identical to a nearest-neighbour image — upload one
+        # texture instead of rasterizing 2*N sub-pixel triangles (the
+        # dominant cost on the GPU for dense meshes).
+        if (coords.shape[:2] == (meshHeight + 1, meshWidth + 1)
+                and len(fc) == N and np.all(offs == offs[0, 0])):
+            xs = pts[0, :, 0]
+            ys = pts[:, 0, 1]
+            if (np.allclose(pts[:, :, 0], xs[None, :], atol=1e-3)
+                    and np.allclose(pts[:, :, 1], ys[:, None], atol=1e-3)
+                    and np.allclose(np.diff(xs), xs[1] - xs[0], atol=1e-3)
+                    and np.allclose(np.diff(ys), ys[1] - ys[0],
+                                    atol=1e-3)):
+                img = np.clip(fc * 255.0 + 0.5, 0, 255).astype(np.uint8)
+                img = np.ascontiguousarray(
+                    img.reshape(meshHeight, meshWidth, 4))
+                if xs[-1] < xs[0]:
+                    img = np.ascontiguousarray(img[:, ::-1])
+                if ys[-1] < ys[0]:
+                    img = np.ascontiguousarray(img[::-1])
+                clip, _ = _clip(gc, self.height)
+                x0 = min(xs[0], xs[-1]) + offs[0, 0, 0]
+                y0 = min(ys[0], ys[-1]) + offs[0, 0, 1]
+                x1 = max(xs[0], xs[-1]) + offs[0, 0, 0]
+                y1 = max(ys[0], ys[-1]) + offs[0, 0, 1]
+                dst = (int(round(x0)), int(round(y0)),
+                       max(1, int(round(x1 - x0))),
+                       max(1, int(round(y1 - y0))))
+                self._cv.image(img.tobytes(), meshWidth, meshHeight,
+                               dst, 0, clip)
+                return
+
+        a = pts[:-1, :-1] + offs
+        b = pts[:-1, 1:] + offs
+        c = pts[1:, 1:] + offs
+        d = pts[1:, :-1] + offs
+        quads = np.stack([a, b, c, a, c, d], axis=2).reshape(-1, 6, 2)
+        ok = np.isfinite(quads).all(axis=(1, 2))
+        cols = np.repeat(fc, 6, axis=0).reshape(-1, 6, 4)
+        clip, _ = _clip(gc, self.height)
+        self._cv.tris(quads[ok].reshape(-1, 2),
+                      cols[ok].reshape(-1, 4), clip)
 
     def get_text_width_height_descent(self, s, prop, ismath):
         size_px = prop.get_size_in_points() * self.dpi / 72.0

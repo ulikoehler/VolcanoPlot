@@ -305,6 +305,46 @@ void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
+void SpineRenderer::drawTrianglesVC(
+    vk::CommandBuffer cmd, vk::Rect2D clip, vk::Extent2D resolution,
+    std::span<const plot::Point2D> triVerts,
+    std::span<const plot::Color> colors) {
+    if (!inited_ || triVerts.empty()) return;
+    size_t count = triVerts.size();
+    if (colors.size() < count) return;
+
+    size_t byteSize = count * sizeof(LineVertex);
+    ensureScratch(byteSize);
+
+    auto* verts = reinterpret_cast<LineVertex*>(
+        static_cast<char*>(scratchVB_.mappedData()) + scratchOffset_);
+    for (size_t i = 0; i < count; ++i) {
+        verts[i].x = triVerts[i].x;
+        verts[i].y = triVerts[i].y;
+        verts[i].r = colors[i].r; verts[i].g = colors[i].g;
+        verts[i].b = colors[i].b; verts[i].a = colors[i].a;
+    }
+
+    cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
+
+    struct PC { float w, h, lw; } pc{
+        float(resolution.width), float(resolution.height), 1.0f};
+    cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
+                      0, sizeof(PC), &pc);
+
+    vk::DeviceSize offsets[] = { scratchOffset_ };
+    cmd.bindVertexBuffers(0, scratchVB_.handle(), offsets);
+
+    vk::Viewport viewport{0, 0, float(resolution.width),
+                          float(resolution.height), 0, 1};
+    cmd.setViewport(0, viewport);
+    cmd.setScissor(0, clip);
+
+    cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
+
+    scratchOffset_ += (byteSize + 15) & ~size_t(15);
+}
+
 void SpineRenderer::drawTrianglesGpu(vk::CommandBuffer cmd, vk::Rect2D clip,
                                      vk::Extent2D resolution,
                                      vk::Buffer buffer,
