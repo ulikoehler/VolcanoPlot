@@ -46,21 +46,13 @@ jobs:
             libfreetype-dev \
             libharfbuzz-dev \
             imagemagick \
+            mesa-vulkan-drivers \
             python3-dev
 
       - name: Install Python dependencies
         run: |
           python3 -m pip install --upgrade pip
           pip3 install matplotlib numpy scipy Pillow
-
-      - name: Install Vulkan SDK
-        run: |
-          # Install the LunarG Vulkan SDK for a known-good vulkan loader.
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list \
-            https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk mesa-vulkan-drivers
 
       - name: Configure VolcanoPlot
         run: |
