@@ -25,6 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libvulkan-dev \
+            libglfw3-dev \
             libshaderc-dev \
             glslang-dev \
             spirv-tools \
