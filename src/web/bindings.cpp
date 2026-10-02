@@ -66,6 +66,7 @@
 #include <volcano/plot/plots/ChirpPlot.hpp>
 #include <volcano/plot/plots/MexicanHatPlot.hpp>
 #include <volcano/plot/plots/BarLabelPlot.hpp>
+#include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
 #include <algorithm>
 #include <limits>
@@ -148,6 +149,17 @@ bool dispatchEvent(uint32_t type, double x, double y, int32_t button,
     fig.dispatch(std::move(e));
     return fig.stale();
 }
+
+// Forward decls — helpers defined further down.
+plot::Point3D min3(const std::vector<float>& a,
+                   const std::vector<float>& b,
+                   const std::vector<float>& c);
+plot::Point3D max3(const std::vector<float>& a,
+                   const std::vector<float>& b,
+                   const std::vector<float>& c);
+std::pair<plot::Point3D, plot::Point3D>
+sync3DBox(uint32_t axesIdx, double elevDeg, double azimDeg,
+          plot::Point3D dataMin, plot::Point3D dataMax);
 
 /// A Float32Array view over the WASM heap carries its linear-memory
 /// address in byteOffset — directly usable as a C++ pointer.
@@ -297,7 +309,15 @@ uintptr_t surface(uint32_t axesIdx, em::val values, uint32_t w,
     g.values = f32vec(values);
     g.width = w; g.height = h;
     g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    float vmin = std::numeric_limits<float>::max(),
+          vmax = std::numeric_limits<float>::lowest();
+    for (float v : g.values) {
+        vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+    }
     auto cam = plot::Camera3D::viewInit(float(elevDeg), float(azimDeg));
+    auto box = sync3DBox(axesIdx, elevDeg, azimDeg,
+        {0, 0, vmin}, {float(w), float(h), vmax});
+    cam.dataMin = box.first; cam.dataMax = box.second;
     auto* ax = targetAxes(axesIdx);
     auto plot = std::make_shared<plot::SurfacePlot>(std::move(g), cam);
     auto* raw = plot.get();
@@ -548,8 +568,17 @@ uintptr_t wireframe(uint32_t axesIdx, em::val values, uint32_t w,
     g.values = f32vec(values);
     g.width = w; g.height = h;
     g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    float vmin = std::numeric_limits<float>::max(),
+          vmax = std::numeric_limits<float>::lowest();
+    for (float v : g.values) {
+        vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+    }
+    auto cam = plot::Camera3D::viewInit(float(elevDeg), float(azimDeg));
+    auto box = sync3DBox(axesIdx, elevDeg, azimDeg,
+        {0, 0, vmin}, {float(w), float(h), vmax});
+    cam.dataMin = box.first; cam.dataMax = box.second;
     auto plot = std::make_shared<plot::WireframePlot>(std::move(g));
-    plot->setCamera(plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+    plot->setCamera(cam);
     auto* ax = targetAxes(axesIdx);
     auto* raw = plot.get();
     ax->addPlot(std::move(plot));
@@ -560,9 +589,14 @@ uintptr_t wireframe(uint32_t axesIdx, em::val values, uint32_t w,
 /// mpl plot_trisurf: Delaunay-triangulated scattered (x,y,z).
 uintptr_t trisurf(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
                   double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    auto cam = plot::Camera3D::viewInit(float(elevDeg), float(azimDeg));
+    auto box = sync3DBox(axesIdx, elevDeg, azimDeg,
+                         min3(x, y, z), max3(x, y, z));
+    cam.dataMin = box.first; cam.dataMax = box.second;
     auto plot = std::make_shared<plot::TrisurfPlot>(
-        f32vec(xs), f32vec(ys), f32vec(zs));
-    plot->setCamera(plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+        std::move(x), std::move(y), std::move(z));
+    plot->setCamera(cam);
     auto* ax = targetAxes(axesIdx);
     auto* raw = plot.get();
     ax->addPlot(std::move(plot));
@@ -588,13 +622,12 @@ void expandBox(std::pair<plot::Point3D, plot::Point3D>& b,
                 mx(b.second.z, hi.z)};
 }
 
-template <typename P, typename... Args>
-uintptr_t add3D(uint32_t axesIdx, double elevDeg, double azimDeg,
-                plot::Point3D dataMin, plot::Point3D dataMax,
-                Args&&... args) {
-    auto plot = std::make_shared<P>(std::forward<Args>(args)...);
-    plot->setCamera(
-        plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+/// Expand the per-axes 3D box and (re)sync every 3D camera on it.
+/// Also ensures an mpl-style Axes3D box plot exists behind the data.
+/// Returns the shared extents.
+std::pair<plot::Point3D, plot::Point3D>
+sync3DBox(uint32_t axesIdx, double elevDeg, double azimDeg,
+          plot::Point3D dataMin, plot::Point3D dataMax) {
     auto* ax = targetAxes(axesIdx);
     auto& box = axes3DBox[axesIdx];
     if (box.first.x == 0.0f && box.second.x == 0.0f &&
@@ -605,14 +638,45 @@ uintptr_t add3D(uint32_t axesIdx, double elevDeg, double azimDeg,
     } else {
         expandBox(box, dataMin, dataMax);
     }
+    // mpl Axes3D draws a 3D box (panes, edges, tick labels) behind the
+    // data — auto-add one per axes, tracking the shared data box.
+    plot::Viewport vr;
+    vr.x = {box.first.x, box.second.x};
+    vr.y = {box.first.y, box.second.y};
+    vr.z = {box.first.z, box.second.z};
+    plot::Axes3DPlot* box3d = nullptr;
+    for (auto& p : ax->plots())
+        if (auto* b = dynamic_cast<plot::Axes3DPlot*>(p.get()))
+            box3d = b;
+    if (!box3d) {
+        auto bp = std::make_shared<plot::Axes3DPlot>(
+            plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)), vr);
+        bp->zorder = -10;
+        box3d = static_cast<plot::Axes3DPlot*>(
+            ax->addPlot(std::move(bp)));
+    } else {
+        box3d->setRange(vr);
+    }
     // mpl (4,4,3) box normalization — shared extents across artists.
     for (auto& p : ax->plots())
         if (auto* c = p->camera3D()) {
             c->dataMin = box.first;
             c->dataMax = box.second;
         }
+    return box;
+}
+
+template <typename P, typename... Args>
+uintptr_t add3D(uint32_t axesIdx, double elevDeg, double azimDeg,
+                plot::Point3D dataMin, plot::Point3D dataMax,
+                Args&&... args) {
+    auto plot = std::make_shared<P>(std::forward<Args>(args)...);
+    plot->setCamera(
+        plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+    auto box = sync3DBox(axesIdx, elevDeg, azimDeg, dataMin, dataMax);
     plot->camera3D()->dataMin = box.first;
     plot->camera3D()->dataMax = box.second;
+    auto* ax = targetAxes(axesIdx);
     auto* raw = plot.get();
     ax->addPlot(std::move(plot));
     S().figure.markStale();
@@ -719,17 +783,16 @@ uintptr_t contour3d(uint32_t axesIdx, em::val values, uint32_t w,
     for (float v : g.values) {
         vmin = std::min(vmin, v); vmax = std::max(vmax, v);
     }
-    auto fixup = [&](auto& plot) {
-        auto* c = plot->camera3D();
-        c->dataMin = {g.xRange.min, g.yRange.min, vmin};
-        c->dataMax = {g.xRange.max, g.yRange.max, vmax};
-    };
+    auto box = sync3DBox(axesIdx, elevDeg, azimDeg,
+        {g.xRange.min, g.yRange.min, vmin},
+        {g.xRange.max, g.yRange.max, vmax});
     auto mk = [&](auto P) {
         auto* ax = targetAxes(axesIdx);
         auto plot = std::make_shared<decltype(P)>(std::move(P));
         plot->setCamera(plot::Camera3D::viewInit(float(elevDeg),
                                                float(azimDeg)));
-        fixup(plot);
+        plot->camera3D()->dataMin = box.first;
+        plot->camera3D()->dataMax = box.second;
         auto* raw = plot.get();
         ax->addPlot(std::move(plot));
         S().figure.markStale();
