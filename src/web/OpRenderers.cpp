@@ -162,7 +162,7 @@ public:
         if (points.size() > capacity_) {
             if (buf_) s_->releaseBuffer(buf_);
             buf_ = s_->createBufferRaw(points.size_bytes() + 16,
-                                       /*vertex*/ 0);
+                                       /*vertex|storage*/ 1|2);
             capacity_ = uint32_t(points.size());
         }
         s_->writeBufferRaw(buf_, 0, points.data(), points.size_bytes());
@@ -199,7 +199,7 @@ public:
                 float width) override {
         color_ = color; width_ = width;
         if (buf_) s_->releaseBuffer(buf_);
-        buf_ = s_->createBufferRaw(points.size_bytes() + 16, 0);
+        buf_ = s_->createBufferRaw(points.size_bytes() + 16, 1|2);
         s_->writeBufferRaw(buf_, 0, points.data(), points.size_bytes());
         count_ = uint32_t(points.size());
     }
@@ -282,9 +282,9 @@ private:
         if (posBuf_) { s_->releaseBuffer(posBuf_);
                        s_->releaseBuffer(colBuf_);
                        s_->releaseBuffer(sizeBuf_); }
-        posBuf_ = s_->createBufferRaw(uint64_t(n) * 8 + 16, 0);
-        colBuf_ = s_->createBufferRaw(uint64_t(n) * 16 + 16, 0);
-        sizeBuf_ = s_->createBufferRaw(uint64_t(n) * 4 + 16, 0);
+        posBuf_ = s_->createBufferRaw(uint64_t(n) * 8 + 16, 1|2);
+        colBuf_ = s_->createBufferRaw(uint64_t(n) * 16 + 16, 1|2);
+        sizeBuf_ = s_->createBufferRaw(uint64_t(n) * 4 + 16, 1|2);
         capacity_ = n;
     }
     OpGpuServices* s_;

@@ -46,11 +46,11 @@ public:
         count_ = uint32_t(positions.size());
         if (posBuf_) s_->releaseBuffer(posBuf_);
         if (colBuf_) s_->releaseBuffer(colBuf_);
-        posBuf_ = s_->createBufferRaw(positions.size_bytes() + 16, 0);
+        posBuf_ = s_->createBufferRaw(positions.size_bytes() + 16, 1|2);
         s_->writeBufferRaw(posBuf_, 0, positions.data(),
                            positions.size_bytes());
         colBuf_ = colors.empty() ? 0
-            : s_->createBufferRaw(colors.size_bytes() + 16, 0);
+            : s_->createBufferRaw(colors.size_bytes() + 16, 1|2);
         if (colBuf_)
             s_->writeBufferRaw(colBuf_, 0, colors.data(),
                                colors.size_bytes());
@@ -104,8 +104,8 @@ public:
         count_ = uint32_t(pos.size());
         if (posBuf_) s_->releaseBuffer(posBuf_);
         if (colBuf_) s_->releaseBuffer(colBuf_);
-        posBuf_ = s_->createBufferRaw(pos.size() * 8 + 16, 0);
-        colBuf_ = s_->createBufferRaw(col.size() * 16 + 16, 0);
+        posBuf_ = s_->createBufferRaw(pos.size() * 8 + 16, 1|2);
+        colBuf_ = s_->createBufferRaw(col.size() * 16 + 16, 1|2);
         s_->writeBufferRaw(posBuf_, 0, pos.data(), pos.size() * 8);
         s_->writeBufferRaw(colBuf_, 0, col.data(), col.size() * 16);
         horizontal_ = data.horizontal;
@@ -172,8 +172,8 @@ public:
         count_ = uint32_t(verts_.size());
         if (posBuf_) s_->releaseBuffer(posBuf_);
         if (colBuf_) s_->releaseBuffer(colBuf_);
-        posBuf_ = s_->createBufferRaw(verts_.size() * 8 + 16, 0);
-        colBuf_ = s_->createBufferRaw(cols_.size() * 16 + 16, 0);
+        posBuf_ = s_->createBufferRaw(verts_.size() * 8 + 16, 1|2);
+        colBuf_ = s_->createBufferRaw(cols_.size() * 16 + 16, 1|2);
         s_->writeBufferRaw(posBuf_, 0, verts_.data(), verts_.size() * 8);
         s_->writeBufferRaw(colBuf_, 0, cols_.data(), cols_.size() * 16);
     }

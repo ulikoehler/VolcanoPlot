@@ -134,8 +134,8 @@ void free_(uintptr_t p) { std::free(reinterpret_cast<void*>(p)); }
 /// Mailbox callback target: the JS interpreter calls this after
 /// mapAsync with the 4×f32 result; routed to the waiting plot.
 void mailbox(uint32_t slot, float v0, float v1, float v2, float v3) {
-    (void)slot; (void)v0; (void)v1; (void)v2; (void)v3;
-    // TODO(M3): OpGpuServices::deliverMailbox(slot, {v0..v3})
+    static_cast<web::OpGpuServices&>(S().backend.gpu())
+        .deliverMailbox(slot, v0, v1, v2, v3);
 }
 
 } // namespace

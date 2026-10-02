@@ -151,11 +151,11 @@ public:
                                Color color) override {
         if (px.size() < 2) return {};
         auto& os = ops(cmd);
-        uint32_t inBuf = s_->createBufferRaw(px.size_bytes() + 16, 1);
+        uint32_t inBuf = s_->createBufferRaw(px.size_bytes() + 16, 1|2);
         s_->writeBufferRaw(inBuf, 0, px.data(), px.size_bytes());
         // Worst-case tess output: 6 verts/segment (join may add).
         uint64_t outBytes = uint64_t(px.size()) * 6 * 32 + 64;
-        uint32_t outBuf = s_->createBufferRaw(outBytes, 1);
+        uint32_t outBuf = s_->createBufferRaw(outBytes, 1|2);
         PTessLines p{inBuf, 0, outBuf, 0,
                      uint32_t(px.size()), uint32_t(px.size() - 1),
                      sp.width * 0.5f,
@@ -183,13 +183,21 @@ public:
     explicit OpReduceRenderer(OpGpuServices& s) : s_(&s) {}
     std::optional<pr::MinMax2D> reduceMinMax2D(GpuBuf buf,
                                          uint32_t count) override {
-        // Emit the op with a mailbox slot; the JS interpreter writes
-        // the result into WASM memory next frame (§6). v1: report
-        // unavailable → CPU fallback keeps correctness.
-        (void)buf; (void)count;
-        return std::nullopt;
+        // Emit the reduce with a fresh mailbox slot; the JS interpreter
+        // computes it via WGSL and delivers through _vp_mailbox next
+        // frame (§6). Meanwhile return the last delivered result for
+        // this buffer — one frame of latency under streaming data, no
+        // synchronous GPU→CPU stall.
+        if (s_->curStream() && count) {
+            uint32_t slot = s_->allocMailbox();
+            s_->trackReduceSlot(slot, uint32_t(buf));
+            PReduceMinMax p{uint32_t(buf), count, slot};
+            s_->curStream()->emit(Op::ReduceMinMax, p);
+        }
+        if (auto* r = s_->reduceResult(uint32_t(buf))) return *r;
+        return std::nullopt;   // first frame: caller falls back to CPU
     }
-    bool ready() const noexcept override { return false; }
+    bool ready() const noexcept override { return true; }
 private:
     OpGpuServices* s_;
 };
@@ -222,7 +230,7 @@ public:
     }
     GpuBuf makeOutput(uint32_t count) const override {
         return GpuBuf(const_cast<OpGpuServices*>(s_)
-                      ->createBufferRaw(uint64_t(count) * 8 + 16, 1));
+                      ->createBufferRaw(uint64_t(count) * 8 + 16, 1|2));
     }
     bool ready() const noexcept override { return true; }
     bool compiled() const noexcept override { return compiled_; }

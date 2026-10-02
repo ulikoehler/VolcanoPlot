@@ -30,6 +30,7 @@
 
 #include <functional>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace volcano::web {
 
@@ -58,6 +59,19 @@ public:
     /// Emit WriteBuffer with HEAP or arena-sourced data.
     void writeBufferRaw(uint32_t handle, uint64_t off,
                         const void* data, size_t bytes);
+
+    // ── mailbox (async compute results from JS) ──────────────────────
+    /// Allocate a mailbox slot for an async GPU result.
+    uint32_t allocMailbox() { return nextSlot_++; }
+    /// Route a delivered mailbox value (bindings::_vp_mailbox) to the
+    /// buffer that requested it.
+    void deliverMailbox(uint32_t slot,
+                        float v0, float v1, float v2, float v3);
+    /// Latest reduce result for a point-buffer handle, if delivered.
+    const render::primitives::MinMax2D*
+        reduceResult(uint32_t buf) const;
+    /// Record that `slot` carries the min/max of point-buffer `buf`.
+    void trackReduceSlot(uint32_t slot, uint32_t buf);
     void releaseBuffer(uint32_t handle);
     void releaseTexture(uint32_t handle);
     uint32_t createTextureRaw(uint32_t w, uint32_t h, uint8_t fmt);
@@ -136,6 +150,11 @@ private:
     std::unique_ptr<render::primitives::KdeEvalRenderer> kdeEval_;
     std::unique_ptr<render::Grid3DRenderer> grid3D_;
     std::unique_ptr<text::TextRenderer> text_;
+
+    uint32_t nextSlot_ = 1;
+    std::unordered_map<uint32_t, uint32_t> slotBuf_;
+    std::unordered_map<uint32_t, render::primitives::MinMax2D>
+        reduceResults_;
 };
 
 } // namespace volcano::web

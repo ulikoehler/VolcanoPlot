@@ -15,6 +15,7 @@ import TRISGPU_WGSL from './shaders/DrawTrisGpu.wgsl?raw';
 import INSTANCED_WGSL from './shaders/DrawInstanced.wgsl?raw';
 import IMAGE_WGSL from './shaders/DrawImage.wgsl?raw';
 import TEXT_WGSL from './shaders/DrawTextQuads.wgsl?raw';
+import REDUCE_WGSL from './shaders/ReduceMinMax.wgsl?raw';
 import TESS_WGSL from './shaders/TessLines.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
@@ -175,6 +176,10 @@ export class Interpreter {
         private device: GPUDevice,
         private ctx: GPUCanvasContext,
         private format: GPUTextureFormat,
+        /// Mailbox delivery: ReduceMinMax results land here → forwarded
+        /// to module._vp_mailbox by the embedding.
+        private onMailbox?: (slot: number,
+                             v: [number, number, number, number]) => void,
     ) {}
 
     init() {
@@ -359,8 +364,53 @@ export class Interpreter {
             pass.end();
         }
         this.device.queue.submit([enc.finish()]);
+        this.flushMailbox();
         this.uniformCursor = 0;
         this.scratchCursor = 0;
+    }
+
+    // ── mailbox (async compute results → C++) ────────────────────────
+    private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
+                           slot: number }[] = [];
+    private reducePipe?: GPUComputePipeline;
+    private reduceBgl?: GPUBindGroupLayout;
+
+    private ensureReduce() {
+        if (this.reducePipe) return;
+        this.reduceBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: REDUCE_WGSL });
+        this.reducePipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.reduceBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    /** After submit: map staging buffers and deliver mailbox results. */
+    private flushMailbox() {
+        const jobs = this.pendingMaps.splice(0);
+        for (const { buf, out, slot } of jobs) {
+            void buf.mapAsync(GPUMapMode.READ).then(() => {
+                const u = new Uint32Array(buf.getMappedRange());
+                const dv = new DataView(new ArrayBuffer(4));
+                const dec = (k: number) => {
+                    // inverse of the WGSL enc() key map
+                    dv.setUint32(0,
+                        (k & 0x80000000) ? (k & 0x7fffffff)
+                                         : (~k >>> 0), true);
+                    return dv.getFloat32(0, true);
+                };
+                this.onMailbox?.(slot,
+                    [dec(u[0]), dec(u[1]), dec(u[2]), dec(u[3])]);
+                buf.unmap(); buf.destroy(); out.destroy();
+            });
+        }
     }
 
     /** Render a frame into an offscreen texture and read the pixels
@@ -488,9 +538,42 @@ export class Interpreter {
 
     private execCompute(r: OpReader, enc: GPUCommandEncoder,
                         op: number, p: DataView<ArrayBuffer>) {
-        // TODO(M3): EvalFunc / FuncDef / ReduceMinMax / HistBins /
-        // KdeEval2D / PcmTess / ViolinKde — mailbox results via
-        // mapAsync → _vp_mailbox (WEBGPU-PLAN §6).
+        // TODO(M3): EvalFunc / FuncDef / HistBins / KdeEval2D /
+        // PcmTess / ViolinKde — mailbox results via mapAsync.
+        if (op === Op.ReduceMinMax) {
+            // PReduceMinMax {inBuf, count, mailbox}
+            this.ensureReduce();
+            const inBuf = p.getUint32(0, true);
+            const count = p.getUint32(4, true);
+            const slot = p.getUint32(8, true);
+            const out = this.device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC |
+                       GPUBufferUsage.COPY_DST });
+            // Sentinel init: {u32::MAX, 0, u32::MAX, 0} key space.
+            this.device.queue.writeBuffer(out, 0,
+                new Uint32Array([0xffffffff, 0, 0xffffffff, 0]));
+            const staging = this.device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            const pc = new Uint32Array(4); pc[0] = count;
+            const off = this.uboWrite(pc);
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.reducePipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.reduceBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 16 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(inBuf) } },
+                    { binding: 2, resource: { buffer: out } },
+                ]}));
+            cpass.dispatchWorkgroups(1);
+            cpass.end();
+            enc.copyBufferToBuffer(out, 0, staging, 0, 16);
+            this.pendingMaps.push({ buf: staging, out, slot });
+            return;
+        }
         if (op !== Op.TessLines) return;
         this.ensureTess();
         // PTessLines {inBuf,inBase,outBuf,outBase,n,nSeg,hwidth,

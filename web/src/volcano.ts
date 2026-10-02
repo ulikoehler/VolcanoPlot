@@ -45,7 +45,8 @@ export class VolcanoCanvas {
     ) {
         this.adapter = adapter ?? null;
         this.interp = new Interpreter(
-            device, gpuCtx, navigator.gpu.getPreferredCanvasFormat());
+            device, gpuCtx, navigator.gpu.getPreferredCanvasFormat(),
+            (slot, v) => mod._vp_mailbox(slot, v[0], v[1], v[2], v[3]));
         this.interp.init();
         this.syncSize();
     }

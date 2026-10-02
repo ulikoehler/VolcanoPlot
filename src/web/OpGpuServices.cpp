@@ -171,4 +171,24 @@ void OpGpuServices::syncTextAtlas() {
     if (text_) text_->syncAtlas();
 }
 
+
+// ── mailbox plumbing ─────────────────────────────────────────────────
+void OpGpuServices::deliverMailbox(uint32_t slot,
+                                   float v0, float v1,
+                                   float v2, float v3) {
+    auto it = slotBuf_.find(slot);
+    if (it == slotBuf_.end()) return;
+    reduceResults_[it->second] =
+        render::primitives::MinMax2D{v0, v1, v2, v3};
+    slotBuf_.erase(it);
+}
+const render::primitives::MinMax2D*
+OpGpuServices::reduceResult(uint32_t buf) const {
+    auto it = reduceResults_.find(buf);
+    return it == reduceResults_.end() ? nullptr : &it->second;
+}
+void OpGpuServices::trackReduceSlot(uint32_t slot, uint32_t buf) {
+    slotBuf_[slot] = buf;
+}
+
 } // namespace volcano::web
