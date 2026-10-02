@@ -6,6 +6,7 @@
 //   vp.renderIfStale();              // call from rAF or on data change
 
 import { Interpreter } from './interpreter';
+import { Canvas2DInterpreter } from './fallback';
 
 /// Emscripten module factory type (produced by --bind MODULARIZE build).
 interface VolcanoModule {
@@ -63,25 +64,40 @@ interface VolcanoModule {
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
 
 export class VolcanoCanvas {
-    private interp: Interpreter;
+    private interp: Interpreter | Canvas2DInterpreter;
+    private ctx2d?: CanvasRenderingContext2D;
     private devPixelRatio = 1;
     // Retain the adapter: in Dawn's wire client, GC'ing the GPUAdapter
     // can destroy the device ("external Instance reference no longer
     // exists" on later mapAsync).
     private adapter: GPUAdapter | null = null;
+    /** Undefined on the Canvas2D fallback path. */
+    readonly device?: GPUDevice;
+    readonly gpuCtx?: GPUCanvasContext;
 
     constructor(
         private mod: VolcanoModule,
         private canvas: HTMLCanvasElement,
-        private device: GPUDevice,
-        private gpuCtx: GPUCanvasContext,
+        device?: GPUDevice,
+        gpuCtx?: GPUCanvasContext,
         adapter?: GPUAdapter,
     ) {
         this.adapter = adapter ?? null;
-        this.interp = new Interpreter(
-            device, gpuCtx, navigator.gpu.getPreferredCanvasFormat(),
-            (slot, v) => mod._vp_mailbox(slot, v[0], v[1], v[2], v[3]));
-        this.interp.init();
+        this.device = device;
+        this.gpuCtx = gpuCtx;
+        const mb = (slot: number,
+                    v: [number, number, number, number]) =>
+            mod._vp_mailbox(slot, v[0], v[1], v[2], v[3]);
+        if (device && gpuCtx) {
+            const gpu = new Interpreter(
+                device, gpuCtx,
+                navigator.gpu.getPreferredCanvasFormat(), mb);
+            gpu.init();
+            this.interp = gpu;
+        } else {
+            this.ctx2d = canvas.getContext('2d')!;
+            this.interp = new Canvas2DInterpreter(mb);
+        }
         this.syncSize();
     }
 
@@ -107,12 +123,20 @@ export class VolcanoCanvas {
 
     render() { this.mod._vp_render(); this.replay(); }
 
-    /** Render to an offscreen texture and read back RGBA8 pixels —
+    /** Render to an offscreen target and read back RGBA8 pixels —
      * test/debug path; does not touch the canvas. */
     async capture(): Promise<Uint8Array<ArrayBuffer>> {
         this.mod._vp_render();
         const ptr = this.mod._vp_framePtr(), len = this.mod._vp_frameLen();
         const frame = this.mod.HEAPU8.subarray(ptr, ptr + len).slice();
+        if (this.interp instanceof Canvas2DInterpreter) {
+            const cv = document.createElement('canvas');
+            cv.width = this.canvas.width; cv.height = this.canvas.height;
+            const c = cv.getContext('2d')!;
+            this.interp.draw(frame, c);
+            const d = c.getImageData(0, 0, cv.width, cv.height).data;
+            return new Uint8Array(d.buffer.slice(0));
+        }
         return this.interp.capture(frame, this.canvas.width,
                                    this.canvas.height);
     }
@@ -299,7 +323,9 @@ export class VolcanoCanvas {
         if (!ptr || !len) return;
         // Frame bytes live in WASM memory — view, don't copy.
         const frame = this.mod.HEAPU8.subarray(ptr, ptr + len);
-        this.interp.draw(frame);
+        if (this.interp instanceof Canvas2DInterpreter)
+            this.interp.draw(frame, this.ctx2d!);
+        else this.interp.draw(frame);
     }
 }
 
@@ -307,16 +333,23 @@ export async function createCanvas(
     canvas: HTMLCanvasElement,
     moduleFactory: ModuleFactory,
 ): Promise<VolcanoCanvas> {
-    if (!navigator.gpu) throw new Error('WebGPU unavailable');
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('no WebGPU adapter');
-    const device = await adapter.requestDevice();
-    const gpuCtx = canvas.getContext('webgpu');
-    if (!gpuCtx) throw new Error('no webgpu canvas context');
-    gpuCtx.configure({
-        device, format: navigator.gpu.getPreferredCanvasFormat(),
-        alphaMode: 'opaque',
-    });
+    let device: GPUDevice | undefined;
+    let gpuCtx: GPUCanvasContext | undefined;
+    let adapter: GPUAdapter | undefined;
+    if (navigator.gpu) {
+        adapter = await navigator.gpu.requestAdapter() ?? undefined;
+        if (adapter) {
+            device = await adapter.requestDevice();
+            gpuCtx = canvas.getContext('webgpu') ?? undefined;
+            if (gpuCtx)
+                gpuCtx.configure({
+                    device,
+                    format: navigator.gpu.getPreferredCanvasFormat(),
+                    alphaMode: 'opaque',
+                });
+        }
+    }
+    // Falls back to the Canvas2D interpreter when WebGPU is absent.
     // Emscripten resolves side files (.wasm/.data) against the page URL;
     // point it at the module's own directory instead.
     const mod = await moduleFactory({

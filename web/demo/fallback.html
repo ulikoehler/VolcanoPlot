@@ -1,0 +1,25 @@
+<!doctype html>
+<html><body>
+<canvas id="c" width="640" height="480" style="width:640px;height:480px"></canvas>
+<script>
+// Simulate a no-WebGPU browser before the bundle loads.
+Object.defineProperty(navigator, 'gpu', { value: undefined });
+</script>
+<script type="module">
+import { createCanvas } from '/dist/bundle.mjs';
+import VolcanoPlot from '/dist/volcanoplot.js';
+
+window.vpDone = (async () => {
+    const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
+    window.vp = vp;
+    const N = 256, xs = new Float32Array(N), ys = new Float32Array(N);
+    for (let i = 0; i < N; i++) { xs[i] = i/(N-1); ys[i] = Math.sin(i*0.08); }
+    vp.line(xs, ys, '#e00000');
+    const px = await vp.capture();
+    window.vpPixels = px;
+    return 'rendered-fallback';
+})();
+window.vpDone.then(v => { window.vpResult = v; },
+                   e => { window.vpError = String(e.stack || e); });
+</script>
+</body></html>
