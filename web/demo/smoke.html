@@ -13,7 +13,7 @@ window.vpDone = (async () => {
     const N = 256;
     const xs = new Float32Array(N), ys = new Float32Array(N);
     for (let i = 0; i < N; i++) { xs[i] = i/(N-1); ys[i] = Math.sin(i*0.08); }
-    vp.line(xs, ys, '#e00000');
+    window.vpLineHandle = vp.line(xs, ys, '#e00000');
     // headless SwiftShader kills the device on canvas present —
     // go straight to the offscreen capture path.
     window.vpCapture = () => vp.capture();

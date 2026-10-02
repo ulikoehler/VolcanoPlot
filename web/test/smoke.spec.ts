@@ -64,3 +64,34 @@ test('renders a line plot to canvas pixels', async ({ page }) => {
     expect(stats.nonWhite).toBeGreaterThan(500);
     expect(stats.red).toBeGreaterThan(50);   // the '#e00000' sine curve
 });
+
+test('setData re-renders a changed curve (streaming path)',
+     async ({ page }) => {
+    await page.goto(`about:blank`);
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto(`http://localhost:${port}/demo/smoke.html`);
+    await page.waitForFunction(
+        () => (window as any).vpResult !== undefined ||
+              (window as any).vpError !== undefined,
+        { timeout: 30_000 });
+    const diff = await page.evaluate(async () => {
+        const vp = (window as any).vp;
+        const N = 256;
+        const xs = new Float32Array(N), ys = new Float32Array(N);
+        // shift the sine by half a period — pixels must change
+        for (let i = 0; i < N; i++) {
+            xs[i] = i/(N-1); ys[i] = Math.sin(i*0.08 + Math.PI);
+        }
+        const h = (window as any).vpLineHandle;
+        vp.setData(h, xs, ys);
+        const px = await vp.capture();
+        const prev = (window as any).vpPixels;
+        let changed = 0;
+        for (let i = 0; i < px.length; i += 4)
+            if (px[i] !== prev[i] || px[i+1] !== prev[i+1]) changed++;
+        return changed;
+    });
+    expect(errors).toEqual([]);
+    expect(diff).toBeGreaterThan(1000);
+});

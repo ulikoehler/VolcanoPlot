@@ -76,3 +76,6 @@ DartConfiguration.tcl
 
 # scratch
 test.sh
+node_modules/
+test-results/
+web/dist/

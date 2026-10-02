@@ -22,6 +22,8 @@ interface VolcanoModule {
     _vp_free(ptr: number): void;
     _vp_mailbox(slot: number, v0: number, v1: number,
                 v2: number, v3: number): void;
+    _vp_setData(handle: number, xs: Float32Array,
+                ys: Float32Array): void;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -103,6 +105,18 @@ export class VolcanoCanvas {
             color = ''): number {
         const vx = this.stage(xs), vy = this.stage(ys);
         try { return this.mod._vp_scatter(0, vx, vy, color); }
+        finally {
+            this.mod._vp_free(vx.byteOffset);
+            this.mod._vp_free(vy.byteOffset);
+        }
+    }
+
+    /** In-place update for a handle from line()/scatter() — the
+     * ring-buffer/streaming path; call renderIfStale() after updating. */
+    setData(handle: number, xs: ArrayLike<number>,
+            ys: ArrayLike<number>) {
+        const vx = this.stage(xs), vy = this.stage(ys);
+        try { this.mod._vp_setData(handle, vx, vy); }
         finally {
             this.mod._vp_free(vx.byteOffset);
             this.mod._vp_free(vy.byteOffset);

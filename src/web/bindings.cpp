@@ -109,6 +109,20 @@ uintptr_t scatter(uint32_t axesIdx, em::val xs, em::val ys,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+/// In-place data update for a plot handle returned by line()/scatter()
+/// (the oscilloscope/ring-buffer path — no plot reallocation).
+void setData(uintptr_t handle, em::val xs, em::val ys) {
+    size_t nx, ny;
+    const float* px = f32Span(xs, nx);
+    const float* py = f32Span(ys, ny);
+    const size_t n = std::min(nx, ny);
+    std::vector<float> x(px, px + n), y(py, py + n);
+    auto* p = reinterpret_cast<plot::IPlot*>(handle);
+    if (auto* lp = dynamic_cast<plot::LinePlot*>(p)) lp->setData(std::move(x), std::move(y));
+    else if (auto* sp = dynamic_cast<plot::ScatterPlot*>(p)) sp->setData(std::move(x), std::move(y));
+    S().figure.markStale();
+}
+
 /// Allocate nbytes in the WASM heap for JS-side data staging.
 /// JS writes a Float32Array over HEAPF32.subarray(ptr/4, ...) then
 /// passes the view to line()/scatter() — zero copies.
@@ -137,5 +151,6 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_alloc", &alloc);
     em::function("_vp_free", &free_);
     em::function("_vp_mailbox", &mailbox);
+    em::function("_vp_setData", &setData);
 }
 #endif // __EMSCRIPTEN__
