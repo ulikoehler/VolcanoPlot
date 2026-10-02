@@ -21,14 +21,22 @@ export const OP_VERSION = 1;
 export const HEADER_BYTES = 40;
 export const XFORM_BYTES = 128;       // TransformUBO / Xform (8×vec4)
 
+// Values must match `enum class Op` in src/web/OpStream.hpp — the
+// numbering is sparse (pixel draws 10-15, data draws 20-28, compute
+// 40-47); do NOT rely on auto-increment.
 export enum Op {
-    CreateBuffer = 1, WriteBuffer, ReleaseBuffer,
-    CreateTexture, WriteTexture, ReleaseTexture,
-    DrawTrisPx, DrawTrisPxVC, DrawLineStripPx, DrawSegmentsPx,
-    DrawTextQuads, DrawInstanced, DrawLines, DrawLineSegs, DrawPoints,
-    DrawTrisData, DrawTrisGpu, DrawPie, DrawImage, DrawSurface, DrawGrid3D,
-    TessLines, EvalFunc, FuncDef, ReduceMinMax, KdeEval2D, HistBins,
-    PcmTess, ViolinKde,
+    CreateBuffer = 1, WriteBuffer = 2, ReleaseBuffer = 3,
+    CreateTexture = 4, WriteTexture = 5, ReleaseTexture = 6,
+
+    DrawTrisPx = 10, DrawTrisPxVC = 11, DrawLineStripPx = 12,
+    DrawSegmentsPx = 13, DrawTextQuads = 14, DrawInstanced = 15,
+
+    DrawLines = 20, DrawLineSegs = 21, DrawPoints = 22,
+    DrawTrisData = 23, DrawTrisGpu = 24, DrawPie = 25, DrawImage = 26,
+    DrawSurface = 27, DrawGrid3D = 28,
+
+    TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
+    KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
 }
 
 export interface FrameHeader {
