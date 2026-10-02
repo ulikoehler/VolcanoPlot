@@ -66,15 +66,26 @@ bool renderIfStale() {
     return true;
 }
 
-/// Ensure at least one axes exists; returns the axes to target.
-/// (v1: single-axes figure — axesIdx is ignored until multi-axes
-/// bindings land.)
+/// Axes are indexed by insertion order in Figure::allAxes().
 plot::Axes* targetAxes(uint32_t axesIdx) {
-    (void)axesIdx;
     auto& fig = S().figure;
     auto ax = fig.allAxes();
     if (ax.empty()) return fig.addAxes(0, 0);
-    return ax.front();
+    if (axesIdx >= ax.size()) return ax.front();
+    return ax[axesIdx];
+}
+
+/// mpl subplot(nrows, ncols, index) — resets the top grid and places an
+/// axes at the 1-based cell index. Returns the axesIdx for plot calls.
+uint32_t subplot(uint32_t nrows, uint32_t ncols, uint32_t index) {
+    auto& fig = S().figure;
+    const uint32_t i = index ? index - 1 : 0;
+    plot::Axes* created = fig.subplot2grid({nrows, ncols},
+        {i / ncols, i % ncols});
+    auto all = fig.allAxes();
+    for (uint32_t k = 0; k < all.size(); ++k)
+        if (all[k] == created) return k;
+    return 0;
 }
 
 /// A Float32Array view over the WASM heap carries its linear-memory
@@ -408,5 +419,6 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_contour", &contour);
     em::function("_vp_pcolormesh", &pcolormesh);
     em::function("_vp_kde", &kde);
+    em::function("_vp_subplot", &subplot);
 }
 #endif // __EMSCRIPTEN__

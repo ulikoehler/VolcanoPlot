@@ -59,6 +59,7 @@ interface VolcanoModule {
                    nRows: number): number;
     _vp_kde(axes: number, xs: Float32Array, ys: Float32Array,
             cmap: string): number;
+    _vp_subplot(nrows: number, ncols: number, index: number): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -150,10 +151,22 @@ export class VolcanoCanvas {
         return view;   // caller must _vp_free(view.byteOffset)
     }
 
+    /// Axes index all plot calls target (mpl "current axes").
+    private cur = 0;
+
+    /** mpl subplot(nrows, ncols, index) — creates the grid on first
+     * use and selects the new axes for subsequent plot calls. */
+    subplot(nrows: number, ncols: number, index: number): number {
+        return (this.cur = this.mod._vp_subplot(nrows, ncols, index));
+    }
+
+    /** Select an existing axes by index (as returned by subplot()). */
+    axes(i: number) { this.cur = i; }
+
     line(xs: ArrayLike<number>, ys: ArrayLike<number>,
          color = ''): number {
         const vx = this.stage(xs), vy = this.stage(ys);
-        try { return this.mod._vp_line(0, vx, vy, color); }
+        try { return this.mod._vp_line(this.cur, vx, vy, color); }
         finally {
             this.mod._vp_free(vx.byteOffset);
             this.mod._vp_free(vy.byteOffset);
@@ -163,7 +176,7 @@ export class VolcanoCanvas {
     scatter(xs: ArrayLike<number>, ys: ArrayLike<number>,
             color = ''): number {
         const vx = this.stage(xs), vy = this.stage(ys);
-        try { return this.mod._vp_scatter(0, vx, vy, color); }
+        try { return this.mod._vp_scatter(this.cur, vx, vy, color); }
         finally {
             this.mod._vp_free(vx.byteOffset);
             this.mod._vp_free(vy.byteOffset);
@@ -173,25 +186,25 @@ export class VolcanoCanvas {
     /** GPU-evaluated function plot: `body` is a GLSL-ish expression or
      * statements assigning `y` from `x` (e.g. "sin(10.0*x)"). */
     func(body: string, xMin = 0, xMax = 1, color = ''): number {
-        return this.mod._vp_function(0, body, xMin, xMax, color);
+        return this.mod._vp_function(this.cur, body, xMin, xMax, color);
     }
 
     bar(heights: ArrayLike<number>, labels: string[] = [],
         color = ''): number {
         const v = this.stage(heights);
-        try { return this.mod._vp_bar(0, v, labels, color); }
+        try { return this.mod._vp_bar(this.cur, v, labels, color); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
     hist(samples: ArrayLike<number>, bins = 10, color = ''): number {
         const v = this.stage(samples);
-        try { return this.mod._vp_hist(0, v, bins, color); }
+        try { return this.mod._vp_hist(this.cur, v, bins, color); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
     pie(values: ArrayLike<number>, labels: string[] = []): number {
         const v = this.stage(values);
-        try { return this.mod._vp_pie(0, v, labels); }
+        try { return this.mod._vp_pie(this.cur, v, labels); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
@@ -199,7 +212,7 @@ export class VolcanoCanvas {
     heatmap(values: ArrayLike<number>, w: number, h: number,
             cmap = 'viridis'): number {
         const v = this.stage(values);
-        try { return this.mod._vp_heatmap(0, v, w, h, cmap); }
+        try { return this.mod._vp_heatmap(this.cur, v, w, h, cmap); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
@@ -208,7 +221,7 @@ export class VolcanoCanvas {
     surface(values: ArrayLike<number>, w: number, h: number,
             elev = 30, azim = -60): number {
         const v = this.stage(values);
-        try { return this.mod._vp_surface(0, v, w, h, elev, azim); }
+        try { return this.mod._vp_surface(this.cur, v, w, h, elev, azim); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
@@ -216,14 +229,14 @@ export class VolcanoCanvas {
              yerr: ArrayLike<number>, color = ''): number {
         const a = this.stage(xs), b = this.stage(ys),
               e = this.stage(yerr);
-        try { return this.mod._vp_errorbar(0, a, b, e, color); }
+        try { return this.mod._vp_errorbar(this.cur, a, b, e, color); }
         finally { for (const v of [a, b, e])
                       this.mod._vp_free(v.byteOffset); }
     }
 
     stem(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
         const a = this.stage(xs), b = this.stage(ys);
-        try { return this.mod._vp_stem(0, a, b); }
+        try { return this.mod._vp_stem(this.cur, a, b); }
         finally { this.mod._vp_free(a.byteOffset);
                   this.mod._vp_free(b.byteOffset); }
     }
@@ -231,14 +244,14 @@ export class VolcanoCanvas {
     step(xs: ArrayLike<number>, ys: ArrayLike<number>,
          where: 'pre' | 'post' | 'mid' = 'pre'): number {
         const a = this.stage(xs), b = this.stage(ys);
-        try { return this.mod._vp_step(0, a, b, where); }
+        try { return this.mod._vp_step(this.cur, a, b, where); }
         finally { this.mod._vp_free(a.byteOffset);
                   this.mod._vp_free(b.byteOffset); }
     }
 
     ecdf(samples: ArrayLike<number>): number {
         const v = this.stage(samples);
-        try { return this.mod._vp_ecdf(0, v); }
+        try { return this.mod._vp_ecdf(this.cur, v); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
@@ -246,14 +259,14 @@ export class VolcanoCanvas {
                 y2: ArrayLike<number>, color = ''): number {
         const a = this.stage(xs), b = this.stage(y1),
               c = this.stage(y2);
-        try { return this.mod._vp_fillBetween(0, a, b, c, color); }
+        try { return this.mod._vp_fillBetween(this.cur, a, b, c, color); }
         finally { for (const v of [a, b, c])
                       this.mod._vp_free(v.byteOffset); }
     }
 
     boxplot(groups: ArrayLike<number>[]): number {
         const staged = groups.map(g => this.stage(g));
-        try { return this.mod._vp_boxplot(0, staged); }
+        try { return this.mod._vp_boxplot(this.cur, staged); }
         finally { for (const v of staged)
                       this.mod._vp_free(v.byteOffset); }
     }
@@ -261,14 +274,14 @@ export class VolcanoCanvas {
     hist2d(xs: ArrayLike<number>, ys: ArrayLike<number>, bins = 10,
            cmap = 'viridis'): number {
         const a = this.stage(xs), b = this.stage(ys);
-        try { return this.mod._vp_hist2d(0, a, b, bins, cmap); }
+        try { return this.mod._vp_hist2d(this.cur, a, b, bins, cmap); }
         finally { this.mod._vp_free(a.byteOffset);
                   this.mod._vp_free(b.byteOffset); }
     }
 
     hexbin(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
         const a = this.stage(xs), b = this.stage(ys);
-        try { return this.mod._vp_hexbin(0, a, b); }
+        try { return this.mod._vp_hexbin(this.cur, a, b); }
         finally { this.mod._vp_free(a.byteOffset);
                   this.mod._vp_free(b.byteOffset); }
     }
@@ -276,14 +289,14 @@ export class VolcanoCanvas {
     quiver(xs: ArrayLike<number>, ys: ArrayLike<number>,
            us: ArrayLike<number>, vs: ArrayLike<number>): number {
         const s = [xs, ys, us, vs].map(a => this.stage(a));
-        try { return this.mod._vp_quiver(0, s[0], s[1], s[2], s[3]); }
+        try { return this.mod._vp_quiver(this.cur, s[0], s[1], s[2], s[3]); }
         finally { for (const v of s) this.mod._vp_free(v.byteOffset); }
     }
 
     contour(values: ArrayLike<number>, w: number, h: number,
             levels = 10, cmap = 'viridis'): number {
         const v = this.stage(values);
-        try { return this.mod._vp_contour(0, v, w, h, levels, cmap); }
+        try { return this.mod._vp_contour(this.cur, v, w, h, levels, cmap); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 
@@ -292,7 +305,7 @@ export class VolcanoCanvas {
                nRows: number): number {
         const a = this.stage(xs), b = this.stage(ys),
               c = this.stage(cs);
-        try { return this.mod._vp_pcolormesh(0, a, b, c, nCols, nRows); }
+        try { return this.mod._vp_pcolormesh(this.cur, a, b, c, nCols, nRows); }
         finally { for (const v of [a, b, c])
                       this.mod._vp_free(v.byteOffset); }
     }
@@ -300,7 +313,7 @@ export class VolcanoCanvas {
     kde(xs: ArrayLike<number>, ys: ArrayLike<number>,
         cmap = 'viridis'): number {
         const a = this.stage(xs), b = this.stage(ys);
-        try { return this.mod._vp_kde(0, a, b, cmap); }
+        try { return this.mod._vp_kde(this.cur, a, b, cmap); }
         finally { this.mod._vp_free(a.byteOffset);
                   this.mod._vp_free(b.byteOffset); }
     }

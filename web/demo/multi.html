@@ -66,6 +66,16 @@ window.vpDone = (async () => {
             us[i] = -Math.sin(y * 6.28); vs[i] = Math.cos(x * 6.28);
         }
         vp.quiver(xs, ys, us, vs);
+    } else if (which === 'subplot') {
+        // 2×1 grid: sine on top, cosine below — different curves,
+        // different colors, in different rect regions.
+        vp.subplot(2, 1, 1);
+        const N = 256, xs = new Float32Array(N), ys = new Float32Array(N);
+        for (let i = 0; i < N; i++) { xs[i] = i/(N-1); ys[i] = Math.sin(i*0.08); }
+        vp.line(xs, ys, '#e00000');
+        vp.subplot(2, 1, 2);
+        for (let i = 0; i < N; i++) ys[i] = Math.cos(i*0.08);
+        vp.line(xs, ys, '#0060e0');
     }
     const px = await vp.capture();
     window.vpPixels = px;

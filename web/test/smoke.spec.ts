@@ -123,7 +123,7 @@ test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
 
 for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'contour', 'hist2d', 'kde', 'box', 'stem',
-                    'quiver']) {
+                    'quiver', 'subplot']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));
