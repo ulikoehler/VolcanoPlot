@@ -1,0 +1,32 @@
+<!doctype html>
+<html><body>
+<canvas id="c" width="640" height="480" style="width:640px;height:480px"></canvas>
+<script type="module">
+import { createCanvas } from '/dist/bundle.mjs';
+import VolcanoPlot from '/dist/volcanoplot.js';
+
+window.vpDone = (async () => {
+    const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
+    window.vp = vp;   // keep device alive — GC'ing it drops the Dawn instance
+    vp.device.addEventListener('uncapturederror',
+        e => console.log('GPUERR:', e.error?.message ?? e));
+    const N = 256;
+    const xs = new Float32Array(N), ys = new Float32Array(N);
+    for (let i = 0; i < N; i++) { xs[i] = i/(N-1); ys[i] = Math.sin(i*0.08); }
+    vp.line(xs, ys, '#e00000');
+    // headless SwiftShader kills the device on canvas present —
+    // go straight to the offscreen capture path.
+    window.vpCapture = () => vp.capture();
+    // capture immediately, in the same task chain — tests whether the
+    // device dies asynchronously (GC/teardown) vs. on first use.
+    const px = await vp.capture();
+    let red = 0;
+    for (let i = 0; i < px.length; i += 4)
+        if (px[i] > 150 && px[i+1] < 100 && px[i+2] < 100) red++;
+    window.vpPixels = px;
+    return 'rendered red=' + red;
+})();
+window.vpDone.then(v => { window.vpResult = v; },
+                   e => { window.vpError = String(e.stack || e); });
+</script>
+</body></html>

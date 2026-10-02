@@ -1,0 +1,39 @@
+<!doctype html>
+<html><body>
+<canvas id="c" width="640" height="480"></canvas>
+<script type="module">
+import { createCanvas } from '/dist/bundle.mjs';
+import VolcanoPlot from '/dist/volcanoplot.js';
+
+// stage: 0 = create device+interp only, 1 = +render, 2 = +capture
+const stage = Number(new URLSearchParams(location.search).get('stage') ?? 0);
+const q = new URLSearchParams(location.search);
+if (q.get('nocompute')) globalThis.VP_NO_COMPUTE = true;
+if (q.get('nodraw')) globalThis.VP_NO_DRAW = true;
+if (q.get('only')) globalThis.VP_ONLY = new Set(q.get('only').split(',').map(Number));
+
+window.probeDone = (async () => {
+    const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
+    window.vp = vp;
+    if (q.get('pass')) {
+        // bare render pass on the canvas texture — no draws at all
+        const d = vp.device, gc = vp.gpuCtx;
+        const enc = d.createCommandEncoder();
+        const p = enc.beginRenderPass({colorAttachments:[{
+            view: gc.getCurrentTexture().createView(),
+            clearValue: {r:1,g:1,b:1,a:1}, loadOp:'clear', storeOp:'store'}]});
+        p.end();
+        d.queue.submit([enc.finish()]);
+    }
+    if (stage >= 1) {
+        const N = 64, xs = new Float32Array(N), ys = new Float32Array(N);
+        for (let i=0;i<N;i++){xs[i]=i/(N-1);ys[i]=Math.sin(i*0.2);}
+        vp.line(xs, ys, '#e00000');
+        vp.render();
+    }
+    return 'stage' + stage + ' ok';
+})();
+window.probeDone.then(v => { window.vpResult = v; },
+                      e => { window.vpError = String(e.stack || e); });
+</script>
+</body></html>

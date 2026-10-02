@@ -76,8 +76,7 @@ fn markerDist(c : vec2f, code : i32, nside : i32, rot : f32) -> f32 {
             let q = abs(r) - vec2f(0.75, 0.75);
             return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0);
         }
-        case 3i, case 5i, case 6i, case 7i, case 8i,
-        case 18i, case 19i, case 20i, case 21i: {
+        case 3i, 5i, 6i, 7i, 8i, 18i, 19i, 20i, 21i: {
             // regular n-gon (iq sdPoly) — nside resolved host-side
             let n = f32(nside);
             let a = atan2(r.x, r.y) + rot + 3.14159265;

@@ -15,6 +15,7 @@ import TRISGPU_WGSL from './shaders/DrawTrisGpu.wgsl?raw';
 import INSTANCED_WGSL from './shaders/DrawInstanced.wgsl?raw';
 import IMAGE_WGSL from './shaders/DrawImage.wgsl?raw';
 import TEXT_WGSL from './shaders/DrawTextQuads.wgsl?raw';
+import TESS_WGSL from './shaders/TessLines.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -321,7 +322,8 @@ export class Interpreter {
 
     // ── frame replay ─────────────────────────────────────────────────
 
-    draw(frame: Uint8Array<ArrayBuffer>) {
+    /** Render the frame into `target` (canvas texture by default). */
+    draw(frame: Uint8Array<ArrayBuffer>, target?: GPUTextureView) {
         const r = new OpReader(frame);
         const enc = this.device.createCommandEncoder();
         const canvasWH = new Float32Array(
@@ -334,15 +336,19 @@ export class Interpreter {
         const drawOps: { op: number; p: DataView<ArrayBuffer> }[] = [];
         for (const { op, p } of r.ops()) {
             if (op <= Op.ReleaseTexture) this.execResource(r, op, p);
-            else if (op >= Op.TessLines) this.execCompute(r, enc, op, p);
-            else drawOps.push({ op, p });
+            else if (op >= Op.TessLines && !((globalThis as any).VP_NO_COMPUTE)) this.execCompute(r, enc, op, p);
+            else {
+            const only = (globalThis as any).VP_ONLY as Set<number> | undefined;
+            if (!(globalThis as any).VP_NO_DRAW && (!only || only.has(op)))
+                drawOps.push({ op, p });
+        }
         }
 
         if (drawOps.length) {
             const [cr, cg, cb, ca] = r.clearRGBA();
             const pass = enc.beginRenderPass({
                 colorAttachments: [{
-                    view: this.ctx.getCurrentTexture().createView(),
+                    view: target ?? this.ctx.getCurrentTexture().createView(),
                     clearValue: { r: cr, g: cg, b: cb, a: ca },
                     loadOp: r.header.loadOp ? 'load' : 'clear',
                     storeOp: 'store',
@@ -355,6 +361,43 @@ export class Interpreter {
         this.device.queue.submit([enc.finish()]);
         this.uniformCursor = 0;
         this.scratchCursor = 0;
+    }
+
+    /** Render a frame into an offscreen texture and read the pixels
+     * back — used by tests (avoids compositing/readback ambiguity on
+     * WebGPU canvases). Returns RGBA8 bytes. */
+    async capture(frame: Uint8Array<ArrayBuffer>, w: number,
+                  h: number): Promise<Uint8Array<ArrayBuffer>> {
+        const tex = this.device.createTexture({
+            size: { width: w, height: h },
+            format: this.format,   // must match the pipeline targets
+            usage: GPUTextureUsage.RENDER_ATTACHMENT |
+                   GPUTextureUsage.COPY_SRC });
+        this.draw(frame, tex.createView());
+        const bpr = Math.ceil(w * 4 / 256) * 256;
+        const rb = this.device.createBuffer({
+            size: bpr * h,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = this.device.createCommandEncoder();
+        enc.copyTextureToBuffer({ texture: tex },
+            { buffer: rb, bytesPerRow: bpr }, { width: w, height: h });
+        this.device.queue.submit([enc.finish()]);
+        await rb.mapAsync(GPUMapMode.READ);
+        const src = new Uint8Array(rb.getMappedRange());
+        const out = new Uint8Array(w * h * 4) as Uint8Array<ArrayBuffer>;
+        const bgra = this.format.startsWith('bgra');
+        for (let y = 0; y < h; y++) {
+            const row = src.subarray(y * bpr, y * bpr + w * 4);
+            out.set(row, y * w * 4);
+            if (bgra) {   // normalize BGRA→RGBA
+                for (let i = y * w * 4; i < (y + 1) * w * 4; i += 4) {
+                    const t = out[i];
+                    out[i] = out[i + 2]; out[i + 2] = t;
+                }
+            }
+        }
+        rb.unmap(); rb.destroy(); tex.destroy();
+        return out;
     }
 
     private execResource(r: OpReader, op: number, p: DataView<ArrayBuffer>) {
@@ -418,12 +461,65 @@ export class Interpreter {
         }
     }
 
-    private execCompute(_r: OpReader, _enc: GPUCommandEncoder,
-                        _op: number, _p: DataView<ArrayBuffer>) {
-        // TODO(M3): TessLines / EvalFunc / FuncDef / ReduceMinMax /
-        // HistBins / KdeEval2D / PcmTess / ViolinKde — compute pass
-        // before the render pass; mailbox results via mapAsync →
-        // _vp_mailbox (WEBGPU-PLAN §6).
+    private tessPipe: GPUComputePipeline | null = null;
+    private tessBgl: GPUBindGroupLayout | null = null;
+
+    private ensureTess() {
+        if (this.tessPipe) return;
+        this.tessBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({
+            code: TRANSFORM_WGSL + '\n' + TESS_WGSL });
+        this.tessPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.tessBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    private execCompute(r: OpReader, enc: GPUCommandEncoder,
+                        op: number, p: DataView<ArrayBuffer>) {
+        // TODO(M3): EvalFunc / FuncDef / ReduceMinMax / HistBins /
+        // KdeEval2D / PcmTess / ViolinKde — mailbox results via
+        // mapAsync → _vp_mailbox (WEBGPU-PLAN §6).
+        if (op !== Op.TessLines) return;
+        this.ensureTess();
+        // PTessLines {inBuf,inBase,outBuf,outBase,n,nSeg,hwidth,
+        //             join u8, cap u8, miterLimit, r,g,b,a}
+        const pc = new DataView(new ArrayBuffer(48));
+        pc.setUint32(0,  p.getUint32(16, true), true);   // n
+        pc.setUint32(4,  p.getUint32(20, true), true);   // nSeg
+        pc.setFloat32(8, p.getFloat32(24, true), true);  // hwidth
+        pc.setUint32(12, p.getUint8(28));                // join
+        pc.setUint32(16, p.getUint8(29));                // cap
+        pc.setFloat32(20, p.getFloat32(30, true), true); // miterLimit
+        pc.setUint32(24, p.getUint32(4,  true), true);   // inBase
+        pc.setUint32(28, p.getUint32(12, true), true);   // outBase
+        pc.setFloat32(32, p.getFloat32(34, true), true); // r
+        pc.setFloat32(36, p.getFloat32(38, true), true); // g
+        pc.setFloat32(40, p.getFloat32(42, true), true); // b
+        pc.setFloat32(44, p.getFloat32(46, true), true); // a
+        const off = this.uboWrite(new Uint8Array(pc.buffer));
+        const n = p.getUint32(16, true), nSeg = p.getUint32(20, true);
+        if (!n || !nSeg) return;
+        const pass = enc.beginComputePass();
+        pass.setPipeline(this.tessPipe!);
+        pass.setBindGroup(0, this.device.createBindGroup({
+            layout: this.tessBgl!, entries: [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 48 } },
+                { binding: 1, resource: { buffer:
+                    this.bufRef(p.getUint32(0, true)) } },
+                { binding: 2, resource: { buffer:
+                    this.bufRef(p.getUint32(8, true)) } },
+            ]}));
+        pass.dispatchWorkgroups(Math.ceil((n + nSeg) / 256));
+        pass.end();
     }
 
     private dispatchDraw(pass: GPURenderPassEncoder, r: OpReader,
@@ -442,7 +538,7 @@ export class Interpreter {
             pass.setPipeline(this.pipelines.get('px.tris')!);
             pass.setBindGroup(0, this.bindGroup('px.tris', [
                 { binding: 0, resource: { buffer: this.uniformRing,
-                                          offset: off, size: 24 } },
+                                          offset: off, size: 32 } },
                 { binding: 1, resource: { buffer: this.scratch,
                                           offset: vOff } },
             ]));
@@ -459,7 +555,7 @@ export class Interpreter {
             pass.setPipeline(this.pipelines.get('px.trisvc')!);
             pass.setBindGroup(0, this.bindGroup('px.trisvc', [
                 { binding: 0, resource: { buffer: this.uniformRing,
-                                          offset: off, size: 24 } },
+                                          offset: off, size: 32 } },
                 { binding: 1, resource: { buffer: this.scratch,
                                           offset: vOff, } },
                 { binding: 2, resource: { buffer: this.scratch,
@@ -482,7 +578,7 @@ export class Interpreter {
             pass.setPipeline(this.pipelines.get(key)!);
             pass.setBindGroup(0, this.bindGroup(key, [
                 { binding: 0, resource: { buffer: this.uniformRing,
-                                          offset: off, size: 24 } },
+                                          offset: off, size: 32 } },
                 { binding: 1, resource: { buffer: this.scratch,
                                           offset: vOff, } },
             ]));
@@ -497,7 +593,7 @@ export class Interpreter {
             pass.setPipeline(this.pipelines.get('text')!);
             pass.setBindGroup(0, this.bindGroup('text', [
                 { binding: 0, resource: { buffer: this.uniformRing,
-                                          offset: off, size: 24 } },
+                                          offset: off, size: 32 } },
                 { binding: 1, resource: { buffer: this.scratch,
                                           offset: qOff, } },
                 { binding: 2, resource:

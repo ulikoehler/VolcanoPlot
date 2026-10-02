@@ -41,9 +41,12 @@ Object.assign(globalThis, {
 const FIXTURE = new URL('../test/fixtures/line_frame.bin', import.meta.url);
 
 describe('Interpreter replay (mock GPU)', () => {
-    const frameBytes = () =>
-        new Uint8Array(readFileSync(FIXTURE).buffer.slice(0)) as
+    const frameBytes = () => {
+        const b = readFileSync(FIXTURE);   // Buffer pools its ArrayBuffer —
+        return new Uint8Array(b.buffer.slice(  // must slice by offset+len
+            b.byteOffset, b.byteOffset + b.byteLength)) as
             Uint8Array<ArrayBuffer>;
+    };
 
     it('fixture decodes as a valid VPOP frame', () => {
         const r = new OpReader(frameBytes());
