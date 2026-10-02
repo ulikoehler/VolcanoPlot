@@ -42,7 +42,8 @@ otherwise look the same).
 | `func(body, xMin?, xMax?, color?)` | GPU-evaluated `y = f(x)`; `body` is a GLSL/WGSL expression in `x`, e.g. `'sin(10.0*x)'` |
 | `bar(heights, labels?, color?)` / `hist(samples, bins?, color?)` / `pie(values, labels?)` | categorical plots |
 | `heatmap(values, w, h, cmap?)` / `hist2d(xs, ys, bins?, cmap?)` / `kde(xs, ys, cmap?)` / `pcolormesh(xs, ys, c, cols, rows)` / `matshow(data, rows, cols)` / `pcolorfast(C, cols, rows, x0?, x1?, y0?, y1?)` / `spy(data, rows, cols)` | 2D fields; `cmap` e.g. `'viridis'` |
-| `surface(values, w, h, elev?, azim?)` / `wireframe(values, w, h, elev?, azim?)` / `trisurf(xs, ys, zs, elev?, azim?)` | 3D plots (WebGPU only) |
+| `surface(values, w, h, elev?, azim?)` / `wireframe(values, w, h, elev?, azim?)` / `trisurf(xs, ys, zs, elev?, azim?)` / `plot3d(xs, ys, zs, ...)` / `scatter3d(...)` / `bar3d(x,y,z,dx,dy,dz,...)` / `quiver3d(x,y,z,u,v,w,...)` / `errorbar3d(x,y,z,zerr,...)` / `contour3d(values,w,h,filled?,...)` / `voxels(filled,nx,ny,nz,...)` / `text3d(x,y,z,s,...)` / `mexicanHat(sigma?, range?, ...)` | 3D plots (WebGPU only); `elev`/`azim` like mpl `view_init` |
+| `barbs(x, y, u, v)` / `groupedBar(heights[][])` / `figimage(px, w, h)` / `chirp(f0, f1, dur, xMax)` / `barLabel(xs, heights, baseline?)` | more plot types |
 | `contour(values, w, h, levels?, cmap?)` / `tricontour(xs, ys, zs)` / `stem(xs, ys)` / `quiver(xs, ys, us, vs)` / `errorbar(xs, ys, err, color?)` / `hexbin(xs, ys)` / `boxplot(groups)` / `violin(groups, w?, box?, color?)` / `stackplot(xs, ys[])` / `fill(xs, ys, color?)` / `tripcolor(xs, ys, zs)` / `triplot(xs, ys)` / `streamplot(us, vs, w, h)` / `brokenBarh(segs)` | more plot types |
 | `specgram(s, fs?)` / `spectrum(s, fs?)` / `psd(s, fs?)` / `csd(x, y, fs?)` / `xcorr(x, y)` / `cohere(x, y, fs?)` | signal-processing plots (FFT in C++) |
 | `xlim(l, h)` `ylim(l, h)` `xscale(n)` `yscale(n)` `title(t)` `xlabel(t)` `ylabel(t)` `grid(on?)` `suptitle(t)` | axes styling |
@@ -105,18 +106,18 @@ cd web && npm install && npm run build
 cd web
 npx tsc -p tsconfig.json     # typecheck
 npx vitest run               # unit tests (op-stream decoding)
-npx playwright test          # real-browser pixel tests (SwiftShader)
+npx playwright test          # real-browser pixel tests (Intel iGPU)
 ```
 
 ## Comparison gallery
 
 `scripts/generate_webgallery.py` renders every demo kind twice — once
-through the WASM+WebGPU engine in headless Chrome (SwiftShader), once
+through the WASM+WebGPU engine in headless Chrome (real GPU), once
 through matplotlib with byte-identical input data (both use the same
 seeded 32-bit LCG) — and composes side-by-side PNGs:
 
 ```bash
-./scripts/generate_webgallery.py web/gallery            # all 33 kinds
+./scripts/generate_webgallery.py web/gallery            # all 48 kinds
 ./scripts/generate_webgallery.py web/gallery --filter bar,pie
 ```
 

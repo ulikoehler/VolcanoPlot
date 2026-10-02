@@ -656,7 +656,7 @@ regenerable via `scripts/generate_webgallery.py`.**
 | Component | Status |
 |---|---|
 | VPOP stream + all Op renderers | done |
-| embind API: 41 plot types bound + setData + subplot + events + axes styling (xlim/ylim/scales/title/labels/grid), reference lines/spans, legend/colorbar/text | done |
+| embind API: 56 plot types bound (incl. all 3D: plot3d/scatter3d/bar3d/quiver3d/errorbar3d/contour3d/contourf3d/voxels/text3d/mexicanHat + barbs/groupedBar/figimage/chirp/barLabel) + setData + subplot + events + axes styling, reference lines/spans, legend/colorbar/text | done |
 | WGSL pipelines (lines/points/tris/instanced/image/text/surface/grid3D) | done |
 | Compute: TessLines, ReduceMinMax (autoscale), FuncDef/EvalFunc, KdeEval2D, PcmTess, ViolinKde (kde1d) | done |
 | Text atlas (glyb→WASM, fonts via --preload-file) | done |
@@ -668,11 +668,11 @@ regenerable via `scripts/generate_webgallery.py`.**
 | Multi-axes (`vp.subplot()`) | done |
 | Device-lost handling, adapter retention | done |
 | npm packaging + README | done |
-| Comparison gallery (web/gallery: 33 mpl-vs-WebGPU side-by-side PNGs via `scripts/generate_webgallery.py`; deterministic LCG data shared between JS demo and mpl script) | done |
+| Comparison gallery (web/gallery: 48 mpl-vs-WebGPU side-by-side PNGs via `scripts/generate_webgallery.py`; deterministic LCG data shared between JS demo and mpl script) | done |
 | HistBins GPU | skipped deliberately — GPU binning is slower than 8-thread CPU even natively (measured); opt-in upstream |
 | Text as vector outlines in SVG export | open — glyphs are atlas-rasterized upstream |
 | Canvas2D fallback for 3D ops | open — surface/grid3D degrade to nothing |
-| Remaining unbound plot types (Bar3D, Plot3D, Scatter3D, Voxels, barbs, eventplot, figimage, table, NavCube, ...) | open — thin wrappers, same pattern |
+| Remaining unbound plot types (eventplot, imshow, table, NavCube, ...) | open — thin wrappers, same pattern |
 
 Notable divergences from the plan text: single session-long OpStream reset at
 render start (repaints append to the same frame — `finish()` must not consume
