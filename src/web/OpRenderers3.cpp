@@ -300,17 +300,78 @@ private:
     bool compiled_ = false, defSent_ = false;
 };
 
-// ═══ OpKdeEvalRenderer (async — v1 CPU fallback) ═════════════════════
+// ═══ OpKdeEvalRenderer (async: emit KdeEval2D, deliver next frame) ═══
+//
+// The interface is synchronous; the op stream can't read back in the
+// same frame. Strategy: emit the compute + bulk mailbox, return {}
+// (callers use their CPU path); once the mailbox lands, subsequent
+// eval() calls with identical params+sample fingerprint get the GPU
+// result. Params/fingerprint changes re-emit.
 
 class OpKdeEvalRenderer final : public pr::KdeEvalRenderer {
 public:
     explicit OpKdeEvalRenderer(OpGpuServices& s) : s_(&s) {}
-    std::vector<float> eval(const std::vector<Point2D>&, uint32_t,
-                            uint32_t, float, float, float, float,
-                            float, float) override { return {}; }
-    bool ready() const noexcept override { return false; }
+
+    std::vector<float> eval(const std::vector<Point2D>& samples,
+                            uint32_t gridW, uint32_t gridH,
+                            float xMin, float xMax,
+                            float yMin, float yMax,
+                            float bwX, float bwY) override {
+        if (samples.empty() || !gridW || !gridH) return {};
+        // Cheap content fingerprint: endpoints + middle sample.
+        const auto& a = samples.front(), &b = samples.back(),
+                  &m = samples[samples.size() / 2];
+        const bool same =
+            pending_ && n_ == samples.size() && gw_ == gridW &&
+            gh_ == gridH && x0_ == xMin && x1_ == xMax &&
+            y0_ == yMin && y1_ == yMax && bwX_ == bwX && bwY_ == bwY &&
+            fp_ == (a.x + a.y + m.x + m.y + b.x + b.y);
+        if (same) {
+            if (!cached_.empty()) return cached_;
+            if (s_->mailboxReady(slot_)) {
+                auto bytes = s_->mailboxTake(slot_);
+                cached_.resize(bytes.size() / 4);
+                std::memcpy(cached_.data(), bytes.data(),
+                            cached_.size() * 4);
+                return cached_;
+            }
+            return {};      // GPU readback in flight — CPU covers
+        }
+        // New/changed request: upload samples, emit KdeEval2D.
+        pending_ = true;
+        n_ = uint32_t(samples.size()); gw_ = gridW; gh_ = gridH;
+        x0_ = xMin; x1_ = xMax; y0_ = yMin; y1_ = yMax;
+        bwX_ = bwX; bwY_ = bwY;
+        fp_ = a.x + a.y + m.x + m.y + b.x + b.y;
+        cached_.clear();
+        slot_ = s_->allocMailbox();
+
+        const uint32_t cells = gridW * gridH;
+        uint32_t in = s_->createBufferRaw(samples.size() * 8 + 16, 1 | 2);
+        s_->writeBufferRaw(in, 0, samples.data(), samples.size() * 8);
+        uint32_t out = s_->createBufferRaw(size_t(cells) * 4 + 16, 2 | 16);
+        constexpr float kTwoPi = 6.28318530718f;
+        PKdeEval2D p{
+            .inBuf = in, .n = n_, .outBuf = out,
+            .gridW = gridW, .gridH = gridH,
+            .xMin = xMin, .xStep = (xMax - xMin) / float(gridW),
+            .yMin = yMin, .yStep = (yMax - yMin) / float(gridH),
+            .inv2bwX2 = 1.0f / (2.0f * bwX * bwX),
+            .inv2bwY2 = 1.0f / (2.0f * bwY * bwY),
+            .norm = 1.0f / (kTwoPi * bwX * bwY * float(samples.size())),
+            .mailbox = slot_,
+        };
+        s_->curStream()->emit(Op::KdeEval2D, p);
+        return {};
+    }
+
+    bool ready() const noexcept override { return true; }
 private:
     OpGpuServices* s_;
+    bool pending_ = false;
+    uint32_t n_ = 0, gw_ = 0, gh_ = 0, slot_ = 0;
+    float x0_ = 0, x1_ = 0, y0_ = 0, y1_ = 0, bwX_ = 0, bwY_ = 0, fp_ = 0;
+    std::vector<float> cached_;
 };
 
 namespace op {

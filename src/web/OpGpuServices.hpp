@@ -72,6 +72,16 @@ public:
         reduceResult(uint32_t buf) const;
     /// Record that `slot` carries the min/max of point-buffer `buf`.
     void trackReduceSlot(uint32_t slot, uint32_t buf);
+
+    // ── bulk mailbox (arbitrary-size async results, e.g. KDE grids) ──
+    /// Allocate `bytes` for `slot` and return its WASM-heap address —
+    /// JS writes the readback bytes there, then calls mailboxDone.
+    uintptr_t mailboxDest(uint32_t slot, uint32_t bytes);
+    void mailboxDone(uint32_t slot);
+    /// True once JS signalled delivery for `slot`.
+    bool mailboxReady(uint32_t slot) const;
+    /// Move delivered bytes out; empty when absent/not ready.
+    std::vector<uint8_t> mailboxTake(uint32_t slot);
     void releaseBuffer(uint32_t handle);
     void releaseTexture(uint32_t handle);
     uint32_t createTextureRaw(uint32_t w, uint32_t h, uint8_t fmt);
@@ -153,6 +163,8 @@ private:
 
     uint32_t nextSlot_ = 1;
     std::unordered_map<uint32_t, uint32_t> slotBuf_;
+    struct BulkMail { std::vector<uint8_t> bytes; bool ready = false; };
+    std::unordered_map<uint32_t, BulkMail> bulkMail_;
     std::unordered_map<uint32_t, render::primitives::MinMax2D>
         reduceResults_;
 };

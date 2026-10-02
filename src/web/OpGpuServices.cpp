@@ -191,4 +191,26 @@ void OpGpuServices::trackReduceSlot(uint32_t slot, uint32_t buf) {
     slotBuf_[slot] = buf;
 }
 
+uintptr_t OpGpuServices::mailboxDest(uint32_t slot, uint32_t bytes) {
+    auto& e = bulkMail_[slot];
+    e.bytes.resize(bytes);
+    e.ready = false;
+    return reinterpret_cast<uintptr_t>(e.bytes.data());
+}
+void OpGpuServices::mailboxDone(uint32_t slot) {
+    if (auto it = bulkMail_.find(slot); it != bulkMail_.end())
+        it->second.ready = true;
+}
+bool OpGpuServices::mailboxReady(uint32_t slot) const {
+    auto it = bulkMail_.find(slot);
+    return it != bulkMail_.end() && it->second.ready;
+}
+std::vector<uint8_t> OpGpuServices::mailboxTake(uint32_t slot) {
+    auto it = bulkMail_.find(slot);
+    if (it == bulkMail_.end() || !it->second.ready) return {};
+    auto v = std::move(it->second.bytes);
+    bulkMail_.erase(it);
+    return v;
+}
+
 } // namespace volcano::web

@@ -102,6 +102,12 @@ struct PFuncDef    { uint16_t funcId; uint8_t lang; BufSrc body; };
 struct PReduceMinMax{ uint32_t inBuf, count, mailbox; };
 struct PHistBins   { uint32_t srcBuf, n, binsBuf;
                      float e0, invW; uint32_t nBins, mailbox; };
+/// 2D KDE: samples (f32 x,y pairs) → grid densities. Result is read
+/// back via bulk mailbox (slot → gridW*gridH f32).
+struct PKdeEval2D  { uint32_t inBuf, n, outBuf, gridW, gridH;
+                     float xMin, xStep, yMin, yStep;
+                     float inv2bwX2, inv2bwY2, norm;
+                     uint32_t mailbox; };
 #pragma pack(pop)
 
 } // namespace volcano::web

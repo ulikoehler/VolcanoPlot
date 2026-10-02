@@ -447,5 +447,11 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_subplot", &subplot);
     em::function("_vp_setInteractive", &setInteractive);
     em::function("_vp_dispatch", &dispatchEvent);
+    em::function("_vp_mailboxDest",
+        +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
+            return S().backend.opGpu().mailboxDest(slot, bytes);
+        });
+    em::function("_vp_mailboxDone",
+        +[](uint32_t slot) { S().backend.opGpu().mailboxDone(slot); });
 }
 #endif // __EMSCRIPTEN__

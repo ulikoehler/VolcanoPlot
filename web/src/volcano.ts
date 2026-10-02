@@ -22,6 +22,8 @@ interface VolcanoModule {
                 color: string): number;
     _vp_alloc(nbytes: number): number;
     _vp_free(ptr: number): void;
+    _vp_mailboxDest(slot: number, bytes: number): number;
+    _vp_mailboxDone(slot: number): void;
     _vp_mailbox(slot: number, v0: number, v1: number,
                 v2: number, v3: number): void;
     _vp_setData(handle: number, xs: Float32Array,
@@ -97,10 +99,15 @@ export class VolcanoCanvas {
         const mb = (slot: number,
                     v: [number, number, number, number]) =>
             mod._vp_mailbox(slot, v[0], v[1], v[2], v[3]);
+        const mbBytes = (slot: number, bytes: Uint8Array) => {
+            const dst = mod._vp_mailboxDest(slot, bytes.length);
+            mod.HEAPU8.set(bytes, dst);
+            mod._vp_mailboxDone(slot);
+        };
         if (device && gpuCtx) {
             const gpu = new Interpreter(
                 device, gpuCtx,
-                navigator.gpu.getPreferredCanvasFormat(), mb);
+                navigator.gpu.getPreferredCanvasFormat(), mb, mbBytes);
             gpu.init();
             this.interp = gpu;
         } else {

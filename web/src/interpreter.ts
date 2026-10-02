@@ -19,6 +19,7 @@ import REDUCE_WGSL from './shaders/ReduceMinMax.wgsl?raw';
 import TESS_WGSL from './shaders/TessLines.wgsl?raw';
 import SURFACE_WGSL from './shaders/DrawSurface.wgsl?raw';
 import GRID3D_WGSL from './shaders/DrawGrid3D.wgsl?raw';
+import KDE_WGSL from './shaders/KdeEval2D.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -165,7 +166,8 @@ const SAMP_NF = (b: number): GPUBindGroupLayoutEntry => ({
 });
 
 // Buffer kind bits (OpGpuServices.cpp)
-const K_VERTEX = 1, K_STORAGE = 2, K_INDEX = 4, K_UNIFORM = 8;
+const K_VERTEX = 1, K_STORAGE = 2, K_INDEX = 4, K_UNIFORM = 8,
+      K_COPYSRC = 16;
 
 interface BufEntry { buf: GPUBuffer; size: number }
 interface TexEntry { tex: GPUTexture; view: GPUTextureView }
@@ -194,6 +196,10 @@ export class Interpreter {
         /// to module._vp_mailbox by the embedding.
         private onMailbox?: (slot: number,
                              v: [number, number, number, number]) => void,
+        /// Bulk mailbox results (KDE grids, …): raw readback bytes →
+        /// module._vp_mailboxDest/_vp_mailboxDone by the embedding.
+        private onMailboxBytes?: (slot: number,
+                                  bytes: Uint8Array) => void,
     ) {}
 
     init() {
@@ -516,6 +522,28 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
     }
 
     // ── mailbox (async compute results → C++) ────────────────────────
+    private pendingBulk: { buf: GPUBuffer; slot: number;
+                           bytes: number }[] = [];
+    private kdePipe?: GPUComputePipeline;
+    private kdeBgl?: GPUBindGroupLayout;
+
+    private ensureKde() {
+        if (this.kdePipe) return;
+        this.kdeBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: KDE_WGSL });
+        this.kdePipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.kdeBgl] }),
+            compute: { module: mod, entryPoint: 'main' } });
+    }
+
     private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
                            slot: number }[] = [];
     private reducePipe?: GPUComputePipeline;
@@ -541,6 +569,15 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
     /** After submit: map staging buffers and deliver mailbox results. */
     private flushMailbox() {
         const jobs = this.pendingMaps.splice(0);
+        const bulk = this.pendingBulk.splice(0);
+        for (const { buf, slot, bytes } of bulk) {
+            void buf.mapAsync(GPUMapMode.READ).then(() => {
+                this.onMailboxBytes?.(slot,
+                    new Uint8Array(buf.getMappedRange())
+                        .slice(0, bytes));
+                buf.unmap(); buf.destroy();
+            });
+        }
         for (const { buf, out, slot } of jobs) {
             void buf.mapAsync(GPUMapMode.READ).then(() => {
                 const u = new Uint32Array(buf.getMappedRange());
@@ -607,6 +644,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             if (kind & K_STORAGE) usage |= GPUBufferUsage.STORAGE;
             if (kind & K_INDEX) usage |= GPUBufferUsage.INDEX;
             if (kind & K_UNIFORM) usage |= GPUBufferUsage.UNIFORM;
+            if (kind & K_COPYSRC) usage |= GPUBufferUsage.COPY_SRC;
             // vertex-pulling shaders read vertex bufs as storage
             if (kind & K_VERTEX) usage |= GPUBufferUsage.STORAGE;
             // Per-frame resources are recreated each render — destroy the
@@ -684,9 +722,50 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
 
     private execCompute(r: OpReader, enc: GPUCommandEncoder,
                         op: number, p: DataView<ArrayBuffer>) {
-        // TODO(M3): EvalFunc / FuncDef / HistBins / KdeEval2D /
-        // PcmTess / ViolinKde — mailbox results via mapAsync.
+        // TODO: HistBins / PcmTess / ViolinKde — CPU fallbacks cover
+        // them today; emitters don't exist yet on the C++ side either.
         if (op === Op.FuncDef) { this.funcDef(r, p); return; }
+        if (op === Op.KdeEval2D) {
+            // PKdeEval2D {inBuf, n, outBuf, gridW, gridH, xMin, xStep,
+            //             yMin, yStep, inv2bwX2, inv2bwY2, norm, mailbox}
+            this.ensureKde();
+            const n = p.getUint32(4, true);
+            const gridW = p.getUint32(12, true),
+                  gridH = p.getUint32(16, true);
+            const bytes = gridW * gridH * 4;
+            if (!n || !bytes) return;
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, n, true);
+            pc.setUint32(4, gridW, true);
+            pc.setUint32(8, gridH, true);
+            // @12 unused (mailbox stays CPU-side)
+            for (let k = 0; k < 6; k++)
+                pc.setFloat32(16 + k * 4,
+                              p.getFloat32(20 + k * 4, true), true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.kdePipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.kdeBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 48 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(8, true)) } },
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(gridW / 8),
+                                   Math.ceil(gridH / 8));
+            cpass.end();
+            const staging = this.device.createBuffer({
+                size: bytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(
+                this.bufRef(p.getUint32(8, true)), 0, staging, 0, bytes);
+            this.pendingBulk.push({ buf: staging,
+                slot: p.getUint32(48, true), bytes });
+            return;
+        }
         if (op === Op.EvalFunc) {
             // PEvalFunc {outBuf u32, xMin f64, xMax f64, count u32,
             //            funcId u16}
