@@ -79,3 +79,6 @@ test.sh
 node_modules/
 test-results/
 web/dist/
+
+# WebGPU comparison gallery output (scripts/generate_webgallery.py)
+/web/gallery/

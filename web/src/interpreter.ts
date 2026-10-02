@@ -1126,6 +1126,10 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         }
         case Op.DrawTrisData: {   // {clip, ubo, posBuf, colBuf, n, rgba}
             this.scissor(pass, p);
+            // ubo.rect (payload +32) is the axes pixel rect — NDC must
+            // map into it, not the full canvas (DrawPie computes its own
+            // pixel affine and must NOT take this branch).
+            this.viewport(pass, p, 32);
             const off = this.uboWrite(new Uint8Array<ArrayBuffer>(
                 p.buffer, p.byteOffset + 16, XFORM_BYTES));
             const colBuf = p.getUint32(148, true);
@@ -1143,6 +1147,9 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                     buffer: this.bufRef(colBuf) } });
             pass.setBindGroup(0, this.bindGroup(key, entries));
             pass.draw(p.getUint32(152, true));
+            // viewport state persists — restore full-canvas for the
+            // pixel-space ops that follow.
+            pass.setViewport(0, 0, canvasWH[0], canvasWH[1], 0, 1);
             break;
         }
         case Op.DrawTrisGpu: {    // {clip, resW, resH, buf, byteOff, n}

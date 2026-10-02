@@ -34,7 +34,7 @@ struct VSOut {
                           scaleFwd(pos[vi].y, U.scaleY)),
                     U.proj.xyz);
     let ndc = (p - U.viewMinSpan.xy) / U.viewMinSpan.zw * 2.0 - 1.0;
-    o.p = vec4f(ndc.x, -ndc.y, 0.0, 1.0);
+    o.p = vec4f(ndc.x, ndc.y, 0.0, 1.0);
 #endif
 #ifdef HAS_COL
     o.color = cols[vi];

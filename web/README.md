@@ -107,3 +107,19 @@ npx tsc -p tsconfig.json     # typecheck
 npx vitest run               # unit tests (op-stream decoding)
 npx playwright test          # real-browser pixel tests (SwiftShader)
 ```
+
+## Comparison gallery
+
+`scripts/generate_webgallery.py` renders every demo kind twice — once
+through the WASM+WebGPU engine in headless Chrome (SwiftShader), once
+through matplotlib with byte-identical input data (both use the same
+seeded 32-bit LCG) — and composes side-by-side PNGs:
+
+```bash
+./scripts/generate_webgallery.py web/gallery            # all 33 kinds
+./scripts/generate_webgallery.py web/gallery --filter bar,pie
+```
+
+Output lands in `web/gallery/{web,matplotlib,comparison}` plus a
+browsable `web/gallery/index.html`. Requires playwright + PIL +
+matplotlib on the Python side.

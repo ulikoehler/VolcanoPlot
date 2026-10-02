@@ -5,6 +5,11 @@
 import { createCanvas } from '/dist/bundle.mjs';
 import VolcanoPlot from '/dist/volcanoplot.js';
 
+// Deterministic PRNG (32-bit LCG) — the python gallery script mirrors
+// this exact sequence so web and matplotlib renders share the data.
+let _lcg = 12345;
+const rnd = () => (_lcg = (_lcg * 1103515245 + 12345) >>> 0) / 2**32;
+
 window.vpDone = (async () => {
     const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
     window.vp = vp;
@@ -166,8 +171,8 @@ window.vpDone = (async () => {
         const n = 2048, s = new Float32Array(n), s2 = new Float32Array(n);
         for (let i = 0; i < n; i++) {
             s[i] = Math.sin(i * 0.3) + Math.sin(i * 1.1) * 0.4 +
-                   (Math.random() - 0.5) * 0.3;
-            s2[i] = Math.sin(i * 0.3 + 0.5) + (Math.random() - 0.5) * 0.3;
+                   (rnd() - 0.5) * 0.3;
+            s2[i] = Math.sin(i * 0.3 + 0.5) + (rnd() - 0.5) * 0.3;
         }
         if (which === 'specgram') vp.specgram(s, 100);
         else if (which === 'spectrum') vp.spectrum(s, 100);

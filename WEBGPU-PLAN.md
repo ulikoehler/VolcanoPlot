@@ -648,8 +648,10 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
 
 ## 14. Implementation status (as built)
 
-**Verified in real Chrome + SwiftShader: 40/40 browser pixel tests, 8/8 vitest,
-1616/1616 native tests.**
+**Verified in real Chrome + SwiftShader: 43/43 browser tests (incl.
+DrawTrisData viewport/orientation regression specs), 8/8 vitest,
+1616/1616 native tests. 33-case matplotlib comparison gallery
+regenerable via `scripts/generate_webgallery.py`.**
 
 | Component | Status |
 |---|---|
@@ -666,6 +668,7 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
 | Multi-axes (`vp.subplot()`) | done |
 | Device-lost handling, adapter retention | done |
 | npm packaging + README | done |
+| Comparison gallery (web/gallery: 33 mpl-vs-WebGPU side-by-side PNGs via `scripts/generate_webgallery.py`; deterministic LCG data shared between JS demo and mpl script) | done |
 | HistBins GPU | skipped deliberately — GPU binning is slower than 8-thread CPU even natively (measured); opt-in upstream |
 | Text as vector outlines in SVG export | open — glyphs are atlas-rasterized upstream |
 | Canvas2D fallback for 3D ops | open — surface/grid3D degrade to nothing |
