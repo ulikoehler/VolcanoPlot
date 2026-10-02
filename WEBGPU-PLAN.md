@@ -643,3 +643,34 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
    recommended yes: fewer ops.
 3. Font set shipped in wasm (DejaVu regular + bold + oblique ≈ 2 MB; subset
    to latin-1 ≈ 300 KB — recommend subset + runtime `setFontData`).
+
+---
+
+## 14. Implementation status (as built)
+
+**Verified in real Chrome + SwiftShader: 19/19 browser pixel tests, 8/8 vitest,
+1616/1616 native tests.**
+
+| Component | Status |
+|---|---|
+| VPOP stream + all Op renderers | done |
+| embind API (all bound plot types + setData + subplot + events) | done |
+| WGSL pipelines (lines/points/tris/instanced/image/text/surface/grid3D) | done |
+| Compute: TessLines, ReduceMinMax (autoscale), FuncDef/EvalFunc, KdeEval2D, PcmTess | done |
+| Text atlas (glyb→WASM, fonts via --preload-file) | done |
+| Mailbox: 4-float (autoscale) + bulk bytes (KDE grids) via _vp_mailboxDest/Done | done |
+| Depth pass (3D surface) + depth-compatible 2D pipeline variants | done |
+| Canvas2D fallback (auto when no WebGPU) | done |
+| SVG vector export (`vp.toSvg()`) | done |
+| Interaction (Navigation pan/zoom via Figure::dispatch) | done |
+| Multi-axes (`vp.subplot()`) | done |
+| Device-lost handling, adapter retention | done |
+| npm packaging + README | done |
+| HistBins GPU | skipped deliberately — GPU binning is slower than 8-thread CPU even natively (measured); opt-in upstream |
+| ViolinKde GPU | open — ViolinPlot isn't bound to JS |
+| Text as vector outlines in SVG export | open — glyphs are atlas-rasterized upstream |
+
+Notable divergences from the plan text: single session-long OpStream reset at
+render start (repaints append to the same frame — `finish()` must not consume
+records); buffer-kind bitmask extended with bit4 COPY_SRC for readback
+sources; mailbox is two channels (4-float + arbitrary bytes), not one.
