@@ -81,6 +81,16 @@ struct PDrawTrisGpu { Rect2Df clip; float resW, resH;
 struct PDrawImage   { Rect2Df viewRect; TransformUBO ubo;
                       uint32_t gridTex, cmapTex; float params[8]; };
 
+// ── 3D draws ──
+/// vp is column-major mat4 (transposed from Camera3D::viewProjection's
+/// row-major layout — WGSL mat4x4f is column-major).
+struct PDrawSurface { Rect2Df clip; float vp[16]; float gridRange[4];
+                      float light[4]; float valueMin, valueMax;
+                      float pad[2];
+                      uint32_t vertBuf, idxBuf, indexCount; };
+/// The full 44-float push block from Grid3DRendererVk::draw.
+struct PDrawGrid3D { Rect2Df clip; float pc[44]; };
+
 // ── compute ops ──
 struct PTessLines  { uint32_t inBuf, inBase, outBuf, outBase;
                      uint32_t n, nSeg; float hwidth;

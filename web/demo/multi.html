@@ -26,6 +26,14 @@ window.vpDone = (async () => {
             g[i] = Math.sin(x * 0.2) * Math.cos(y * 0.15);
         }
         vp.heatmap(g, 64, 48, 'viridis');
+    } else if (which === 'surface') {
+        const W = 40, H = 30, g = new Float32Array(W * H);
+        for (let j = 0; j < H; j++)
+            for (let i = 0; i < W; i++) {
+                const x = i * 0.3 - 6, y = j * 0.3 - 4.5;
+                g[j * W + i] = Math.sin(Math.sqrt(x * x + y * y));
+            }
+        vp.surface(g, W, H);
     }
     const px = await vp.capture();
     window.vpPixels = px;

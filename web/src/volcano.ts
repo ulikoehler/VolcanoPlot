@@ -33,6 +33,8 @@ interface VolcanoModule {
     _vp_pie(axes: number, values: Float32Array, labels: string[]): number;
     _vp_heatmap(axes: number, values: Float32Array, w: number,
                 h: number, cmap: string): number;
+    _vp_surface(axes: number, values: Float32Array, w: number,
+                h: number, elev: number, azim: number): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -151,6 +153,15 @@ export class VolcanoCanvas {
             cmap = 'viridis'): number {
         const v = this.stage(values);
         try { return this.mod._vp_heatmap(0, v, w, h, cmap); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** 3D surface from a row-major height grid. Camera uses mpl
+     * viewInit angles (elev=30, azim=-60 by default). */
+    surface(values: ArrayLike<number>, w: number, h: number,
+            elev = 30, azim = -60): number {
+        const v = this.stage(values);
+        try { return this.mod._vp_surface(0, v, w, h, elev, azim); }
         finally { this.mod._vp_free(v.byteOffset); }
     }
 

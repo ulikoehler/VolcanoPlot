@@ -20,6 +20,7 @@
 
 #include <volcano/render/Grid3DRenderer.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -29,13 +30,76 @@ namespace volcano::web {
 using render::Cmd;
 using namespace plot;
 
-// ═══ OpGrid3DRenderer (v1 stub — WGSL port in M2) ════════════════════
+// ═══ OpGrid3DRenderer — ray-cast grid planes → DrawGrid3D op ════════
+// The 44-float block mirrors Grid3DRendererVk::draw's push constants
+// verbatim; the WGSL shader does the same plane-intersect math.
+
+namespace {
+/// 4x4 row-major inverse via Gauss-Jordan (same as Grid3DRenderer.cpp).
+std::array<float, 16> mat4Inverse(const std::array<float, 16>& m) {
+    std::array<float, 32> aug;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            aug[i * 8 + j] = m[i * 4 + j];
+            aug[i * 8 + 4 + j] = (i == j) ? 1.0f : 0.0f;
+        }
+    for (int col = 0; col < 4; ++col) {
+        int pivot = col;
+        float maxVal = std::abs(aug[col * 8 + col]);
+        for (int row = col + 1; row < 4; ++row)
+            if (std::abs(aug[row * 8 + col]) > maxVal) {
+                maxVal = std::abs(aug[row * 8 + col]); pivot = row;
+            }
+        if (maxVal < 1e-30f) return {};
+        if (pivot != col)
+            for (int j = 0; j < 8; ++j)
+                std::swap(aug[col * 8 + j], aug[pivot * 8 + j]);
+        const float piv = aug[col * 8 + col];
+        for (int j = 0; j < 8; ++j) aug[col * 8 + j] /= piv;
+        for (int row = 0; row < 4; ++row) {
+            if (row == col) continue;
+            const float f = aug[row * 8 + col];
+            for (int j = 0; j < 8; ++j) aug[row * 8 + j] -= f * aug[col * 8 + j];
+        }
+    }
+    std::array<float, 16> inv{};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) inv[i * 4 + j] = aug[i * 8 + 4 + j];
+    return inv;
+}
+} // namespace
 
 class OpGrid3DRenderer final : public render::Grid3DRenderer {
 public:
     explicit OpGrid3DRenderer(OpGpuServices&) {}
-    void draw(Cmd&, Rect2D, const Viewport&, const Camera3D&,
-              const render::Grid3DStyle&) const override {}
+    void draw(Cmd& cmd, Rect2D rect, const Viewport& viewport,
+              const Camera3D& camera,
+              const render::Grid3DStyle& style) const override {
+        PDrawGrid3D p{};
+        p.clip = toF(rect);
+        float* pc = p.pc;
+        pc[0] = float(rect.x); pc[1] = float(rect.y);
+        pc[2] = float(rect.width); pc[3] = float(rect.height);
+        pc[4] = viewport.x.min; pc[5] = viewport.x.min;
+        pc[6] = viewport.x.span(); pc[7] = 0;
+        pc[8] = viewport.y.min; pc[9] = viewport.y.min;
+        pc[10] = viewport.y.span(); pc[11] = 0;
+        pc[12] = viewport.z.min; pc[13] = viewport.z.min;
+        pc[14] = viewport.z.span(); pc[15] = 0;
+        pc[16] = style.color.r; pc[17] = style.color.g;
+        pc[18] = style.color.b; pc[19] = style.color.a;
+        pc[20] = style.floorXZ ? 1.f : 0.f;
+        pc[21] = style.backWallXY ? 1.f : 0.f;
+        pc[22] = style.sideWallYZ ? 1.f : 0.f;
+        pc[23] = style.step;
+        const auto inv = mat4Inverse(camera.viewProjection());
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                pc[24 + i * 4 + j] = inv[i * 4 + j];
+        pc[40] = camera.eye.x; pc[41] = camera.eye.y;
+        pc[42] = camera.eye.z; pc[43] = 0;
+        ops(cmd).emit(Op::DrawGrid3D, p);
+    }
 };
 
 // ═══ OpTextRenderer ══════════════════════════════════════════════════

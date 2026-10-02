@@ -121,7 +121,7 @@ test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
     expect(stats.red).toBeGreaterThan(500);   // sin(10x) curve pixels
 });
 
-for (const kind of ['bar', 'hist', 'pie', 'heat']) {
+for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));

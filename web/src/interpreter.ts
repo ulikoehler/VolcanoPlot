@@ -17,6 +17,8 @@ import IMAGE_WGSL from './shaders/DrawImage.wgsl?raw';
 import TEXT_WGSL from './shaders/DrawTextQuads.wgsl?raw';
 import REDUCE_WGSL from './shaders/ReduceMinMax.wgsl?raw';
 import TESS_WGSL from './shaders/TessLines.wgsl?raw';
+import SURFACE_WGSL from './shaders/DrawSurface.wgsl?raw';
+import GRID3D_WGSL from './shaders/DrawGrid3D.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -131,6 +133,8 @@ interface PipeSpec {
     transform?: boolean;       // prepend transform.wgsl
     topology: GPUPrimitiveTopology;
     bindings: GPUBindGroupLayoutEntry[];
+    depth?: boolean;           // enable depth32float test+write (3D)
+    blend?: boolean;           // default true (surface disables)
 }
 
 const U = (dyn: boolean): GPUBindGroupLayoutEntry => ({
@@ -204,15 +208,30 @@ export class Interpreter {
             size: 8 << 20,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
-        const mk = (key: string, s: PipeSpec) => {
-            const bgl = this.device.createBindGroupLayout({
-                entries: s.bindings,
-            });
-            this.bgls.set(key, bgl);
+        const mk = (key: string, s: PipeSpec,
+                    into: Map<string, GPURenderPipeline> = this.pipelines,
+                    depthMode = false) => {
+            if (!depthMode) this.specList.push([key, s]);
+            let bgl = this.bgls.get(key);
+            if (!bgl) {
+                bgl = this.device.createBindGroupLayout({
+                    entries: s.bindings,
+                });
+                this.bgls.set(key, bgl);
+            }
             const src = (s.transform ? TRANSFORM_WGSL + '\n' : '') +
                 buildWgsl(s.src, new Set(s.defines ?? []));
             const mod = this.device.createShaderModule({ code: src });
-            this.pipelines.set(key, this.device.createRenderPipeline({
+            // A pass with a depth attachment requires every pipeline it
+            // runs to declare depthStencil state — 2D pipelines get a
+            // test-off variant, 'surface' gets real depth.
+            const ds: GPUDepthStencilState | undefined =
+                (s.depth || depthMode) ? {
+                    format: 'depth32float',
+                    depthWriteEnabled: s.depth === true && depthMode,
+                    depthCompare: s.depth && depthMode ? 'less' : 'always',
+                } : undefined;
+            into.set(key, this.device.createRenderPipeline({
                 layout: this.device.createPipelineLayout({
                     bindGroupLayouts: [bgl],
                 }),
@@ -220,7 +239,7 @@ export class Interpreter {
                 fragment: { module: mod, entryPoint: 'fs',
                             targets: [{
                                 format: this.format,
-                                blend: {
+                                blend: s.blend === false ? undefined : {
                                     color: { srcFactor: 'src-alpha',
                                              dstFactor: 'one-minus-src-alpha',
                                              operation: 'add' },
@@ -230,8 +249,10 @@ export class Interpreter {
                                 },
                             }] },
                 primitive: { topology: s.topology },
+                depthStencil: ds,
             }));
         };
+        this.mkPipe = mk;
 
         const ub = U(false), ud = U(false);
         mk('px.tris', { src: PX_WGSL, topology: 'triangle-list',
@@ -279,6 +300,31 @@ export class Interpreter {
                           bindings: [ub, S(1), S(2)] });
         mk('text', { src: TEXT_WGSL, topology: 'triangle-list',
                      bindings: [ub, S(1), T(2), SAMP(3)] });
+        mk('surface', { src: SURFACE_WGSL, topology: 'triangle-list',
+                        depth: true, blend: false,
+                        bindings: [ub, S(1), S(2)] });
+        mk('grid3d', { src: GRID3D_WGSL, topology: 'triangle-list',
+                       bindings: [ub] });
+    }
+
+    /** Pipeline set for passes that carry a depth attachment — every
+     * pipeline must declare a (possibly inert) depthStencil state to be
+     * attachment-compatible. Built lazily on the first 3D frame. */
+    private depthPipes?: Map<string, GPURenderPipeline>;
+    private specList: [string, PipeSpec][] = [];
+    private mkPipe!: (key: string, s: PipeSpec,
+                      into: Map<string, GPURenderPipeline>,
+                      depthMode: boolean) => void;
+    private activePipes: Map<string, GPURenderPipeline> = this.pipelines;
+
+    private pipesFor(depth: boolean) {
+        if (!depth) return this.pipelines;
+        if (!this.depthPipes) {
+            this.depthPipes = new Map();
+            for (const [k, s] of this.specList)
+                this.mkPipe(k, s, this.depthPipes, true);
+        }
+        return this.depthPipes;
     }
 
     // ── helpers ──────────────────────────────────────────────────────
@@ -359,8 +405,27 @@ export class Interpreter {
         }
         }
 
+        let depthTex: GPUTexture | undefined;
         if (drawOps.length) {
             const [cr, cg, cb, ca] = r.clearRGBA();
+            // 3D ops need a depth buffer sized to the target.
+            const needDepth = drawOps.some(d => d.op === Op.DrawSurface);
+            this.activePipes = this.pipesFor(needDepth);
+            let depthAttachment: GPURenderPassDepthStencilAttachment | undefined;
+            if (needDepth) {
+                depthTex = this.device.createTexture({
+                    size: { width: r.header.canvasW || 1,
+                            height: r.header.canvasH || 1 },
+                    format: 'depth32float',
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+                });
+                depthAttachment = {
+                    view: depthTex.createView(),
+                    depthClearValue: 1.0,
+                    depthLoadOp: 'clear',
+                    depthStoreOp: 'discard',
+                };
+            }
             const pass = enc.beginRenderPass({
                 colorAttachments: [{
                     view: target ?? this.ctx.getCurrentTexture().createView(),
@@ -368,12 +433,15 @@ export class Interpreter {
                     loadOp: r.header.loadOp ? 'load' : 'clear',
                     storeOp: 'store',
                 }],
+                depthStencilAttachment: depthAttachment,
             });
             for (const { op, p } of drawOps)
                 this.dispatchDraw(pass, r, canvasWH, op, p);
             pass.end();
+            // destroy() is deferred until after submit below.
         }
         this.device.queue.submit([enc.finish()]);
+        depthTex?.destroy();
         this.flushMailbox();
         this.uniformCursor = 0;
         this.scratchCursor = 0;
@@ -718,7 +786,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             ubo.set([p.getFloat32(40, true), p.getFloat32(44, true),
                      p.getFloat32(48, true), p.getFloat32(52, true)], 2);
             const off = this.uboWrite(ubo);
-            pass.setPipeline(this.pipelines.get('px.tris')!);
+            pass.setPipeline(this.activePipes.get('px.tris')!);
             pass.setBindGroup(0, this.bindGroup('px.tris', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 32 } },
@@ -735,7 +803,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const cOff = this.scratchWrite(r.bulk(p, 40));
             const ubo = new Float32Array(6); ubo.set(canvasWH, 0);
             const off = this.uboWrite(ubo);
-            pass.setPipeline(this.pipelines.get('px.trisvc')!);
+            pass.setPipeline(this.activePipes.get('px.trisvc')!);
             pass.setBindGroup(0, this.bindGroup('px.trisvc', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 32 } },
@@ -758,7 +826,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const off = this.uboWrite(ubo);
             const key = op === Op.DrawLineStripPx ? 'px.lineStrip'
                                                   : 'px.segs';
-            pass.setPipeline(this.pipelines.get(key)!);
+            pass.setPipeline(this.activePipes.get(key)!);
             pass.setBindGroup(0, this.bindGroup(key, [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 32 } },
@@ -773,7 +841,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const qOff = this.scratchWrite(r.bulk(p, 20));
             const ubo = new Float32Array(6); ubo.set(canvasWH, 0);
             const off = this.uboWrite(ubo);
-            pass.setPipeline(this.pipelines.get('text')!);
+            pass.setPipeline(this.activePipes.get('text')!);
             pass.setBindGroup(0, this.bindGroup('text', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 32 } },
@@ -792,7 +860,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const iOff = this.scratchWrite(r.bulk(p, 40));
             const ubo = new Float32Array(4); ubo.set(canvasWH, 0);
             const off = this.uboWrite(ubo);
-            pass.setPipeline(this.pipelines.get('instanced')!);
+            pass.setPipeline(this.activePipes.get('instanced')!);
             pass.setBindGroup(0, this.bindGroup('instanced', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 16 } },
@@ -814,7 +882,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const off = this.uboWrite(new Uint8Array<ArrayBuffer>(
                 p.buffer, p.byteOffset + 32, XFORM_BYTES));
             const key = op === Op.DrawLines ? 'lines' : 'linesegs';
-            pass.setPipeline(this.pipelines.get(key)!);
+            pass.setPipeline(this.activePipes.get(key)!);
             pass.setBindGroup(0, this.bindGroup(key, [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off,
@@ -841,7 +909,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const flags = p.getUint32(176, true);
             const key = 'points' + (flags & 1 ? '.c' : '') +
                                    (flags & 2 ? '.s' : '');
-            pass.setPipeline(this.pipelines.get(key)!);
+            pass.setPipeline(this.activePipes.get(key)!);
             const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off,
@@ -864,7 +932,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                 p.buffer, p.byteOffset + 16, XFORM_BYTES));
             const colBuf = p.getUint32(148, true);
             const key = colBuf ? 'trisData' : 'trisData.flat';
-            pass.setPipeline(this.pipelines.get(key)!);
+            pass.setPipeline(this.activePipes.get(key)!);
             const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off,
@@ -887,7 +955,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const dv = new DataView(ubo.buffer);
             dv.setUint32(8, p.getUint32(28, true), true);  // byteOff lo
             const off = this.uboWrite(ubo);
-            pass.setPipeline(this.pipelines.get('trisGpu')!);
+            pass.setPipeline(this.activePipes.get('trisGpu')!);
             pass.setBindGroup(0, this.bindGroup('trisGpu', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 16 } },
@@ -906,7 +974,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             new DataView(uboBytes.buffer).setFloat32(112, canvasWH[0], true);
             new DataView(uboBytes.buffer).setFloat32(116, canvasWH[1], true);
             const off = this.uboWrite(uboBytes);
-            pass.setPipeline(this.pipelines.get('pie')!);
+            pass.setPipeline(this.activePipes.get('pie')!);
             pass.setBindGroup(0, this.bindGroup('pie', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off,
@@ -927,7 +995,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             uboBytes.set(new Uint8Array(p.buffer, p.byteOffset + 152, 32),
                          96);
             const off = this.uboWrite(uboBytes);
-            pass.setPipeline(this.pipelines.get('image')!);
+            pass.setPipeline(this.activePipes.get('image')!);
             pass.setBindGroup(0, this.bindGroup('image', [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off,
@@ -941,7 +1009,37 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             pass.draw(6);
             break;
         }
-        default: break;  // DrawSurface/DrawGrid3D — M2
+        case Op.DrawSurface: {  // PDrawSurface: clip@0, ubo@16(128B), bufs@128
+            const cnt = p.getUint32(136, true);
+            if (!cnt) break;
+            this.scissor(pass, p); this.viewport(pass, p, 0);
+            const off = this.uboWrite(new Uint8Array(
+                p.buffer, p.byteOffset + 16, 128));
+            pass.setPipeline(this.activePipes.get('surface')!);
+            pass.setBindGroup(0, this.bindGroup('surface', [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 128 } },
+                { binding: 1, resource: { buffer:
+                    this.bufRef(p.getUint32(128, true)) } },
+                { binding: 2, resource: { buffer:
+                    this.bufRef(p.getUint32(132, true)) } },
+            ]));
+            pass.draw(cnt);
+            break;
+        }
+        case Op.DrawGrid3D: {   // PDrawGrid3D: clip@0, pc[44]@16 (176B)
+            this.scissor(pass, p); this.viewport(pass, p, 0);
+            const off = this.uboWrite(new Uint8Array(
+                p.buffer, p.byteOffset + 16, 176));
+            pass.setPipeline(this.activePipes.get('grid3d')!);
+            pass.setBindGroup(0, this.bindGroup('grid3d', [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 176 } },
+            ]));
+            pass.draw(3);   // fullscreen triangle
+            break;
+        }
+        default: break;
         }
     }
 }

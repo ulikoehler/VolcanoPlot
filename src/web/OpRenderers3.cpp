@@ -22,7 +22,9 @@
 #include <volcano/plot/DataSeries.hpp>
 #include <volcano/plot/Colormap.hpp>
 
+#include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace volcano::web {
 
@@ -95,16 +97,72 @@ private:
     Range xRange_{}, yRange_{}, valueRange_{};
 };
 
-// ═══ OpSurfaceRenderer (v1: vertices only — WGSL port in M2) ════════
+// ═══ OpSurfaceRenderer — CPU grid tessellation → DrawSurface op ═════
+// Same vertex/index construction as SurfaceRendererVk::upload; the VP
+// matrix and shading parameters travel in the op payload.
 
 class OpSurfaceRenderer final : public pr::SurfaceRenderer {
 public:
     explicit OpSurfaceRenderer(OpGpuServices& s) : s_(&s) {}
-    void upload(const Grid2D&) override {}
-    void draw(Cmd&, Rect2D, const Camera3D&, bool,
-              float, float) const override {}
+    void upload(const Grid2D& grid) override {
+        if (grid.width < 2 || grid.height < 2) { indexCount_ = 0; return; }
+        std::vector<Point3D> verts(grid.width * grid.height);
+        const float xMin = grid.xRange.min, xMax = grid.xRange.max;
+        const float yMin = grid.yRange.min, yMax = grid.yRange.max;
+        for (uint32_t j = 0; j < grid.height; ++j)
+            for (uint32_t i = 0; i < grid.width; ++i) {
+                float x = xMin + float(i) / float(grid.width - 1)
+                                * (xMax - xMin);
+                float y = yMin + float(j) / float(grid.height - 1)
+                                * (yMax - yMin);
+                verts[j * grid.width + i] = {x, y,
+                                             grid.values[j * grid.width + i]};
+            }
+        std::vector<uint32_t> indices;
+        indices.reserve((grid.width - 1) * (grid.height - 1) * 6);
+        for (uint32_t j = 0; j < grid.height - 1; ++j)
+            for (uint32_t i = 0; i < grid.width - 1; ++i) {
+                uint32_t a = j * grid.width + i;
+                uint32_t b = a + 1, c = a + grid.width, d = c + 1;
+                indices.insert(indices.end(), {a, c, b, b, c, d});
+            }
+        indexCount_ = uint32_t(indices.size());
+        if (vertBuf_) s_->releaseBuffer(vertBuf_);
+        if (idxBuf_) s_->releaseBuffer(idxBuf_);
+        vertBuf_ = s_->createBufferRaw(verts.size() * 12 + 16, 1|2);
+        idxBuf_ = s_->createBufferRaw(indices.size() * 4 + 16, 4|2);
+        s_->writeBufferRaw(vertBuf_, 0, verts.data(), verts.size() * 12);
+        s_->writeBufferRaw(idxBuf_, 0, indices.data(), indices.size() * 4);
+        valueMin_ = grid.valueRange.min; valueMax_ = grid.valueRange.max;
+        xRange_ = grid.xRange; yRange_ = grid.yRange;
+    }
+    void draw(Cmd& cmd, Rect2D rect, const Camera3D& camera, bool shade,
+              float lightAzdeg, float lightAltdeg) const override {
+        if (!indexCount_) return;
+        PDrawSurface p{};
+        p.clip = clipF(rect);
+        const auto vp = camera.viewProjection();
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                p.vp[j * 4 + i] = vp[i * 4 + j];   // row → column major
+        p.gridRange[0] = xRange_.min; p.gridRange[1] = xRange_.max;
+        p.gridRange[2] = yRange_.min; p.gridRange[3] = yRange_.max;
+        const float az = lightAzdeg * 3.14159265f / 180.0f;
+        const float al = lightAltdeg * 3.14159265f / 180.0f;
+        p.light[0] = std::cos(al) * std::cos(az);
+        p.light[1] = std::cos(al) * std::sin(az);
+        p.light[2] = std::sin(al);
+        p.light[3] = shade ? 1.0f : 0.0f;
+        p.valueMin = valueMin_; p.valueMax = valueMax_;
+        p.vertBuf = vertBuf_; p.idxBuf = idxBuf_;
+        p.indexCount = indexCount_;
+        ops(cmd).emit(Op::DrawSurface, p);
+    }
 private:
     OpGpuServices* s_;
+    uint32_t vertBuf_ = 0, idxBuf_ = 0, indexCount_ = 0;
+    float valueMin_ = 0, valueMax_ = 1;
+    Range xRange_{0, 1}, yRange_{0, 1};
 };
 
 // ═══ OpInstancedPathRenderer ═════════════════════════════════════════

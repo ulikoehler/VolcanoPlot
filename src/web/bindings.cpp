@@ -18,6 +18,7 @@
 #include <volcano/plot/plots/HistPlot.hpp>
 #include <volcano/plot/plots/PiePlot.hpp>
 #include <volcano/plot/plots/HeatmapPlot.hpp>
+#include <volcano/plot/plots/SurfacePlot.hpp>
 #include <volcano/plot/Colormap.hpp>
 
 using namespace volcano;
@@ -205,6 +206,22 @@ uintptr_t heatmap(uint32_t axesIdx, em::val values, uint32_t w,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+/// 3D surface: row-major height grid, camera via mpl viewInit angles.
+uintptr_t surface(uint32_t axesIdx, em::val values, uint32_t w,
+                  uint32_t h, double elevDeg, double azimDeg) {
+    plot::Grid2D g;
+    g.values = f32vec(values);
+    g.width = w; g.height = h;
+    g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    auto cam = plot::Camera3D::viewInit(float(elevDeg), float(azimDeg));
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<plot::SurfacePlot>(std::move(g), cam);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -253,5 +270,6 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_hist", &hist);
     em::function("_vp_pie", &pie);
     em::function("_vp_heatmap", &heatmap);
+    em::function("_vp_surface", &surface);
 }
 #endif // __EMSCRIPTEN__
