@@ -72,6 +72,10 @@ export class VolcanoCanvas {
     // can destroy the device ("external Instance reference no longer
     // exists" on later mapAsync).
     private adapter: GPUAdapter | null = null;
+    private dead = false;
+    /** Called when the WebGPU device is lost. The canvas is then dead:
+     * render calls throw until a new VolcanoCanvas is created. */
+    onDeviceLost?: (reason: string, message: string) => void;
     /** Undefined on the Canvas2D fallback path. */
     readonly device?: GPUDevice;
     readonly gpuCtx?: GPUCanvasContext;
@@ -99,7 +103,23 @@ export class VolcanoCanvas {
             this.ctx2d = canvas.getContext('2d')!;
             this.interp = new Canvas2DInterpreter(mb);
         }
+        device?.lost.then(info => {
+            if (info.reason === 'destroyed') return; // explicit destroy()
+            this.dead = true;
+            this.onDeviceLost?.(info.reason, info.message);
+        });
         this.syncSize();
+    }
+
+    private checkLive() {
+        if (this.dead)
+            throw new Error('WebGPU device lost — recreate the canvas');
+    }
+
+    /** Release the GPU device and mark this canvas unusable. */
+    destroy() {
+        this.dead = true;
+        this.device?.destroy();
     }
 
     /** Follow DPR — call on resize/orientation change. */
@@ -117,16 +137,18 @@ export class VolcanoCanvas {
 
     /** Render if the figure is stale; replays the op stream. */
     renderIfStale(): boolean {
+        this.checkLive();
         if (!this.mod._vp_renderIfStale()) return false;
         this.replay();
         return true;
     }
 
-    render() { this.mod._vp_render(); this.replay(); }
+    render() { this.checkLive(); this.mod._vp_render(); this.replay(); }
 
     /** Render to an offscreen target and read back RGBA8 pixels —
      * test/debug path; does not touch the canvas. */
     async capture(): Promise<Uint8Array<ArrayBuffer>> {
+        this.checkLive();
         this.mod._vp_render();
         const ptr = this.mod._vp_framePtr(), len = this.mod._vp_frameLen();
         const frame = this.mod.HEAPU8.subarray(ptr, ptr + len).slice();
