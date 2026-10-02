@@ -10,6 +10,23 @@
 #include "OpStream.hpp"
 #include <volcano/render/GpuServices.hpp>
 #include <volcano/text/TextRenderer.hpp>
+// unique_ptr members need complete types (destructor instantiated
+// where OpGpuServices is created — e.g. WebBackend.hpp).
+#include <volcano/render/primitives/SpineRenderer.hpp>
+#include <volcano/render/primitives/PointRenderer.hpp>
+#include <volcano/render/primitives/LineRenderer.hpp>
+#include <volcano/render/primitives/LineSegmentRenderer.hpp>
+#include <volcano/render/primitives/FillRenderer.hpp>
+#include <volcano/render/primitives/BarRenderer.hpp>
+#include <volcano/render/primitives/PieRenderer.hpp>
+#include <volcano/render/primitives/HeatmapRenderer.hpp>
+#include <volcano/render/primitives/SurfaceRenderer.hpp>
+#include <volcano/render/primitives/InstancedPathRenderer.hpp>
+#include <volcano/render/primitives/GpuLineRenderer.hpp>
+#include <volcano/render/primitives/ReduceRenderer.hpp>
+#include <volcano/render/primitives/EvalRenderer.hpp>
+#include <volcano/render/primitives/KdeEvalRenderer.hpp>
+#include <volcano/render/Grid3DRenderer.hpp>
 
 #include <functional>
 #include <unordered_set>

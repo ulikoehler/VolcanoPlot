@@ -21,10 +21,7 @@ set(VOLCANO_WEB_SOURCES
     ${VOLCANO_ROOT}/src/web/OpRenderers3.cpp
     ${VOLCANO_ROOT}/src/web/OpRenderers4.cpp
     ${VOLCANO_ROOT}/src/web/bindings.cpp
-    # backend-neutral engine (no volcano_core/volcano_backend natives)
-    ${VOLCANO_PLOT_SOURCES}
-    ${VOLCANO_TEXT_SOURCES}
-    # VectorRenderer + tick/layout etc. are engine-side too
+    # backend-neutral render engine pieces (no volcano_core/backend)
     ${VOLCANO_ROOT}/src/render/TickLayout.cpp
     ${VOLCANO_ROOT}/src/render/VectorWriters.cpp
     ${VOLCANO_ROOT}/src/render/VectorRenderer.cpp
@@ -40,14 +37,24 @@ target_compile_features(volcanoplot_web PRIVATE cxx_std_23)
 target_link_options(volcanoplot_web PRIVATE
     -sWASM=1
     -sMODULARIZE=1
+    -sEXPORT_ES6=1
     -sEXPORT_NAME=VolcanoPlot
     -sALLOW_MEMORY_GROWTH=1
     -sMAXIMUM_MEMORY=4GB
-    -sENVIRONMENT=web
+    -sENVIRONMENT=web,node
     --bind
+    "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32"
     -fexceptions
     -O3
 )
+# Link the archive files directly — the component targets carry native
+# link deps (volcano_core/volcano_render) that don't exist in this build.
+add_dependencies(volcanoplot_web
+    volcano_plot_static volcano_text_static glyb_static)
+target_link_libraries(volcanoplot_web PRIVATE
+    $<TARGET_FILE:volcano_plot_static>
+    $<TARGET_FILE:volcano_text_static>
+    $<TARGET_FILE:glyb_static>)
 set_target_properties(volcanoplot_web PROPERTIES
     OUTPUT_NAME volcanoplot
     RUNTIME_OUTPUT_DIRECTORY ${VOLCANO_ROOT}/web/dist

@@ -2,10 +2,6 @@
 #include "volcano/plot/plots/PcolormeshPlot.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/CommandBuffer.hpp>
-#include <volcano/core/DescriptorPool.hpp>
-#include <volcano/core/ShaderModule.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>

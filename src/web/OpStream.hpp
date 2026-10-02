@@ -154,7 +154,7 @@ public:
     static BufSrc heapRef(const void* ptr, size_t bytes) {
         BufSrc s{};
         s.kind = 1;
-        s.off = reinterpret_cast<uint64_t>(
+        s.off = static_cast<uint64_t>(
             reinterpret_cast<uintptr_t>(ptr));
         s.len = bytes;
         return s;

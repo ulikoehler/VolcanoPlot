@@ -6,16 +6,23 @@
 #pragma once
 
 #include <volcano/backend/IBackend.hpp>
+#ifndef VOLCANO_WEB
 #include <volcano/core/Instance.hpp>
 #include <volcano/core/Device.hpp>
 #include <volcano/core/Allocator.hpp>
 #include <volcano/core/CommandPool.hpp>
 
 #include <vulkan/vulkan.hpp>
+#endif
 
 #include <memory>
 #include <string>
 
+#ifdef VOLCANO_WEB
+// Web builds have no GpuContext/factories — WebBackend lives in
+// src/web/WebBackend.hpp. BackendDesc exists so shared headers parse.
+namespace volcano::backend { struct BackendDesc { uint32_t width = 1280, height = 720; }; }
+#else
 namespace volcano::backend {
 
 struct BackendDesc {
@@ -72,3 +79,4 @@ std::shared_ptr<GpuContext> sharedGpuContext();
 [[nodiscard]] vk::Format findDepthFormat(vk::PhysicalDevice phys);
 
 } // namespace volcano::backend
+#endif // !VOLCANO_WEB

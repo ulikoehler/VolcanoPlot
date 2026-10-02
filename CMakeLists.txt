@@ -80,6 +80,33 @@ endif()
 # Defined in cmake/VolcanoComponent.cmake; included below.
 
 # -----------------------------------------------------------------------------
+# WebGPU/WASM build (emcmake -DVOLCANO_WEB=ON): engine + op-stream backend
+# only — no Vulkan/GLFW/encoders/native targets. Must precede the native
+# dependency checks below.
+# -----------------------------------------------------------------------------
+option(VOLCANO_WEB "Build the Emscripten/WebGPU WASM target" OFF)
+if(VOLCANO_WEB)
+    set(VOLCANO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+    set(GLYB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glyb")
+    # Emscripten system ports replace system Freetype/HarfBuzz/PNG.
+    set(VOLCANO_FREETYPE_LINK "")
+    set(VOLCANO_HARFBUZZ_LINK "")
+    add_compile_options(-sUSE_FREETYPE=1 -sUSE_HARFBUZZ=1 -sUSE_LIBPNG=1)
+    add_compile_definitions(VOLCANO_WEB=1)
+    add_link_options(-sUSE_FREETYPE=1 -sUSE_HARFBUZZ=1 -sUSE_LIBPNG=1)
+    find_package(Threads REQUIRED)
+    # Emscripten libpng is a compiler flag, not a package — stub the
+    # imported target glyb links against.
+    add_library(PNG::PNG INTERFACE IMPORTED)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VolcanoComponent.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/web.cmake)
+    return()
+endif()
+
+# -----------------------------------------------------------------------------
 # Dependencies
 # -----------------------------------------------------------------------------
 # Vulkan loader + headers (system)
@@ -281,17 +308,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VolcanoComponent.cmake)
 
 # Root for component .cmake files
 set(VOLCANO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
-
-# WebGPU/WASM build (emcmake -DVOLCANO_WEB=ON): builds only the engine +
-# op-stream backend — no Vulkan, GLFW, encoders, or native targets.
-option(VOLCANO_WEB "Build the Emscripten/WebGPU WASM target" OFF)
-if(VOLCANO_WEB)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/web.cmake)
-    return()
-endif()
 
 # -----------------------------------------------------------------------------
 # Components

@@ -366,7 +366,7 @@ void VectorRenderer::emitPlots(const plot::Axes& axes, Rect2D rect,
         }
         std::vector<uint8_t> rgba; uint32_t w = 0, h = 0;
         if (rasterize_ && rasterize_(axes, run, rgba, w, h) && !rgba.empty())
-            c.image({0, 0, int32_t(w), int32_t(h)}, w, h, rgba);
+            c.image({0, 0, w, h}, w, h, rgba);
     }
     c.popClip();
 }

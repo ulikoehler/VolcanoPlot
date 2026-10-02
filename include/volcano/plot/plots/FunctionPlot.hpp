@@ -5,7 +5,6 @@
 #include "volcano/plot/DataSeries.hpp"
 #include "volcano/render/primitives/LineRenderer.hpp"
 #include "volcano/render/primitives/EvalRenderer.hpp"
-#include "volcano/core/Buffer.hpp"
 namespace volcano::plot {
 
 /// Plots a function y = f(x) by evaluating it on the GPU via a compute shader.
