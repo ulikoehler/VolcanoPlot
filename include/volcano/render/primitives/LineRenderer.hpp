@@ -36,6 +36,10 @@ public:
     /// Bind an externally-owned buffer (e.g. EvalRenderer output). The
     /// caller guarantees the buffer outlives this renderer's draws.
     virtual void bindExternalBuffer(GpuBuf buf, uint32_t count) = 0;
+    /// Update color/width without re-uploading points — needed by
+    /// bindExternalBuffer users (GPU-evaluated function plots) that
+    /// never call upload().
+    virtual void setStyle(plot::Color color, float width) = 0;
 };
 
 } // namespace volcano::render::primitives

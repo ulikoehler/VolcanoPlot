@@ -172,6 +172,9 @@ public:
         buf_ = uint32_t(buf); count_ = count;
         capacity_ = count;
     }
+    void setStyle(Color color, float width) override {
+        color_ = color; width_ = width;
+    }
     void draw(Cmd& cmd, Rect2D rect, const Transform2D& t,
               uint32_t pointCount) const override {
         if (!buf_ || pointCount < 2) return;

@@ -1,0 +1,24 @@
+<!doctype html>
+<html><body>
+<canvas id="c" width="640" height="480" style="width:640px;height:480px"></canvas>
+<script type="module">
+import { createCanvas } from '/dist/bundle.mjs';
+import VolcanoPlot from '/dist/volcanoplot.js';
+
+window.vpDone = (async () => {
+    const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
+    window.vp = vp;
+    vp.device.addEventListener('uncapturederror',
+        e => console.log('GPUERR:', e.error?.message ?? e));
+    vp.func('sin(10.0*x)', -3.14159, 3.14159, '#e00000');
+    const px = await vp.capture();
+    window.vpPixels = px;
+    let red = 0;
+    for (let i = 0; i < px.length; i += 4)
+        if (px[i] > 150 && px[i+1] < 100 && px[i+2] < 100) red++;
+    return 'rendered red=' + red;
+})();
+window.vpDone.then(v => { window.vpResult = v; },
+                   e => { window.vpError = String(e.stack || e); });
+</script>
+</body></html>

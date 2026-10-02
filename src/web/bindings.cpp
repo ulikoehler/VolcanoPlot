@@ -13,6 +13,7 @@
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
+#include <volcano/plot/plots/FunctionPlot.hpp>
 
 using namespace volcano;
 namespace em = emscripten;
@@ -109,6 +110,22 @@ uintptr_t scatter(uint32_t axesIdx, em::val xs, em::val ys,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+uintptr_t func(uint32_t axesIdx, const std::string& body,
+               double xMin, double xMax, em::val color) {
+    auto* ax = targetAxes(axesIdx);
+    plot::Color col = plot::Color::blue();
+    if (color.typeOf().as<std::string>() == "string") {
+        if (auto c = plot::Color::parse(color.as<std::string>()))
+            col = *c;
+    }
+    auto plot = std::make_shared<plot::FunctionPlot>(
+        body, plot::Range{float(xMin), float(xMax)}, 1024, col);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -152,5 +169,6 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_free", &free_);
     em::function("_vp_mailbox", &mailbox);
     em::function("_vp_setData", &setData);
+    em::function("_vp_function", &func);
 }
 #endif // __EMSCRIPTEN__

@@ -70,6 +70,9 @@ public:
     }
     [[nodiscard]] uint32_t pointCount() const noexcept override { return count_; }
     void updatePoints(std::span<const plot::Point2D> points) override;
+    void setStyle(plot::Color color, float width) override {
+        color_ = color; width_ = width;
+    }
     void bindExternalBuffer(GpuBuf buf, uint32_t count) override {
         externalBuf_ = buf;
         count_ = count;

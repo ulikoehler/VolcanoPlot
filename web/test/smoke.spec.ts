@@ -95,3 +95,28 @@ test('setData re-renders a changed curve (streaming path)',
     expect(errors).toEqual([]);
     expect(diff).toBeGreaterThan(1000);
 });
+
+test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    page.on('console', m => { const t = m.text();
+        if (!/404|favicon/.test(t)) errors.push('CON: ' + t.slice(0, 300)); });
+    await page.goto(`http://localhost:${port}/demo/func.html`);
+    await page.waitForFunction(
+        () => (window as any).vpResult !== undefined ||
+              (window as any).vpError !== undefined,
+        { timeout: 30_000 });
+    const res = await page.evaluate(() =>
+        ({ ok: !(window as any).vpError,
+           v: (window as any).vpResult ?? (window as any).vpError }));
+    expect(res.ok, `page error: ${res.v} ${errors}`).toBe(true);
+    const stats = await page.evaluate(() => {
+        const px = (window as any).vpPixels;
+        let red = 0;
+        for (let i = 0; i < px.length; i += 4)
+            if (px[i]>150 && px[i+1]<100 && px[i+2]<100) red++;
+        return { red };
+    });
+    console.log('FUNC', JSON.stringify(stats), JSON.stringify(errors));
+    expect(stats.red).toBeGreaterThan(500);   // sin(10x) curve pixels
+});

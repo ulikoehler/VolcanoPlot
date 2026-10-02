@@ -369,6 +369,64 @@ export class Interpreter {
         this.scratchCursor = 0;
     }
 
+    // ── function evaluation (FuncDef/EvalFunc) ───────────────────────
+    private funcPipes = new Map<number, GPUComputePipeline>();
+    private evalBgl?: GPUBindGroupLayout;
+
+    private ensureEval() {
+        if (this.evalBgl) return;
+        this.evalBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+        ]});
+    }
+
+    /** Loose GLSL→WGSL for user bodies: bare expressions are wrapped as
+     * `y = (expr);` (mirroring EvalRendererVk::wrapBody); common builtin
+     * names coincide between the two languages. */
+    private glslToWgslBody(body: string): string {
+        let b = body.trim();
+        if (!/[=;{]/.test(b)) b = `y = (${b});`;
+        return b
+            .replace(/\bmod\s*\(/g, 'vpMod(')
+            .replace(/\batan\s*\(\s*([^,()]+)\s*,/g, 'atan2($1,')
+            .replace(/\bfloat\s*\(/g, 'f32(')
+            .replace(/\bfloat\s+/g, 'var ')
+            .replace(/\bint\s*\(/g, 'i32(')
+            .replace(/\bbool\b/g, 'bool')
+            .replace(/\bvec([234])\s*\(/g, 'vec$1f(');
+    }
+
+    private funcDef(r: OpReader, p: DataView<ArrayBuffer>) {
+        const funcId = p.getUint16(0, true);
+        const body = new TextDecoder().decode(r.bulk(p, 3));
+        const wgsl = `
+fn vpMod(a : f32, b : f32) -> f32 { return a - b * floor(a / b); }
+struct EvalPC { xBase : f32, xStep : f32, count : u32, pad : u32 };
+@group(0) @binding(0) var<storage, read_write> outBuf : array<vec2f>;
+@group(0) @binding(1) var<uniform> pc : EvalPC;
+@compute @workgroup_size(256)
+fn cs(@builtin(global_invocation_id) gid : vec3u) {
+    let i = gid.x;
+    if (i >= pc.count) { return; }
+    let x = pc.xBase + f32(i) * pc.xStep;
+    var y = 0.0;
+    ${this.glslToWgslBody(body)}
+    outBuf[i] = vec2f(x, y);
+}`;
+        this.ensureEval();
+        const mod = this.device.createShaderModule({ code: wgsl });
+        void mod.getCompilationInfo().then(info =>
+            info.messages.forEach(m => console.warn(
+                `[VP WGSL func] ${m.lineNum}:${m.linePos} ${m.message}`)));
+        this.funcPipes.set(funcId, this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.evalBgl!] }),
+            compute: { module: mod, entryPoint: 'cs' } }));
+    }
+
     // ── mailbox (async compute results → C++) ────────────────────────
     private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
                            slot: number }[] = [];
@@ -540,6 +598,34 @@ export class Interpreter {
                         op: number, p: DataView<ArrayBuffer>) {
         // TODO(M3): EvalFunc / FuncDef / HistBins / KdeEval2D /
         // PcmTess / ViolinKde — mailbox results via mapAsync.
+        if (op === Op.FuncDef) { this.funcDef(r, p); return; }
+        if (op === Op.EvalFunc) {
+            // PEvalFunc {outBuf u32, xMin f64, xMax f64, count u32,
+            //            funcId u16}
+            const pipe = this.funcPipes.get(p.getUint16(24, true));
+            const count = p.getUint32(20, true);
+            if (!pipe || !count) return;
+            const xMin = p.getFloat64(4, true);
+            const xMax = p.getFloat64(12, true);
+            const pc = new DataView(new ArrayBuffer(16));
+            pc.setFloat32(0, xMin, true);
+            pc.setFloat32(4, count > 1
+                ? (xMax - xMin) / (count - 1) : 0, true);
+            pc.setUint32(8, count, true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(pipe);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.evalBgl!, entries: [
+                    { binding: 0, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 1, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 16 } },
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(count / 256));
+            cpass.end();
+            return;
+        }
         if (op === Op.ReduceMinMax) {
             // PReduceMinMax {inBuf, count, mailbox}
             this.ensureReduce();

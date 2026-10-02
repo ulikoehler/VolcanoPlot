@@ -60,6 +60,7 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
         }
         eval_->eval(evalBuf_, xRange.min, xRange.max, evalSamples_);
         renderer_->bindExternalBuffer(evalBuf_, evalSamples_);
+        renderer_->setStyle(color_, lineWidth_);
         return;
     }
 

@@ -24,6 +24,8 @@ interface VolcanoModule {
                 v2: number, v3: number): void;
     _vp_setData(handle: number, xs: Float32Array,
                 ys: Float32Array): void;
+    _vp_function(axes: number, body: string, xMin: number,
+                 xMax: number, color: string): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -110,6 +112,12 @@ export class VolcanoCanvas {
             this.mod._vp_free(vx.byteOffset);
             this.mod._vp_free(vy.byteOffset);
         }
+    }
+
+    /** GPU-evaluated function plot: `body` is a GLSL-ish expression or
+     * statements assigning `y` from `x` (e.g. "sin(10.0*x)"). */
+    func(body: string, xMin = 0, xMax = 1, color = ''): number {
+        return this.mod._vp_function(0, body, xMin, xMax, color);
     }
 
     /** In-place update for a handle from line()/scatter() — the
