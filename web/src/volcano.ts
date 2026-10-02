@@ -7,6 +7,7 @@
 
 import { Interpreter } from './interpreter';
 import { Canvas2DInterpreter } from './fallback';
+import { SvgExporter } from './svg';
 
 /// Emscripten module factory type (produced by --bind MODULARIZE build).
 interface VolcanoModule {
@@ -147,6 +148,17 @@ export class VolcanoCanvas {
     }
 
     render() { this.checkLive(); this.mod._vp_render(); this.replay(); }
+
+    /** Export the last rendered frame as an SVG string — vector
+     * geometry ops become <path>/<circle>/<polyline>; heatmaps embed
+     * as raster PNGs; tick-label glyph quads are skipped (text is
+     * atlas-rasterized upstream). */
+    toSvg(): string {
+        const ptr = this.mod._vp_framePtr(), len = this.mod._vp_frameLen();
+        if (!ptr || !len) return '';
+        const frame = this.mod.HEAPU8.subarray(ptr, ptr + len);
+        return new SvgExporter().toSvg(frame.slice());
+    }
 
     /** Render to an offscreen target and read back RGBA8 pixels —
      * test/debug path; does not touch the canvas. */

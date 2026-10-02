@@ -145,6 +145,31 @@ test('interaction: scroll-zoom changes the viewport', async ({ page }) => {
     expect(diff).toBeGreaterThan(100); // zoomed curve occupies new pixels
 });
 
+test('toSvg() exports vector markup', async ({ page }) => {
+    await page.goto(`http://localhost:${port}/demo/smoke.html`);
+    await page.waitForFunction(() => (window as any).vpResult !== undefined,
+        { timeout: 30_000 });
+    const stats = await page.evaluate(() => {
+        const svg = (window as any).vp.toSvg();
+        const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+        const err = doc.querySelector('parsererror');
+        const col = Array.from(doc.querySelectorAll('[stroke],[fill]'))
+            .map(e => e.getAttribute('stroke') ?? e.getAttribute('fill'))
+            .filter(c => c && c !== 'none');
+        return {
+            err: err ? err.textContent : null,
+            paths: doc.querySelectorAll('path').length,
+            // '#e00000' line → some stroke/fill must be red
+            red: col.filter(c => c === '#e00000' || c === '#ff0000').length,
+            len: svg.length,
+        };
+    });
+    console.log('SVG', JSON.stringify(stats));
+    expect(stats.err).toBeNull();
+    expect(stats.paths).toBeGreaterThan(5);
+    expect(stats.red).toBeGreaterThan(0);
+});
+
 for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'contour', 'hist2d', 'kde', 'box', 'stem',
                     'quiver', 'subplot']) {

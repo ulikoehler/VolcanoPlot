@@ -74,7 +74,7 @@ function projFwd(x: number, y: number, pr: number[]): [number, number] {
     return [x, y];
 }
 
-class XformView {
+export class XformView {
     readonly f: number[];
     constructor(p: DataView<ArrayBuffer>, at: number) {
         this.f = [];
@@ -94,7 +94,7 @@ class XformView {
     }
 }
 
-const css = (c: ArrayLike<number>) =>
+export const css = (c: ArrayLike<number>) =>
     `rgba(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 0},${c[3]})`;
 
 // ── interpreter ──────────────────────────────────────────────────────
