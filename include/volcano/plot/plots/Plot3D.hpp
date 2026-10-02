@@ -48,7 +48,7 @@ public:
     Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -60,10 +60,10 @@ private:
     Plot3DConfig config_;
     Camera3D camera_;
 
-    render::primitives::LineRenderer lineRenderer_;
+    std::unique_ptr<render::primitives::LineRenderer> lineRenderer_;
     std::vector<Point2D> projectedPoints_;
 
-    render::primitives::PointRenderer pointRenderer_;
+    std::unique_ptr<render::primitives::PointRenderer> pointRenderer_;
     std::vector<Point2D> markerPoints_;
     std::vector<Color> markerColors_;
 

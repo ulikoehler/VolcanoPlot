@@ -1,10 +1,13 @@
 // volcano/render/primitives/PieRenderer.cpp
 #include "volcano/render/primitives/PieRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -70,8 +73,12 @@ private:
     bool inited_ = false;
 };
 
-void PieRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                       vk::SampleCountFlagBits samples, core::PipelineCache& cache {
+void PieRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
+    device_ = device;
     device_ = device;
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -152,7 +159,11 @@ void PieRendererVk::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void PieRendererVk::upload(const plot::PieData& data {
+void PieRendererVk::upload(const plot::PieData& data) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     float total = 0;
     for (auto v : data.values) total += v;
     if (total <= 0) return;
@@ -230,7 +241,8 @@ void PieRendererVk::upload(const plot::PieData& data {
                         std::as_bytes(std::span{colors.data(), colors.size()}));
 }
 
-void PieRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect const {
+void PieRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || vertexCount_ == 0) return;
 
     // NDC per pie-data unit, per axis. The mpl pie view spans ±1.25,
@@ -266,10 +278,10 @@ void PieRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect const {
     cmd.draw(vertexCount_, 1, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<PieRenderer> makePieVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<PieRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

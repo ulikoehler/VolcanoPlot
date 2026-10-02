@@ -1,0 +1,18 @@
+{
+    "name": "@volcanoplot/web",
+    "version": "0.0.1",
+    "type": "module",
+    "description": "VolcanoPlot WebGPU front-end — WASM engine + op-stream interpreter",
+    "main": "dist/interpreter.js",
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "test": "vitest run",
+        "test:e2e": "playwright test"
+    },
+    "devDependencies": {
+        "typescript": "^5.5.0",
+        "vitest": "^2.0.0",
+        "@webgpu/types": "^0.1.40",
+        "@playwright/test": "^1.45.0"
+    }
+}

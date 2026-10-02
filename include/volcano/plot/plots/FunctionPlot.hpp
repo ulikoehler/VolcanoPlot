@@ -1,6 +1,7 @@
 // volcano/plot/plots/FunctionPlot.hpp — GPU-side function evaluation plot
 #pragma once
 #include "volcano/plot/Plot.hpp"
+#include <volcano/render/Cmd.hpp>
 #include "volcano/plot/DataSeries.hpp"
 #include "volcano/render/primitives/LineRenderer.hpp"
 #include "volcano/render/primitives/EvalRenderer.hpp"
@@ -19,7 +20,7 @@ public:
           color_(color), lineWidth_(lineWidth), label_(std::move(label)) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
                                   Viewport& v) const override;
@@ -38,9 +39,9 @@ private:
     Color color_;
     float lineWidth_;
     std::string label_;
-    render::primitives::LineRenderer renderer_;
-    render::primitives::EvalRenderer eval_;
-    core::Buffer evalBuf_;
+    std::unique_ptr<render::primitives::LineRenderer> renderer_;
+    std::unique_ptr<render::primitives::EvalRenderer> eval_;
+    render::GpuBuf evalBuf_ = 0;
     uint32_t evalCap_ = 0;
     uint32_t evalSamples_ = 0;
     Range evalRange_{0, 0};

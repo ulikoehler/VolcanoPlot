@@ -155,29 +155,22 @@ void VoxelsPlot::projectVoxels() {
 void VoxelsPlot::prepare(render::Renderer& r) {
     projectVoxels();
 
-    auto& ctx = r.backend().context();
 
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {
-        edgeRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        edgeRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{edgeSegments_}, config_.edgeColor,
+        if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
+        edgeRenderer_->upload(std::span{edgeSegments_}, config_.edgeColor,
                              config_.edgeWidth);
     }
 
     prepared_ = true;
 }
 
-void VoxelsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void VoxelsPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -186,13 +179,13 @@ void VoxelsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (!fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawEdges && !edgeSegments_.empty())
-        edgeRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(edgeSegments_.size()));
+        edgeRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(edgeSegments_.size()));
 }
 
 void VoxelsPlot::contributeToAutoscale(Viewport& v) const {

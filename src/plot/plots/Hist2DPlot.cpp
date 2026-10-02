@@ -210,23 +210,19 @@ void Hist2DPlot::buildGeometry() {
 void Hist2DPlot::prepare(render::Renderer& r) {
     computeBins();
     buildGeometry();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{fillPositions_}, std::span{fillColors_});
+        renderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
     prepared_ = true;
 }
 
-void Hist2DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Hist2DPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void Hist2DPlot::contributeToAutoscale(Viewport& v) const {

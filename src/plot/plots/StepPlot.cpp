@@ -64,23 +64,19 @@ void StepPlot::buildStepPoints() {
 
 void StepPlot::prepare(render::Renderer& r) {
     buildStepPoints();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineRenderer();
     if (!stepPoints_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{stepPoints_}, color_, lineWidth_);
+        renderer_->upload(std::span{stepPoints_}, color_, lineWidth_);
     }
     prepared_ = true;
 }
 
-void StepPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void StepPlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || stepPoints_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
 }
 
 void StepPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -108,8 +104,8 @@ void StepPlot::contributeToAutoscale(Viewport& v) const {
 
 void StepPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(),
-                                    renderer_.pointCount());
+    auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(),
+                                    renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX);
     v.x.max = std::max(v.x.max, r->maxX);
@@ -130,7 +126,6 @@ StairsPlot::StairsPlot(std::vector<float> values, std::vector<float> edges,
 }
 
 void StairsPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
 
     // Build staircase outline: (edges[0], values[0]) → (edges[1], values[0])
     // → (edges[1], values[1]) → ... → (edges[N], values[N-1]).
@@ -145,18 +140,14 @@ void StairsPlot::prepare(render::Renderer& r) {
         stepPoints_.push_back({edges_[n], values_[n - 1]});
     }
 
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                      r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (!stepPoints_.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{stepPoints_}, color_, lineWidth_);
+        lineRenderer_->upload(std::span{stepPoints_}, color_, lineWidth_);
     }
 
     // Build fill triangles if requested.
     if (fill_ && n > 0) {
-        fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                          r.backend().sampleCount(), r.pipelineCache());
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
         fillPositions_.clear();
         fillColors_.clear();
         for (size_t i = 0; i < n; ++i) {
@@ -175,23 +166,21 @@ void StairsPlot::prepare(render::Renderer& r) {
             fillPositions_.push_back(ul);
             for (int j = 0; j < 6; ++j) fillColors_.push_back(fillColor_);
         }
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
 
     prepared_ = true;
 }
 
-void StairsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void StairsPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     if (fill_ && !fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
     if (!stepPoints_.empty())
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
 }
 
 void StairsPlot::emitVector(render::VectorCanvas& c, const Axes& axes,

@@ -71,26 +71,22 @@ void Line3DCollection::projectSegments() {
 void Line3DCollection::prepare(render::Renderer& r) {
     projectSegments();
 
-    auto& ctx = r.backend().context();
 
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!projected_.empty()) {
         // LineSegmentRenderer uses a single color for all segments.
         // For per-segment colors, we'd need a different renderer, but
         // the current LineSegmentRenderer only supports one color.
         // We use the default color; per-segment colors are stored but
         // not used by the current renderer.
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{projected_}, config_.color,
+        renderer_->upload(std::span{projected_}, config_.color,
                          config_.lineWidth);
     }
 
     prepared_ = true;
 }
 
-void Line3DCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Line3DCollection::draw(render::Cmd& cmd, render::Renderer& r,
                             const Axes& axes, Rect2D rect) {
     if (!prepared_ || projected_.empty()) return;
 
@@ -99,9 +95,9 @@ void Line3DCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(projected_.size()));
+    renderer_->draw(cmd, vrect, t, static_cast<uint32_t>(projected_.size()));
 }
 
 void Line3DCollection::contributeToAutoscale(Viewport& v) const {
@@ -193,29 +189,22 @@ void Poly3DCollection::projectPolygons() {
 void Poly3DCollection::prepare(render::Renderer& r) {
     projectPolygons();
 
-    auto& ctx = r.backend().context();
 
     if (config_.drawFaces && !fillPositions_.empty()) {
-        fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {
-        edgeRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        edgeRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{edgeSegments_}, config_.edgeColor,
+        if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
+        edgeRenderer_->upload(std::span{edgeSegments_}, config_.edgeColor,
                              config_.edgeWidth);
     }
 
     prepared_ = true;
 }
 
-void Poly3DCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Poly3DCollection::draw(render::Cmd& cmd, render::Renderer& r,
                             const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -224,13 +213,13 @@ void Poly3DCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (config_.drawFaces && !fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawEdges && !edgeSegments_.empty())
-        edgeRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(edgeSegments_.size()));
+        edgeRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(edgeSegments_.size()));
 }
 
 void Poly3DCollection::contributeToAutoscale(Viewport& v) const {

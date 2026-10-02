@@ -86,32 +86,28 @@ void ScatterPlot::prepare(render::Renderer& r) {
         if (colors.empty())
             colors.assign(series_.points.size(), series_.resolvedColor());
         auto sizes = pointSizes();
-        renderer_.updatePoints(std::span{series_.points},
+        renderer_->updatePoints(std::span{series_.points},
                                std::span{colors}, std::span{sizes});
         dataDirty_ = false;
         return;
     }
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.descriptorPool(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createPointRenderer();
 
     auto colors = pointColors();
     if (colors.empty())
         colors.assign(series_.points.size(), series_.resolvedColor());
     auto sizes = pointSizes();
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{series_.points}, std::span{colors}, std::span{sizes});
+    renderer_->upload(std::span{series_.points}, std::span{colors}, std::span{sizes});
     prepared_ = true;
     dataDirty_ = false;
 }
 
-void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ScatterPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     // mpl clip_on=False → clip to the whole canvas, not the axes rect.
-    auto eff = clipRect(rect, r.backend().extent());
-    vk::Rect2D vrect{vk::Offset2D{eff.x, eff.y}, vk::Extent2D{eff.width, eff.height}};
+    auto eff = clipRect(rect, r.gpu().extent());
+    Rect2D vrect{eff.x, eff.y, eff.width, eff.height};
 
     // Custom Path / TeX markers, domain-limited scales (log/logit
     // masks out-of-domain points), artist transforms (mpl transform=),
@@ -261,7 +257,7 @@ void ScatterPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         .numsides = static_cast<float>(series_.markerNumsides),
         .angle = series_.markerAngle,
     };
-    renderer_.draw(cmd, vrect, t,
+    renderer_->draw(cmd, vrect, t,
                    static_cast<uint32_t>(series_.points.size()), mp);
 }
 
@@ -399,7 +395,7 @@ void ScatterPlot::contributeToAutoscaleScaled(Viewport& v,
 
 void ScatterPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(), renderer_.pointCount());
+    auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(), renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX);
     v.x.max = std::max(v.x.max, r->maxX);

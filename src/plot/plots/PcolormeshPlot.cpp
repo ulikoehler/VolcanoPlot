@@ -23,79 +23,6 @@ const Colormap& defaultColormap() {
 
 /// Compute shader: expands one cell per invocation into fill triangles
 /// (vec2 pos + vec4 color), matching buildGeometry()'s CPU output.
-constexpr const char* kPcmTessGlsl = R"(
-#version 460
-layout(local_size_x = 256) in;
-
-layout(set = 0, binding = 0) readonly buffer Xs { float v[]; } xs;
-layout(set = 0, binding = 1) readonly buffer Ys { float v[]; } ys;
-// Per-cell normalized t (flat shading) or per-corner t (gouraud).
-layout(set = 0, binding = 2) readonly buffer Ts { float v[]; } ts;
-// Colormap LUT: [0..255] = t∈[0,1], 256 = under, 257 = over, 258 = bad.
-layout(set = 0, binding = 3) readonly buffer Lut { vec4 c[]; } lut;
-layout(set = 0, binding = 4) writeonly buffer Pos { vec2 v[]; } pos;
-layout(set = 0, binding = 5) writeonly buffer Col { vec4 v[]; } col;
-
-layout(push_constant) uniform PC {
-    uint nCols;   // cells per row (flat) or corner count (gouraud)
-    uint nRows;
-    uint gouraud;
-    uint flags;   // bit0 = cmap.bad set, bit1 = skipNaN
-} pc;
-
-vec4 colorOf(float t) {
-    if (isnan(t)) return lut.c[258];
-    if (t < 0.0)  return lut.c[256];
-    if (t > 1.0)  return lut.c[257];
-    return lut.c[uint(t * 255.0 + 0.5)];
-}
-
-void main() {
-    uint cell = gl_GlobalInvocationID.x;
-    if (pc.gouraud == 0u) {
-        if (cell >= pc.nCols * pc.nRows) return;
-        uint i = cell % pc.nCols, j = cell / pc.nCols;
-        vec4 c = colorOf(ts.v[cell]);
-        vec2 bl = vec2(xs.v[i],   ys.v[j]);
-        vec2 br = vec2(xs.v[i+1], ys.v[j]);
-        vec2 ur = vec2(xs.v[i+1], ys.v[j+1]);
-        vec2 ul = vec2(xs.v[i],   ys.v[j+1]);
-        uint v = cell * 6u;
-        pos.v[v]    = bl; pos.v[v+1u] = br; pos.v[v+2u] = ul;
-        pos.v[v+3u] = br; pos.v[v+4u] = ur; pos.v[v+5u] = ul;
-        for (uint k = 0u; k < 6u; ++k) col.v[v + k] = c;
-    } else {
-        // Gouraud: (nCols-1)*(nRows-1) quads, 4 tris meeting at the
-        // averaged center vertex (mpl _convert_mesh_to_triangles).
-        uint qw = pc.nCols - 1u;
-        if (cell >= qw * (pc.nRows - 1u)) return;
-        uint i = cell % qw, j = cell / qw;
-        float ta = ts.v[j*pc.nCols + i],       tb = ts.v[j*pc.nCols + i+1];
-        float tc = ts.v[(j+1u)*pc.nCols + i+1u], td = ts.v[(j+1u)*pc.nCols + i];
-        vec4 ca = colorOf(ta), cb = colorOf(tb);
-        vec4 cc = colorOf(tc), cd = colorOf(td);
-        // mpl drops the quad if any corner is masked and no bad color.
-        if ((pc.flags & 3u) == 2u && (isnan(ta) || isnan(tb) || isnan(tc) || isnan(td))) {
-            ca = cb = cc = cd = vec4(0.0);
-        }
-        vec4 cCtr = (ca + cb + cc + cd) * 0.25;
-        vec2 pa = vec2(xs.v[i],   ys.v[j]);
-        vec2 pb = vec2(xs.v[i+1], ys.v[j]);
-        vec2 pq = vec2(xs.v[i+1], ys.v[j+1]);
-        vec2 pd = vec2(xs.v[i],   ys.v[j+1]);
-        vec2 pCtr = (pa + pb + pq + pd) * 0.25;
-        uint v = cell * 12u;
-        vec2 pts[12] = vec2[12](pa, pb, pCtr, pb, pq, pCtr,
-                                pq, pd, pCtr, pd, pa, pCtr);
-        vec4 cls[12] = vec4[12](ca, cb, cCtr, cb, cc, cCtr,
-                                cc, cd, cCtr, cd, ca, cCtr);
-        for (uint k = 0u; k < 12u; ++k) {
-            pos.v[v + k] = pts[k];
-            col.v[v + k] = cls[k];
-        }
-    }
-}
-)";
 
 } // namespace
 
@@ -264,12 +191,6 @@ void PcolormeshPlot::buildGeometry() {
 }
 
 bool PcolormeshPlot::buildGeometryGpu(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    vk::Device dev = ctx.device.handle();
-    vk::Queue queue = ctx.device.graphicsQueue();
-    vk::CommandPool pool = ctx.graphicsPool.handle();
-    VmaAllocator alloc = ctx.allocator.handle();
-
     const bool gouraud = config_.shading == PcmShading::Gouraud;
     const uint32_t cells = gouraud ? (nCols_ - 1) * (nRows_ - 1)
                                    : nCols_ * nRows_;
@@ -299,102 +220,13 @@ bool PcolormeshPlot::buildGeometryGpu(render::Renderer& r) {
     lut[257] = cmap.over.value_or(cmap.sample(1.0f));
     lut[258] = cmap.bad.value_or(Color::transparent());
 
-    // --- pipeline (built per prepare; cheap relative to big meshes) ---
-    auto spv = core::ShaderModule::compileGlsl(kPcmTessGlsl, "comp");
-    core::ShaderModule shader(dev, spv);
-    vk::DescriptorSetLayoutBinding bindings[6];
-    for (uint32_t b = 0; b < 6; ++b)
-        bindings[b].setBinding(b)
-            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-            .setDescriptorCount(1)
-            .setStageFlags(vk::ShaderStageFlagBits::eCompute);
-    vk::DescriptorSetLayoutCreateInfo dlci{};
-    dlci.setBindings(bindings);
-    auto descLayout = dev.createDescriptorSetLayoutUnique(dlci);
-
-    vk::PushConstantRange pcr{};
-    pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute).setOffset(0).setSize(16);
-    vk::PipelineLayoutCreateInfo plci{};
-    plci.setSetLayouts(descLayout.get()).setPushConstantRanges(pcr);
-    auto pipeLayout = dev.createPipelineLayoutUnique(plci);
-
-    vk::ComputePipelineCreateInfo ci{};
-    ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
-        .setModule(shader.handle()).setPName("main");
-    ci.setLayout(pipeLayout.get());
-    auto res = dev.createComputePipelineUnique(nullptr, ci);
-    if (res.result != vk::Result::eSuccess) return false;
-    auto pipe = std::move(res.value);
-
-    // --- buffers ---
-    auto mkStorage = [&](const void* data, size_t bytes) {
-        core::BufferDesc d{};
-        d.size = bytes;
-        d.usage = core::BufferUsage::Storage;
-        core::Buffer buf(alloc, d);
-        buf.upload(dev, queue, pool,
-                   std::span{static_cast<const std::byte*>(data), bytes});
-        return buf;
-    };
-    core::Buffer xBuf = mkStorage(x_.data(), x_.size() * 4);
-    core::Buffer yBuf = mkStorage(y_.data(), y_.size() * 4);
-    core::Buffer tBuf = mkStorage(tvals.data(), tvals.size() * 4);
-    core::Buffer lutBuf = mkStorage(lut.data(), lut.size() * sizeof(Color));
-
-    core::BufferDesc pdesc{};
-    pdesc.size = nVerts * sizeof(Point2D);
-    pdesc.usage = core::BufferUsage::VertexStorage;
-    core::Buffer posBuf(alloc, pdesc);
-    core::BufferDesc cdesc{};
-    cdesc.size = nVerts * sizeof(Color);
-    cdesc.usage = core::BufferUsage::VertexStorage;
-    core::Buffer colBuf(alloc, cdesc);
-
-    vk::DescriptorPoolSize ps{};
-    ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(6);
-    core::DescriptorPool descPool(dev, {ps}, 1);
-    vk::DescriptorSet dset = descPool.allocate(descLayout.get());
-
-    vk::DescriptorBufferInfo infos[6];
-    std::array<std::pair<vk::Buffer, vk::DeviceSize>, 6> bufs{{
-        {xBuf.handle(), xBuf.size()}, {yBuf.handle(), yBuf.size()},
-        {tBuf.handle(), tBuf.size()}, {lutBuf.handle(), lutBuf.size()},
-        {posBuf.handle(), posBuf.size()}, {colBuf.handle(), colBuf.size()}}};
-    vk::WriteDescriptorSet writes[6];
-    for (uint32_t b = 0; b < 6; ++b) {
-        infos[b].setBuffer(bufs[b].first).setOffset(0).setRange(bufs[b].second);
-        writes[b].setDstSet(dset).setDstBinding(b)
-            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-            .setBufferInfo(infos[b]);
-    }
-    dev.updateDescriptorSets(writes, {});
-
-    {
-        core::OneTimeCommands cmd(dev, pool, queue);
-        auto c = cmd.handle();
-        c.bindPipeline(vk::PipelineBindPoint::eCompute, pipe.get());
-        c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                             pipeLayout.get(), 0, dset, {});
-        uint32_t pcv[4] = {nCols_, nRows_, gouraud ? 1u : 0u,
-                           (cmap.bad ? 1u : 0u) | (config_.skipNaN ? 2u : 0u)};
-        c.pushConstants(pipeLayout.get(), vk::ShaderStageFlagBits::eCompute,
-                        0, 16, pcv);
-        c.dispatch((cells + 255) / 256, 1, 1);
-        // Compute writes -> vertex attribute reads.
-        vk::BufferMemoryBarrier barriers[2];
-        for (uint32_t b = 0; b < 2; ++b) {
-            barriers[b].setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
-                .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
-                .setBuffer(bufs[4 + b].first).setOffset(0)
-                .setSize(bufs[4 + b].second);
-        }
-        c.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                          vk::PipelineStageFlagBits::eVertexInput,
-                          {}, {}, barriers, {});
-    }
-
-    fillRenderer_.adoptBuffers(std::move(posBuf), std::move(colBuf),
-                             uint32_t(nVerts));
+    const uint32_t flags =
+        (cmap.bad ? 1u : 0u) | (config_.skipNaN ? 2u : 0u);
+    render::GpuBuf posTok = 0, colTok = 0;
+    if (!r.gpu().pcmTessellate(x_, y_, tvals, lut, nCols_, nRows_,
+                               gouraud, flags, posTok, colTok))
+        return false;
+    fillRenderer_->adoptBuffers(posTok, colTok, uint32_t(nVerts));
     return true;
 }
 
@@ -418,7 +250,6 @@ bool PcolormeshPlot::eligibleForTexture() const {
 }
 
 void PcolormeshPlot::uploadTexture(render::Renderer& r) {
-    auto& ctx = r.backend().context();
     Grid2D g;
     g.width = nCols_;
     g.height = nRows_;
@@ -442,28 +273,22 @@ void PcolormeshPlot::uploadTexture(render::Renderer& r) {
         g.valueRange = valueRange_;
     }
     const Colormap& cmap = config_.cmap ? *config_.cmap : defaultColormap();
-    texRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                        ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                        g, cmap, config_.skipNaN && hasNaN);
+    texRenderer_->upload(g, cmap, config_.skipNaN && hasNaN);
 }
 
 void PcolormeshPlot::prepare(render::Renderer& r) {
     computeValueRange();
-    auto& ctx = r.backend().context();
     useTex_ = eligibleForTexture();
     if (useTex_) {
         if (!texInit_) {
-            texRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                              r.backend().sampleCount(), r.pipelineCache(),
-                              r.descriptorPool());
+            if (!texRenderer_) texRenderer_ = r.gpu().createHeatmapRenderer();
             texInit_ = true;
         }
         uploadTexture(r);
         prepared_ = true;
         return;
     }
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     const bool gouraud = config_.shading == PcmShading::Gouraud;
     const uint64_t cells = gouraud ? uint64_t(nCols_ - 1) * (nRows_ - 1)
                                    : uint64_t(nCols_) * nRows_;
@@ -474,25 +299,23 @@ void PcolormeshPlot::prepare(render::Renderer& r) {
     if (!gpu) {
         buildGeometry();
         if (!fillPositions_.empty()) {
-            fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                                 ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                                 std::span{fillPositions_}, std::span{fillColors_});
+            fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
         }
     }
     prepared_ = true;
 }
 
-void PcolormeshPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void PcolormeshPlot::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     if (useTex_) {
-        texRenderer_.draw(cmd, vrect, t);
+        texRenderer_->draw(cmd, vrect, t);
         return;
     }
-    if (fillRenderer_.pointCount() == 0) return;
-    fillRenderer_.draw(cmd, vrect, t);
+    if (fillRenderer_->pointCount() == 0) return;
+    fillRenderer_->draw(cmd, vrect, t);
 }
 
 void PcolormeshPlot::contributeToAutoscale(Viewport& v) const {

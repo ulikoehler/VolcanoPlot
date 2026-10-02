@@ -1,8 +1,10 @@
 // volcano/encode/ImageEncoder.hpp — image encoding interface
 #pragma once
 
+#ifndef VOLCANO_WEB
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.h>
+#endif
 
 #include <array>
 #include <cstdint>
@@ -58,11 +60,13 @@ std::unique_ptr<IImageEncoder> createCpuEncoder(ImageFormat fmt);
 
 /// Factory: create a GPU encoder (compute shader) for the given format.
 /// Falls back to CPU if GPU encoding is not available for that format.
+#ifndef VOLCANO_WEB
 std::unique_ptr<IImageEncoder> createGpuEncoder(ImageFormat fmt,
                                                 vk::Device device,
                                                 vk::Queue queue,
                                                 vk::CommandPool pool,
                                                 VmaAllocator allocator);
+#endif
 
 /// Infer the output format from a file extension (matplotlib savefig
 /// format detection). Returns nullopt for unknown extensions.

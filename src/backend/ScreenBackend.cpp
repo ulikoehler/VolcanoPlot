@@ -1,5 +1,6 @@
 // volcano/backend/ScreenBackend.cpp
 #include "volcano/backend/ScreenBackend.hpp"
+#include "../render/VulkanGpuServices.hpp"
 
 #include <volcano/core/CommandBuffer.hpp>
 
@@ -610,7 +611,7 @@ void ScreenBackend::toggleFullscreen() {
     }
 }
 
-vk::CommandBuffer ScreenBackend::beginFrame() {
+std::unique_ptr<render::Cmd> ScreenBackend::beginFrame() {
     if (resized_) recreateSwapchain();
 
     auto dev = ctx_.device.handle();
@@ -642,7 +643,7 @@ vk::CommandBuffer ScreenBackend::beginFrame() {
        .setRenderArea(vk::Rect2D{}.setOffset({0,0}).setExtent(extent_))
        .setClearValues(clears);
     cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
-    return cb;
+    return std::make_unique<render::VkCmd>(cb);
 }
 
 void ScreenBackend::endFrame() {
@@ -667,6 +668,15 @@ void ScreenBackend::endFrame() {
         recreateSwapchain();
     }
     currentFrame_ = (currentFrame_ + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+render::GpuServices& ScreenBackend::gpu() {
+    if (!gpuServices_)
+        gpuServices_ = std::make_unique<render::VulkanGpuServices>(
+            ctx_, renderPass_.get(), colorFormat_, depthFormat_, samples_);
+    auto& s = static_cast<render::VulkanGpuServices&>(*gpuServices_);
+    s.setExtent({extent_.width, extent_.height});
+    return s;
 }
 
 } // namespace volcano::backend

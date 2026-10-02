@@ -1,5 +1,7 @@
 // volcano/render/primitives/GpuLineRenderer.cpp
 #include "volcano/render/primitives/GpuLineRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 
 #include <volcano/core/CommandBuffer.hpp>
 #include <volcano/core/DescriptorPool.hpp>
@@ -247,14 +249,70 @@ void main() {
 }
 )GLSL";
 
+class GpuLineRendererVk final : public GpuLineRenderer {
+public:
+    explicit GpuLineRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    std::vector<Mesh> tessellate(Cmd& cmd,
+                                 std::span<const plot::Point2D> px,
+                                 const plot::StrokeParams& sp,
+                                 plot::Color color) override;
+    [[nodiscard]] bool envelopeColumns(GpuBuf points, uint32_t count,
+                                       float ax, float kx,
+                                       int cx0, int cx1,
+                                       std::vector<float>& mn,
+                                       std::vector<float>& mx) override;
+    void resetScratch() override;
+    [[nodiscard]] bool inited() const noexcept override { return inited_; }
+
+private:
+    static constexpr uint32_t kJoinVerts = 8 * 3;
+    static constexpr uint32_t kCapVerts = 8 * 3;
+    static constexpr uint32_t kSegVerts = 6;
+    static constexpr vk::DeviceSize kMaxBufferBytes =
+        vk::DeviceSize(3) << 30;
+    static constexpr size_t kMaxChunkPoints = 1'000'000;
+
+    Mesh tessellateChunk(vk::CommandBuffer cmd,
+                         std::span<const plot::Point2D> px,
+                         const plot::StrokeParams& sp,
+                         plot::Color color);
+    void ensureIn(size_t points);
+    void ensureOut(size_t verts);
+    void rebind();
+
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_;
+    VmaAllocator allocator_ = nullptr;
+    core::DescriptorPool* descPool_ = nullptr;
+    bool inited_ = false;
+
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipeLayout_;
+    vk::UniquePipeline pipe_;
+    vk::DescriptorSet dset_;
+
+    vk::UniqueDescriptorSetLayout envDescLayout_;
+    vk::UniquePipelineLayout envPipeLayout_;
+    vk::UniquePipeline envPipe_;
+
+    core::Buffer inBuf_;
+    core::Buffer outBuf_;
+    std::vector<core::Buffer> retiredIn_, retiredOut_;
+    vk::DeviceSize inOff_ = 0, outOff_ = 0;
+};
+
 } // namespace
 
-void GpuLineRendererVk::init(vk::Device device, VmaAllocator allocator,
-                           core::DescriptorPool& descPool,
-                           core::PipelineCache& cache {
+void GpuLineRendererVk::init() {
     if (inited_) return;
+    const vk::Device device = svcs_->device();
+    auto& descPool = svcs_->descPool();
+    auto& cache = svcs_->pipelineCache();
     device_ = device;
-    allocator_ = allocator;
+    allocator_ = svcs_->allocator();
     descPool_ = &descPool;
 
     auto spv = core::ShaderModule::compileGlsl(kTessGlsl, "comp");
@@ -324,7 +382,7 @@ void GpuLineRendererVk::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void GpuLineRendererVk::resetScratch( {
+void GpuLineRendererVk::resetScratch() {
     inOff_ = 0;
     outOff_ = 0;
     retiredIn_.clear();
@@ -343,12 +401,13 @@ constexpr uint32_t kOrdPosInf = 0xFF800000u; // ord(+inf)
 constexpr uint32_t kOrdNegInf = 0x007FFFFFu; // ord(-inf)
 } // namespace
 
-bool GpuLineRendererVk::envelopeColumns(vk::Queue queue, vk::CommandPool pool,
-                                      GpuBuf points, uint32_t count,
+bool GpuLineRendererVk::envelopeColumns(GpuBuf points, uint32_t count,
                                       float ax, float kx,
                                       int cx0, int cx1,
                                       std::vector<float>& mn,
-                                      std::vector<float>& mx {
+                                      std::vector<float>& mx) {
+    const vk::Queue queue = svcs_->computeQueue();
+    const vk::CommandPool pool = svcs_->computePool();
     if (!inited_ || !points || count < 2 || cx1 < cx0) return false;
     const uint32_t W = uint32_t(cx1 - cx0 + 1);
     const vk::DeviceSize outBytes = vk::DeviceSize(W) * 2 * 4;
@@ -366,7 +425,7 @@ bool GpuLineRendererVk::envelopeColumns(vk::Queue queue, vk::CommandPool pool,
     vk::DescriptorSet set = onePool.allocate(envDescLayout_.get());
 
     vk::DescriptorBufferInfo infos[3];
-    infos[0].setBuffer(points).setOffset(0)
+    infos[0].setBuffer(svcs_->vkBufferOf(points)).setOffset(0)
              .setRange(vk::DeviceSize(count) * 8);
     infos[1].setBuffer(outBuf.handle()).setOffset(0)
              .setRange(vk::DeviceSize(W) * 4);
@@ -419,7 +478,7 @@ bool GpuLineRendererVk::envelopeColumns(vk::Queue queue, vk::CommandPool pool,
     return true;
 }
 
-void GpuLineRendererVk::ensureIn(size_t points {
+void GpuLineRendererVk::ensureIn(size_t points) {
     if (inOff_ + points <= inBuf_.size() / sizeof(float) / 2) return;
     retiredIn_.push_back(std::move(inBuf_));
     size_t cap = std::max<size_t>(points + inOff_, 4096) * 2;
@@ -435,7 +494,7 @@ void GpuLineRendererVk::ensureIn(size_t points {
     rebind();
 }
 
-void GpuLineRendererVk::ensureOut(size_t verts {
+void GpuLineRendererVk::ensureOut(size_t verts) {
     if (outOff_ + verts <= outBuf_.size() / (sizeof(float) * 6)) return;
     retiredOut_.push_back(std::move(outBuf_));
     size_t cap = std::max<size_t>(verts + outOff_, 16384) * 2;
@@ -448,7 +507,7 @@ void GpuLineRendererVk::ensureOut(size_t verts {
     rebind();
 }
 
-void GpuLineRendererVk::rebind( {
+void GpuLineRendererVk::rebind() {
     if (!inBuf_.handle() || !outBuf_.handle()) return;
     vk::DescriptorBufferInfo infos[2];
     infos[0].setBuffer(inBuf_.handle()).setOffset(0).setRange(inBuf_.size());
@@ -465,7 +524,8 @@ std::vector<GpuLineRendererVk::Mesh>
 GpuLineRendererVk::tessellate(Cmd& cmdRef,
                             std::span<const plot::Point2D> px,
                             const plot::StrokeParams& sp,
-                            plot::Color color {
+                            plot::Color color) {
+    const vk::CommandBuffer cmd = vkCmd(cmdRef);
     std::vector<Mesh> out;
     if (px.size() < 2) return out;
     // Huge inputs are split so each chunk's output stays under the
@@ -486,10 +546,10 @@ GpuLineRendererVk::tessellate(Cmd& cmdRef,
 }
 
 GpuLineRendererVk::Mesh
-GpuLineRendererVk::tessellateChunk(Cmd& cmdRef,
+GpuLineRendererVk::tessellateChunk(vk::CommandBuffer cmd,
                                  std::span<const plot::Point2D> px,
                                  const plot::StrokeParams& sp,
-                                 plot::Color color {
+                                 plot::Color color) {
     const uint32_t n = uint32_t(px.size());
     if (n < 2) return {};
     const uint32_t nSeg = n - 1;
@@ -531,12 +591,18 @@ GpuLineRendererVk::tessellateChunk(Cmd& cmdRef,
                         {}, {}, bar, {});
 
     Mesh m;
-    m.buffer = outBuf_.handle();
+    m.buffer = GpuBuf(VkBuffer(outBuf_.handle()));
     m.firstVertex = uint32_t(outOff_);
     m.vertexCount = uint32_t(outVerts);
     inOff_ += n;
     outOff_ += outVerts;
     return m;
+}
+
+std::unique_ptr<GpuLineRenderer> makeGpuLineVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<GpuLineRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

@@ -1490,7 +1490,7 @@ public:
     render::Renderer* renderer() {
         return root_ ? root_->renderer() : bundle_->renderer.get();
     }
-    vk::Extent2D extent() { return backend()->extent(); }
+    plot::Extent2D extent() { return backend()->extent(); }
 
     /// Resize the canvas. The figure migrates to the pooled bundle for
     /// the target size — all bundles share the device, so prepared
@@ -30845,7 +30845,7 @@ del _nt
         auto measurer = []() -> text::TextRenderer& {
             static std::unique_ptr<text::TextRenderer> tr;
             if (!tr) {
-                tr = std::make_unique<text::TextRenderer>();
+                tr = text::TextRenderer::createCpuOnly();
                 tr->initFonts();
             }
             return *tr;

@@ -66,6 +66,12 @@ public:
     /// Framebuffer extent in pixels — the draw-coordinate space.
     [[nodiscard]] virtual plot::Extent2D extent() const = 0;
 
+    /// Idempotent lazy init of the shared graphics renderers (the
+    /// services may compile pipelines on first call).
+    virtual void ensureGraphics() = 0;
+    /// True once the text renderer's atlas is uploaded and usable.
+    [[nodiscard]] virtual bool textReady() const noexcept = 0;
+
     // ── Shared renderers ─────────────────────────────────────────────
     // One instance per services object, reused frame to frame. Created
     // lazily on first access.
@@ -100,6 +106,12 @@ public:
         createInstancedPathRenderer() = 0;
     virtual std::unique_ptr<primitives::EvalRenderer>
         createEvalRenderer() = 0;
+    virtual std::unique_ptr<primitives::SpineRenderer>
+        createSpineRenderer() = 0;
+    virtual std::unique_ptr<primitives::GpuLineRenderer>
+        createGpuLineRenderer() = 0;
+    virtual std::unique_ptr<text::TextRenderer>
+        createTextRenderer() = 0;
 
     // ── Buffers ──────────────────────────────────────────────────────
     /// Allocate a buffer owned by the services. The token stays valid
@@ -135,28 +147,39 @@ public:
     // Synchronous results on Vulkan; the op backend returns failure and
     // the caller takes its CPU path (or skips — v1 feature gaps).
 
-    /// Histogram binning compute: data → nBins counts over [lo, hi].
+    /// Histogram binning compute: data → nBins counts, bin index
+    /// floor((v - e0) * invW). Returns nullopt when unavailable.
     virtual std::optional<std::vector<uint32_t>> histBin(
-        std::span<const float> data, uint32_t nBins, float lo, float hi) {
-        (void)data; (void)nBins; (void)lo; (void)hi;
+        std::span<const float> data, uint32_t nBins,
+        float e0, float invW) {
+        (void)data; (void)nBins; (void)e0; (void)invW;
         return std::nullopt;
     }
 
-    /// Violin density normalization compute (sample → normalized KDE).
-    virtual std::optional<std::vector<float>> violinNormalize(
-        std::span<const float> src, uint32_t n) {
-        (void)src; (void)n;
+    /// 1-D Gaussian KDE over `data` evaluated at `n` points from `lo`
+    /// with spacing `step` and bandwidth `bw`. Nullopt when unavailable.
+    virtual std::optional<std::vector<float>> kde1d(
+        std::span<const float> data, float lo, float step, float bw,
+        uint32_t n) {
+        (void)data; (void)lo; (void)step; (void)bw; (void)n;
         return std::nullopt;
     }
 
-    /// Pcolormesh quad tessellation compute: cell coords (x,y) + scalar
-    /// field t colormapped via lut → per-vertex posOut/colOut buffers.
-    /// `cells` is the number of quad cells; outputs hold 6 verts/cell.
-    virtual bool pcmTessellate(GpuBuf x, GpuBuf y, GpuBuf t, GpuBuf lut,
-                               uint32_t lutSize, GpuBuf posOut,
-                               GpuBuf colOut, uint32_t cells) {
-        (void)x; (void)y; (void)t; (void)lut; (void)lutSize;
-        (void)posOut; (void)colOut; (void)cells;
+    /// Pcolormesh quad tessellation compute: cell coords (x,y edges) +
+    /// normalized scalar field `t` colormapped via `lut` → adopted
+    /// per-vertex position/color buffers (6 verts/cell flat, 12 for
+    /// gouraud). `flags`: bit0 = cmap.bad present, bit1 = skip NaN.
+    /// Outputs are returned as tokens consumable by
+    /// FillRenderer::adoptBuffers.
+    virtual bool pcmTessellate(std::span<const float> x,
+                               std::span<const float> y,
+                               std::span<const float> t,
+                               std::span<const plot::Color> lut,
+                               uint32_t nCols, uint32_t nRows,
+                               bool gouraud, uint32_t flags,
+                               GpuBuf& posOut, GpuBuf& colOut) {
+        (void)x; (void)y; (void)t; (void)lut; (void)nCols; (void)nRows;
+        (void)gouraud; (void)flags; (void)posOut; (void)colOut;
         return false;
     }
 };

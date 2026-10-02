@@ -385,8 +385,8 @@ std::vector<Point2D> Collection::clipRingPx(const Axes& axes,
     return ring;
 }
 
-void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
-                              vk::Rect2D clip, vk::Extent2D res,
+void Collection::drawSubpaths(render::Cmd& cmd, render::Renderer& r,
+                              Rect2D clip, Extent2D res,
                               const std::vector<Path::Subpath>& subs,
                               Color face, Color edge, float lw,
                               std::span<const float> dash,
@@ -394,7 +394,7 @@ void Collection::drawSubpaths(vk::CommandBuffer cmd, render::Renderer& r,
                               float hatchSpacing, float sketchScale,
                               float sketchLength,
                               std::span<const Point2D> clipRing) {
-    auto& spine = r.spineRenderer();
+    auto& spine = r.gpu().spine();
     // Fill (ear-clipped per closed subpath).
     if (face.a > 0.0f) {
         std::vector<Point2D> tris;
@@ -516,15 +516,15 @@ const T& at(const std::vector<T>& v, size_t i, const T& fallback) {
     return v.empty() ? fallback : v[i % v.size()];
 }
 
-vk::Rect2D clipOf(Rect2D r) {
-    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+Rect2D clipOf(Rect2D r) {
+    return {r.x, r.y, r.width, r.height};
 }
 
 } // namespace
 
-void PatchCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void PatchCollection::draw(render::Cmd& cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
     auto ring = clipRingPx(axes, rect);
     for (const auto& p : patches) {
@@ -552,10 +552,10 @@ void PatchCollection::contributeToAutoscale(Viewport& v) const {
         }
 }
 
-void PathCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void PathCollection::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (offsets.empty()) return;
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
     auto ring = clipRingPx(axes, rect);
     auto proto = path.toPolylines();
@@ -572,7 +572,7 @@ void PathCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
     // GPU fast path: instance the template triangles. Eligible when the
     // per-item work is a pure scale+translate fill — no per-item
     // transforms, hatch, dashes, sketch, clip path, or edge stroke.
-    auto& inst = r.instancedPathRenderer();
+    auto& inst = r.gpu().instancedPath();
     bool edgesVisible = std::ranges::any_of(edgeColors,
                                             [](Color c) { return c.a > 0; });
     if (inst.inited() && transforms.empty() && hatch.empty() && ring.empty()
@@ -586,9 +586,7 @@ void PathCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
                 auto t = earClip(sp.points);
                 tris.insert(tris.end(), t.begin(), t.end());
             }
-            auto& ctx = r.backend().context();
-            inst.setTemplate(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), tris);
+            inst.setTemplate(tris);
             templateDirty_ = false;
         }
         std::vector<render::primitives::PathInstance> insts;
@@ -638,11 +636,11 @@ void PathCollection::contributeToAutoscale(Viewport& v) const {
     }
 }
 
-void LineCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void LineCollection::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
-    auto& spine = r.spineRenderer();
+    auto& spine = r.gpu().spine();
     auto ring = clipRingPx(axes, rect);
     Color def{0.121f, 0.466f, 0.705f, 1};
     const float dpi = axes.style().dpi;
@@ -703,9 +701,9 @@ void LineCollection::contributeToAutoscale(Viewport& v) const {
         }
 }
 
-void PolyCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void PolyCollection::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
     Color defFace{0.121f, 0.466f, 0.705f, 1};
     Color defEdge{0, 0, 0, 0};
@@ -734,14 +732,14 @@ void PolyCollection::contributeToAutoscale(Viewport& v) const {
         }
 }
 
-void QuadMesh::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void QuadMesh::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (rows == 0 || cols == 0 ||
         corners.size() < size_t(rows + 1) * (cols + 1))
         return;
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
-    auto& spine = r.spineRenderer();
+    auto& spine = r.gpu().spine();
     auto ring = clipRingPx(axes, rect);
     Color def{0.121f, 0.466f, 0.705f, 1};
     for (uint32_t row = 0; row < rows; ++row)
@@ -771,11 +769,11 @@ void QuadMesh::contributeToAutoscale(Viewport& v) const {
     }
 }
 
-void TriMeshCollection::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void TriMeshCollection::draw(render::Cmd& cmd, render::Renderer& r,
                              const Axes& axes, Rect2D rect) {
-    vk::Extent2D res = r.backend().extent();
+    Extent2D res = r.gpu().extent();
     auto clip = clipOf(rect);
-    auto& spine = r.spineRenderer();
+    auto& spine = r.gpu().spine();
     auto ring = clipRingPx(axes, rect);
     Color def{0.121f, 0.466f, 0.705f, 1};
     for (size_t i = 0; i < triangles.size(); ++i) {
@@ -935,9 +933,9 @@ FxPass fxPass(const PathEffect& e, Color face, Color edge, float lw,
 
 } // namespace
 
-void Collection::drawSubpathsFx(vk::CommandBuffer cmd,
+void Collection::drawSubpathsFx(render::Cmd& cmd,
                                 render::Renderer& r,
-                                vk::Rect2D clip, vk::Extent2D res,
+                                Rect2D clip, Extent2D res,
                                 std::vector<Path::Subpath> subs,
                                 Color face, Color edge, float lw,
                                 std::span<const float> dash,

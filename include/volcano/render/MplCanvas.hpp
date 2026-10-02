@@ -49,7 +49,7 @@ public:
     MplCanvas(const MplCanvas&) = delete;
     MplCanvas& operator=(const MplCanvas&) = delete;
 
-    [[nodiscard]] vk::Extent2D extent() const { return backend_->extent(); }
+    [[nodiscard]] plot::Extent2D extent() const { return backend_->extent(); }
     [[nodiscard]] bool isWindow() const noexcept { return windowed_; }
     /// Resize the render target (mpl FigureCanvas.resize).
     void resize(uint32_t w, uint32_t h);
@@ -268,19 +268,19 @@ private:
                             TrisOp, InstanceOp, PointsOp>;
 
     void initRenderers();
-    void execute(vk::CommandBuffer cmd);
+    void execute(render::Cmd& cmd);
     /// Compute pre-pass recorded before the render pass: GPU-tessellates
     /// large solid edge strokes (CPU stroking dominates for ≥~1k pts).
     void gpuPrepass();
     /// Rebuild a PathOp's plot::Path (orphan CLOSEPOLY tolerated).
     static plot::Path pathFromOp(const PathOp& op);
-    void execPath(vk::CommandBuffer cmd, const PathOp& op);
-    void execImage(vk::CommandBuffer cmd, const ImageOp& op);
-    void execText(vk::CommandBuffer cmd, const TextOp& op);
-    void execGouraud(vk::CommandBuffer cmd, const GouraudOp& op);
-    void execTris(vk::CommandBuffer cmd, const TrisOp& op);
-    void execInstances(vk::CommandBuffer cmd, const InstanceOp& op);
-    void execPoints(vk::CommandBuffer cmd, const PointsOp& op);
+    void execPath(render::Cmd& cmd, const PathOp& op);
+    void execImage(render::Cmd& cmd, const ImageOp& op);
+    void execText(render::Cmd& cmd, const TextOp& op);
+    void execGouraud(render::Cmd& cmd, const GouraudOp& op);
+    void execTris(render::Cmd& cmd, const TrisOp& op);
+    void execInstances(render::Cmd& cmd, const InstanceOp& op);
+    void execPoints(render::Cmd& cmd, const PointsOp& op);
     /// Resolve family/style/weight → glyb face + faux-style flags.
     font_face* faceFor(const TextOp& op);
 
@@ -288,17 +288,14 @@ private:
     bool windowed_ = false;
     bool inited_ = false;
 
-    std::unique_ptr<core::PipelineCache> pipelineCache_;
-    std::unique_ptr<core::DescriptorPool> descPool_;
-    primitives::SpineRenderer spine_;
-    primitives::HeatmapRenderer heat_;
-    primitives::InstancedPathRenderer instFill_, instEdge_;
-    primitives::GpuLineRenderer gpuLine_;
-    primitives::PointRenderer pointR_;
+    std::unique_ptr<primitives::SpineRenderer> spine_;
+    std::unique_ptr<primitives::HeatmapRenderer> heat_;
+    std::unique_ptr<primitives::InstancedPathRenderer> instFill_, instEdge_;
+    std::unique_ptr<primitives::GpuLineRenderer> gpuLine_;
+    std::unique_ptr<primitives::PointRenderer> pointR_;
     bool pointInit_ = false;
     float maxPointSize_ = 64.0f;
-    std::optional<core::CommandBuffer> preCmd_;
-    text::TextRenderer text_;
+    std::unique_ptr<text::TextRenderer> text_;
 
     std::vector<Op> ops_;
     plot::Color clear_{1, 1, 1, 1};

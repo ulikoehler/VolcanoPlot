@@ -1,13 +1,23 @@
 // volcano/render/primitives/InstancedPathRenderer.cpp
 #include "volcano/render/primitives/InstancedPathRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
 
 #include <cstring>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
 namespace {
+
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{static_cast<int32_t>(r.x),
+                        static_cast<int32_t>(r.y)},
+            vk::Extent2D{r.width, r.height}};
+}
+
 
 constexpr const char* kVertGlsl = R"(
 #version 460
@@ -41,15 +51,58 @@ void main() {
 }
 )";
 
+class InstancedPathRendererVk final : public InstancedPathRenderer {
+public:
+    explicit InstancedPathRendererVk(VulkanGpuServices& svcs)
+        : svcs_(&svcs) {}
+
+    void init();
+
+    void setTemplate(std::span<const plot::Point2D> triVerts) override;
+    void drawInstanced(Cmd& cmd, plot::Rect2D clip,
+                       plot::Extent2D resolution,
+                       std::span<const PathInstance> instances) override;
+    void resetScratch() override {
+        scratchOffset_ = 0;
+        retiredScratch_.clear();
+        retiredTemplates_.clear();
+    }
+
+    [[nodiscard]] bool inited() const noexcept override { return inited_; }
+    [[nodiscard]] uint32_t templateVertCount() const noexcept override {
+        return templateVerts_;
+    }
+
+private:
+    void ensureScratch(size_t byteCount);
+
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    bool inited_ = false;
+
+    core::Buffer templateVB_;
+    uint32_t templateVerts_ = 0;
+    std::vector<core::Buffer> retiredTemplates_;
+
+    core::Buffer scratchVB_;
+    std::vector<core::Buffer> retiredScratch_;
+    size_t scratchCapacity_ = 0;
+    size_t scratchOffset_ = 0;
+};
+
 } // namespace
 
-void InstancedPathRendererVk::init(vk::Device device, VmaAllocator allocator,
-                                 vk::RenderPass renderPass,
-                                 vk::SampleCountFlagBits samples,
-                                 core::PipelineCache& /*cache*/,
-                                 core::DescriptorPool& /*descPool*/ {
+void InstancedPathRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
     device_ = device;
-    allocator_ = allocator;
+    allocator_ = svcs_->allocator();
 
     auto vertSpv = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto fragSpv = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -146,9 +199,11 @@ void InstancedPathRendererVk::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void InstancedPathRendererVk::setTemplate(vk::Device device, vk::Queue queue,
-                                        vk::CommandPool pool,
-                                        std::span<const plot::Point2D> triVerts {
+void InstancedPathRendererVk::setTemplate(
+        std::span<const plot::Point2D> triVerts) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
     templateVerts_ = uint32_t(triVerts.size());
     if (triVerts.empty()) { templateVB_ = {}; return; }
     // A draw recorded earlier this frame may still reference the old
@@ -165,7 +220,7 @@ void InstancedPathRendererVk::setTemplate(vk::Device device, vk::Queue queue,
             bdesc.size));
 }
 
-void InstancedPathRendererVk::ensureScratch(size_t byteCount {
+void InstancedPathRendererVk::ensureScratch(size_t byteCount) {
     if (scratchOffset_ + byteCount <= scratchCapacity_) return;
     size_t needed = scratchOffset_ + byteCount;
     size_t newSize = std::max<size_t>(1u << 20, needed * 2);
@@ -184,7 +239,8 @@ void InstancedPathRendererVk::ensureScratch(size_t byteCount {
 
 void InstancedPathRendererVk::drawInstanced(
         Cmd& cmdRef, plot::Rect2D clip, plot::Extent2D resolution,
-        std::span<const PathInstance> instances {
+        std::span<const PathInstance> instances) {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || instances.empty() || templateVerts_ == 0) return;
 
     size_t byteSize = instances.size() * sizeof(PathInstance);
@@ -212,6 +268,13 @@ void InstancedPathRendererVk::drawInstanced(
     cmd.draw(templateVerts_, uint32_t(instances.size()), 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
+}
+
+std::unique_ptr<InstancedPathRenderer>
+makeInstancedPathVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<InstancedPathRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

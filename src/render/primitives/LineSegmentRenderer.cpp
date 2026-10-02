@@ -1,11 +1,14 @@
 // volcano/render/primitives/LineSegmentRenderer.cpp
 #include "volcano/render/primitives/LineSegmentRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <stdexcept>
 #include <string>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -80,9 +83,11 @@ private:
     bool inited_ = false;
 };
 
-void LineSegmentRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                                vk::SampleCountFlagBits samples,
-                                core::PipelineCache& cache {
+void LineSegmentRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -167,7 +172,11 @@ void LineSegmentRendererVk::init(vk::Device device, vk::RenderPass renderPass,
 }
 
 void LineSegmentRendererVk::upload(std::span<const plot::Point2D> points,
-                                  plot::Color color, float width {
+                                  plot::Color color, float width) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     core::BufferDesc d;
     d.size = points.size_bytes();
     d.usage = core::BufferUsage::VertexStorage;
@@ -181,7 +190,8 @@ void LineSegmentRendererVk::upload(std::span<const plot::Point2D> points,
 
 void LineSegmentRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
                                 const plot::Transform2D& transform,
-                                uint32_t vertexCount const {
+                                uint32_t vertexCount) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || vertexCount < 2) return;
 
     struct PC {
@@ -234,10 +244,10 @@ void LineSegmentRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     cmd.draw(vertexCount, 1, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<LineSegmentRenderer> makeLineSegmentVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<LineSegmentRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

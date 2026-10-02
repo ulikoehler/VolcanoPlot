@@ -1,14 +1,19 @@
 // volcano/render/primitives/HeatmapRenderer.cpp
 #include "volcano/render/primitives/HeatmapRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/core/CommandBuffer.hpp>
 #include <volcano/plot/Transform.hpp>
+#include <volcano/plot/Colormap.hpp>
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <format>
 #include <stdexcept>
 #include <string>
+#include <volcano/core/ShaderModule.hpp>
+#include <volcano/core/Image.hpp>
 
 namespace volcano::render::primitives {
 
@@ -225,9 +230,13 @@ private:
     bool inited_ = false;
 };
 
-void HeatmapRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                           vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-                           core::DescriptorPool& descPool {
+void HeatmapRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
+    auto& descPool = svcs_->descPool();
+    device_ = device;
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -331,7 +340,11 @@ void HeatmapRendererVk::init(vk::Device device, vk::RenderPass renderPass,
 
 void HeatmapRendererVk::upload(const plot::Grid2D& grid,
                              const plot::Colormap& cmap,
-                             bool nanTransparent {
+                             bool nanTransparent) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     nanTransparent_ = nanTransparent;
     rgbaMode_ = !grid.rgba.empty();
     const vk::Format gridFmt = rgbaMode_ ? vk::Format::eR8G8B8A8Unorm
@@ -500,7 +513,8 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
 }
 
 void HeatmapRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
-                           const plot::Transform2D& transform const {
+                           const plot::Transform2D& transform) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || !quadBuffer_.handle()) return;
 
     struct PC {
@@ -561,10 +575,10 @@ void HeatmapRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     cmd.draw(6, 1, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<HeatmapRenderer> makeHeatmapVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<HeatmapRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

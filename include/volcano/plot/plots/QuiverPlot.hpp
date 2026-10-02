@@ -63,7 +63,7 @@ public:
     [[nodiscard]] const std::vector<float>& vVec() const { return v_; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// The mpl-style scale factor mapping (u,v) magnitudes to data-space
@@ -87,8 +87,8 @@ private:
     std::vector<Color> headFillColors_;  // per-vertex colors
     float shaftWpx_ = 1.0f;              // effective shaft width (px)
 
-    render::primitives::LineSegmentRenderer shaftRenderer_;
-    render::primitives::FillRenderer headRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> shaftRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> headRenderer_;
     bool prepared_ = false;
 
     // For draw(), we need to recompute arrowheads per-frame in pixel space.

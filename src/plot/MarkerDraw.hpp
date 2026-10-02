@@ -18,8 +18,8 @@ namespace volcano::plot {
 /// Color → 'none' (no fill / no edge); opaque → explicit color.
 /// `colors`/`sizes` give per-point overrides (mpl scatter c=/s= arrays);
 /// empty spans draw uniformly with `color`/`size`.
-inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
-                          vk::Rect2D clip, std::span<const Point2D> pxPts,
+inline void drawMarkersPx(render::Renderer& r, render::Cmd& cmd,
+                          Rect2D clip, std::span<const Point2D> pxPts,
                           const MarkerGeom& g, float size, Color color,
                           float strokeW = 1.0f,
                           const std::optional<Color>& face = std::nullopt,
@@ -29,8 +29,8 @@ inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
                           const std::optional<render::primitives::MarkerParams>& sdf =
                               std::nullopt) {
     if (size <= 0.0f) return;
-    auto& spine = r.spineRenderer();
-    auto res = r.backend().extent();
+    auto& spine = r.gpu().spine();
+    auto res = r.gpu().extent();
     // mpl: a stroked outline is drawn when the marker isn't filled or an
     // explicit edge color was given; 'none' (a==0) suppresses it.
     bool strokesPossible = !g.filled || (edge.has_value() && edge->a > 0);
@@ -42,8 +42,7 @@ inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
             // per-marker tessellated triangle soup (~57 verts for 'o').
             // Pure fills only: the sprites can't draw a distinct edge
             // color, so stroke-needing markers use the paths below.
-            auto& ctx = r.backend().context();
-            auto& pr = r.pointRenderer();
+            auto& pr = r.gpu().sharedPoints();
             const size_t n = pxPts.size();
             std::vector<Color> colScratch;
             std::span<const Color> cols;
@@ -64,16 +63,14 @@ inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
             if (pr.hasData())
                 pr.updatePoints(pxPts, cols, sz);
             else
-                pr.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                          ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                          pxPts, cols, sz);
+                pr.upload(pxPts, cols, sz);
             // Canvas-pixel view (same convention as MplCanvas::execPoints):
             // x spans [0,W], y is reversed [H,0] so canvas Y-down lands
             // correctly after the shader's Y-flip.
             Transform2D t;
             t.view.x = {0.0f, static_cast<float>(res.width)};
             t.view.y = {static_cast<float>(res.height), 0.0f};
-            vk::Rect2D vp{vk::Offset2D{0, 0}, res};
+            Rect2D vp{0, 0, res.width, res.height};
             pr.draw(cmd, vp, clip, t, static_cast<uint32_t>(n), *sdf);
             return;
         }
@@ -153,8 +150,8 @@ inline void drawMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
 
 /// Raster-draw a TeX/mathtext marker string centered at each pixel
 /// position (matplotlib marker='$…$'). `size` scales the glyph.
-inline void drawTexMarkersPx(render::Renderer& r, vk::CommandBuffer cmd,
-                             vk::Rect2D clip,
+inline void drawTexMarkersPx(render::Renderer& r, render::Cmd& cmd,
+                             Rect2D clip,
                              std::span<const Point2D> pxPts,
                              std::string_view tex, Color color,
                              float size) {

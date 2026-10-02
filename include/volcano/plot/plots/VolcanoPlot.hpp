@@ -21,7 +21,7 @@ class VolcanoPlot : public IPlot {
 public:
     explicit VolcanoPlot(VolcanoData data);
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
                                   Viewport& v) const override;

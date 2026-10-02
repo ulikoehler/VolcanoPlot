@@ -71,7 +71,7 @@ public:
     void setCamera(const Camera3D& camera) { config_.camera = camera; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport&) const override {}
 

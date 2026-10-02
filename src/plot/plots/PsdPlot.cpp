@@ -159,24 +159,20 @@ void PsdPlot::prepare(render::Renderer& r) {
     for (size_t i = 0; i < freqs_.size(); ++i)
         linePoints_.push_back({freqs_[i], values_[i]});
 
-    auto& ctx = r.backend().context();
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (!linePoints_.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{linePoints_}, config_.color,
+        lineRenderer_->upload(std::span{linePoints_}, config_.color,
                              config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void PsdPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void PsdPlot::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_ || linePoints_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(linePoints_.size()));
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(linePoints_.size()));
 }
 
 void PsdPlot::contributeToAutoscale(Viewport& v) const {

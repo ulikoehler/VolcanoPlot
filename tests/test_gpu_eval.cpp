@@ -2,6 +2,7 @@
 // FunctionPlot) and GPU KDE (KdeEvalRenderer + KDEPlot).
 #include <gtest/gtest.h>
 #include <volcano/backend/HeadlessBackend.hpp>
+#include "../src/render/VulkanGpuServices.hpp"
 #include <volcano/render/primitives/EvalRenderer.hpp>
 #include <volcano/render/primitives/KdeEvalRenderer.hpp>
 #include <volcano/plot/plots/FunctionPlot.hpp>
@@ -27,13 +28,16 @@ struct GpuFixture {
         desc.samples = vk::SampleCountFlagBits::e1;
         backend = backend::createHeadlessBackend(desc);
     }
+    render::VulkanGpuServices& gpu() {
+        return static_cast<render::VulkanGpuServices&>(backend->gpu());
+    }
     core::Buffer hostStorage(uint32_t count) {
         core::BufferDesc d{};
         d.size = vk::DeviceSize(count) * sizeof(float) * 2;
         d.usage = core::BufferUsage::Storage;
         d.hostVisible = true;
         d.hostCached = true;
-        return core::Buffer(backend->context().allocator.handle(), d);
+        return core::Buffer(gpu().allocator(), d);
     }
 };
 
@@ -71,15 +75,12 @@ size_t darkPixels(const Image& img) {
 
 TEST(EvalRenderer, BareExpressionEvaluates) {
     GpuFixture fx;
-    auto& ctx = fx.backend->context();
-    render::primitives::EvalRenderer eval;
-    eval.init(ctx.device.handle(), ctx.allocator.handle(),
-              ctx.device.computeQueue(), ctx.computePool.handle());
-    if (!eval.ready()) GTEST_SKIP() << "no compute queue";
-    ASSERT_TRUE(eval.compile("sin(x)"));
-    auto buf = fx.hostStorage(64);
-    eval.eval(buf.handle(), 0.0, 1.0, 64);
-    auto pts = readback(buf, 64);
+    auto eval = fx.gpu().createEvalRenderer();
+    if (!eval->ready()) GTEST_SKIP() << "no compute queue";
+    ASSERT_TRUE(eval->compile("sin(x)"));
+    auto tok = fx.gpu().adoptBuffer(fx.hostStorage(64));
+    eval->eval(tok, 0.0, 1.0, 64);
+    auto pts = readback(*fx.gpu().bufferOf(tok), 64);
     for (uint32_t i = 0; i < 64; ++i) {
         float x = i / 63.0f;
         EXPECT_NEAR(pts[i].x, x, 1e-4f);
@@ -89,28 +90,22 @@ TEST(EvalRenderer, BareExpressionEvaluates) {
 
 TEST(EvalRenderer, StatementBodyEvaluates) {
     GpuFixture fx;
-    auto& ctx = fx.backend->context();
-    render::primitives::EvalRenderer eval;
-    eval.init(ctx.device.handle(), ctx.allocator.handle(),
-              ctx.device.computeQueue(), ctx.computePool.handle());
-    if (!eval.ready()) GTEST_SKIP() << "no compute queue";
-    ASSERT_TRUE(eval.compile("y = x * x;"));
-    auto buf = fx.hostStorage(32);
-    eval.eval(buf.handle(), -1.0, 1.0, 32);
-    auto pts = readback(buf, 32);
+    auto eval = fx.gpu().createEvalRenderer();
+    if (!eval->ready()) GTEST_SKIP() << "no compute queue";
+    ASSERT_TRUE(eval->compile("y = x * x;"));
+    auto tok = fx.gpu().adoptBuffer(fx.hostStorage(32));
+    eval->eval(tok, -1.0, 1.0, 32);
+    auto pts = readback(*fx.gpu().bufferOf(tok), 32);
     for (uint32_t i = 0; i < 32; ++i)
         EXPECT_NEAR(pts[i].y, pts[i].x * pts[i].x, 1e-4f) << "i=" << i;
 }
 
 TEST(EvalRenderer, InvalidBodyFailsCompile) {
     GpuFixture fx;
-    auto& ctx = fx.backend->context();
-    render::primitives::EvalRenderer eval;
-    eval.init(ctx.device.handle(), ctx.allocator.handle(),
-              ctx.device.computeQueue(), ctx.computePool.handle());
-    if (!eval.ready()) GTEST_SKIP() << "no compute queue";
-    EXPECT_FALSE(eval.compile("y = }}"));
-    EXPECT_FALSE(eval.compiled());
+    auto eval = fx.gpu().createEvalRenderer();
+    if (!eval->ready()) GTEST_SKIP() << "no compute queue";
+    EXPECT_FALSE(eval->compile("y = }}"));
+    EXPECT_FALSE(eval->compiled());
 }
 
 // ─── FunctionPlot (rendered via GPU eval or CPU fallback) ─────────────────

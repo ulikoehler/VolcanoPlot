@@ -35,7 +35,7 @@ public:
     float scaleX = 1.0f, scaleY = 1.0f;
 
     void prepare(render::Renderer&) override {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport&) const override {} // axes-frac space
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -133,7 +133,7 @@ public:
     explicit WordCloudPlot(std::vector<Entry> w) : words(std::move(w)) {}
 
     void prepare(render::Renderer&) override {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport&) const override {}  // axes space
 
@@ -172,7 +172,7 @@ public:
                 Options opts);
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return {}; }
@@ -189,8 +189,8 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> edges_;
     Options opts_;
     std::vector<Point2D> pos_;
-    render::primitives::LineSegmentRenderer edgesR_;
-    render::primitives::PointRenderer nodesR_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> edgesR_;
+    std::unique_ptr<render::primitives::PointRenderer> nodesR_;
     bool laidOut_ = false, prepared_ = false;
     void computeLayout();
 };

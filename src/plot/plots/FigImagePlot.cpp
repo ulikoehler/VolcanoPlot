@@ -74,24 +74,20 @@ void FigImagePlot::buildGeometry() {
 
 void FigImagePlot::prepare(render::Renderer& r) {
     buildGeometry();
-    auto& ctx = r.backend().context();
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
     prepared_ = true;
 }
 
-void FigImagePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void FigImagePlot::draw(render::Cmd& cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
 
     // Use the full framebuffer extent for the scissor rect.
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
 
     // Set up a pixel-space transform. The FillRenderer vertex shader does:
     //   ndc = (p - viewMin) / viewSpan * 2 - 1
@@ -111,7 +107,7 @@ void FigImagePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.logX = false;
     t.logY = false;
 
-    fillRenderer_.draw(cmd, fullRect, t);
+    fillRenderer_->draw(cmd, fullRect, t);
 }
 
 void FigImagePlot::contributeToAutoscale(Viewport& v) const {

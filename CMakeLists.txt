@@ -282,6 +282,17 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VolcanoComponent.cmake)
 # Root for component .cmake files
 set(VOLCANO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
+# WebGPU/WASM build (emcmake -DVOLCANO_WEB=ON): builds only the engine +
+# op-stream backend — no Vulkan, GLFW, encoders, or native targets.
+option(VOLCANO_WEB "Build the Emscripten/WebGPU WASM target" OFF)
+if(VOLCANO_WEB)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/web.cmake)
+    return()
+endif()
+
 # -----------------------------------------------------------------------------
 # Components
 # -----------------------------------------------------------------------------

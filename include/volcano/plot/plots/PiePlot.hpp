@@ -8,7 +8,7 @@ class PiePlot : public IPlot {
 public:
     explicit PiePlot(PieData data) : data_(std::move(data)) {}
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override { (void)v; }
     LegendMarker legendMarker() const override { return LegendMarker::Square; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -18,7 +18,7 @@ public:
     [[nodiscard]] PieData& data() noexcept { return data_; }
 private:
     PieData data_;
-    render::primitives::PieRenderer renderer_;
+    std::unique_ptr<render::primitives::PieRenderer> renderer_;
     bool prepared_ = false;
 };
 } // namespace volcano::plot

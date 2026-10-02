@@ -1,8 +1,13 @@
 // volcano/render/Renderer.cpp
 #include "volcano/render/Renderer.hpp"
+#ifndef VOLCANO_WEB
+#include "VulkanGpuServices.hpp"
+#endif
 #include "volcano/render/VectorRenderer.hpp"
 #include "volcano/render/VectorWriters.hpp"
+#ifndef VOLCANO_WEB
 #include <volcano/encode/GpuPngEncoder.hpp>
+#endif
 #include <volcano/encode/MovieWriter.hpp>
 #include <volcano/plot/Animation.hpp>
 #include <volcano/plot/Colormap.hpp>
@@ -26,10 +31,18 @@ namespace volcano::render {
 
 namespace {
 
+/// The backend's Vulkan services (native builds — all callers are
+/// native-only paths like savefig/encoders).
+#ifndef VOLCANO_WEB
+static render::VulkanGpuServices& vkGpu(render::GpuServices& g) {
+    return static_cast<render::VulkanGpuServices&>(g);
+}
+#endif
+
 /// WidgetPainter adapter backed by the SpineRenderer + TextRenderer.
 class Painter : public plot::WidgetPainter {
 public:
-    Painter(vk::CommandBuffer cmd, Renderer& r, vk::Rect2D scissor)
+    Painter(render::Cmd& cmd, Renderer& r, plot::Rect2D scissor)
         : cmd_(cmd), r_(r), scissor_(scissor) {}
 
     void fillRect(plot::Rect2D rect, plot::Color c) override {
@@ -57,9 +70,9 @@ public:
     }
 
 private:
-    vk::CommandBuffer cmd_;
+    render::Cmd& cmd_;
     Renderer& r_;
-    vk::Rect2D scissor_;
+    plot::Rect2D scissor_;
 };
 
 /// backend::InputEvent → plot::Event.
@@ -107,90 +120,15 @@ bool Renderer::processInput(plot::Figure& figure) {
     return true;
 }
 
-namespace {
-/// vkPipelineCache blob path: $VOLCANO_CACHE_DIR, then
-/// $XDG_CACHE_HOME/volcanoplot, then ~/.cache/volcanoplot. Empty = disabled.
-/// Driver-specific blobs are validated by Vulkan on load, so stale or
-/// foreign caches are safely ignored. Pipeline creation on lavapipe is
-/// ~150 ms each — the cache pays for itself after the first run.
-std::filesystem::path pipelineCacheFile() {
-    std::filesystem::path dir;
-    if (const char* d = std::getenv("VOLCANO_CACHE_DIR"); d && d[0]) {
-        dir = d;
-    } else if (const char* x = std::getenv("XDG_CACHE_HOME"); x && x[0]) {
-        dir = std::filesystem::path(x) / "volcanoplot";
-    } else if (const char* h = std::getenv("HOME"); h && h[0]) {
-        dir = std::filesystem::path(h) / ".cache" / "volcanoplot";
-    } else {
-        return {};
-    }
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    if (ec) return {};
-    return dir / "pipeline-cache.bin";
-}
-} // namespace
-
-Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {
-    auto& ctx = backend_.context();
-    pipelineCache_ = std::make_unique<core::PipelineCache>(
-        ctx.device.handle(), pipelineCacheFile());
-    std::vector<vk::DescriptorPoolSize> sizes = {
-        { vk::DescriptorType::eUniformBuffer, 256 },
-        { vk::DescriptorType::eStorageBuffer, 256 },
-        { vk::DescriptorType::eCombinedImageSampler, 64 },
-    };
-    descriptorPool_ = std::make_unique<core::DescriptorPool>(
-        ctx.device.handle(), sizes, 512,
-        vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
-}
+Renderer::Renderer(backend::IBackend& backend) : backend_(backend) {}
 
 Renderer::~Renderer() = default;
 
 void Renderer::prepare(plot::Figure& figure) {
-    auto& ctx = backend_.context();
-    // Init text renderer once.
-    if (!textInited_) {
-        textRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
-                           backend_.renderPass(), backend_.sampleCount(),
-                           *pipelineCache_, *descriptorPool_);
-        textInited_ = true;
-        // Pre-render ASCII glyphs and upload atlas texture.
-        textRenderer_.prepareAtlas(ctx.device.graphicsQueue(),
-                                   ctx.graphicsPool.handle());
-        textReady_ = true;
-    }
-    // Init the independent primitive renderers once, in parallel: each
-    // compiles its own shaders (process-wide memo + disk cache) and
-    // creates its own pipelines. Shared parents (pipeline cache,
-    // descriptor pool) are serialized internally.
-    if (!spineInited_) {
-        auto dev = ctx.device.handle();
-        auto alloc = ctx.allocator.handle();
-        auto rp = backend_.renderPass();
-        auto samples = backend_.sampleCount();
-        auto runAll = [&](auto... init) {
-            std::vector<std::future<void>> futs;
-            (futs.push_back(std::async(std::launch::async, init)), ...);
-            for (auto& f : futs) f.get(); // propagate init failures
-        };
-        runAll(
-            [&] { spineRenderer_.init(dev, alloc, rp, samples,
-                                     *pipelineCache_, *descriptorPool_); },
-            [&] { instancedPathRenderer_.init(dev, alloc, rp, samples,
-                                              *pipelineCache_,
-                                              *descriptorPool_); },
-            [&] { gpuLineRenderer_.init(dev, alloc, *descriptorPool_,
-                                        *pipelineCache_); },
-            [&] { pointRenderer_.init(dev, rp, samples, *descriptorPool_,
-                                      *pipelineCache_); },
-            // ReduceRenderer owns its descriptor pool and submits nothing
-            // during init — safe to join the parallel group.
-            [&] { reduceRenderer_.init(dev, alloc, ctx.device.computeQueue(),
-                                       ctx.computePool.handle()); });
-        spineInited_ = true;
-        reduceInited_ = true;
-    }
+    gpu().ensureGraphics();
+    graphicsReady_ = true;
+    gpu().ensureText();
+    textReady_ = gpu().textReady();
 
     // Upload all plot GPU resources first, so the GPU autoscale reduce can
     // operate on the uploaded point buffers.
@@ -202,7 +140,7 @@ void Renderer::prepare(plot::Figure& figure) {
     // Compute viewports via GPU parallel min/max reduce (per-layer CPU
     // fallback for plot types without GPU buffers).
     for (auto& p : figure.placements()) {
-        p.axes->autoscaleGpu(reduceRenderer_);
+        p.axes->autoscaleGpu(gpu().reduce());
     }
     prepared_ = true;
 }
@@ -210,17 +148,17 @@ void Renderer::prepare(plot::Figure& figure) {
 text::TextRenderer::TextMetrics
 Renderer::measureRichText(std::string_view text, float scale) {
     if (!text::containsMath(text))
-        return textRenderer_.measureText(text, scale);
-    font_face* serif = textRenderer_.serifFace();
+        return gpu().text().measureText(text, scale);
+    font_face* serif = gpu().text().serifFace();
     text::MeasureFn alt;
     if (mathFontset_ == text::MathFontset::DejaVuSerif && serif)
         alt = [this, serif](std::string_view s, float sc) {
-            auto m = textRenderer_.measureText(s, sc, serif);
+            auto m = gpu().text().measureText(s, sc, serif);
             return text::TextMeasure{m.width, m.height, m.ascent};
         };
     auto lay = text::layoutMathText(text, scale,
         [this](std::string_view s, float sc) {
-            auto m = textRenderer_.measureText(s, sc);
+            auto m = gpu().text().measureText(s, sc);
             return text::TextMeasure{m.width, m.height, m.ascent};
         }, mathFontset_, alt);
     return {lay.width, lay.ascent + lay.descent, lay.ascent};
@@ -228,10 +166,10 @@ Renderer::measureRichText(std::string_view text, float scale) {
 
 text::TextRenderer::FaceMatch
 Renderer::richTextFace(const plot::FontProperties& font) {
-    return textRenderer_.faceFor(font.family, font.style, font.weight);
+    return gpu().text().faceFor(font.family, font.style, font.weight);
 }
 
-void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void Renderer::drawRichText(render::Cmd& cmd, plot::Rect2D scissor,
                             std::string_view text, float x, float y,
                             plot::Color color, float scale, float rotation,
                             plot::HAlign lineAlign,
@@ -239,21 +177,21 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
     if (!textReady_ || text.empty()) return;
     font_face* face = font ? richTextFace(*font).face : nullptr;
     if (!text::containsMath(text)) {
-        textRenderer_.draw(cmd, scissor, text, x, y, color, scale,
+        gpu().text().draw(cmd, scissor, text, x, y, color, scale,
                            rotation, lineAlign, face);
         return;
     }
     // Layout the math segments and emit each positioned run/rule.
-    font_face* serif = textRenderer_.serifFace();
+    font_face* serif = gpu().text().serifFace();
     text::MeasureFn alt;
     if (mathFontset_ == text::MathFontset::DejaVuSerif && serif)
         alt = [this, serif](std::string_view s, float sc) {
-            auto m = textRenderer_.measureText(s, sc, serif);
+            auto m = gpu().text().measureText(s, sc, serif);
             return text::TextMeasure{m.width, m.height, m.ascent};
         };
     auto lay = text::layoutMathText(text, scale,
         [this](std::string_view s, float sc) {
-            auto m = textRenderer_.measureText(s, sc);
+            auto m = gpu().text().measureText(s, sc);
             return text::TextMeasure{m.width, m.height, m.ascent};
         }, mathFontset_, alt);
     float cosR = std::cos(rotation), sinR = std::sin(rotation);
@@ -264,7 +202,7 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
     for (const auto& r : lay.runs) {
         auto p = rot(r.x, r.baseline);
         font_face* rface = (r.face == 1) ? serif : face;
-        textRenderer_.draw(cmd, scissor, r.text, p.x, p.y,
+        gpu().text().draw(cmd, scissor, r.text, p.x, p.y,
                            color, scale * r.scale, rotation,
                            plot::HAlign::Left, rface);
     }
@@ -272,12 +210,12 @@ void Renderer::drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
         auto p0 = rot(rl.x0, rl.y0);
         auto p1 = rot(rl.x1, rl.y0);
         plot::Point2D pts[2] = {p0, p1};
-        spineRenderer_.drawLineStrip(cmd, scissor, backend_.extent(),
+        gpu().spine().drawLineStrip(cmd, scissor, backend_.extent(),
                                      std::span{pts, 2}, color, rl.thickness);
     }
 }
 
-void Renderer::drawRichTextFx(vk::CommandBuffer cmd, vk::Rect2D scissor,
+void Renderer::drawRichTextFx(render::Cmd& cmd, plot::Rect2D scissor,
                               std::span<const plot::PathEffect> fxs,
                               std::string_view text, float x, float y,
                               plot::Color color, float scale,
@@ -336,7 +274,7 @@ inline bool isGeoProj(plot::ProjectionKind k) noexcept {
 
 } // namespace
 
-void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                         plot::Rect2D rect) {
     if (!textReady_) return;
 
@@ -379,7 +317,7 @@ void Renderer::drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
     // Use the full framebuffer as the scissor rect so text outside the
     // axes rect (labels, title) is not clipped.
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
 
     // Gap between a tick mark and its label comes from the axis's tick
     // pad (matplotlib xtick.major.pad=3.5pt / xtick.minor.pad=3.4pt).
@@ -875,9 +813,9 @@ void Renderer::alignAxesLabels(plot::Figure& figure) {
     for (auto& e : ys) e.ax->yLabelShiftPx = groupMax(ys, e.key) - e.depth;
 }
 
-void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawSpines(render::Cmd& cmd, const plot::Axes& axes,
                            plot::Rect2D rect) {
-    if (!spineInited_) return;
+    if (!graphicsReady_) return;
     const auto& style = axes.style();
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
@@ -886,7 +824,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     if (!style.xAxis.visible && !style.yAxis.visible) return;
 
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
 
     // Draw the border as pixel-aligned filled quads (matplotlib draws ~1px
     // spines). Filled quads aligned to integer pixel coordinates get 100%
@@ -901,7 +839,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
     const auto& sp = axes.spines();
     auto quad = [&](float qx0, float qy0, float qx1, float qy1,
                     plot::Color c) {
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+        gpu().spine().drawFilledRect(cmd, fullRect, ext,
             plot::Rect2D{int32_t(std::lround(qx0)),
                          int32_t(std::lround(qy0)),
                          uint32_t(std::lround(qx1 - qx0)),
@@ -946,7 +884,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                 sp2.width = sw;
                 sp2.dashes = std::move(dashes);
                 auto mesh = plot::strokePolyline(pts, sp2);
-                spineRenderer_.drawTriangles(cmd, fullRect, ext,
+                gpu().spine().drawTriangles(cmd, fullRect, ext,
                                              mesh.verts, c);
                 return;
             }
@@ -971,7 +909,7 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
                                         horiz ? plot::Point2D{to, p}
                                               : plot::Point2D{p, to}};
                 auto mesh = plot::strokePolyline(pts, sp2);
-                spineRenderer_.drawTriangles(cmd, fullRect, ext,
+                gpu().spine().drawTriangles(cmd, fullRect, ext,
                                              mesh.verts, c);
             } else if (s.positionSet) {
                 if (horiz) quad(from, p - sw * 0.5f, to, p + sw * 0.5f, c);
@@ -1025,14 +963,14 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
             if (yAxis) { tickRect.x = int32_t(pos); tickRect.width = 0; }
             else       { tickRect.y = int32_t(pos); tickRect.height = 0; }
         }
-        spineRenderer_.drawTicks(cmd, fullRect, ext, tickRect, majorFrac,
+        gpu().spine().drawTicks(cmd, fullRect, ext, tickRect, majorFrac,
                                  as.color, tc.majorSize * figDpi / 72.0f,
                                  yAxis, 0.0f, 1.0f, inF, farSide,
                                  std::max(tc.majorWidth * figDpi / 72.0f, 1.5f));
         auto minors = axisMinorTicks(tc, scale, lo, hi, majors);
         if (!minors.empty()) {
             auto minorFrac = toFrac(minors, yAxis);
-            spineRenderer_.drawTicks(cmd, fullRect, ext, tickRect, minorFrac,
+            gpu().spine().drawTicks(cmd, fullRect, ext, tickRect, minorFrac,
                                      as.color, tc.minorSize * figDpi / 72.0f,
                                      yAxis, 0.0f, 1.0f, inF, farSide,
                                      std::max(tc.minorWidth * figDpi / 72.0f, 1.0f));
@@ -1071,17 +1009,16 @@ void Renderer::drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
 /// ticks. gridWhich selects "major"/"minor"/"both"; minor lines use the
 /// minorGrid* styling. Grid line style "-"/"--"/":"/"-." maps to the
 /// usual dash patterns. Lines are clipped to the axes rect.
-void Renderer::drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawGrid(render::Cmd& cmd, const plot::Axes& axes,
                         plot::Rect2D rect) {
-    if (!spineInited_) return;
+    if (!graphicsReady_) return;
     // mpl axison=False removes the axis objects including their grid.
     if (!axes.axison()) return;
     const auto& style = axes.style();
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
     const auto& vp = axes.viewport();
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    plot::Rect2D clip{rect.x, rect.y, rect.width, rect.height};
 
     const float x0 = float(rect.x), y0 = float(rect.y);
     const float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
@@ -1115,7 +1052,7 @@ void Renderer::drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
             tris.insert(tris.end(), mesh.verts.begin(), mesh.verts.end());
         }
         if (!tris.empty())
-            spineRenderer_.drawTriangles(cmd, clip, backend_.extent(),
+            gpu().spine().drawTriangles(cmd, clip, backend_.extent(),
                                          tris, color);
     };
 
@@ -1162,8 +1099,8 @@ namespace {
 /// outline when set (pad/rounding in units of `mutationPx` — the text
 /// fontsize in px), else a plain rect. Face drawn when face.a > 0,
 /// edge stroked at `edgeW` px when edge.a > 0.
-inline void drawTextBbox(vk::CommandBuffer cmd, vk::Rect2D clip,
-                         vk::Extent2D res, primitives::SpineRenderer& spine,
+inline void drawTextBbox(render::Cmd& cmd, plot::Rect2D clip,
+                         plot::Extent2D res, primitives::SpineRenderer& spine,
                          float x0, float y0, float w, float h, float padPx,
                          plot::Color face, plot::Color edge, float edgeW,
                          const std::optional<plot::BoxStyleSpec>& boxStyle,
@@ -1228,9 +1165,9 @@ std::vector<plot::Point2D> polarCircle(const plot::Axes& axes,
 }
 
 /// Stroke a pixel-space polyline into a triangle mesh and draw it.
-void strokePxPoly(vk::CommandBuffer cmd,
+void strokePxPoly(render::Cmd& cmd,
                   primitives::SpineRenderer& sr,
-                  vk::Rect2D clip, vk::Extent2D ext,
+                  plot::Rect2D clip, plot::Extent2D ext,
                   std::span<const plot::Point2D> pts,
                   plot::Color color, float widthPx) {
     plot::StrokeParams sp;
@@ -1241,7 +1178,7 @@ void strokePxPoly(vk::CommandBuffer cmd,
 }
 } // namespace
 
-void Renderer::drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawPolarGrid(render::Cmd& cmd, const plot::Axes& axes,
                              plot::Rect2D rect) {
     const auto& style = axes.style();
     const float figDpi = axes.figure()
@@ -1249,8 +1186,7 @@ void Renderer::drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
     const auto& vp = axes.viewport();
     float rmax = std::max(std::fabs(vp.y.min), std::fabs(vp.y.max));
     if (rmax <= 0.0f) rmax = 1.0f;
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    plot::Rect2D clip{rect.x, rect.y, rect.width, rect.height};
     auto ext = backend_.extent();
     constexpr float kPi = 3.14159265358979323846f;
 
@@ -1266,7 +1202,7 @@ void Renderer::drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
         auto c = polarToPx(axes, rect, 0.0f, 0.0f);
         for (float th : thetas) {
             plot::Point2D pts[2] = {c, polarToPx(axes, rect, th, rmax)};
-            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+            strokePxPoly(cmd, gpu().spine(), clip, ext, pts,
                          style.xAxis.gridColor,
                          style.xAxis.gridLineWidth * figDpi / 72.0f);
         }
@@ -1281,14 +1217,14 @@ void Renderer::drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
         for (float r : rTicks) {
             if (r <= 0.0f || r > rmax) continue;
             auto circ = polarCircle(axes, rect, r);
-            strokePxPoly(cmd, spineRenderer_, clip, ext, circ,
+            strokePxPoly(cmd, gpu().spine(), clip, ext, circ,
                          style.yAxis.gridColor,
                          style.yAxis.gridLineWidth * figDpi / 72.0f);
         }
     }
 }
 
-void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
+void Renderer::drawPolarSpineAndLabels(render::Cmd& cmd,
                                        const plot::Axes& axes,
                                        plot::Rect2D rect) {
     const auto& style = axes.style();
@@ -1298,12 +1234,12 @@ void Renderer::drawPolarSpineAndLabels(vk::CommandBuffer cmd,
     float rmax = std::max(std::fabs(vp.y.min), std::fabs(vp.y.max));
     if (rmax <= 0.0f) rmax = 1.0f;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     constexpr float kPi = 3.14159265358979323846f;
 
     // Circular outer spine at rmax.
     auto circ = polarCircle(axes, rect, rmax);
-    strokePxPoly(cmd, spineRenderer_, fullRect, ext, circ,
+    strokePxPoly(cmd, gpu().spine(), fullRect, ext, circ,
                  style.xAxis.color,
                  std::max(style.xAxis.lineWidth * figDpi / 72.0f, 1.0f));
 
@@ -1416,13 +1352,12 @@ std::vector<float> geoLatTicks(const plot::Axes& axes,
 
 } // namespace
 
-void Renderer::drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawGeoGrid(render::Cmd& cmd, const plot::Axes& axes,
                            plot::Rect2D rect) {
     const auto& style = axes.style();
     const float figDpi =
         axes.figure() ? axes.figure()->dpi() : style.dpi;
-    vk::Rect2D clip{vk::Offset2D{rect.x, rect.y},
-                    vk::Extent2D{rect.width, rect.height}};
+    plot::Rect2D clip{rect.x, rect.y, rect.width, rect.height};
     auto ext = backend_.extent();
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kHalfPi = 1.5707963267948966f;
@@ -1439,7 +1374,7 @@ void Renderer::drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
                 pts.push_back(geoToPx(axes, rect, lon,
                                       -ends + 2.0f * ends *
                                           float(i) / 64.0f));
-            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+            strokePxPoly(cmd, gpu().spine(), clip, ext, pts,
                          style.xAxis.gridColor,
                          style.xAxis.gridLineWidth * figDpi / 72.0f);
         }
@@ -1453,21 +1388,21 @@ void Renderer::drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
                 pts.push_back(geoToPx(axes, rect,
                                       -kPi + 2.0f * kPi * float(i) / 128.0f,
                                       lat));
-            strokePxPoly(cmd, spineRenderer_, clip, ext, pts,
+            strokePxPoly(cmd, gpu().spine(), clip, ext, pts,
                          style.yAxis.gridColor,
                          style.yAxis.gridLineWidth * figDpi / 72.0f);
         }
     }
 }
 
-void Renderer::drawGeoFrameAndLabels(vk::CommandBuffer cmd,
+void Renderer::drawGeoFrameAndLabels(render::Cmd& cmd,
                                      const plot::Axes& axes,
                                      plot::Rect2D rect) {
     const auto& style = axes.style();
     const float figDpi =
         axes.figure() ? axes.figure()->dpi() : style.dpi;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kHalfPi = 1.5707963267948966f;
     constexpr float kDeg = 57.29577951308232f;
@@ -1493,7 +1428,7 @@ void Renderer::drawGeoFrameAndLabels(vk::CommandBuffer cmd,
         bd.push_back(geoToPx(axes, rect, -kPi,
                              kHalfPi - kPi * float(i) / 96.0f));
     bd.push_back(bd.front());
-    strokePxPoly(cmd, spineRenderer_, fullRect, ext, bd,
+    strokePxPoly(cmd, gpu().spine(), fullRect, ext, bd,
                  style.xAxis.color,
                  std::max(style.xAxis.lineWidth * figDpi / 72.0f, 1.0f));
 
@@ -1674,12 +1609,12 @@ Renderer::measureLegend(const std::vector<LegendEntry>& entries,
 /// Paint a measured legend box whose (bx,by) box-fraction corner sits at
 /// `anchor` (canvas px). Returns the box rect.
 plot::Rect2D Renderer::paintLegendBox(
-    vk::CommandBuffer cmd, const std::vector<LegendEntry>& entries,
+    render::Cmd& cmd, const std::vector<LegendEntry>& entries,
     const plot::LegendStyle& lg, const LegendLayout& L,
     plot::Color textColor, plot::Point2D anchor, float bx, float by,
     float forceW) {
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     const int n = static_cast<int>(entries.size());
     const float fontPx = L.fontPx;
     const float handleW = L.handleW, textGap = L.textGap;
@@ -1708,7 +1643,7 @@ plot::Rect2D Renderer::paintLegendBox(
     // Drop shadow behind the box.
     if (lg.shadow) {
         const float so = fontPx * 0.25f;
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+        gpu().spine().drawFilledRect(cmd, fullRect, ext,
             pxRect(boxX + so, boxY + so, boxW, L.boxH),
             plot::Color::fromRgba8(0, 0, 0, 100));
     }
@@ -1717,8 +1652,8 @@ plot::Rect2D Renderer::paintLegendBox(
         // Semi-transparent background.
         auto bg = lg.faceColor;
         bg.a *= lg.frameAlpha;
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext, boxRect, bg);
-        spineRenderer_.drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
+        gpu().spine().drawFilledRect(cmd, fullRect, ext, boxRect, bg);
+        gpu().spine().drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
     }
 
     // mpl alignment: the entry block + title align left/center/right
@@ -1761,7 +1696,7 @@ plot::Rect2D Renderer::paintLegendBox(
             fan.push_back({cx + r * std::cos(a0), cy + r * std::sin(a0)});
             fan.push_back({cx + r * std::cos(a1), cy + r * std::sin(a1)});
         }
-        spineRenderer_.drawTriangles(cmd, fullRect, ext, fan, col);
+        gpu().spine().drawTriangles(cmd, fullRect, ext, fan, col);
     };
 
     // Draw each entry: handle (line/marker) + text label. Each column
@@ -1792,7 +1727,7 @@ plot::Rect2D Renderer::paintLegendBox(
 
             if (e.marker == plot::LegendMarker::Line) {
                 plot::Point2D pts[] = {{hX, midY}, {hX + handleW, midY}};
-                spineRenderer_.drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
+                gpu().spine().drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
                 // mpl numpoints: markers evenly spaced on the segment.
                 const float rad = markerSize * 0.3f;
                 for (int p = 0; p < npts; ++p) {
@@ -1812,7 +1747,7 @@ plot::Rect2D Renderer::paintLegendBox(
             } else {
                 // Filled square centered in the handle area.
                 const float sx = hX + (handleW - markerSize) / 2.0f;
-                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                gpu().spine().drawFilledRect(cmd, fullRect, ext,
                     {int32_t(sx), int32_t(midY - markerSize / 2.0f),
                      uint32_t(markerSize), uint32_t(markerSize)},
                     e.color);
@@ -1827,10 +1762,10 @@ plot::Rect2D Renderer::paintLegendBox(
     return boxRect;
 }
 
-void Renderer::drawFigureLegend(vk::CommandBuffer cmd,
+void Renderer::drawFigureLegend(render::Cmd& cmd,
                                 const plot::Figure& fig) {
     const auto& lg = fig.figureLegend();
-    if (!spineInited_ || !textReady_ || !lg.visible) return;
+    if (!graphicsReady_ || !textReady_ || !lg.visible) return;
 
     std::vector<LegendEntry> entries;
     for (auto& p : fig.placements()) {
@@ -1868,9 +1803,9 @@ void Renderer::drawFigureLegend(vk::CommandBuffer cmd,
                    anchor, la.bx, la.by, forceW);
 }
 
-void Renderer::drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawLegend(render::Cmd& cmd, const plot::Axes& axes,
                           plot::Rect2D rect) {
-    if (!spineInited_ || !textReady_) return;
+    if (!graphicsReady_ || !textReady_) return;
     const auto& style = axes.style();
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
@@ -1976,10 +1911,8 @@ void Renderer::renderFrame(plot::Figure& figure) {
     renderFrameSubset(figure, DrawSubset::All);
     // Lazily-rasterized glyphs (first CJK/fallback-face characters in a
     // frame) grow the CPU atlas mid-pass — re-upload and repaint once.
-    if (textReady_ && textRenderer_.atlasDirty()) {
-        auto& ctx = backend_.context();
-        textRenderer_.syncAtlas(ctx.device.graphicsQueue(),
-                                ctx.graphicsPool.handle());
+    if (textReady_ && gpu().text().atlasDirty()) {
+        gpu().syncTextAtlas();
         renderFrameSubset(figure, DrawSubset::All);
     }
     figure.setStale(false);
@@ -2018,12 +1951,8 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     // same-queue ordering makes its writes visible to the draw
     // submission (same mechanism as staging uploads).
     {
-        auto& ctx = backend_.context();
-        if (!preCmd_)
-            preCmd_.emplace(ctx.device.handle(), ctx.graphicsPool.handle());
-        preCmd_->reset();
-        preCmd_->begin();
-        gpuLineRenderer_.resetScratch();
+        auto pre = gpu().beginPrePass();
+        gpu().gpuLine().resetScratch();
         for (auto& p : figure.placements())
             for (auto* plot : p.axes->drawOrder()) {
                 if (subset == DrawSubset::StaticOnly && plot->animated)
@@ -2031,38 +1960,31 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                 if (subset == DrawSubset::AnimatedOnly && !plot->animated)
                     continue;
                 const_cast<plot::IPlot*>(plot)->preDraw(
-                    preCmd_->handle(), *this, *p.axes, p.axes->rect);
+                    *pre, *this, *p.axes, p.axes->rect);
             }
-        preCmd_->end();
-        vk::SubmitInfo si{};
-        vk::CommandBuffer pcb = preCmd_->handle();
-        si.setCommandBuffers(pcb);
-        ctx.device.graphicsQueue().submit(si);
+        gpu().submitPrePass(std::move(pre));
     }
 
-    auto cmd = subset == DrawSubset::AnimatedOnly
-                   ? backend_.beginFrameLoad()
-                   : backend_.beginFrame();
-    textRenderer_.resetScratch();
-    spineRenderer_.resetScratch();
-    instancedPathRenderer_.resetScratch();
-    pointRenderer_.resetScratch();
+    auto cmdOwner = subset == DrawSubset::AnimatedOnly
+                        ? backend_.beginFrameLoad()
+                        : backend_.beginFrame();
+    render::Cmd& cmd = *cmdOwner;
+    gpu().beginFrameScratch();
 
     // Figure patch (figure.facecolor) fills the canvas under everything.
     const auto& figFc = figure.style().faceColor;
-    if (subset != DrawSubset::AnimatedOnly && spineInited_ &&
+    if (subset != DrawSubset::AnimatedOnly && graphicsReady_ &&
         figure.style().frameOn && figFc.a > 0.0f) {
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        plot::Rect2D fullRect{0, 0, ext.width, ext.height};
         plot::Rect2D canvas{0, 0, ext.width, ext.height};
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext, canvas, figFc);
+        gpu().spine().drawFilledRect(cmd, fullRect, ext, canvas, figFc);
     }
 
     for (const auto* p : figure.axesDrawOrder()) {
         // mpl Axes.set_visible(False) hides the whole axes.
         if (!p->axes->visible()) continue;
         plot::Rect2D rect = p->axes->rect;
-        vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                         vk::Extent2D{rect.width, rect.height}};
+        plot::Rect2D vrect{rect.x, rect.y, rect.width, rect.height};
 
         const bool gridOn = p->axes->style().xAxis.grid ||
                             p->axes->style().yAxis.grid;
@@ -2070,13 +1992,13 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         // Axes facecolor patch (matplotlib axes.facecolor). Drawn only
         // when both axison and frame_on are set (mpl Axes.draw: the
         // patch is inserted into the draw list iff axison && frameon).
-        if (subset != DrawSubset::AnimatedOnly && spineInited_ &&
+        if (subset != DrawSubset::AnimatedOnly && graphicsReady_ &&
             p->axes->axison() && p->axes->frameOn()) {
             // mpl Axes.set_alpha scales the patch alpha.
             auto fc = p->axes->style().faceColor;
             if (auto a = p->axes->alpha()) fc.a *= *a;
             if (fc.a > 0.0f)
-                spineRenderer_.drawFilledRect(cmd, vrect, ext, rect, fc);
+                gpu().spine().drawFilledRect(cmd, vrect, ext, rect, fc);
         }
 
         const auto projKind = p->axes->projection().kind;
@@ -2124,12 +2046,12 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         else if (geo) drawGeoFrameAndLabels(cmd, *p->axes, rect);
         else if (!has3D && !isCax) drawSpines(cmd, *p->axes, rect);
         // Draw text (axis labels, tick labels, title).
-        if (!isCax && textInited_ && textReady_) {
+        if (!isCax && textReady_) {
             drawText(cmd, *p->axes, rect);
         }
 
         // Draw text annotations and arrow annotations.
-        if (textInited_ && textReady_) {
+        if (textReady_) {
             drawAnnotations(cmd, *p->axes, rect);
         }
 
@@ -2137,11 +2059,11 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         drawLegend(cmd, *p->axes, rect);
 
         // Draw anchored size bars.
-        if (textInited_ && textReady_)
+        if (textReady_)
             drawSizeBars(cmd, *p->axes, rect);
 
         // Draw anchored text boxes.
-        if (textInited_ && textReady_)
+        if (textReady_)
             drawAnchoredTexts(cmd, *p->axes, rect);
 
         // Draw inset-zoom indicators (connectors span the canvas).
@@ -2157,9 +2079,9 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
 
     // Figure suptitle at top center (mirrors VectorRenderer).
     const auto& ft = figure.style().title;
-    if (subset != DrawSubset::AnimatedOnly && textInited_ && textReady_ &&
+    if (subset != DrawSubset::AnimatedOnly && textReady_ &&
         !ft.text.empty()) {
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        plot::Rect2D fullRect{0, 0, ext.width, ext.height};
         float scale = ft.font.size / 12.0f;
         auto m = measureRichText(ft.text, scale);
         auto fm = richTextFace(ft.font);
@@ -2177,8 +2099,8 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
 
     // Figure-level texts (mpl fig.text / fig.texts) — figure-fraction
     // coords by default, honor per-text transform/coords/bbox.
-    if (subset != DrawSubset::AnimatedOnly && textInited_ && textReady_) {
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    if (subset != DrawSubset::AnimatedOnly && textReady_) {
+        plot::Rect2D fullRect{0, 0, ext.width, ext.height};
         plot::Extent2D figExtent{ext.width, ext.height};
         float dpi = figure.style().dpi;
         const float kFS = dpi / (72.0f * 16.0f);
@@ -2197,7 +2119,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
             if (t.hasBbox || t.bboxFaceColor.a > 0.0f) {
                 auto al = plot::alignText(pos, t.halign, t.valign,
                                           m.width, m.height, m.ascent);
-                drawTextBbox(cmd, fullRect, ext, spineRenderer_,
+                drawTextBbox(cmd, fullRect, ext, gpu().spine(),
                              al.x, al.y - m.ascent,
                              m.width, m.height, t.bboxPadding,
                              t.bboxFaceColor, t.bboxEdgeColor,
@@ -2215,9 +2137,9 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     // Figure-level axis labels (mpl fig.supxlabel / fig.supylabel):
     // bottom-center horizontal and left-center rotated bottom-to-top.
     // Font follows figure.labelsize ('large' ≈ 12pt).
-    if (subset != DrawSubset::AnimatedOnly && textInited_ && textReady_ &&
+    if (subset != DrawSubset::AnimatedOnly && textReady_ &&
         (!figure.supxlabel().empty() || !figure.supylabel().empty())) {
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        plot::Rect2D fullRect{0, 0, ext.width, ext.height};
         float dpi = figure.style().dpi;
         float labScale = figure.supXlabelFont.size * dpi /
                          (72.0f * 16.0f);
@@ -2244,8 +2166,8 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     }
 
     // Interactive overlays (§11): widgets + nav zoom rubber-band.
-    if (subset != DrawSubset::AnimatedOnly && spineInited_) {
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    if (subset != DrawSubset::AnimatedOnly && graphicsReady_) {
+        plot::Rect2D fullRect{0, 0, ext.width, ext.height};
         Painter painter{cmd, *this, fullRect};
         for (auto& w : figure.widgets()) w->draw(painter);
         if (figure.navCreated() && figure.nav().hasZoomRect()) {
@@ -2254,16 +2176,16 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
                             int32_t(std::lround(std::min(a.y, b.y))),
                             uint32_t(std::lround(std::abs(b.x - a.x))),
                             uint32_t(std::lround(std::abs(b.y - a.y)))};
-            spineRenderer_.drawRect(cmd, fullRect, ext, zr,
+            gpu().spine().drawRect(cmd, fullRect, ext, zr,
                                     plot::Color{0.0f, 0.0f, 0.0f, 0.8f}, 1.0f);
         }
     }
     backend_.endFrame();
 }
 
-void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawColorbar(render::Cmd& cmd, const plot::Axes& axes,
                             plot::Rect2D rect) {
-    if (!spineInited_ || !textReady_) return;
+    if (!graphicsReady_ || !textReady_) return;
     const auto& style = axes.style();
     if (!style.colorbar.visible) return;
     // mpl colorbar tick labels + label use font.size pt at figure dpi.
@@ -2309,7 +2231,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     if (!hasRange) return;
 
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
 
     // Layout: vertical color strip to the right of the axes. mpl
     // make_axes places the cax in the right `fraction` slice of the
@@ -2395,15 +2317,15 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         float segW = bodyW / 64.0f;
         for (uint32_t i = 0; i < 64; ++i) {
             float t = float(i) / 63.0f;
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+            gpu().spine().drawFilledRect(cmd, fullRect, ext,
                 {int32_t(bodyX0 + i * segW), int32_t(stripY),
                  uint32_t(segW) + 1, uint32_t(stripH)},
                 sampleAt(t));
         }
-        vk::Extent2D res2{ext.width, ext.height};
+        plot::Extent2D res2{ext.width, ext.height};
         if (extMin) {   // left-pointing extension
             if (cbs.extendrect) {
-                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                gpu().spine().drawFilledRect(cmd, fullRect, ext,
                     {int32_t(bodyX0 - extW), int32_t(stripY),
                      uint32_t(extW), uint32_t(stripH)},
                     sampleAt(0.0f));
@@ -2411,13 +2333,13 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                 plot::Point2D tri[3] = {
                     {bodyX0, stripY}, {bodyX0, stripY + stripH},
                     {bodyX0 - extW, stripY + stripH * 0.5f}};
-                spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                gpu().spine().drawTriangles(cmd, fullRect, res2, tri,
                                              sampleAt(0.0f));
             }
         }
         if (extMax) {   // right-pointing extension
             if (cbs.extendrect) {
-                spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+                gpu().spine().drawFilledRect(cmd, fullRect, ext,
                     {int32_t(bodyX1), int32_t(stripY),
                      uint32_t(extW), uint32_t(stripH)},
                     sampleAt(1.0f));
@@ -2425,11 +2347,11 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
                 plot::Point2D tri[3] = {
                     {bodyX1, stripY}, {bodyX1, stripY + stripH},
                     {bodyX1 + extW, stripY + stripH * 0.5f}};
-                spineRenderer_.drawTriangles(cmd, fullRect, res2, tri,
+                gpu().spine().drawTriangles(cmd, fullRect, res2, tri,
                                              sampleAt(1.0f));
             }
         }
-        spineRenderer_.drawRect(cmd, fullRect, ext,
+        gpu().spine().drawRect(cmd, fullRect, ext,
             {int32_t(bodyX0), int32_t(stripY),
              uint32_t(bodyW), uint32_t(stripH)},
             style.colorbar.edgeColor, 1.0f);
@@ -2448,7 +2370,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             float x = bodyX0 + t * bodyW;
             plot::Point2D tickPts[2] = {
                 {x, stripY + stripH}, {x, stripY + stripH + 4.0f}};
-            spineRenderer_.drawLineStrip(cmd, fullRect, ext, tickPts,
+            gpu().spine().drawLineStrip(cmd, fullRect, ext, tickPts,
                                          style.colorbar.edgeColor, 1.0f);
             drawRichText(cmd, fullRect, cbt.labels[ti],
                          x - 8.0f, stripY + stripH + 14.0f,
@@ -2464,13 +2386,13 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             plot::Point2D mTick[2] = {
                 {x, stripY + stripH},
                 {x, stripY + stripH + 2.0f}};
-            spineRenderer_.drawLineStrip(cmd, fullRect, ext, mTick,
+            gpu().spine().drawLineStrip(cmd, fullRect, ext, mTick,
                                 style.colorbar.edgeColor, 1.0f);
         }
         // mpl colorbar.set_label — centered under the horizontal strip.
         if (!cbs.label.empty()) {
-            auto m = textRenderer_.measureText(cbs.label, cbScale);
-            textRenderer_.draw(cmd, fullRect, cbs.label,
+            auto m = gpu().text().measureText(cbs.label, cbScale);
+            gpu().text().draw(cmd, fullRect, cbs.label,
                                bodyX0 + bodyW * 0.5f - m.width * 0.5f,
                                stripY + stripH + 30.0f,
                                style.colorbar.labelColor, cbScale);
@@ -2486,19 +2408,19 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         float t = 1.0f - float(i) / float(segments - 1);
         auto color = sampleAt(t);
         float y = bodyY0 + i * segH;
-        spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+        gpu().spine().drawFilledRect(cmd, fullRect, ext,
             {int32_t(stripX), int32_t(y), uint32_t(stripW), uint32_t(segH) + 1},
             color);
     }
 
     // Extend triangles (matplotlib colorbar extend=...). Min extension at
     // the bottom, max at the top; colored with the strip's end color.
-    vk::Extent2D res{ext.width, ext.height};
+    plot::Extent2D res{ext.width, ext.height};
     if (extMin) {
         // mpl extendrect → rectangular extension; else downward
         // triangle under the strip.
         if (cbs.extendrect) {
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+            gpu().spine().drawFilledRect(cmd, fullRect, ext,
                 {int32_t(stripX), int32_t(bodyY1),
                  uint32_t(stripW), uint32_t(extH)},
                 sampleAt(0.0f));
@@ -2506,13 +2428,13 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             plot::Point2D tri[3] = {
                 {stripX, bodyY1}, {stripX + stripW, bodyY1},
                 {stripX + stripW * 0.5f, bodyY1 + extH}};
-            spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
+            gpu().spine().drawTriangles(cmd, fullRect, res, tri,
                                          sampleAt(0.0f));
         }
     }
     if (extMax) {
         if (cbs.extendrect) {
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+            gpu().spine().drawFilledRect(cmd, fullRect, ext,
                 {int32_t(stripX), int32_t(bodyY0 - extH),
                  uint32_t(stripW), uint32_t(extH)},
                 sampleAt(1.0f));
@@ -2520,13 +2442,13 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             plot::Point2D tri[3] = {
                 {stripX, bodyY0}, {stripX + stripW, bodyY0},
                 {stripX + stripW * 0.5f, bodyY0 - extH}};
-            spineRenderer_.drawTriangles(cmd, fullRect, res, tri,
+            gpu().spine().drawTriangles(cmd, fullRect, res, tri,
                                          sampleAt(1.0f));
         }
     }
 
     // Draw border around the strip body (plus extend outlines).
-    spineRenderer_.drawRect(cmd, fullRect, ext,
+    gpu().spine().drawRect(cmd, fullRect, ext,
         {int32_t(stripX), int32_t(bodyY0), uint32_t(stripW), uint32_t(bodyH)},
         style.colorbar.edgeColor, 1.0f);
 
@@ -2547,7 +2469,7 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
             {stripX + stripW, y},
             {stripX + stripW + 4.0f, y},
         };
-        spineRenderer_.drawLineStrip(cmd, fullRect, ext, tickPts,
+        gpu().spine().drawLineStrip(cmd, fullRect, ext, tickPts,
                                      style.colorbar.edgeColor, 1.0f);
         // Draw label (rich text for "$10^{k}$" mathtext labels).
         drawRichText(cmd, fullRect, cbt.labels[ti],
@@ -2565,15 +2487,15 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
         plot::Point2D mTick[2] = {
             {stripX + stripW, y},
             {stripX + stripW + 2.0f, y}};
-        spineRenderer_.drawLineStrip(cmd, fullRect, ext, mTick,
+        gpu().spine().drawLineStrip(cmd, fullRect, ext, mTick,
                             style.colorbar.edgeColor, 1.0f);
     }
 
     // mpl colorbar.set_label — rotated alongside a vertical strip,
     // right of the tick labels.
     if (!cbs.label.empty()) {
-        auto m = textRenderer_.measureText(cbs.label, cbScale);
-        textRenderer_.draw(cmd, fullRect, cbs.label,
+        auto m = gpu().text().measureText(cbs.label, cbScale);
+        gpu().text().draw(cmd, fullRect, cbs.label,
                            stripX + stripW + 26.0f,
                            bodyY0 + bodyH * 0.5f + m.width * 0.5f,
                            style.colorbar.labelColor, cbScale,
@@ -2581,13 +2503,13 @@ void Renderer::drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
     }
 }
 
-void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawAnnotations(render::Cmd& cmd, const plot::Axes& axes,
                                 plot::Rect2D rect) {
     const auto& vp = axes.viewport();
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     plot::Extent2D figExtent{ext.width, ext.height};
     float dpi = figDpi;
     float baseFontSize = 16.0f;
@@ -2611,16 +2533,15 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                          uint32_t(m.width), uint32_t(m.height)};
         }
         // clipOn restricts the scissor to the axes rect.
-        vk::Rect2D clipRect = t.clipOn
-            ? vk::Rect2D{vk::Offset2D{rect.x, rect.y},
-                         vk::Extent2D{rect.width, rect.height}}
+        plot::Rect2D clipRect = t.clipOn
+            ? plot::Rect2D{rect.x, rect.y, rect.width, rect.height}
             : fullRect;
 
         // Draw background box if requested (mpl FancyBboxPatch).
         if (t.hasBbox || t.bboxFaceColor.a > 0.0f) {
             auto aligned = plot::alignText(pos, t.halign, t.valign,
                                            m.width, m.height, m.ascent);
-            drawTextBbox(cmd, clipRect, backend_.extent(), spineRenderer_,
+            drawTextBbox(cmd, clipRect, backend_.extent(), gpu().spine(),
                          aligned.x, aligned.y - m.ascent,
                          m.width, m.height, t.bboxPadding,
                          t.bboxFaceColor, t.bboxEdgeColor,
@@ -2646,9 +2567,8 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                                        a.textOffsetX, a.textOffsetY);
         textPos.x += a.dragOffset.x;
         textPos.y += a.dragOffset.y;
-        vk::Rect2D clipRect = a.clipOn
-            ? vk::Rect2D{vk::Offset2D{rect.x, rect.y},
-                         vk::Extent2D{rect.width, rect.height}}
+        plot::Rect2D clipRect = a.clipOn
+            ? plot::Rect2D{rect.x, rect.y, rect.width, rect.height}
             : fullRect;
 
         // Draw arrow if requested.
@@ -2679,17 +2599,17 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                                  rect.y + (1.0f - f2.y) * float(rect.height)});
                         }
                 }
-                vk::Extent2D res{backend_.extent().width,
+                plot::Extent2D res{backend_.extent().width,
                                  backend_.extent().height};
                 for (auto& s : geo.strokes) {
                     if (ring.empty()) {
-                        spineRenderer_.drawLineStrip(cmd, clipRect,
+                        gpu().spine().drawLineStrip(cmd, clipRect,
                             backend_.extent(), std::span{s},
                             a.arrowColor, a.arrowWidth);
                     } else {
                         for (auto& piece : plot::clipPolylineToPolygon(
                                  std::span<const plot::Point2D>{s}, ring))
-                            spineRenderer_.drawLineStrip(cmd, clipRect,
+                            gpu().spine().drawLineStrip(cmd, clipRect,
                                 backend_.extent(),
                                 std::span<const plot::Point2D>{piece},
                                 a.arrowColor, a.arrowWidth);
@@ -2700,11 +2620,11 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                     if (!ring.empty())
                         tris = plot::clipTrianglesToPolygon(tris, ring);
                     if (!tris.empty())
-                        spineRenderer_.drawTriangles(cmd, clipRect, res,
+                        gpu().spine().drawTriangles(cmd, clipRect, res,
                             std::span{tris}, a.arrowColor);
                 }
             } else if (path.size() >= 2) {
-                spineRenderer_.drawLineStrip(cmd, clipRect, backend_.extent(),
+                gpu().spine().drawLineStrip(cmd, clipRect, backend_.extent(),
                     std::span{path}, a.arrowColor, a.arrowWidth);
 
                 // Arrowhead along the final segment's tangent.
@@ -2731,10 +2651,10 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                         {endX, endY},
                         {endX - rightX * headLen, endY - rightY * headLen}
                     };
-                    spineRenderer_.drawLineStrip(cmd, clipRect,
+                    gpu().spine().drawLineStrip(cmd, clipRect,
                         backend_.extent(),
                         std::span{head1, 2}, a.arrowColor, a.arrowWidth);
-                    spineRenderer_.drawLineStrip(cmd, clipRect,
+                    gpu().spine().drawLineStrip(cmd, clipRect,
                         backend_.extent(),
                         std::span{head2, 2}, a.arrowColor, a.arrowWidth);
                 }
@@ -2757,7 +2677,7 @@ void Renderer::drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
                 auto aligned = plot::alignText(textPos, a.halign, a.valign,
                                                m.width, m.height, m.ascent);
                 drawTextBbox(cmd, clipRect, backend_.extent(),
-                             spineRenderer_,
+                             gpu().spine(),
                              aligned.x, aligned.y - m.ascent,
                              m.width, m.height, a.bboxPadding,
                              a.bboxFaceColor, a.bboxEdgeColor,
@@ -2822,10 +2742,12 @@ bool Renderer::savefig(plot::Figure& figure,
         if (!gpuEncTried_.count(fmt)) {
             gpuEncTried_.insert(fmt);
             try {
-                auto& ctx = backend_.context();
+#ifndef VOLCANO_WEB
+                auto& vgpu = vkGpu(gpu());
                 gpuEncs_[fmt] = encode::createGpuEncoder(
-                    fmt, ctx.device.handle(), ctx.device.graphicsQueue(),
-                    ctx.graphicsPool.handle(), ctx.allocator.handle());
+                    fmt, vgpu.device(), vgpu.graphicsQueue(),
+                    vgpu.graphicsPool(), vgpu.allocator());
+#endif
             } catch (const std::exception&) {
                 gpuEncs_.erase(fmt); // CPU fallback
             }
@@ -3064,7 +2986,7 @@ bool Renderer::savefigVector(plot::Figure& figure,
     VectorRenderer::MeasureFn measure;
     if (textReady_)
         measure = [this](std::string_view s, float sc) {
-            auto m = textRenderer_.measureText(s, sc);
+            auto m = gpu().text().measureText(s, sc);
             return text::TextMeasure{m.width, m.height, m.ascent};
         };
     // Raster fallback: draw only this run's layers for `axes` onto a
@@ -3075,11 +2997,12 @@ bool Renderer::savefigVector(plot::Figure& figure,
                std::vector<uint8_t>& rgba, uint32_t& w, uint32_t& h) {
             ++frameSeq_;   // invalidate preDraw GPU meshes from prior frames
             backend_.setClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-            auto cmd = backend_.beginFrame();
-            spineRenderer_.resetScratch();
-            instancedPathRenderer_.resetScratch();
-            pointRenderer_.resetScratch();
-            textRenderer_.resetScratch();
+            auto cmdOwner = backend_.beginFrame();
+            render::Cmd& cmd = *cmdOwner;
+            gpu().spine().resetScratch();
+            gpu().instancedPath().resetScratch();
+            gpu().sharedPoints().resetScratch();
+            gpu().text().resetScratch();
             for (auto* p : plots)
                 if (p->visible)
                     const_cast<plot::IPlot*>(p)->draw(cmd, *this, axes,
@@ -3150,17 +3073,23 @@ bool Renderer::saveAnimation(plot::Animation& anim,
     if (!w->open(path, ext.width, ext.height, fps)) return false;
     // GPU-side PNG filtering for APNG frames (compute shader picks the
     // per-row filter; zlib deflate stays on the CPU).
+    #ifndef VOLCANO_WEB
     std::unique_ptr<encode::GpuPngEncoder> gpuEnc;
+#endif
     if (auto* apng = dynamic_cast<encode::ApngWriter*>(w.get())) {
-        auto& ctx = backend_.context();
+#ifndef VOLCANO_WEB
+        auto& vgpu = vkGpu(gpu());
         gpuEnc = std::make_unique<encode::GpuPngEncoder>(
-            ctx.device.handle(), ctx.device.graphicsQueue(),
-            ctx.graphicsPool.handle(), ctx.allocator.handle());
+            vgpu.device(), vgpu.graphicsQueue(),
+            vgpu.graphicsPool(), vgpu.allocator());
+#endif
+#ifndef VOLCANO_WEB
         auto* enc = gpuEnc.get();
         apng->setFrameFilter([enc](std::span<const uint8_t> rgba,
                                    uint32_t fw, uint32_t fh) {
             return enc->filterScanlines(rgba, fw, fh);
         });
+#endif
     }
     size_t n = anim.frameCount();
     // Blit path (mpl blit=True): snapshot the static background once,
@@ -3231,13 +3160,13 @@ std::string Renderer::toHtml5Video(plot::Animation& anim, double fps) {
 }
 
 
-void Renderer::drawSizeBars(vk::CommandBuffer cmd, const plot::Axes& axes,
+void Renderer::drawSizeBars(render::Cmd& cmd, const plot::Axes& axes,
                             plot::Rect2D rect) {
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
     if (axes.sizeBars().empty()) return;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     const float dpi = figDpi;
     auto measureFn = [&](std::string_view t, float pt) {
         auto m = measureRichText(t, pt * dpi / (72.0f * 16.0f));
@@ -3255,16 +3184,16 @@ void Renderer::drawSizeBars(vk::CommandBuffer cmd, const plot::Axes& axes,
                                      dpi, measureFn);
         if (!L.valid) continue;
         if (sb.frameon) {
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext, toI(L.box),
+            gpu().spine().drawFilledRect(cmd, fullRect, ext, toI(L.box),
                                           sb.frameFaceColor);
-            spineRenderer_.drawRect(cmd, fullRect, ext, toI(L.box),
+            gpu().spine().drawRect(cmd, fullRect, ext, toI(L.box),
                                     sb.frameEdgeColor, 1.0f);
         }
         if (L.fill)
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext, toI(L.bar),
+            gpu().spine().drawFilledRect(cmd, fullRect, ext, toI(L.bar),
                                           sb.color);
         else
-            spineRenderer_.drawRect(cmd, fullRect, ext, toI(L.bar),
+            gpu().spine().drawRect(cmd, fullRect, ext, toI(L.bar),
                                     sb.color, 1.0f);
         if (!sb.label.empty())
             drawRichText(cmd, fullRect, sb.label, L.labelBaseline.x,
@@ -3274,12 +3203,12 @@ void Renderer::drawSizeBars(vk::CommandBuffer cmd, const plot::Axes& axes,
 }
 
 
-void Renderer::drawInsetIndicators(vk::CommandBuffer cmd,
+void Renderer::drawInsetIndicators(render::Cmd& cmd,
                                    const plot::Axes& axes,
                                    plot::Rect2D rect) {
     if (axes.insetIndicators().empty()) return;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     plot::Extent2D figExtent{ext.width, ext.height};
     for (const auto& ind : axes.insetIndicators()) {
         auto L = plot::layoutInsetIndicator(ind, axes, rect, figExtent);
@@ -3289,11 +3218,11 @@ void Renderer::drawInsetIndicators(vk::CommandBuffer cmd,
         auto face = ind.faceColor;
         face.a *= ind.alpha;
         if (face.a > 0.0f)
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext,
+            gpu().spine().drawFilledRect(cmd, fullRect, ext,
                 {int32_t(std::lround(L.rect.x)), int32_t(std::lround(L.rect.y)),
                  uint32_t(std::lround(L.rect.w)),
                  uint32_t(std::lround(L.rect.h))}, face);
-        spineRenderer_.drawRect(cmd, fullRect, ext,
+        gpu().spine().drawRect(cmd, fullRect, ext,
             {int32_t(std::lround(L.rect.x)), int32_t(std::lround(L.rect.y)),
              uint32_t(std::lround(L.rect.w)),
              uint32_t(std::lround(L.rect.h))}, edge, ind.lineWidth);
@@ -3301,21 +3230,21 @@ void Renderer::drawInsetIndicators(vk::CommandBuffer cmd,
             if (!L.connVisible[i]) continue;
             plot::Point2D seg[2] = {L.connectors[i].first,
                                     L.connectors[i].second};
-            spineRenderer_.drawLineStrip(cmd, fullRect, ext,
+            gpu().spine().drawLineStrip(cmd, fullRect, ext,
                 std::span{seg}, edge, ind.lineWidth);
         }
     }
 }
 
 
-void Renderer::drawAnchoredTexts(vk::CommandBuffer cmd,
+void Renderer::drawAnchoredTexts(render::Cmd& cmd,
                                  const plot::Axes& axes,
                                  plot::Rect2D rect) {
     const float figDpi = axes.figure()
         ? axes.figure()->dpi() : axes.style().dpi;
     if (axes.anchoredTexts().empty()) return;
     auto ext = backend_.extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    plot::Rect2D fullRect{0, 0, ext.width, ext.height};
     const float dpi = figDpi;
     auto measureFn = [&](std::string_view t, float pt) {
         auto m = measureRichText(t, pt * dpi / (72.0f * 16.0f));
@@ -3330,9 +3259,9 @@ void Renderer::drawAnchoredTexts(vk::CommandBuffer cmd,
                              int32_t(std::lround(L.box.y)),
                              uint32_t(std::lround(L.box.w)),
                              uint32_t(std::lround(L.box.h))};
-            spineRenderer_.drawFilledRect(cmd, fullRect, ext, box,
+            gpu().spine().drawFilledRect(cmd, fullRect, ext, box,
                                           at.frameFaceColor);
-            spineRenderer_.drawRect(cmd, fullRect, ext, box,
+            gpu().spine().drawRect(cmd, fullRect, ext, box,
                                     at.frameEdgeColor, 1.0f);
         }
         size_t i = 0;

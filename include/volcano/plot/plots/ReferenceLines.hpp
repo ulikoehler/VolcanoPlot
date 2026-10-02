@@ -30,7 +30,7 @@ public:
         : y_(y), color_(color), width_(width) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -61,7 +61,7 @@ public:
         : x_(x), color_(color), width_(width) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -94,7 +94,7 @@ public:
         : xy1_(xy1), xy2_(xy2), color_(color), width_(width) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -144,7 +144,7 @@ public:
         : y1_(y1), y2_(y2), color_(color) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -159,7 +159,7 @@ private:
     float y1_, y2_;
     Color color_;
     std::string label_;
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     bool prepared_ = false;
 };
 
@@ -174,7 +174,7 @@ public:
         : x1_(x1), x2_(x2), color_(color) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -189,7 +189,7 @@ private:
     float x1_, x2_;
     Color color_;
     std::string label_;
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     bool prepared_ = false;
 };
 
@@ -206,7 +206,7 @@ public:
           color_(color), width_(width) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -223,7 +223,7 @@ private:
     Color color_;
     float width_;
     std::string label_;
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     uint32_t vertexCount_ = 0;
     bool prepared_ = false;
 };
@@ -241,7 +241,7 @@ public:
           color_(color), width_(width) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -258,7 +258,7 @@ private:
     Color color_;
     float width_;
     std::string label_;
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     uint32_t vertexCount_ = 0;
     bool prepared_ = false;
 };
@@ -299,7 +299,7 @@ public:
     float lineWidth = 1.5f;
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }

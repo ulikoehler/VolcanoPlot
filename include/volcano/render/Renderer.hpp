@@ -1,14 +1,13 @@
 // volcano/render/Renderer.hpp — top-level renderer orchestrating all primitives
 #pragma once
 
-#include <volcano/backend/Backend.hpp>
-#include <volcano/core/PipelineCache.hpp>
-#include <volcano/core/DescriptorPool.hpp>
+#include <volcano/backend/IBackend.hpp>
+#include <volcano/render/Cmd.hpp>
+#include <volcano/render/GpuServices.hpp>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/InstancedPathRenderer.hpp>
 #include <volcano/render/primitives/GpuLineRenderer.hpp>
 #include <volcano/render/primitives/PointRenderer.hpp>
-#include <volcano/core/CommandBuffer.hpp>
 #include <volcano/render/primitives/ReduceRenderer.hpp>
 #include <volcano/text/TextRenderer.hpp>
 #include <volcano/text/MathText.hpp>
@@ -16,7 +15,6 @@
 #include <volcano/plot/Plot.hpp>
 #include <volcano/encode/ImageEncoder.hpp>
 
-#include <vulkan/vulkan.hpp>
 #include <future>
 
 #include <filesystem>
@@ -102,36 +100,36 @@ public:
         const encode::SaveOptions& options = {});
 
     [[nodiscard]] backend::IBackend& backend() noexcept { return backend_; }
-    [[nodiscard]] core::PipelineCache& pipelineCache() noexcept { return *pipelineCache_; }
-    [[nodiscard]] core::DescriptorPool& descriptorPool() noexcept { return *descriptorPool_; }
-    [[nodiscard]] text::TextRenderer& textRenderer() noexcept { return textRenderer_; }
-    [[nodiscard]] primitives::ReduceRenderer& reduceRenderer() noexcept { return reduceRenderer_; }
-    [[nodiscard]] primitives::SpineRenderer& spineRenderer() noexcept { return spineRenderer_; }
+    /// GPU services of the active backend (factories + shared renderers).
+    [[nodiscard]] render::GpuServices& gpu() noexcept { return backend_.gpu(); }
+    [[nodiscard]] text::TextRenderer& textRenderer() noexcept { return gpu().text(); }
+    [[nodiscard]] primitives::ReduceRenderer& reduceRenderer() noexcept { return gpu().reduce(); }
+    [[nodiscard]] primitives::SpineRenderer& spineRenderer() noexcept { return gpu().spine(); }
     /// Instanced path renderer — lazily inited with the spine renderer.
     [[nodiscard]] primitives::InstancedPathRenderer& instancedPathRenderer() noexcept {
-        return instancedPathRenderer_;
+        return gpu().instancedPath();
     }
     [[nodiscard]] primitives::GpuLineRenderer& gpuLineRenderer() noexcept {
-        return gpuLineRenderer_;
+        return gpu().gpuLine();
     }
     /// SDF point-sprite renderer — lazily inited with the spine renderer.
     [[nodiscard]] primitives::PointRenderer& pointRenderer() noexcept {
-        return pointRenderer_;
+        return gpu().sharedPoints();
     }
     /// Monotonically increasing draw-cycle counter — plots use it to
     /// invalidate GPU meshes produced in a previous frame's preDraw.
     [[nodiscard]] uint64_t frameSeq() const noexcept { return frameSeq_; }
     /// True when the text renderer pipeline + atlas are ready to draw.
-    [[nodiscard]] bool textReady() const noexcept { return textInited_ && textReady_; }
+    [[nodiscard]] bool textReady() const noexcept { return textReady_; }
     /// True when the spine renderer pipeline is ready.
-    [[nodiscard]] bool spineReady() const noexcept { return spineInited_; }
+    [[nodiscard]] bool spineReady() const noexcept { return graphicsReady_; }
 
     /// Draw UTF-8 text with mathtext (`$…$`) support at a pixel position
     /// (baseline origin). Used internally and by plot layers drawing
     /// rich-text elements (TeX markers, contour labels).
     /// `font` selects the face (family/style/weight) via
     /// TextRenderer::faceFor; nullptr uses the primary face.
-    void drawRichText(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    void drawRichText(Cmd& cmd, plot::Rect2D scissor,
                       std::string_view text, float x, float y,
                       plot::Color color, float scale = 1.0f,
                       float rotation = 0.0f,
@@ -150,7 +148,7 @@ public:
     /// (approximating the glyph outline), shadow passes draw one offset
     /// copy, Normal/thenNormal run the plain draw at their position in
     /// the list.
-    void drawRichTextFx(vk::CommandBuffer cmd, vk::Rect2D scissor,
+    void drawRichTextFx(Cmd& cmd, plot::Rect2D scissor,
                         std::span<const plot::PathEffect> fxs,
                         std::string_view text, float x, float y,
                         plot::Color color, float scale = 1.0f,
@@ -177,21 +175,8 @@ private:
     /// mpl mathtext.fontset — set from figure.style().mathFontset at the
     /// top of every frame; consumed by drawRichText/measureRichText.
     text::MathFontset mathFontset_ = text::MathFontset::DejaVuSans;
-    std::unique_ptr<core::PipelineCache> pipelineCache_;
-    std::unique_ptr<core::DescriptorPool> descriptorPool_;
-    primitives::SpineRenderer spineRenderer_;
-    primitives::InstancedPathRenderer instancedPathRenderer_;
-    primitives::GpuLineRenderer gpuLineRenderer_;
-    primitives::PointRenderer pointRenderer_;
-    /// Pre-pass command buffer for IPlot::preDraw compute work — recorded
-    /// and submitted before beginFrame() each renderFrameSubset.
-    std::optional<core::CommandBuffer> preCmd_;
     uint64_t frameSeq_ = 0;
-    primitives::ReduceRenderer reduceRenderer_;
-    text::TextRenderer textRenderer_;
-    bool textInited_ = false;
-    bool spineInited_ = false;
-    bool reduceInited_ = false;
+    bool graphicsReady_ = false;
     bool textReady_ = false;
     bool prepared_ = false;
     bool frameValid_ = false;
@@ -204,25 +189,25 @@ private:
     std::set<encode::ImageFormat> gpuEncTried_;
 
     /// Draw axis labels, tick labels, and title for one axes.
-    void drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawText(Cmd& cmd, const plot::Axes& axes,
                   plot::Rect2D rect);
 
     /// Draw axis spines (border lines) and tick marks for one axes.
-    void drawSpines(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawSpines(Cmd& cmd, const plot::Axes& axes,
                     plot::Rect2D rect);
 
     /// Draw tick-aligned grid lines for one axes (xAxis.grid → vertical
     /// lines at x ticks, yAxis.grid → horizontal lines at y ticks;
     /// gridWhich selects major/minor/both).
-    void drawGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawGrid(Cmd& cmd, const plot::Axes& axes,
                   plot::Rect2D rect);
 
     /// Polar furniture: radial "thetagrid" spokes + concentric r-grid
     /// circles (matplotlib projection="polar"), plus the circular outer
     /// spine, degree theta labels, and r tick labels.
-    void drawPolarGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawPolarGrid(Cmd& cmd, const plot::Axes& axes,
                        plot::Rect2D rect);
-    void drawPolarSpineAndLabels(vk::CommandBuffer cmd,
+    void drawPolarSpineAndLabels(Cmd& cmd,
                                  const plot::Axes& axes,
                                  plot::Rect2D rect);
 
@@ -230,36 +215,36 @@ private:
     /// boundary frame, graticule grid (meridians + parallels), degree
     /// longitude labels on the equator and latitude labels on the left
     /// limb (matplotlib GeoAxes layout).
-    void drawGeoGrid(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawGeoGrid(Cmd& cmd, const plot::Axes& axes,
                      plot::Rect2D rect);
-    void drawGeoFrameAndLabels(vk::CommandBuffer cmd,
+    void drawGeoFrameAndLabels(Cmd& cmd,
                                const plot::Axes& axes,
                                plot::Rect2D rect);
 
     /// Draw a legend for the axes (if enabled in style).
-    void drawLegend(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawLegend(Cmd& cmd, const plot::Axes& axes,
                     plot::Rect2D rect);
     /// mpl fig.legend — figure-level legend collecting handles from all
     /// axes, anchored in figure (canvas) coordinates.
-    void drawFigureLegend(vk::CommandBuffer cmd, const plot::Figure& fig);
+    void drawFigureLegend(Cmd& cmd, const plot::Figure& fig);
 
     /// Draw a colorbar for the axes (if enabled in style).
-    void drawColorbar(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawColorbar(Cmd& cmd, const plot::Axes& axes,
                       plot::Rect2D rect);
 
     /// Draw text annotations and arrow annotations for one axes.
-    void drawAnnotations(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawAnnotations(Cmd& cmd, const plot::Axes& axes,
                          plot::Rect2D rect);
 
     /// Draw anchored scale bars (mpl AnchoredSizeBar) for one axes.
-    void drawSizeBars(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawSizeBars(Cmd& cmd, const plot::Axes& axes,
                       plot::Rect2D rect);
     /// Draw anchored text boxes (mpl AnchoredText) for one axes.
-    void drawAnchoredTexts(vk::CommandBuffer cmd, const plot::Axes& axes,
+    void drawAnchoredTexts(Cmd& cmd, const plot::Axes& axes,
                            plot::Rect2D rect);
     /// Draw inset-zoom indicator rectangles + connectors (mpl
     /// indicate_inset_zoom) for one axes.
-    void drawInsetIndicators(vk::CommandBuffer cmd,
+    void drawInsetIndicators(Cmd& cmd,
                              const plot::Axes& axes,
                              plot::Rect2D rect);
 
@@ -306,7 +291,7 @@ private:
                                const plot::LegendStyle& lg, float dpi);
     /// forceW > 0 (mpl mode="expand" / 4-tuple bbox_to_anchor): the box
     /// grows to that width, spreading columns to fill it.
-    plot::Rect2D paintLegendBox(vk::CommandBuffer cmd,
+    plot::Rect2D paintLegendBox(Cmd& cmd,
                                 const std::vector<LegendEntry>& entries,
                                 const plot::LegendStyle& lg,
                                 const LegendLayout& L,

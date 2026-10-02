@@ -42,7 +42,7 @@ public:
     CsdPlot(std::vector<float> x, std::vector<float> y, CsdConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -66,7 +66,7 @@ private:
     std::vector<float> freqs_;
     std::vector<float> values_;
 
-    render::primitives::LineRenderer lineRenderer_;
+    std::unique_ptr<render::primitives::LineRenderer> lineRenderer_;
     std::vector<Point2D> linePoints_;
     bool prepared_ = false;
 

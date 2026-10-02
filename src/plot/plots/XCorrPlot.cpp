@@ -60,7 +60,6 @@ void XCorrPlot::computeCorrelation() {
 
 void XCorrPlot::prepare(render::Renderer& r) {
     computeCorrelation();
-    auto& ctx = r.backend().context();
 
     // Build stem segments: vertical line from (lag, 0) to (lag, value).
     stemSegments_.clear();
@@ -81,38 +80,31 @@ void XCorrPlot::prepare(render::Renderer& r) {
         }
     }
 
-    stemRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!stemRenderer_) stemRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!stemSegments_.empty()) {
-        stemRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{stemSegments_}, config_.color,
+        stemRenderer_->upload(std::span{stemSegments_}, config_.color,
                              config_.lineWidth);
     }
 
     if (config_.markers && !markerPoints_.empty()) {
-        markerRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                             r.backend().sampleCount(), r.descriptorPool(),
-                             r.pipelineCache());
-        markerRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                                ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                                std::span{markerPoints_}, std::span{markerColors_},
+        if (!markerRenderer_) markerRenderer_ = r.gpu().createPointRenderer();
+        markerRenderer_->upload(std::span{markerPoints_}, std::span{markerColors_},
                                 std::span{markerSizes_});
     }
 
     prepared_ = true;
 }
 
-void XCorrPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void XCorrPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || stemSegments_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    stemRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stemSegments_.size()));
+    stemRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(stemSegments_.size()));
 
     if (config_.markers && !markerPoints_.empty()) {
-        markerRenderer_.draw(cmd, vrect, t,
+        markerRenderer_->draw(cmd, vrect, t,
                              static_cast<uint32_t>(markerPoints_.size()));
     }
 }

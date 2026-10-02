@@ -7,20 +7,18 @@
 #include "../VectorEmitHelpers.hpp"
 namespace volcano::plot {
 void BarPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(), r.backend().sampleCount(), r.pipelineCache());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
-                     ctx.allocator.handle(), data_);
+    if (!renderer_) renderer_ = r.gpu().createBarRenderer();
+    renderer_->upload(data_);
     prepared_ = true;
 }
-void BarPlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
+void BarPlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     // mpl patheffects: replay each bar per effect pass on the CPU
     // (the GPU instanced path can't offset/override per pass).
     if (!pathEffects.empty()) {
-        auto& spine = r.spineRenderer();
-        vk::Extent2D res = r.backend().extent();
+        auto& spine = r.gpu().spine();
+        Extent2D res = r.gpu().extent();
         const float dpi = axes.style().dpi;
         auto toPx = [&](Point2D p) {
             auto f = axes.dataToFraction(p);
@@ -92,7 +90,7 @@ void BarPlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes,
         return;
     }
     Transform2D t = axes.transform();
-    renderer_.draw(cmd, vrect, t);
+    renderer_->draw(cmd, vrect, t);
 }
 void BarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                          Rect2D rect) {

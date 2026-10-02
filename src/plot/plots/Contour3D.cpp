@@ -185,19 +185,15 @@ void Contour3D::marchingSquares() {
 void Contour3D::prepare(render::Renderer& r) {
     computeLevels();
     marchingSquares();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{segments_}, config_.lineColor,
+        renderer_->upload(std::span{segments_}, config_.lineColor,
                          config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void Contour3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Contour3D::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes&, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
     // mpl colors each contour level from the colormap (default
@@ -206,9 +202,9 @@ void Contour3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + (p.x * 0.5f + 0.5f) * float(rect.width),
                        rect.y + (0.5f - p.y * 0.5f) * float(rect.height)};
     };
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    vk::Extent2D res = r.backend().extent();
-    auto& spine = r.spineRenderer();
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    Extent2D res = r.gpu().extent();
+    auto& spine = r.gpu().spine();
 
     std::map<float, std::vector<size_t>> byLevel;
     for (size_t i = 0; i + 1 < segments_.size(); i += 2)
@@ -332,26 +328,22 @@ void Contourf3D::marchingSquaresFilled() {
 void Contourf3D::prepare(render::Renderer& r) {
     computeLevels();
     marchingSquaresFilled();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{positions_}, std::span{colors_});
+        renderer_->upload(std::span{positions_}, std::span{colors_});
     }
     prepared_ = true;
 }
 
-void Contourf3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Contourf3D::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
     Transform2D t;
     t.view.x = {-1.0f, 1.0f};
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void Contourf3D::contributeToAutoscale(Viewport& v) const {

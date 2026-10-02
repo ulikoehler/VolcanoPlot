@@ -122,13 +122,11 @@ void BarbsPlot::prepare(render::Renderer& r) {
     // We need the viewport and rect to build barbs in pixel space.
     // But we don't have them at prepare() time. So we'll build in draw().
     // Just init the renderer here.
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     prepared_ = true;
 }
 
-void BarbsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void BarbsPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -139,19 +137,16 @@ void BarbsPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
     // Upload segments. We need to upload every frame since the segments
     // depend on the viewport. This is acceptable for barbs (small data).
-    auto& ctx = r.backend().context();
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{segments_}, config_.color, config_.lineWidth);
+    renderer_->upload(std::span{segments_}, config_.color, config_.lineWidth);
 
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
     // Use identity transform (pixel space) — segments are already in pixels.
     Transform2D t;
     t.view.x = {0.0f, static_cast<float>(ext.width)};
     t.view.y = {static_cast<float>(ext.height), 0.0f};  // inverted Y (pixel space)
     t.view.z = {0, 1};
-    renderer_.draw(cmd, fullRect, t, static_cast<uint32_t>(segments_.size()));
+    renderer_->draw(cmd, fullRect, t, static_cast<uint32_t>(segments_.size()));
 }
 
 void BarbsPlot::contributeToAutoscale(Viewport& v) const {

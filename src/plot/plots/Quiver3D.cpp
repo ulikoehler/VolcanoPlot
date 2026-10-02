@@ -82,29 +82,22 @@ void Quiver3D::projectArrows() {
 void Quiver3D::prepare(render::Renderer& r) {
     projectArrows();
 
-    auto& ctx = r.backend().context();
 
-    shaftRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                        r.backend().sampleCount(), r.pipelineCache());
+    if (!shaftRenderer_) shaftRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!shaftSegments_.empty()) {
-        shaftRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{shaftSegments_}, config_.color,
+        shaftRenderer_->upload(std::span{shaftSegments_}, config_.color,
                               config_.lineWidth);
     }
 
     if (config_.filledHeads && !headPositions_.empty()) {
-        headRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        headRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{headPositions_}, std::span{headColors_});
+        if (!headRenderer_) headRenderer_ = r.gpu().createFillRenderer();
+        headRenderer_->upload(std::span{headPositions_}, std::span{headColors_});
     }
 
     prepared_ = true;
 }
 
-void Quiver3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Quiver3D::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -113,13 +106,13 @@ void Quiver3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (!shaftSegments_.empty())
-        shaftRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegments_.size()));
+        shaftRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegments_.size()));
 
     if (config_.filledHeads && !headPositions_.empty())
-        headRenderer_.draw(cmd, vrect, t);
+        headRenderer_->draw(cmd, vrect, t);
 }
 
 void Quiver3D::contributeToAutoscale(Viewport& v) const {

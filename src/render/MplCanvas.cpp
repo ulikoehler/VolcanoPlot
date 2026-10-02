@@ -1,6 +1,7 @@
 // volcano/render/MplCanvas.cpp — generic Vulkan canvas for the
 // matplotlib backend bridge. See MplCanvas.hpp for the model.
 #include "volcano/render/MplCanvas.hpp"
+#include "VulkanGpuServices.hpp"
 
 #include <volcano/backend/HeadlessBackend.hpp>
 #ifdef VOLCANO_HAVE_SCREEN
@@ -21,15 +22,12 @@ namespace {
 
 constexpr float kFontBasePx = 16.0f;  // glyph design size at scale=1
 
-plot::Rect2D fullRect(vk::Extent2D e) {
+plot::Rect2D fullRect(plot::Extent2D e) {
     return {0, 0, e.width, e.height};
 }
-vk::Rect2D vkRect(plot::Rect2D r) {
-    return vk::Rect2D{vk::Offset2D{r.x, r.y},
-                      vk::Extent2D{r.width, r.height}};
-}
-vk::Rect2D clipVk(std::optional<plot::Rect2D> clip, vk::Extent2D e) {
-    return vkRect(clip ? *clip : fullRect(e));
+plot::Rect2D clipOr(std::optional<plot::Rect2D> clip, plot::Extent2D e) {
+    if (clip) return *clip;
+    return {0, 0, e.width, e.height};
 }
 
 // Signed polygon area (+CCW in the canvas' Y-down space is visually CW —
@@ -164,39 +162,18 @@ MplCanvas::windowed(uint32_t width, uint32_t height, std::string title,
 }
 
 void MplCanvas::initRenderers() {
-    auto& ctx = backend_->context();
-    pipelineCache_ = std::make_unique<core::PipelineCache>(
-        ctx.device.handle());
-    std::vector<vk::DescriptorPoolSize> sizes = {
-        {vk::DescriptorType::eUniformBuffer, 128},
-        {vk::DescriptorType::eStorageBuffer, 128},
-        {vk::DescriptorType::eCombinedImageSampler, 64},
-    };
-    descPool_ = std::make_unique<core::DescriptorPool>(
-        ctx.device.handle(), sizes, 256,
-        vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet);
-    spine_.init(ctx.device.handle(), ctx.allocator.handle(),
-                backend_->renderPass(), backend_->sampleCount(),
-                *pipelineCache_, *descPool_);
-    instFill_.init(ctx.device.handle(), ctx.allocator.handle(),
-                   backend_->renderPass(), backend_->sampleCount(),
-                   *pipelineCache_, *descPool_);
-    instEdge_.init(ctx.device.handle(), ctx.allocator.handle(),
-                   backend_->renderPass(), backend_->sampleCount(),
-                   *pipelineCache_, *descPool_);
-    gpuLine_.init(ctx.device.handle(), ctx.allocator.handle(),
-                  *descPool_, *pipelineCache_);
-    pointR_.init(ctx.device.handle(), backend_->renderPass(),
-                 backend_->sampleCount(), *descPool_, *pipelineCache_);
-    maxPointSize_ =
-        ctx.device.physical().getProperties().limits.pointSizeRange[1];
-    heat_.init(ctx.device.handle(), backend_->renderPass(),
-               backend_->sampleCount(), *pipelineCache_, *descPool_);
-    text_.init(ctx.device.handle(), ctx.allocator.handle(),
-               backend_->renderPass(), backend_->sampleCount(),
-               *pipelineCache_, *descPool_);
-    text_.prepareAtlas(ctx.device.graphicsQueue(),
-                       ctx.graphicsPool.handle());
+    auto& g = backend_->gpu();
+    g.ensureGraphics();
+    spine_     = g.createSpineRenderer();
+    instFill_  = g.createInstancedPathRenderer();
+    instEdge_  = g.createInstancedPathRenderer();
+    gpuLine_   = g.createGpuLineRenderer();
+    pointR_    = g.createPointRenderer();
+    heat_      = g.createHeatmapRenderer();
+    g.ensureText();
+    text_ = g.createTextRenderer();
+    auto& vg = static_cast<render::VulkanGpuServices&>(g);
+    maxPointSize_ = vg.maxPointSize();
     inited_ = true;
 }
 
@@ -204,8 +181,8 @@ MplCanvas::~MplCanvas() {
     if (backend_) {
         // Let in-flight frames finish before tearing down Vulkan
         // objects held by the renderers.
-        auto& ctx = backend_->context();
-        if (auto dev = ctx.device.handle()) dev.waitIdle();
+        auto& vg = static_cast<render::VulkanGpuServices&>(backend_->gpu());
+        if (auto dev = vg.device()) dev.waitIdle();
     }
 }
 
@@ -228,18 +205,12 @@ void MplCanvas::endFrame() {
     for (int pass = 0; pass < 2; ++pass) {
         backend_->setClearColor(clear_.r, clear_.g, clear_.b, clear_.a);
         auto cmd = backend_->beginFrame();
-        spine_.resetScratch();
-        instFill_.resetScratch();
-        instEdge_.resetScratch();
-        pointR_.resetScratch();
-        text_.resetScratch();
-        execute(cmd);
+        backend_->gpu().beginFrameScratch();
+        execute(*cmd);
         backend_->endFrame();
-        if (!text_.atlasDirty()) break;
+        if (!text_->atlasDirty()) break;
         // New glyphs rasterized mid-pass: re-upload and repaint once.
-        auto& ctx = backend_->context();
-        text_.syncAtlas(ctx.device.graphicsQueue(),
-                        ctx.graphicsPool.handle());
+        text_->syncAtlas();
     }
     ops_.clear();
 }
@@ -384,8 +355,8 @@ MplCanvas::measureText(std::string_view utf8, float sizePx,
                        const std::string& family,
                        const std::string& style,
                        const std::string& weight) {
-    auto fm = text_.faceFor(family, style, weight);
-    auto m = text_.measureText(utf8, sizePx / kFontBasePx, fm.face);
+    auto fm = text_->faceFor(family, style, weight);
+    auto m = text_->measureText(utf8, sizePx / kFontBasePx, fm.face);
     return {m.width, m.height, m.ascent};
 }
 
@@ -395,17 +366,17 @@ MplCanvas::measureMath(std::string_view utf8, float sizePx,
                        const std::string& family,
                        const std::string& style,
                        const std::string& weight) {
-    auto fm = text_.faceFor(family, style, weight);
+    auto fm = text_->faceFor(family, style, weight);
     float scale = sizePx / kFontBasePx;
     text::MeasureFn measure = [this, scale, f = fm.face](
                                   std::string_view s, float sc) {
-        auto m = text_.measureText(s, sc, f);
+        auto m = text_->measureText(s, sc, f);
         return text::TextMeasure{m.width, m.height, m.ascent};
     };
     text::MeasureFn alt;
-    if (auto* serif = text_.serifFace())
+    if (auto* serif = text_->serifFace())
         alt = [this, serif](std::string_view s, float sc) {
-            auto m = text_.measureText(s, sc, serif);
+            auto m = text_->measureText(s, sc, serif);
             return text::TextMeasure{m.width, m.height, m.ascent};
         };
     auto lay = text::layoutMathText(utf8, scale, measure,
@@ -431,7 +402,7 @@ void MplCanvas::setTitle(std::string_view title) {
 
 // ═══ replay ═════════════════════════════════════════════════════════
 
-void MplCanvas::execute(vk::CommandBuffer cmd) {
+void MplCanvas::execute(render::Cmd& cmd) {
     for (const auto& op : ops_)
         std::visit([&](const auto& o) {
             using T = std::decay_t<decltype(o)>;
@@ -482,14 +453,11 @@ plot::Path MplCanvas::pathFromOp(const PathOp& op) {
 }
 
 void MplCanvas::gpuPrepass() {
-    if (!gpuLine_.inited()) return;
-    auto& ctx = backend_->context();
+    if (!gpuLine_->inited()) return;
+    auto pre = backend_->gpu().beginPrePass();
+    render::Cmd& pcb = *pre;
     bool recorded = false;
-    if (!preCmd_)
-        preCmd_.emplace(ctx.device.handle(), ctx.graphicsPool.handle());
-    preCmd_->reset();
-    preCmd_->begin();
-    gpuLine_.resetScratch();
+    gpuLine_->resetScratch();
     for (auto& v : ops_) {
         auto* op = std::get_if<PathOp>(&v);
         if (!op || op->edge.a <= 0.0f || op->lwPx <= 0.0f ||
@@ -528,7 +496,7 @@ void MplCanvas::gpuPrepass() {
         sp.cap = op->cap;
         for (auto& sub : op->subsCache) {
             if (sub.points.size() < 2) continue;
-            auto ms = gpuLine_.tessellate(preCmd_->handle(), sub.points,
+            auto ms = gpuLine_->tessellate(pcb, sub.points,
                                           sp, op->edge);
             op->edgeMeshes.insert(op->edgeMeshes.end(), ms.begin(),
                                   ms.end());
@@ -536,20 +504,14 @@ void MplCanvas::gpuPrepass() {
         op->gpuStroke = true;
         recorded = true;
     }
-    preCmd_->end();
-    // Same-queue ordering makes the tessellated meshes visible to the
-    // render-pass submission (same mechanism as staging uploads).
-    if (recorded) {
-        vk::SubmitInfo si{};
-        vk::CommandBuffer pcb = preCmd_->handle();
-        si.setCommandBuffers(pcb);
-        ctx.device.graphicsQueue().submit(si);
-    }
+    if (recorded)
+        backend_->gpu().submitPrePass(std::move(pre));
+    // (if nothing was recorded the prepass cmd is simply dropped)
 }
 
-void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
+void MplCanvas::execPath(render::Cmd& cmd, const PathOp& op) {
     auto res = backend_->extent();
-    auto clip = clipVk(op.clip, res);
+    auto clip = clipOr(op.clip, res);
     std::vector<plot::Path::Subpath> localSubs;
     if (op.subsCache.empty())
         localSubs = pathFromOp(op).toPolylines();
@@ -596,7 +558,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
             if (!op.clipRing.empty())
                 tris = plot::clipTrianglesToPolygon(tris, op.clipRing);
             if (!tris.empty())
-                spine_.drawTriangles(cmd, clip, res, tris, op.face);
+                spine_->drawTriangles(cmd, clip, res, tris, op.face);
         } else {
         // Largest first so outers precede their holes.
         std::ranges::sort(closed, {}, [](const auto& s) {
@@ -625,7 +587,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         if (!op.clipRing.empty())
             tris = plot::clipTrianglesToPolygon(tris, op.clipRing);
         if (!tris.empty())
-            spine_.drawTriangles(cmd, clip, res, tris, op.face);
+            spine_->drawTriangles(cmd, clip, res, tris, op.face);
         }
     }
 
@@ -641,7 +603,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         if (!op.clipRing.empty())
             ht = plot::clipTrianglesToPolygon(ht, op.clipRing);
         if (!ht.empty())
-            spine_.drawTriangles(cmd, clip, res, ht,
+            spine_->drawTriangles(cmd, clip, res, ht,
                                  op.hatchColor.a > 0 ? op.hatchColor
                                                      : op.edge);
     }
@@ -649,7 +611,7 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
     // ── edge ──
     if (op.gpuStroke) {
         for (auto& m : op.edgeMeshes)
-            spine_.drawTrianglesGpu(cmd, clip, res, m.buffer,
+            spine_->drawTrianglesGpu(cmd, clip, res, m.buffer,
                                     m.firstVertex * 6 * sizeof(float),
                                     m.vertexCount);
     } else if (op.edge.a > 0.0f && op.lwPx > 0.0f) {
@@ -688,14 +650,13 @@ void MplCanvas::execPath(vk::CommandBuffer cmd, const PathOp& op) {
         }
         if (!op.clipRing.empty())
             ev = plot::clipTrianglesToPolygon(ev, op.clipRing);
-        if (!ev.empty()) spine_.drawTriangles(cmd, clip, res, ev, op.edge);
+        if (!ev.empty()) spine_->drawTriangles(cmd, clip, res, ev, op.edge);
     }
 }
 
-void MplCanvas::execImage(vk::CommandBuffer cmd, const ImageOp& op) {
+void MplCanvas::execImage(render::Cmd& cmd, const ImageOp& op) {
     if (op.w == 0 || op.h == 0 || op.rgba.size() < size_t(op.w) * op.h * 4)
         return;
-    auto& ctx = backend_->context();
     plot::Grid2D g;
     g.width = op.w; g.height = op.h;
     g.rgba.resize(size_t(op.w) * op.h);
@@ -706,9 +667,7 @@ void MplCanvas::execImage(vk::CommandBuffer cmd, const ImageOp& op) {
     }
     g.xRange = {0, 1}; g.yRange = {0, 1};
     plot::Colormap cmap;  // unused in rgba mode
-    heat_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                 ctx.graphicsPool.handle(), ctx.allocator.handle(), g,
-                 cmap);
+    heat_->upload(g, cmap);
     // The grid rect maps onto the dst pixel rect; clip to dst ∩ op.clip.
     plot::Rect2D sc = op.dst;
     if (op.clip) {
@@ -724,22 +683,22 @@ void MplCanvas::execImage(vk::CommandBuffer cmd, const ImageOp& op) {
     if (sc.width == 0 || sc.height == 0) return;
     plot::Transform2D t{};
     t.view.x = {0, 1}; t.view.y = {0, 1};
-    heat_.draw(cmd, vkRect(sc), t);
+    heat_->draw(cmd, (sc), t);
 }
 
 font_face* MplCanvas::faceFor(const TextOp& op) {
-    auto fm = text_.faceFor(op.family, op.style, op.weight);
+    auto fm = text_->faceFor(op.family, op.style, op.weight);
     return fm.face;
 }
 
-void MplCanvas::execText(vk::CommandBuffer cmd, const TextOp& op) {
+void MplCanvas::execText(render::Cmd& cmd, const TextOp& op) {
     if (op.text.empty()) return;
     auto res = backend_->extent();
-    auto clip = clipVk(op.clip, res);
+    auto clip = clipOr(op.clip, res);
     float scale = op.sizePx / kFontBasePx;
     float rot = op.rotDeg * float(M_PI) / 180.0f;
     if (!op.math) {
-        text_.draw(cmd, clip, op.text, op.x, op.y, op.color, scale, rot,
+        text_->draw(cmd, clip, op.text, op.x, op.y, op.color, scale, rot,
                    plot::HAlign::Left, faceFor(op));
         return;
     }
@@ -747,14 +706,14 @@ void MplCanvas::execText(vk::CommandBuffer cmd, const TextOp& op) {
     float baseScale = scale;
     text::MeasureFn measure = [this, f = faceFor(op)](
                                   std::string_view s, float sc) {
-        auto m = text_.measureText(s, sc, f);
+        auto m = text_->measureText(s, sc, f);
         return text::TextMeasure{m.width, m.height, m.ascent};
     };
     text::MeasureFn alt;
-    auto* serif = text_.serifFace();
+    auto* serif = text_->serifFace();
     if (serif)
         alt = [this, serif](std::string_view s, float sc) {
-            auto m = text_.measureText(s, sc, serif);
+            auto m = text_->measureText(s, sc, serif);
             return text::TextMeasure{m.width, m.height, m.ascent};
         };
     auto lay = text::layoutMathText(
@@ -767,43 +726,43 @@ void MplCanvas::execText(vk::CommandBuffer cmd, const TextOp& op) {
     };
     for (auto& r : lay.runs) {
         auto p = rp(r.x, r.baseline);
-        text_.draw(cmd, clip, r.text, p.x, p.y, op.color,
+        text_->draw(cmd, clip, r.text, p.x, p.y, op.color,
                    baseScale * r.scale, rot, plot::HAlign::Left,
                    r.face == 1 ? serif : faceFor(op));
     }
     for (auto& rl : lay.rules) {
         auto p0 = rp(rl.x0, rl.y0), p1 = rp(rl.x1, rl.y0);
         plot::Point2D pts[2] = {p0, p1};
-        spine_.drawLineStrip(cmd, clip, res, std::span{pts, 2},
+        spine_->drawLineStrip(cmd, clip, res, std::span{pts, 2},
                              op.color, rl.thickness);
     }
 }
 
-void MplCanvas::execGouraud(vk::CommandBuffer cmd, const GouraudOp& op) {
+void MplCanvas::execGouraud(render::Cmd& cmd, const GouraudOp& op) {
     plot::Point2D tri[3] = {{op.x[0], op.y[0]}, {op.x[1], op.y[1]},
                             {op.x[2], op.y[2]}};
     auto res = backend_->extent();
-    spine_.drawTrianglesVC(cmd, clipVk(op.clip, res), res,
+    spine_->drawTrianglesVC(cmd, clipOr(op.clip, res), res,
                            std::span{tri, 3}, std::span{op.c, 3});
 }
 
-void MplCanvas::execTris(vk::CommandBuffer cmd, const TrisOp& op) {
+void MplCanvas::execTris(render::Cmd& cmd, const TrisOp& op) {
     size_t n = op.verts.size() / 2;
     if (n < 3 || op.colors.size() < n * 4) return;
     trisScratch_.resize(n);
     for (size_t i = 0; i < n; ++i)
         trisScratch_[i] = {op.verts[2 * i], op.verts[2 * i + 1]};
     auto res = backend_->extent();
-    spine_.drawTrianglesVC(
-        cmd, clipVk(op.clip, res), res, trisScratch_,
+    spine_->drawTrianglesVC(
+        cmd, clipOr(op.clip, res), res, trisScratch_,
         std::span{reinterpret_cast<const plot::Color*>(op.colors.data()),
                   n});
 }
 
-void MplCanvas::execInstances(vk::CommandBuffer cmd,
+void MplCanvas::execInstances(render::Cmd& cmd,
                               const InstanceOp& op) {
     auto res = backend_->extent();
-    auto clip = clipVk(op.clip, res);
+    auto clip = clipOr(op.clip, res);
     size_t n = op.instXY.size() / 2;
     if (n == 0) return;
     bool perInstFace = op.instRGBA.size() >= n * 4;
@@ -894,11 +853,8 @@ void MplCanvas::execInstances(vk::CommandBuffer cmd,
             tplScratch_.insert(tplScratch_.end(), t.begin(), t.end());
         }
         if (!tplScratch_.empty()) {
-            auto& ctx = backend_->context();
-            instFill_.setTemplate(ctx.device.handle(),
-                                  ctx.device.graphicsQueue(),
-                                  ctx.graphicsPool.handle(), tplScratch_);
-            instFill_.drawInstanced(
+                    instFill_->setTemplate(tplScratch_);
+            instFill_->drawInstanced(
                 cmd, clip, res,
                 fillInsts(op.instRGBA, op.uniform));
         }
@@ -928,18 +884,15 @@ void MplCanvas::execInstances(vk::CommandBuffer cmd,
                                mesh.verts.end());
         }
         if (!tplScratch_.empty()) {
-            auto& ctx = backend_->context();
-            instEdge_.setTemplate(ctx.device.handle(),
-                                  ctx.device.graphicsQueue(),
-                                  ctx.graphicsPool.handle(), tplScratch_);
-            instEdge_.drawInstanced(
+                    instEdge_->setTemplate(tplScratch_);
+            instEdge_->drawInstanced(
                 cmd, clip, res,
                 fillInsts(op.edgeRGBA, op.uniformEdge));
         }
     }
 }
 
-void MplCanvas::execPoints(vk::CommandBuffer cmd, const PointsOp& op) {
+void MplCanvas::execPoints(render::Cmd& cmd, const PointsOp& op) {
     size_t n = op.xy.size() / 2;
     if (!n || op.sizes.empty()) return;
     auto* pts = reinterpret_cast<const plot::Point2D*>(op.xy.data());
@@ -964,14 +917,11 @@ void MplCanvas::execPoints(vk::CommandBuffer cmd, const PointsOp& op) {
         sz = szScratch;
     }
 
-    auto& ctx = backend_->context();
     if (!pointInit_) {
-        pointR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                       pspan, cols, sz);
+        pointR_->upload(pspan, cols, sz);
         pointInit_ = true;
     } else {
-        pointR_.updatePoints(pspan, cols, sz);
+        pointR_->updatePoints(pspan, cols, sz);
     }
 
     // Canvas-pixel view: x spans [0,W]; y is given the reversed range
@@ -984,8 +934,8 @@ void MplCanvas::execPoints(vk::CommandBuffer cmd, const PointsOp& op) {
     primitives::MarkerParams m;
     m.code = op.code; m.fill = op.fill;
     m.numsides = op.sides; m.angle = op.angle;
-    vk::Rect2D vp{vk::Offset2D{0, 0}, res};
-    pointR_.draw(cmd, vp, clipVk(op.clip, res), t,
+    plot::Rect2D vp{0, 0, res.width, res.height};
+    pointR_->draw(cmd, vp, clipOr(op.clip, res), t,
                  static_cast<uint32_t>(n), m);
 }
 

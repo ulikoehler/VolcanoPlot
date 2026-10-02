@@ -29,7 +29,7 @@ public:
               std::vector<std::string> labels = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -62,7 +62,7 @@ private:
     // ys[0..i][j]; stack[0] is the baseline ("first_line" in mpl).
     mutable std::vector<std::vector<float>> stack_;
 
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
     bool prepared_ = false;

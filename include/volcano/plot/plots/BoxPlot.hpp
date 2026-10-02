@@ -99,7 +99,7 @@ public:
     BoxPlot(std::vector<BxpStats> stats, BxpConfig cfg);
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -129,11 +129,11 @@ private:
     bool showBox_ = true, showCaps_ = true, showMedians_ = true;
 
     // Renderers.
-    render::primitives::FillRenderer boxFillRenderer_;       // box fills
-    render::primitives::LineSegmentRenderer boxEdgeRenderer_; // box edges + whiskers + caps
-    render::primitives::LineSegmentRenderer medianRenderer_;  // median lines
-    render::primitives::LineSegmentRenderer meanRenderer_;    // mean lines/markers
-    render::primitives::PointRenderer outlierRenderer_;       // outlier points
+    std::unique_ptr<render::primitives::FillRenderer> boxFillRenderer_;       // box fills
+    std::unique_ptr<render::primitives::LineSegmentRenderer> boxEdgeRenderer_; // box edges + whiskers + caps
+    std::unique_ptr<render::primitives::LineSegmentRenderer> medianRenderer_;  // median lines
+    std::unique_ptr<render::primitives::LineSegmentRenderer> meanRenderer_;    // mean lines/markers
+    std::unique_ptr<render::primitives::PointRenderer> outlierRenderer_;       // outlier points
 
     // Computed geometry.
     std::vector<Point2D> boxFillVerts_;

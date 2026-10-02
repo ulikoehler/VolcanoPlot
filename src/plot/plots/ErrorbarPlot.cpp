@@ -142,42 +142,32 @@ void ErrorbarPlot::buildErrorSegments() {
 }
 
 void ErrorbarPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    auto device = ctx.device.handle();
-    auto queue = ctx.device.graphicsQueue();
-    auto pool = ctx.graphicsPool.handle();
-    auto allocator = ctx.allocator.handle();
-    auto renderPass = r.backend().renderPass();
-    auto samples = r.backend().sampleCount();
 
     // Build error bar segments.
     buildErrorSegments();
 
     // Initialize connecting line renderer.
     if (cfg_.drawLine && x_.size() >= 2) {
-        lineRenderer_.init(device, renderPass, samples, r.pipelineCache());
+        if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
         std::vector<Point2D> linePoints;
         linePoints.reserve(x_.size());
         for (size_t i = 0; i < x_.size(); ++i)
             linePoints.push_back({x_[i], y_[i]});
-        lineRenderer_.upload(device, queue, pool, allocator,
-                             std::span{linePoints.data(), linePoints.size()},
+        lineRenderer_->upload(std::span{linePoints.data(), linePoints.size()},
                              cfg_.color, cfg_.lineWidth);
     }
 
     // Initialize error bar segment renderer.
     if (hasErrors_ && errorVertexCount_ >= 2) {
-        errorRenderer_.init(device, renderPass, samples, r.pipelineCache());
-        errorRenderer_.upload(device, queue, pool, allocator,
-                              std::span{errorSegments_.data(),
+        if (!errorRenderer_) errorRenderer_ = r.gpu().createLineSegmentRenderer();
+        errorRenderer_->upload(std::span{errorSegments_.data(),
                                         errorSegments_.size()},
                               cfg_.errorbarColor, cfg_.errorbarWidth);
     }
 
     // Initialize point renderer for markers.
     if (cfg_.drawMarker && !x_.empty()) {
-        pointRenderer_.init(device, renderPass, samples,
-                            r.descriptorPool(), r.pipelineCache());
+        if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
         std::vector<Point2D> pts;
         std::vector<Color> colors;
         std::vector<float> sizes;
@@ -186,26 +176,24 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
         sizes.resize(x_.size(), cfg_.markerSize);
         for (size_t i = 0; i < x_.size(); ++i)
             pts.push_back({x_[i], y_[i]});
-        pointRenderer_.upload(device, queue, pool, allocator,
-                              std::span{pts.data(), pts.size()},
+        pointRenderer_->upload(std::span{pts.data(), pts.size()},
                               std::span{colors.data(), colors.size()},
                               std::span{sizes.data(), sizes.size()});
     }
 
     // Cap markers (mpl draws caps as '_' / '|' markers at capsize pts).
-    auto uploadCaps = [&](render::primitives::PointRenderer& pr,
+    auto uploadCaps = [&](std::unique_ptr<render::primitives::PointRenderer>& pr,
                           const std::vector<Point2D>& pts) {
         if (pts.empty()) return;
-        pr.init(device, renderPass, samples, r.descriptorPool(),
-                r.pipelineCache());
         std::vector<Color> colors(pts.size(), cfg_.errorbarColor);
         std::vector<float> sizes(pts.size(), cfg_.capSize);
-        pr.upload(device, queue, pool, allocator,
-                  std::span{pts.data(), pts.size()},
-                  std::span{colors.data(), colors.size()},
-                  std::span{sizes.data(), sizes.size()});
+        pr->upload(std::span{pts.data(), pts.size()},
+                   std::span{colors.data(), colors.size()},
+                   std::span{sizes.data(), sizes.size()});
     };
     if (cfg_.drawCaps) {
+        if (!capYRenderer_) capYRenderer_ = r.gpu().createPointRenderer();
+        if (!capXRenderer_) capXRenderer_ = r.gpu().createPointRenderer();
         uploadCaps(capYRenderer_, capYPoints_);
         uploadCaps(capXRenderer_, capXPoints_);
     }
@@ -213,40 +201,40 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void ErrorbarPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ErrorbarPlot::draw(render::Cmd& cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     // Draw error bars first (behind line and markers).
     if (hasErrors_ && errorVertexCount_ >= 2)
-        errorRenderer_.draw(cmd, vrect, t, errorVertexCount_);
+        errorRenderer_->draw(cmd, vrect, t, errorVertexCount_);
 
     // Caps as '_' / '|' markers (mpl renders caps via cap marker styles).
     if (cfg_.drawCaps) {
         render::primitives::MarkerParams mp;
-        if (capYRenderer_.pointCount() > 0) {
+        if (capYRenderer_->pointCount() > 0) {
             mp.code = static_cast<float>(
                 static_cast<int>(MarkerStyle::HLine));
-            capYRenderer_.draw(cmd, vrect, t,
-                               capYRenderer_.pointCount(), mp);
+            capYRenderer_->draw(cmd, vrect, t,
+                               capYRenderer_->pointCount(), mp);
         }
-        if (capXRenderer_.pointCount() > 0) {
+        if (capXRenderer_->pointCount() > 0) {
             mp.code = static_cast<float>(
                 static_cast<int>(MarkerStyle::VLine));
-            capXRenderer_.draw(cmd, vrect, t,
-                               capXRenderer_.pointCount(), mp);
+            capXRenderer_->draw(cmd, vrect, t,
+                               capXRenderer_->pointCount(), mp);
         }
     }
 
     // Draw connecting line.
     if (cfg_.drawLine && x_.size() >= 2)
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(x_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(x_.size()));
 
     // Draw markers on top.
     if (cfg_.drawMarker && !x_.empty())
-        pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(x_.size()));
+        pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(x_.size()));
 }
 
 void ErrorbarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -309,9 +297,9 @@ void ErrorbarPlot::contributeToAutoscaleGpu(
     // Use the error segment buffer if available (it contains all the
     // extreme points including error bar ends). Fall back to the line
     // renderer's buffer, then to CPU.
-    if (hasErrors_ && errorRenderer_.pointCount() > 0) {
-        auto r = reducer.reduceMinMax2D(errorRenderer_.pointBuffer(),
-                                        errorRenderer_.pointCount());
+    if (hasErrors_ && errorRenderer_->pointCount() > 0) {
+        auto r = reducer.reduceMinMax2D(errorRenderer_->pointBuffer(),
+                                        errorRenderer_->pointCount());
         if (r) {
             v.x.min = std::min(v.x.min, r->minX);
             v.x.max = std::max(v.x.max, r->maxX);
@@ -320,9 +308,9 @@ void ErrorbarPlot::contributeToAutoscaleGpu(
             return;
         }
     }
-    if (cfg_.drawLine && lineRenderer_.pointCount() > 0) {
-        auto r = reducer.reduceMinMax2D(lineRenderer_.pointBuffer(),
-                                        lineRenderer_.pointCount());
+    if (cfg_.drawLine && lineRenderer_->pointCount() > 0) {
+        auto r = reducer.reduceMinMax2D(lineRenderer_->pointBuffer(),
+                                        lineRenderer_->pointCount());
         if (r) {
             v.x.min = std::min(v.x.min, r->minX);
             v.x.max = std::max(v.x.max, r->maxX);

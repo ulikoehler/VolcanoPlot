@@ -1,10 +1,13 @@
 // volcano/render/primitives/ReduceRenderer.cpp — GPU parallel min/max reduce
 #include "volcano/render/primitives/ReduceRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include "volcano/core/CommandBuffer.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -97,14 +100,55 @@ uint32_t divRoundUp(uint32_t n, uint32_t d) {
     return (n + d - 1) / d;
 }
 
+class ReduceRendererVk final : public ReduceRenderer {
+public:
+    explicit ReduceRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    std::optional<MinMax2D> reduceMinMax2D(GpuBuf pointBuffer,
+                                           uint32_t count) override;
+    [[nodiscard]] bool ready() const noexcept override { return inited_; }
+
+private:
+    void ensureIntermediateCapacity(uint32_t slots);
+    void recordPass(vk::CommandBuffer cmd, vk::DescriptorSet descSet,
+                    vk::Buffer inBuf, uint32_t inCount,
+                    vk::Buffer outBuf, bool isFinal, bool vec2Input);
+
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_;
+    vk::Queue computeQueue_;
+    vk::CommandPool computePool_;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+
+    core::ShaderModule reduceVec2_;
+    core::ShaderModule reduceVec4_;
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeVec2_;
+    vk::UniquePipeline pipeVec4_;
+
+    vk::UniqueDescriptorPool descPool_;
+    std::vector<vk::DescriptorSet> descSets_;
+    uint32_t descRingCap_ = 0;
+
+    core::Buffer intermediateA_;
+    core::Buffer intermediateB_;
+    core::Buffer output_;
+    uint32_t interSlots_ = 0;
+
+    bool inited_ = false;
+};
+
 } // namespace
 
-void ReduceRendererVk::init(vk::Device device, VmaAllocator allocator,
-                          vk::Queue computeQueue, vk::CommandPool computePool {
+void ReduceRendererVk::init() {
+    const vk::Device device = svcs_->device();
     device_ = device;
-    allocator_ = allocator;
-    computeQueue_ = computeQueue;
-    computePool_ = computePool;
+    allocator_ = svcs_->allocator();
+    computeQueue_ = svcs_->computeQueue();
+    computePool_ = svcs_->computePool();
 
     auto v2Spv = core::ShaderModule::compileGlsl(kReduceVec2Glsl, "comp");
     auto v4Spv = core::ShaderModule::compileGlsl(kReduceVec4Glsl, "comp");
@@ -181,7 +225,7 @@ void ReduceRendererVk::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void ReduceRendererVk::ensureIntermediateCapacity(uint32_t slots {
+void ReduceRendererVk::ensureIntermediateCapacity(uint32_t slots) {
     if (slots <= interSlots_) return;
     vk::DeviceSize bytes = vk::DeviceSize(slots) * sizeof(float) * 4;
     core::BufferDesc desc{};
@@ -193,9 +237,11 @@ void ReduceRendererVk::ensureIntermediateCapacity(uint32_t slots {
     interSlots_ = slots;
 }
 
-void ReduceRendererVk::recordPass(Cmd& cmdRef, vk::DescriptorSet descSet,
-                                GpuBuf inBuf, uint32_t inCount,
-                                GpuBuf outBuf, bool isFinal, bool vec2Input {
+void ReduceRendererVk::recordPass(vk::CommandBuffer cmd,
+                                vk::DescriptorSet descSet,
+                                vk::Buffer inBuf, uint32_t inCount,
+                                vk::Buffer outBuf, bool isFinal,
+                                bool vec2Input) {
     // Update this pass's descriptor set bindings (host-side; takes effect
     // before the command buffer is submitted).
     vk::DescriptorBufferInfo inInfo{};
@@ -246,7 +292,7 @@ void ReduceRendererVk::recordPass(Cmd& cmdRef, vk::DescriptorSet descSet,
 }
 
 std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
-                                                       uint32_t count {
+                                                       uint32_t count) {
     if (!inited_ || count == 0 || !pointBuffer) return std::nullopt;
 
     uint32_t slots = divRoundUp(count, kWorkgroup);
@@ -273,7 +319,7 @@ std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
         core::OneTimeCommands cmd(device_, computePool_, computeQueue_);
         auto cb = cmd.handle();
 
-        vk::Buffer curIn = pointBuffer;
+        vk::Buffer curIn = svcs_->vkBufferOf(pointBuffer);
         uint32_t curCount = count;
         bool vec2Input = true;
         bool which = false; // false -> write A, true -> write B
@@ -306,6 +352,12 @@ std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
     // Guard against an all-empty reduce (shouldn't happen since count > 0).
     if (!(r.minX <= r.maxX) || std::isinf(r.minX)) return std::nullopt;
     return r;
+}
+
+std::unique_ptr<ReduceRenderer> makeReduceVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<ReduceRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

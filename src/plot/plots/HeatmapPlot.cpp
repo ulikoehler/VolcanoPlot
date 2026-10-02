@@ -92,11 +92,8 @@ std::optional<Range> HeatmapPlot::valueRange() const {
 }
 
 void HeatmapPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
     if (!prepared_)
-        renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache(),
-                       r.descriptorPool());
+        if (!renderer_) renderer_ = r.gpu().createHeatmapRenderer();
     if (!prepared_ || dirty_) {
         Grid2D g = effectiveGrid();
         // matplotlib auto-normalizes from data when vmin/vmax aren't
@@ -121,18 +118,16 @@ void HeatmapPlot::prepare(render::Renderer& r) {
             if (cmScaled.under) cmScaled.under->a *= alpha_;
             if (cmScaled.over) cmScaled.over->a *= alpha_;
         }
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         g, cmScaled);
+        renderer_->upload(g, cmScaled);
         dirty_ = false;
     }
     prepared_ = true;
 }
-void HeatmapPlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
+void HeatmapPlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 void HeatmapPlot::contributeToAutoscale(Viewport& v) const {
     // mpl update_datalim(extent corners) — sorted; the stored extent is

@@ -24,7 +24,7 @@ public:
              Color color = Color::blue(), float lineWidth = 1.5f);
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -44,7 +44,7 @@ private:
     float lineWidth_;
     std::string label_;
     std::vector<Point2D> stepPoints_;  // expanded staircase points
-    render::primitives::LineRenderer renderer_;
+    std::unique_ptr<render::primitives::LineRenderer> renderer_;
     bool prepared_ = false;
 
     void buildStepPoints();
@@ -63,7 +63,7 @@ public:
                Color fillColor = Color::fromRgba8(31, 119, 180, 128));
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return label_; }
@@ -81,8 +81,8 @@ private:
     bool fill_;
     std::string label_;
     std::vector<Point2D> stepPoints_;  // staircase outline
-    render::primitives::LineRenderer lineRenderer_;
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::LineRenderer> lineRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
     bool prepared_ = false;

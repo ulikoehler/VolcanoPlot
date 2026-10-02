@@ -68,3 +68,11 @@ DartConfiguration.tcl
 # Python extension build artifacts
 *.so
 *.cpython-*.so
+
+# Web package
+/web/node_modules/
+/web/dist/
+/web/package-lock.json
+
+# scratch
+test.sh

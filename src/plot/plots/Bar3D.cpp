@@ -146,29 +146,22 @@ void Bar3D::projectBars() {
 void Bar3D::prepare(render::Renderer& r) {
     projectBars();
 
-    auto& ctx = r.backend().context();
 
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
 
     if (config_.drawEdges && !edgePoints_.empty()) {
-        lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{edgePoints_}, config_.edgeColor,
+        if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
+        lineRenderer_->upload(std::span{edgePoints_}, config_.edgeColor,
                              config_.edgeWidth);
     }
 
     prepared_ = true;
 }
 
-void Bar3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Bar3D::draw(render::Cmd& cmd, render::Renderer& r,
                  const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -177,13 +170,13 @@ void Bar3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (!fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawEdges && edgePoints_.size() >= 2)
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(edgePoints_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(edgePoints_.size()));
 }
 
 void Bar3D::contributeToAutoscale(Viewport& v) const {

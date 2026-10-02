@@ -5,6 +5,7 @@
 // CPU vs GPU-hybrid, and prints median encode ms + output size.
 // This isolates the encode stage from render/readback.
 #include <volcano/backend/Backend.hpp>
+#include <volcano/backend/HeadlessBackend.hpp>
 #include <volcano/encode/ImageEncoder.hpp>
 #include <volcano/encode/GpuPngEncoder.hpp>
 #include <volcano/encode/GpuYuvEncoder.hpp>
@@ -86,7 +87,7 @@ int main() {
     backend::BackendDesc desc;
     desc.width = 64; desc.height = 64;
     auto backend = backend::createHeadlessBackend(desc);
-    auto& ctx = backend->context();
+    auto& ctx = static_cast<backend::HeadlessBackend&>(*backend).context();
     auto dev = ctx.device.handle();
     auto queue = ctx.device.graphicsQueue();
     auto pool = ctx.graphicsPool.handle();

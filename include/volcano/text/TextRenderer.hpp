@@ -49,6 +49,10 @@ public:
     TextRenderer();
     virtual ~TextRenderer();
 
+    /// CPU-only instance (font metrics/measuring; draw()/atlas are
+    /// no-ops). Used by the Python binding's text measurer.
+    static std::unique_ptr<TextRenderer> createCpuOnly();
+
     TextRenderer(const TextRenderer&) = delete;
     TextRenderer& operator=(const TextRenderer&) = delete;
 

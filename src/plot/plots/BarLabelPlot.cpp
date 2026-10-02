@@ -52,15 +52,15 @@ void BarLabelPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void BarLabelPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void BarLabelPlot::draw(render::Cmd& cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_ || generatedLabels_.empty()) return;
 
-    auto& text = r.textRenderer();
+    auto& text = r.gpu().text();
 
     // Use full framebuffer as scissor so labels aren't clipped.
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
 
     for (size_t i = 0; i < x_.size() && i < generatedLabels_.size(); ++i) {
         const std::string& label = generatedLabels_[i];

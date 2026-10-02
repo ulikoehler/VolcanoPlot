@@ -87,28 +87,24 @@ void buildFillTriangles(const std::vector<Point2D>& pts,
 } // namespace
 
 void FillPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
 
     // Build fill triangles from the polygon points.
     std::vector<Point2D> positions;
     std::vector<Color> colors;
     buildFillTriangles(series_.points, positions, colors, series_.color);
 
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{positions.data(), positions.size()},
+    renderer_->upload(std::span{positions.data(), positions.size()},
                      std::span{colors.data(), colors.size()});
     prepared_ = true;
 }
 
-void FillPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void FillPlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void FillPlot::contributeToAutoscale(Viewport& v) const {
@@ -122,8 +118,8 @@ void FillPlot::contributeToAutoscale(Viewport& v) const {
 
 void FillPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(),
-                                    renderer_.pointCount());
+    auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(),
+                                    renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX);
     v.x.max = std::max(v.x.max, r->maxX);

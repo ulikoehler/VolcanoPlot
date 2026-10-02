@@ -59,7 +59,7 @@ public:
                HexbinConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Bin-count range (drives the colorbar).
@@ -86,7 +86,7 @@ private:
     // Render data.
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     bool prepared_ = false;
 
     void computeBins();

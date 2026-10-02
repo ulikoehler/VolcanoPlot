@@ -1,10 +1,13 @@
 // volcano/render/primitives/EvalRenderer.cpp — GPU function evaluation
 #include "volcano/render/primitives/EvalRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include "volcano/core/CommandBuffer.hpp"
 
 #include <cmath>
 #include <format>
 #include <stdexcept>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -46,14 +49,43 @@ void main() {{
 
 uint32_t divRoundUp(uint32_t n, uint32_t d) { return (n + d - 1) / d; }
 
+class EvalRendererVk final : public EvalRenderer {
+public:
+    explicit EvalRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    bool compile(const std::string& body) override;
+    void eval(GpuBuf out, double xMin, double xMax,
+              uint32_t count) override;
+    [[nodiscard]] GpuBuf makeOutput(uint32_t count) const override;
+    [[nodiscard]] bool ready() const noexcept override { return inited_; }
+    [[nodiscard]] bool compiled() const noexcept override {
+        return static_cast<bool>(pipeline_);
+    }
+
+private:
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    vk::Queue computeQueue_;
+    vk::CommandPool computePool_;
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    vk::UniqueDescriptorPool descPool_;
+    vk::DescriptorSet descSet_;
+    bool inited_ = false;
+};
+
 } // namespace
 
-void EvalRendererVk::init(vk::Device device, VmaAllocator allocator,
-                        vk::Queue computeQueue, vk::CommandPool computePool {
+void EvalRendererVk::init() {
+    const vk::Device device = svcs_->device();
     device_ = device;
-    allocator_ = allocator;
-    computeQueue_ = computeQueue;
-    computePool_ = computePool;
+    allocator_ = svcs_->allocator();
+    computeQueue_ = svcs_->computeQueue();
+    computePool_ = svcs_->computePool();
 
     vk::DescriptorSetLayoutBinding binding{};
     binding.setBinding(0)
@@ -87,7 +119,7 @@ void EvalRendererVk::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-bool EvalRendererVk::compile(const std::string& body {
+bool EvalRendererVk::compile(const std::string& body) {
     if (!inited_) return false;
     std::vector<uint32_t> spv;
     try {
@@ -114,20 +146,21 @@ bool EvalRendererVk::compile(const std::string& body {
     return true;
 }
 
-core::Buffer EvalRendererVk::makeOutput(uint32_t count const {
+GpuBuf EvalRendererVk::makeOutput(uint32_t count) const {
     core::BufferDesc desc{};
     desc.size = vk::DeviceSize(count) * sizeof(float) * 2;
     desc.usage = core::BufferUsage::VertexStorage;
-    return core::Buffer(allocator_, desc);
+    return svcs_->adoptBuffer(core::Buffer(allocator_, desc));
 }
 
 void EvalRendererVk::eval(GpuBuf out, double xMin, double xMax,
-                        uint32_t count {
+                        uint32_t count) {
     if (!pipeline_ || !out || count == 0) return;
 
     // Bind this evaluation's output buffer.
     vk::DescriptorBufferInfo outInfo{};
-    outInfo.setBuffer(out).setOffset(0).setRange(VK_WHOLE_SIZE);
+    outInfo.setBuffer(svcs_->vkBufferOf(out))
+        .setOffset(0).setRange(VK_WHOLE_SIZE);
     vk::WriteDescriptorSet w{};
     w.setDstSet(descSet_)
      .setDstBinding(0)
@@ -161,6 +194,12 @@ void EvalRendererVk::eval(GpuBuf out, double xMin, double xMax,
                        vk::PipelineStageFlagBits::eVertexInput |
                        vk::PipelineStageFlagBits::eComputeShader,
                        {}, mb, {}, {});
+}
+
+std::unique_ptr<EvalRenderer> makeEvalVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<EvalRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

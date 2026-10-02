@@ -62,7 +62,7 @@ public:
     }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -82,8 +82,8 @@ private:
     std::vector<Point2D> arrowPositions_;
     std::vector<Color> arrowColors_;
 
-    render::primitives::LineSegmentRenderer lineRenderer_;
-    render::primitives::FillRenderer arrowRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> arrowRenderer_;
     bool prepared_ = false;
 
     /// Sample the vector field at (x, y) via bilinear interpolation.

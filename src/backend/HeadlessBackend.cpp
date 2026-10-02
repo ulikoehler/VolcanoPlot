@@ -1,5 +1,6 @@
 // volcano/backend/HeadlessBackend.cpp
 #include "volcano/backend/HeadlessBackend.hpp"
+#include "../render/VulkanGpuServices.hpp"
 
 #include <volcano/core/Buffer.hpp>
 #include <volcano/core/CommandBuffer.hpp>
@@ -257,7 +258,7 @@ void HeadlessBackend::createCommandBuffer() {
     commandBuffer_ = std::move(cbs.front());
 }
 
-vk::CommandBuffer HeadlessBackend::beginFrame() {
+std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
     auto cb = commandBuffer_.get();
     cb.reset();
     vk::CommandBufferBeginInfo bi{};
@@ -277,7 +278,7 @@ vk::CommandBuffer HeadlessBackend::beginFrame() {
        .setClearValues(clears);
     cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
     frameBegun_ = true;
-    return cb;
+    return std::make_unique<render::VkCmd>(cb);
 }
 
 void HeadlessBackend::endFrame() {
@@ -332,7 +333,7 @@ bool HeadlessBackend::blitCapture() {
     return true;
 }
 
-vk::CommandBuffer HeadlessBackend::beginFrameLoad() {
+std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
     if (!blitCaptured_ || !renderPassLoad_) return beginFrame();
 
     auto cb = commandBuffer_.get();
@@ -374,7 +375,7 @@ vk::CommandBuffer HeadlessBackend::beginFrameLoad() {
        .setClearValues(clears);
     cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
     frameBegun_ = true;
-    return cb;
+    return std::make_unique<render::VkCmd>(cb);
 }
 
 std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
@@ -432,6 +433,15 @@ std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
     std::vector<uint8_t> out(size);
     std::memcpy(out.data(), staging.mappedData(), size);
     return out;
+}
+
+render::GpuServices& HeadlessBackend::gpu() {
+    if (!gpuServices_)
+        gpuServices_ = std::make_unique<render::VulkanGpuServices>(
+            ctx_, renderPass_.get(), colorFormat_, depthFormat_, samples_);
+    auto& s = static_cast<render::VulkanGpuServices&>(*gpuServices_);
+    s.setExtent({extent_.width, extent_.height});
+    return s;
 }
 
 } // namespace volcano::backend

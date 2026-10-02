@@ -56,7 +56,7 @@ public:
         : x_(std::move(x)), y_(std::move(y)), cfg_(std::move(cfg)) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -77,11 +77,11 @@ private:
     ErrorbarConfig cfg_;
 
     // Renderers (initialized in prepare).
-    render::primitives::LineRenderer lineRenderer_;        // connecting line
-    render::primitives::LineSegmentRenderer errorRenderer_; // error bars + lim arrowheads
-    render::primitives::PointRenderer pointRenderer_;      // markers
-    render::primitives::PointRenderer capYRenderer_;       // yerr caps ('_' markers)
-    render::primitives::PointRenderer capXRenderer_;       // xerr caps ('|' markers)
+    std::unique_ptr<render::primitives::LineRenderer> lineRenderer_;        // connecting line
+    std::unique_ptr<render::primitives::LineSegmentRenderer> errorRenderer_; // error bars + lim arrowheads
+    std::unique_ptr<render::primitives::PointRenderer> pointRenderer_;      // markers
+    std::unique_ptr<render::primitives::PointRenderer> capYRenderer_;       // yerr caps ('_' markers)
+    std::unique_ptr<render::primitives::PointRenderer> capXRenderer_;       // xerr caps ('|' markers)
 
     // Computed geometry (built in prepare).
     std::vector<Point2D> errorSegments_;  // line segment endpoints for error bars + lim arrowheads

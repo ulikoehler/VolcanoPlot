@@ -59,42 +59,34 @@ void TriplotPlot::prepare(render::Renderer& r) {
 
     buildEdges();
 
-    auto& ctx = r.backend().context();
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{segments_}, config_.color,
+        lineRenderer_->upload(std::span{segments_}, config_.color,
                              config_.lineWidth);
     }
 
     if (config_.showMarkers && !points_.empty()) {
-        pointRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                            r.backend().sampleCount(), r.descriptorPool(),
-                            r.pipelineCache());
+        if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
         std::vector<float> sizes(points_.size(), config_.markerSize);
-        pointRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{points_}, std::span{pointColors_},
+        pointRenderer_->upload(std::span{points_}, std::span{pointColors_},
                               std::span{sizes});
     }
 
     prepared_ = true;
 }
 
-void TriplotPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void TriplotPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (!segments_.empty())
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
 
     if (config_.showMarkers && !points_.empty())
-        pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
+        pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
 }
 
 void TriplotPlot::contributeToAutoscale(Viewport& v) const {

@@ -132,36 +132,28 @@ void Errorbar3D::projectGeometry(float canvasW, float canvasH) {
 }
 
 void Errorbar3D::prepare(render::Renderer& r) {
-    auto ext = r.backend().extent();
+    auto ext = r.gpu().extent();
     projectGeometry(float(ext.width), float(ext.height));
 
-    auto& ctx = r.backend().context();
 
     // Init and upload error bar segments.
     if (hasErrors_ && !errorSegments_.empty()) {
-        errorRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                            r.backend().sampleCount(), r.pipelineCache());
-        errorRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{errorSegments_}, config_.errorbarColor,
+        if (!errorRenderer_) errorRenderer_ = r.gpu().createLineSegmentRenderer();
+        errorRenderer_->upload(std::span{errorSegments_}, config_.errorbarColor,
                               config_.errorbarWidth);
     }
 
     // Init and upload markers.
     if (config_.drawMarker && !markerPoints_.empty()) {
-        pointRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                            r.backend().sampleCount(), r.descriptorPool(),
-                            r.pipelineCache());
-        pointRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{markerPoints_}, std::span{markerColors_},
+        if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
+        pointRenderer_->upload(std::span{markerPoints_}, std::span{markerColors_},
                               std::span{markerSizes_});
     }
 
     prepared_ = true;
 }
 
-void Errorbar3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Errorbar3D::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -170,13 +162,13 @@ void Errorbar3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (hasErrors_ && !errorSegments_.empty())
-        errorRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(errorSegments_.size()));
+        errorRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(errorSegments_.size()));
 
     if (config_.drawMarker && !markerPoints_.empty())
-        pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));
+        pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));
 }
 
 void Errorbar3D::contributeToAutoscale(Viewport& v) const {

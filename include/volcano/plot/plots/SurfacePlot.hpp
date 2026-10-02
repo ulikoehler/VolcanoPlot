@@ -11,7 +11,7 @@ public:
     SurfacePlot(Grid2D grid, Camera3D camera = {})
         : grid_(std::move(grid)), camera_(camera) {}
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     Camera3D& camera() noexcept { return camera_; }
     Camera3D* camera3D() noexcept override { return &camera_; }
@@ -22,7 +22,7 @@ public:
 private:
     Grid2D grid_;
     Camera3D camera_;
-    render::primitives::SurfaceRenderer renderer_;
+    std::unique_ptr<render::primitives::SurfaceRenderer> renderer_;
     bool prepared_ = false;
 };
 } // namespace volcano::plot

@@ -73,21 +73,16 @@ void ECDFPlot::prepare(render::Renderer& r) {
     computeECDF();
     buildStepPoints();
 
-    auto& ctx = r.backend().context();
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
 
     if (!stepPoints_.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{stepPoints_}, config_.color,
+        lineRenderer_->upload(std::span{stepPoints_}, config_.color,
                              config_.lineWidth);
     }
 
     // Build fill triangles if requested.
     if (config_.fill && !values_.empty()) {
-        fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
         fillPositions_.clear();
         fillColors_.clear();
 
@@ -116,24 +111,22 @@ void ECDFPlot::prepare(render::Renderer& r) {
         }
 
         if (!fillPositions_.empty()) {
-            fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                                 ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                                 std::span{fillPositions_}, std::span{fillColors_});
+            fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
         }
     }
 
     prepared_ = true;
 }
 
-void ECDFPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ECDFPlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     if (config_.fill && !fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
     if (!stepPoints_.empty())
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(stepPoints_.size()));
 }
 
 void ECDFPlot::contributeToAutoscale(Viewport& v) const {

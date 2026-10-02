@@ -54,7 +54,7 @@ public:
     }
 
     void prepare(render::Renderer&) override {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport&) const override {}  // axes coords
     [[nodiscard]] bool canEmitVector() const override { return true; }

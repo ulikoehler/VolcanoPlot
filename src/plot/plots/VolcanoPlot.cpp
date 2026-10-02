@@ -28,7 +28,7 @@ void VolcanoPlot::prepare(render::Renderer& r) {
     scatter_.prepare(r);
 }
 
-void VolcanoPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void VolcanoPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     scatter_.draw(cmd, r, axes, rect);
 }

@@ -1,0 +1,124 @@
+// src/web/OpGpuServices.hpp — GpuServices over an OpStream (VOLCANO_WEB)
+//
+// All resources are u32 op-stream handles packed into GpuBuf tokens.
+// createBuffer/writeBuffer emit ops into the *current* frame stream —
+// impls call createBufferRaw/writeBufferRaw which stash deferred
+// resource ops that the next frame's OpCmd picks up (uploads happen at
+// IPlot::prepare time, outside any Cmd).
+#pragma once
+
+#include "OpStream.hpp"
+#include <volcano/render/GpuServices.hpp>
+#include <volcano/text/TextRenderer.hpp>
+
+#include <functional>
+#include <unordered_set>
+
+namespace volcano::web {
+
+class OpGpuServices final : public render::GpuServices {
+public:
+    OpGpuServices() = default;
+
+    /// Session-long stream: resource ops (uploads during prepare) and
+    /// frame ops land in the same ordered stream — the interpreter
+    /// executes resource ops during the walk (§2 ordering). The backend
+    /// calls resetFrame() at frame start, finish() at frame end.
+    OpStream& stream() { return stream_; }
+    /// Non-null stream pointer for impls (always bound — kept for call
+    /// symmetry with backends that may record lazily).
+    OpStream* curStream() { return &stream_; }
+    /// Clear the record/arena sections (handles stay valid — resource
+    /// ops from earlier frames already executed on the JS side).
+        /// Per-frame scratch reset. Does NOT clear the stream — resource ops
+    /// recorded outside a frame (prepare-phase uploads) must reach the
+    /// next finish(); OpStream::finish() clears records after packing.
+    void resetFrame() { beginFrameScratch(); }
+
+    // ── internal helpers used by Op* impls ───────────────────────────
+    /// Emit CreateBuffer (deferred when mid-stream absent) → handle.
+    uint32_t createBufferRaw(uint64_t size, uint8_t kind);
+    /// Emit WriteBuffer with HEAP or arena-sourced data.
+    void writeBufferRaw(uint32_t handle, uint64_t off,
+                        const void* data, size_t bytes);
+    void releaseBuffer(uint32_t handle);
+    void releaseTexture(uint32_t handle);
+    uint32_t createTextureRaw(uint32_t w, uint32_t h, uint8_t fmt);
+    void writeTextureRaw(uint32_t handle, uint32_t x, uint32_t y,
+                         uint32_t w, uint32_t h,
+                         const void* data, size_t bytes);
+    [[nodiscard]] uint32_t allocHandle() { return stream_.allocHandle(); }
+
+    // ── GpuServices ──────────────────────────────────────────────────
+    [[nodiscard]] plot::Extent2D extent() const override { return extent_; }
+    void setExtent(plot::Extent2D e) { extent_ = e; }
+
+    void ensureGraphics() override {}
+    [[nodiscard]] bool textReady() const noexcept override {
+        return textReady_;
+    }
+
+    render::primitives::SpineRenderer& spine() override;
+    render::primitives::PointRenderer& sharedPoints() override;
+    render::primitives::InstancedPathRenderer& instancedPath() override;
+    render::primitives::GpuLineRenderer& gpuLine() override;
+    render::primitives::ReduceRenderer& reduce() override;
+    render::primitives::KdeEvalRenderer& kdeEval() override;
+    render::Grid3DRenderer& grid3D() override;
+    text::TextRenderer& text() override;
+
+    std::unique_ptr<render::primitives::PointRenderer>
+        createPointRenderer() override;
+    std::unique_ptr<render::primitives::LineRenderer>
+        createLineRenderer() override;
+    std::unique_ptr<render::primitives::LineSegmentRenderer>
+        createLineSegmentRenderer() override;
+    std::unique_ptr<render::primitives::FillRenderer>
+        createFillRenderer() override;
+    std::unique_ptr<render::primitives::BarRenderer>
+        createBarRenderer() override;
+    std::unique_ptr<render::primitives::PieRenderer>
+        createPieRenderer() override;
+    std::unique_ptr<render::primitives::HeatmapRenderer>
+        createHeatmapRenderer() override;
+    std::unique_ptr<render::primitives::SurfaceRenderer>
+        createSurfaceRenderer() override;
+    std::unique_ptr<render::primitives::InstancedPathRenderer>
+        createInstancedPathRenderer() override;
+    std::unique_ptr<render::primitives::EvalRenderer>
+        createEvalRenderer() override;
+    std::unique_ptr<render::primitives::SpineRenderer>
+        createSpineRenderer() override;
+    std::unique_ptr<render::primitives::GpuLineRenderer>
+        createGpuLineRenderer() override;
+    std::unique_ptr<text::TextRenderer> createTextRenderer() override;
+
+    render::GpuBuf createBuffer(const render::GpuBufferDesc& desc) override;
+    void writeBuffer(render::GpuBuf buf, uint64_t offset,
+                     std::span<const std::byte> data) override;
+    void destroyBuffer(render::GpuBuf buf) override;
+
+    void beginFrameScratch() override;
+    std::unique_ptr<render::Cmd> beginPrePass() override;
+    void submitPrePass(std::unique_ptr<render::Cmd> cmd) override;
+
+    void ensureText() override;
+    void syncTextAtlas() override;
+
+private:
+    plot::Extent2D extent_{};
+    OpStream stream_;
+    bool textReady_ = false;
+    std::unordered_set<uint32_t> live_;
+
+    std::unique_ptr<render::primitives::SpineRenderer> spine_;
+    std::unique_ptr<render::primitives::PointRenderer> points_;
+    std::unique_ptr<render::primitives::InstancedPathRenderer> instPath_;
+    std::unique_ptr<render::primitives::GpuLineRenderer> gpuLine_;
+    std::unique_ptr<render::primitives::ReduceRenderer> reduce_;
+    std::unique_ptr<render::primitives::KdeEvalRenderer> kdeEval_;
+    std::unique_ptr<render::Grid3DRenderer> grid3D_;
+    std::unique_ptr<text::TextRenderer> text_;
+};
+
+} // namespace volcano::web

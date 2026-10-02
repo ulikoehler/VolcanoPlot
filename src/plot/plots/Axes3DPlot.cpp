@@ -158,35 +158,25 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     axisEdge(P(zx, zy, z0), P(zx, zy, z1), zt,
              [&](float t) { return P(zx, zy, t); }, config_.zLabel);
 
-    auto& ctx = r.backend().context();
     if (!paneTris_.empty()) {
-        fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
         std::vector<Color> cols(paneTris_.size(), config_.paneColor);
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{paneTris_}, std::span{cols});
+        fillRenderer_->upload(std::span{paneTris_}, std::span{cols});
     }
     if (!lineSegs_.empty()) {
-        lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{lineSegs_}, config_.edgeColor,
+        if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
+        lineRenderer_->upload(std::span{lineSegs_}, config_.edgeColor,
                              config_.lineWidth);
     }
     if (!axisSegs_.empty()) {
-        axisRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        axisRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{axisSegs_}, config_.axisColor,
+        if (!axisRenderer_) axisRenderer_ = r.gpu().createLineSegmentRenderer();
+        axisRenderer_->upload(std::span{axisSegs_}, config_.axisColor,
                              config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void Axes3DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Axes3DPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes&, Rect2D rect) {
     if (!prepared_) return;
 
@@ -194,22 +184,22 @@ void Axes3DPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.x = {-1.0f, 1.0f};
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (!paneTris_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
     if (!lineSegs_.empty())
-        lineRenderer_.draw(cmd, vrect, t,
+        lineRenderer_->draw(cmd, vrect, t,
                            static_cast<uint32_t>(lineSegs_.size()));
     if (!axisSegs_.empty())
-        axisRenderer_.draw(cmd, vrect, t,
+        axisRenderer_->draw(cmd, vrect, t,
                            static_cast<uint32_t>(axisSegs_.size()));
 
     // Tick labels in pixel space. NDC (x, y-up) → pixel.
     if (config_.tickLabels && !labels_.empty()) {
-        auto& text = r.textRenderer();
-        auto ext = r.backend().extent();
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+        auto& text = r.gpu().text();
+        auto ext = r.gpu().extent();
+        Rect2D fullRect{0, 0, ext.width, ext.height};
         for (const auto& l : labels_) {
             float px = rect.x + (l.x + 1.0f) * 0.5f * rect.width;
             float py = rect.y + (1.0f - (l.y + 1.0f) * 0.5f) * rect.height;

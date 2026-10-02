@@ -156,9 +156,7 @@ fillPolygons(const std::vector<float>& x, const std::vector<float>& y1,
 } // namespace
 
 void FillBetweenPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
 
     // Store the unique data points for GPU autoscale (the triangle vertices
     // include duplicates, so we build a separate list of unique points).
@@ -177,9 +175,7 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
         std::vector<Color> colors;
         buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
                                   positions, colors, color_);
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{positions.data(), positions.size()},
+        renderer_->upload(std::span{positions.data(), positions.size()},
                          std::span{colors.data(), colors.size()});
         meshBuilt_ = true;
     }
@@ -187,20 +183,19 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
 }
 
 
-void FillBetweenPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     // mpl clip_on=False → clip to the whole canvas, not the axes rect.
-    auto eff = clipRect(rect, r.backend().extent());
-    vk::Rect2D vrect{vk::Offset2D{eff.x, eff.y},
-                     vk::Extent2D{eff.width, eff.height}};
+    auto eff = clipRect(rect, r.gpu().extent());
+    Rect2D vrect{eff.x, eff.y, eff.width, eff.height};
 
     if (!transform && pathEffects.empty()) {
         // Huge x-monotonic band on linear scales: one vertical quad per
         // pixel column covering the band's min/max envelope — raster-
         // equivalent to the per-segment mesh at ~6 verts per column
         // instead of 6 per input point.
-        const float W = float(r.backend().extent().width);
+        const float W = float(r.gpu().extent().width);
         const size_t n = x_.size();
         if (n > size_t(std::max(8192.0f, W * 4.0f)) && where_.empty() &&
             axes.projection().kind == ProjectionKind::Rectilinear &&
@@ -239,25 +234,20 @@ void FillBetweenPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                              {{xl, yHi}, {xr, yHi}, {xl, yLo},
                               {xr, yHi}, {xr, yLo}, {xl, yLo}});
             }
-            r.spineRenderer().drawTriangles(
-                cmd, vrect, r.backend().extent(), verts, color_);
+            r.gpu().spine().drawTriangles(
+                cmd, vrect, r.gpu().extent(), verts, color_);
             return;
         }
         if (!meshBuilt_) {
-            auto& ctx = r.backend().context();
             std::vector<Point2D> positions;
             std::vector<Color> colors;
             buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
                                       positions, colors, color_);
-            renderer_.upload(ctx.device.handle(),
-                             ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(),
-                             ctx.allocator.handle(),
-                             std::span{positions.data(), positions.size()},
+            renderer_->upload(std::span{positions.data(), positions.size()},
                              std::span{colors.data(), colors.size()});
             meshBuilt_ = true;
         }
-        renderer_.draw(cmd, vrect, axes.transform());
+        renderer_->draw(cmd, vrect, axes.transform());
         return;
     }
 
@@ -268,8 +258,8 @@ void FillBetweenPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     auto toPx = [&](Point2D p) {
         return transform ? transform->apply(p) : baseMap(p);
     };
-    auto& spine = r.spineRenderer();
-    vk::Extent2D res = r.backend().extent();
+    auto& spine = r.gpu().spine();
+    Extent2D res = r.gpu().extent();
     auto polys = fillPolygons(x_, y1_, y2_, where_, interpolate_);
 
     auto fillPass = [&](Color c, Point2D off) {
@@ -400,8 +390,8 @@ void FillBetweenPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
     // Use the FillRenderer's point buffer (which contains triangle vertices,
     // but min/max over those is the same as min/max over the data points).
-    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(),
-                                    renderer_.pointCount());
+    auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(),
+                                    renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX);
     v.x.max = std::max(v.x.max, r->maxX);

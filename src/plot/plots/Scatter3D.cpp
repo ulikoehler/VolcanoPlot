@@ -98,18 +98,13 @@ void Scatter3D::prepare(render::Renderer& r) {
         return;
     }
 
-    auto& ctx = r.backend().context();
-    pointRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                        r.backend().sampleCount(), r.descriptorPool(),
-                        r.pipelineCache());
-    pointRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                          ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                          std::span{projectedPoints_}, std::span{markerColors_},
+    if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
+    pointRenderer_->upload(std::span{projectedPoints_}, std::span{markerColors_},
                           std::span{markerSizes_});
     prepared_ = true;
 }
 
-void Scatter3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Scatter3D::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || projectedPoints_.empty()) return;
 
@@ -118,8 +113,8 @@ void Scatter3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(projectedPoints_.size()));
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(projectedPoints_.size()));
 }
 
 void Scatter3D::contributeToAutoscale(Viewport& v) const {

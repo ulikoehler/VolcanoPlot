@@ -1,5 +1,7 @@
 // volcano/render/primitives/LineRenderer.cpp
 #include "volcano/render/primitives/LineRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
@@ -7,6 +9,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -89,8 +92,11 @@ private:
     bool inited_ = false;
 };
 
-void LineRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                        vk::SampleCountFlagBits samples, core::PipelineCache& cache {
+void LineRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -266,10 +272,10 @@ void LineRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     cmd.draw(pointCount, 1, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<LineRenderer> makeLineVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<LineRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

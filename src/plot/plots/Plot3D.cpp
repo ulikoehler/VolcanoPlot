@@ -54,34 +54,26 @@ void Plot3D::projectPoints() {
 void Plot3D::prepare(render::Renderer& r) {
     projectPoints();
 
-    auto& ctx = r.backend().context();
 
     // Init and upload line data.
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (projectedPoints_.size() >= 2) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{projectedPoints_}, config_.color,
+        lineRenderer_->upload(std::span{projectedPoints_}, config_.color,
                              config_.lineWidth);
     }
 
     // Init and upload marker data.
     if (config_.showMarkers && !markerPoints_.empty()) {
-        pointRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                            r.backend().sampleCount(), r.descriptorPool(),
-                            r.pipelineCache());
+        if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
         std::vector<float> sizes(markerPoints_.size(), config_.markerSize);
-        pointRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{markerPoints_}, std::span{markerColors_},
+        pointRenderer_->upload(std::span{markerPoints_}, std::span{markerColors_},
                               std::span{sizes});
     }
 
     prepared_ = true;
 }
 
-void Plot3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Plot3D::draw(render::Cmd& cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -92,13 +84,13 @@ void Plot3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (projectedPoints_.size() >= 2)
-        lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(projectedPoints_.size()));
+        lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(projectedPoints_.size()));
 
     if (config_.showMarkers && !markerPoints_.empty())
-        pointRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));
+        pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));
 }
 
 void Plot3D::contributeToAutoscale(Viewport& v) const {

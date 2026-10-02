@@ -22,18 +22,15 @@ float evalCpu(const std::string& body, float x) {
 } // namespace
 
 void FunctionPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
     if (!prepared_) {
-        renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+        if (!renderer_) renderer_ = r.gpu().createLineRenderer();
         prepared_ = true;
     }
 
     // Lazy init of the compute evaluator + compile the GLSL body.
     if (!evalInited_) {
-        eval_.init(ctx.device.handle(), ctx.allocator.handle(),
-                   ctx.device.computeQueue(), ctx.computePool.handle());
-        gpuPath_ = eval_.ready() && eval_.compile(glslBody_);
+        if (!eval_) eval_ = r.gpu().createEvalRenderer();
+        gpuPath_ = eval_->ready() && eval_->compile(glslBody_);
         evalInited_ = true;
     }
 
@@ -42,7 +39,7 @@ void FunctionPlot::prepare(render::Renderer& r) {
     // viewports keep the home range (avoids a padding-growth loop).
     Range want = (axes_ && axes_->manualX()) ? axes_->viewport().x
                                            : xRange_;
-    auto ext = r.backend().extent();
+    auto ext = r.gpu().extent();
     uint32_t wantSamples = std::max(samples_, ext.width * 2);
     if (want.min != evalRange_.min || want.max != evalRange_.max ||
         wantSamples != evalSamples_) {
@@ -58,34 +55,31 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
 
     if (gpuPath_) {
         if (evalCap_ < evalSamples_) {
-            evalBuf_ = eval_.makeOutput(evalSamples_);
+            evalBuf_ = eval_->makeOutput(evalSamples_);
             evalCap_ = evalSamples_;
         }
-        eval_.eval(evalBuf_.handle(), xRange.min, xRange.max, evalSamples_);
-        renderer_.bindExternalBuffer(evalBuf_.handle(), evalSamples_);
+        eval_->eval(evalBuf_, xRange.min, xRange.max, evalSamples_);
+        renderer_->bindExternalBuffer(evalBuf_, evalSamples_);
         return;
     }
 
     // CPU fallback (compile failed / no shaderc).
-    auto& ctx = r.backend().context();
     std::vector<Point2D> points(evalSamples_);
     for (uint32_t i = 0; i < evalSamples_; ++i) {
         float t = float(i) / (evalSamples_ - 1);
         float x = xRange.min + t * xRange.span();
         points[i] = {x, evalCpu(glslBody_, x)};
     }
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{points}, color_, lineWidth_);
+    renderer_->upload(std::span{points}, color_, lineWidth_);
 }
 
-void FunctionPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void FunctionPlot::draw(render::Cmd& cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     axes_ = &axes;  // bind for viewport-change detection in prepare()
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t, renderer_.pointCount());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t, renderer_->pointCount());
 }
 
 void FunctionPlot::contributeToAutoscale(Viewport& v) const {
@@ -98,8 +92,8 @@ void FunctionPlot::contributeToAutoscale(Viewport& v) const {
 
 void FunctionPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    auto res = reducer.reduceMinMax2D(renderer_.pointBuffer(),
-                                      renderer_.pointCount());
+    auto res = reducer.reduceMinMax2D(renderer_->pointBuffer(),
+                                      renderer_->pointCount());
     if (!res) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, res->minX);
     v.x.max = std::max(v.x.max, res->maxX);

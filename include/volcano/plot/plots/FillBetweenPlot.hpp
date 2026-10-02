@@ -28,7 +28,7 @@ public:
           color_(color) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -59,7 +59,7 @@ private:
     bool interpolate_ = false;
     Color color_;
     std::string label_;
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     std::vector<Point2D> uploadedPoints_;  // for GPU autoscale
     bool prepared_ = false;
     /// Huge inputs defer the per-segment triangle mesh — draw() emits a

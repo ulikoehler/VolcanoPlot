@@ -19,7 +19,7 @@ public:
     }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Log/logit scales drop out-of-domain points from the data limits.
@@ -147,7 +147,7 @@ private:
     [[nodiscard]] std::vector<float> pointSizes() const;
 
     Series2D series_;
-    render::primitives::PointRenderer renderer_;
+    std::unique_ptr<render::primitives::PointRenderer> renderer_;
     std::vector<Color> pcCache_;    ///< pointColors() scratch (draw path)
     std::vector<float> psCache_;    ///< pointSizes() scratch
     bool prepared_ = false;

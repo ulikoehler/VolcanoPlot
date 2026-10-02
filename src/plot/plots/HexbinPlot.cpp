@@ -201,23 +201,19 @@ void HexbinPlot::buildGeometry() {
 void HexbinPlot::prepare(render::Renderer& r) {
     computeBins();
     buildGeometry();
-    auto& ctx = r.backend().context();
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
     prepared_ = true;
 }
 
-void HexbinPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void HexbinPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_ || fillPositions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    fillRenderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    fillRenderer_->draw(cmd, vrect, t);
 }
 
 void HexbinPlot::contributeToAutoscale(Viewport& v) const {

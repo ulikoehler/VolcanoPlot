@@ -146,55 +146,43 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
 }
 
 void QuiverPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    shaftRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                        r.backend().sampleCount(), r.pipelineCache());
-    headRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!shaftRenderer_) shaftRenderer_ = r.gpu().createLineSegmentRenderer();
+    if (!headRenderer_) headRenderer_ = r.gpu().createFillRenderer();
     // Upload dummy data so renderers are ready. Actual geometry is built
     // in draw() since it depends on the viewport.
     Point2D dummy[] = {{0, 0}, {1, 1}};
-    shaftRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                          ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                          std::span{dummy, 2}, cfg_.color, cfg_.lineWidth);
+    shaftRenderer_->upload(std::span{dummy, 2}, cfg_.color, cfg_.lineWidth);
     Point2D dPos[] = {{0, 0}, {1, 0}, {0, 1}};
     Color dCol[] = {cfg_.color, cfg_.color, cfg_.color};
-    headRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{dPos, 3}, std::span{dCol, 3});
+    headRenderer_->upload(std::span{dPos, 3}, std::span{dCol, 3});
     prepared_ = true;
 }
 
-void QuiverPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void QuiverPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     buildGeometry(axes, rect);
 
-    auto& ctx = r.backend().context();
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     // Upload shaft segments at the width computed by buildGeometry
     // (mpl default 0.06*span/clip(sqrt(N),8,25) unless overridden).
     if (!shaftSegs_.empty()) {
-        shaftRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                              ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                              std::span{shaftSegs_}, cfg_.color, shaftWpx_);
-        shaftRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
+        shaftRenderer_->upload(std::span{shaftSegs_}, cfg_.color, shaftWpx_);
+        shaftRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
     }
 
     // Upload arrowhead triangles (pixel space → identity transform).
     if (cfg_.filledHeads && !headFillPos_.empty()) {
-        headRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{headFillPos_}, std::span{headFillColors_});
-        auto ext = r.backend().extent();
+        headRenderer_->upload(std::span{headFillPos_}, std::span{headFillColors_});
+        auto ext = r.gpu().extent();
         Transform2D tpix;
         tpix.view.x = {0.0f, static_cast<float>(ext.width)};
         tpix.view.y = {static_cast<float>(ext.height), 0.0f};
         tpix.view.z = {0, 1};
-        vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
-        headRenderer_.draw(cmd, fullRect, tpix);
+        Rect2D fullRect{0, 0, ext.width, ext.height};
+        headRenderer_->draw(cmd, fullRect, tpix);
     }
 }
 

@@ -54,18 +54,16 @@ void KDEPlot::evaluateKdeOnGpu(render::Renderer& r) {
 
     // GPU path: stream samples to a storage buffer and gather the
     // density per cell in a compute shader.
-    auto& ctx = r.backend().context();
     if (!kdeInited_) {
         try {
-            kde_.init(ctx.device.handle(), ctx.allocator.handle(),
-                      ctx.device.computeQueue(), ctx.computePool.handle());
+            
         } catch (...) {
             // No shaderc / pipeline failure — CPU fallback below.
         }
         kdeInited_ = true;
     }
-    if (kde_.ready()) {
-        grid_.values = kde_.eval(samples_, gridW_, gridH_,
+    if (r.gpu().kdeEval().ready()) {
+        grid_.values = r.gpu().kdeEval().eval(samples_, gridW_, gridH_,
                                  rx.min, rx.max, ry.min, ry.max, bwX, bwY);
     }
 
@@ -100,19 +98,16 @@ void KDEPlot::evaluateKdeOnGpu(render::Renderer& r) {
 
 void KDEPlot::prepare(render::Renderer& r) {
     evaluateKdeOnGpu(r);
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(), r.backend().sampleCount(),
-                   r.pipelineCache(), r.descriptorPool());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
-                     ctx.allocator.handle(), grid_, cmap_);
+    if (!renderer_) renderer_ = r.gpu().createHeatmapRenderer();
+    renderer_->upload(grid_, cmap_);
     prepared_ = true;
 }
 
-void KDEPlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
+void KDEPlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void KDEPlot::contributeToAutoscale(Viewport& v) const {

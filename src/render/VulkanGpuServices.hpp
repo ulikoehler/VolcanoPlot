@@ -46,6 +46,11 @@ public:
     [[nodiscard]] vk::Queue computeQueue() const {
         return ctx_.device.computeQueue();
     }
+    /// Largest supported point size (PointRenderer clamps to this).
+    [[nodiscard]] float maxPointSize() const {
+        return ctx_.device.physical().getProperties()
+            .limits.pointSizeRange[1];
+    }
     [[nodiscard]] vk::CommandPool computePool() const {
         return ctx_.computePool.handle();
     }
@@ -75,9 +80,9 @@ public:
 
     /// Idempotent lazy init of the shared renderers (parallel shader
     /// compile — mirrors the old Renderer::prepare() init block).
-    void ensureGraphics();
+    void ensureGraphics() override;
     [[nodiscard]] bool graphicsReady() const noexcept { return graphicsReady_; }
-    [[nodiscard]] bool textReady() const noexcept { return textReady_; }
+    [[nodiscard]] bool textReady() const noexcept override { return textReady_; }
 
     primitives::SpineRenderer& spine() override;
     primitives::PointRenderer& sharedPoints() override;
@@ -102,6 +107,10 @@ public:
     std::unique_ptr<primitives::InstancedPathRenderer>
         createInstancedPathRenderer() override;
     std::unique_ptr<primitives::EvalRenderer> createEvalRenderer() override;
+    std::unique_ptr<primitives::SpineRenderer> createSpineRenderer() override;
+    std::unique_ptr<primitives::GpuLineRenderer>
+        createGpuLineRenderer() override;
+    std::unique_ptr<text::TextRenderer> createTextRenderer() override;
 
     GpuBuf createBuffer(const GpuBufferDesc& desc) override;
     void writeBuffer(GpuBuf buf, uint64_t offset,
@@ -117,12 +126,16 @@ public:
 
     std::optional<std::vector<uint32_t>> histBin(
         std::span<const float> data, uint32_t nBins,
-        float lo, float hi) override;
-    std::optional<std::vector<float>> violinNormalize(
-        std::span<const float> src, uint32_t n) override;
-    bool pcmTessellate(GpuBuf x, GpuBuf y, GpuBuf t, GpuBuf lut,
-                       uint32_t lutSize, GpuBuf posOut, GpuBuf colOut,
-                       uint32_t cells) override;
+        float e0, float invW) override;
+    std::optional<std::vector<float>> kde1d(
+        std::span<const float> data, float lo, float step, float bw,
+        uint32_t n) override;
+    bool pcmTessellate(std::span<const float> x, std::span<const float> y,
+                       std::span<const float> t,
+                       std::span<const plot::Color> lut,
+                       uint32_t nCols, uint32_t nRows, bool gouraud,
+                       uint32_t flags, GpuBuf& posOut,
+                       GpuBuf& colOut) override;
 
 private:
     backend::GpuContext& ctx_;

@@ -50,7 +50,7 @@ public:
     explicit StemPlot(std::vector<float> y, StemConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -74,9 +74,9 @@ private:
     std::vector<float> x_, y_;
     StemConfig config_;
 
-    render::primitives::LineSegmentRenderer stemRenderer_;
-    render::primitives::LineSegmentRenderer baselineRenderer_;
-    render::primitives::PointRenderer markerRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> stemRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> baselineRenderer_;
+    std::unique_ptr<render::primitives::PointRenderer> markerRenderer_;
 
     std::vector<Point2D> stemSegments_;  // pairs for eLineList
     std::vector<Point2D> baselineSegments_;

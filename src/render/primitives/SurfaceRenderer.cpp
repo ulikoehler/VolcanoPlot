@@ -1,10 +1,13 @@
 // volcano/render/primitives/SurfaceRenderer.cpp
 #include "volcano/render/primitives/SurfaceRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -126,8 +129,12 @@ private:
     bool inited_ = false;
 };
 
-void SurfaceRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                           vk::SampleCountFlagBits samples, core::PipelineCache& cache {
+void SurfaceRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
+    device_ = device;
     device_ = device;
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -195,7 +202,11 @@ void SurfaceRendererVk::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void SurfaceRendererVk::upload(const plot::Grid2D& grid {
+void SurfaceRendererVk::upload(const plot::Grid2D& grid) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     // Build vertex grid: (width × height) vertices, each with (x, y, z=value).
     std::vector<plot::Point3D> verts(grid.width * grid.height);
     float xMin = grid.xRange.min, xMax = grid.xRange.max;
@@ -245,7 +256,8 @@ void SurfaceRendererVk::upload(const plot::Grid2D& grid {
 
 void SurfaceRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
                            const plot::Camera3D& camera, bool shade,
-                           float lightAzdeg, float lightAltdeg const {
+                           float lightAzdeg, float lightAltdeg) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || indexCount_ == 0) return;
 
     struct PC {
@@ -294,10 +306,10 @@ void SurfaceRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     cmd.drawIndexed(indexCount_, 1, 0, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<SurfaceRenderer> makeSurfaceVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<SurfaceRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

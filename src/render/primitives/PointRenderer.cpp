@@ -13,6 +13,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 

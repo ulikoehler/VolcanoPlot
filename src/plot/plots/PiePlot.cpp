@@ -92,23 +92,22 @@ std::string autopctLabel(const PieData& d, float frac) {
 } // namespace
 
 void PiePlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(), r.backend().sampleCount(), r.pipelineCache());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
-                     ctx.allocator.handle(), data_);
+    if (!renderer_) renderer_ = r.gpu().createPieRenderer();
+    renderer_->upload(data_);
     prepared_ = true;
 }
-void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect2D rect) {
+void PiePlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes&, Rect2D rect) {
     if (!prepared_) return;
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect);
 
     PieGeom g(data_, rect);
     if (!g.ok) return;
 
-    auto& spine = r.spineRenderer();
-    vk::Rect2D fullRect{{0, 0}, r.backend().extent()};
-    auto& text = r.textRenderer();
+    auto& spine = r.gpu().spine();
+    auto e = r.gpu().extent();
+    Rect2D fullRect{0, 0, e.width, e.height};
+    auto& text = r.gpu().text();
 
     // White edge lines between slices (mpl wedgeprops edgecolor) at each
     // wedge start, from the (exploded) wedge center to the outer rim.
@@ -123,7 +122,7 @@ void PiePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect
         Point2D e{wc.x + data_.radius * std::cos(a0),
                   wc.y + data_.radius * std::sin(a0)};
         Point2D edgePts[2] = {g.toPx(wc), g.toPx(e)};
-        spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+        spine.drawLineStrip(cmd, fullRect, r.gpu().extent(),
                             edgePts, Color::white(), 1.0f);
         theta1 = theta2;
     }

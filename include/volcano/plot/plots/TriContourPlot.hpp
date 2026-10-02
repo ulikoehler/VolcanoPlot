@@ -43,7 +43,7 @@ public:
                    std::vector<float> z, TriContourConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -54,7 +54,7 @@ private:
     TriContourConfig config_;
     std::vector<Triangle> tris_;
     std::vector<float> levels_;
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     std::vector<Point2D> segments_;
     std::vector<float> segLevels_;
     bool prepared_ = false;
@@ -77,7 +77,7 @@ public:
                     std::vector<float> z, TriContourConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -96,7 +96,7 @@ private:
     TriContourConfig config_;
     std::vector<Triangle> tris_;
     std::vector<float> levels_;
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::vector<Point2D> positions_;
     std::vector<Color> colors_;
     bool prepared_ = false;

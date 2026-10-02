@@ -5,21 +5,19 @@
 #include <algorithm>
 namespace volcano::plot {
 void SurfacePlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(), r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createSurfaceRenderer();
     // Auto-normalize height colors from data when no range is given.
     if (grid_.valueRange.min > grid_.valueRange.max && !grid_.values.empty()) {
         auto [lo, hi] = std::ranges::minmax(grid_.values);
         grid_.valueRange = {lo, hi};
     }
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
-                     ctx.allocator.handle(), grid_);
+    renderer_->upload(grid_);
     prepared_ = true;
 }
-void SurfacePlot::draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes&, Rect2D rect) {
+void SurfacePlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes&, Rect2D rect) {
     if (!prepared_) return;
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, camera_, shade, lightAzdeg, lightAltdeg);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, camera_, shade, lightAzdeg, lightAltdeg);
 }
 void SurfacePlot::contributeToAutoscale(Viewport& v) const {
     v.x.min = std::min(v.x.min, grid_.xRange.min);

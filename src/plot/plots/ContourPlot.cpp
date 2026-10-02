@@ -249,19 +249,15 @@ void ContourPlot::marchingSquares() {
 void ContourPlot::prepare(render::Renderer& r) {
     computeLevels();
     marchingSquares();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{segments_}, config_.lineColor,
+        renderer_->upload(std::span{segments_}, config_.lineColor,
                          config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
     // mpl colors each level from the colormap (default: image.cmap =
@@ -272,9 +268,9 @@ void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + f.x * float(rect.width),
                        rect.y + (1.0f - f.y) * float(rect.height)};
     };
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    vk::Extent2D res = r.backend().extent();
-    auto& spine = r.spineRenderer();
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    Extent2D res = r.gpu().extent();
+    auto& spine = r.gpu().spine();
 
     // Group segment indices by level (levels are few).
     std::map<float, std::vector<size_t>> byLevel;
@@ -288,7 +284,7 @@ void ContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     std::map<float, Rect2Df> labelBoxes;
     if (config_.clabel) {
         anchors = clabelAnchors();
-        auto& text = r.textRenderer();
+        auto& text = r.gpu().text();
         constexpr float pad = 2.0f;
         for (const auto& [level, a] : anchors) {
             auto m = text.measureText(std::format("{:g}", level),
@@ -370,12 +366,12 @@ std::map<float, Point2D> ContourPlot::clabelAnchors() const {
     return out;
 }
 
-void ContourPlot::drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
+void ContourPlot::drawClabels(render::Cmd& cmd, render::Renderer& r,
                               const Axes& axes, Rect2D rect) {
     Color color = config_.clabelColor.a > 0 ? config_.clabelColor
                                             : config_.lineColor;
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    auto& text = r.textRenderer();
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    auto& text = r.gpu().text();
 
     for (const auto& [level, anchor] : clabelAnchors()) {
         // Data → pixel.
@@ -606,31 +602,27 @@ void ContourfPlot::marchingSquaresFilled() {
 void ContourfPlot::prepare(render::Renderer& r) {
     computeLevels();
     marchingSquaresFilled();
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{positions_}, std::span{colors_});
+        renderer_->upload(std::span{positions_}, std::span{colors_});
     }
     prepared_ = true;
 }
 
-void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ContourfPlot::draw(render::Cmd& cmd, render::Renderer& r,
                         const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     if (!positions_.empty()) {
         Transform2D t = axes.transform();
-        vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-        renderer_.draw(cmd, vrect, t);
+        Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+        renderer_->draw(cmd, vrect, t);
     }
     // mpl contourf `hatches`: per-band hatch patterns (cycled), drawn
     // in pixel space like collection hatches.
     if (config_.hatches.empty() || bandRings_.empty()) return;
     auto toPx = pxMapper(axes, rect);
-    auto clip = clipRectVk(rect, r.backend().extent());
-    auto res = r.backend().extent();
+    auto clip = clipRectVk(rect, r.gpu().extent());
+    auto res = r.gpu().extent();
     for (size_t b = 0; b < bandRings_.size(); ++b) {
         const auto& pat =
             config_.hatches[b % config_.hatches.size()];
@@ -659,7 +651,7 @@ void ContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             tris.insert(tris.end(), h.begin(), h.end());
         }
         if (!tris.empty())
-            r.spineRenderer().drawTriangles(cmd, clip, res, tris,
+            r.gpu().spine().drawTriangles(cmd, clip, res, tris,
                                             Color::black());
     }
 }

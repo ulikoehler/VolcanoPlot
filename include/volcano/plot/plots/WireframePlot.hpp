@@ -44,7 +44,7 @@ public:
     Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -56,7 +56,7 @@ private:
     WireframeConfig config_;
     Camera3D camera_;
 
-    render::primitives::LineSegmentRenderer lineRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;
     std::vector<Point2D> segments_;
     bool prepared_ = false;
 

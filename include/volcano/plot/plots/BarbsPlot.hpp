@@ -47,7 +47,7 @@ public:
               BarbsConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl Barbs config access (barbcolor/length/flip mutators).
@@ -65,7 +65,7 @@ private:
     std::vector<float> x_, y_, u_, v_;
     BarbsConfig config_;
 
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     std::vector<Point2D> segments_;
     bool prepared_ = false;
 

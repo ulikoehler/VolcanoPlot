@@ -1,5 +1,6 @@
 // volcano/cli/main_headless.cpp — headless render-to-file
 #include <volcano/backend/Backend.hpp>
+#include <volcano/backend/HeadlessBackend.hpp>
 #include <volcano/render/Renderer.hpp>
 #include <volcano/plot/Plot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
@@ -53,11 +54,13 @@ int main(int argc, char** argv) {
     renderer.renderFrame(figure);
 
     auto pixels = backend->readbackRgba8();
+    auto& hb = static_cast<backend::HeadlessBackend&>(*backend);
+    auto& ctx = hb.context();
     auto encoder = encode::createGpuEncoder(encode::ImageFormat::Png,
-                                            backend->context().device.handle(),
-                                            backend->context().device.graphicsQueue(),
-                                            backend->context().graphicsPool.handle(),
-                                            backend->context().allocator.handle());
+                                            ctx.device.handle(),
+                                            ctx.device.graphicsQueue(),
+                                            ctx.graphicsPool.handle(),
+                                            ctx.allocator.handle());
     if (encoder->encodeToFile(pixels, desc.width, desc.height, outFile)) {
         std::cout << "Wrote " << outFile << " (" << pixels.size() << " raw bytes)\n";
     } else {

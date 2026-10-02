@@ -51,7 +51,7 @@ public:
     SpecgramPlot(std::vector<float> signal, SpecgramConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -78,7 +78,7 @@ private:
     uint32_t ncols_ = 0;
     Range valueRange_;
 
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
     bool prepared_ = false;

@@ -276,13 +276,6 @@ void BoxPlot::buildGeometry() {
 }
 
 void BoxPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    auto device = ctx.device.handle();
-    auto queue = ctx.device.graphicsQueue();
-    auto pool = ctx.graphicsPool.handle();
-    auto allocator = ctx.allocator.handle();
-    auto renderPass = r.backend().renderPass();
-    auto samples = r.backend().sampleCount();
 
     // Compute statistics for each group — skipped for bxp, where
     // stats_ were supplied precomputed in the constructor.
@@ -298,38 +291,32 @@ void BoxPlot::prepare(render::Renderer& r) {
 
     // Initialize renderers.
     if (cfg_.fillBox && boxFillCount_ >= 3) {
-        boxFillRenderer_.init(device, renderPass, samples, r.pipelineCache());
-        boxFillRenderer_.upload(device, queue, pool, allocator,
-            std::span{boxFillVerts_.data(), boxFillVerts_.size()},
+        if (!boxFillRenderer_) boxFillRenderer_ = r.gpu().createFillRenderer();
+        boxFillRenderer_->upload(std::span{boxFillVerts_.data(), boxFillVerts_.size()},
             std::span{boxFillColors_.data(), boxFillColors_.size()});
     }
 
     if (boxEdgeCount_ >= 2) {
-        boxEdgeRenderer_.init(device, renderPass, samples, r.pipelineCache());
-        boxEdgeRenderer_.upload(device, queue, pool, allocator,
-            std::span{boxEdgeSegs_.data(), boxEdgeSegs_.size()},
+        if (!boxEdgeRenderer_) boxEdgeRenderer_ = r.gpu().createLineSegmentRenderer();
+        boxEdgeRenderer_->upload(std::span{boxEdgeSegs_.data(), boxEdgeSegs_.size()},
             cfg_.whiskerColor, cfg_.lineWidth);
     }
 
     if (medianCount_ >= 2) {
-        medianRenderer_.init(device, renderPass, samples, r.pipelineCache());
-        medianRenderer_.upload(device, queue, pool, allocator,
-            std::span{medianSegs_.data(), medianSegs_.size()},
+        if (!medianRenderer_) medianRenderer_ = r.gpu().createLineSegmentRenderer();
+        medianRenderer_->upload(std::span{medianSegs_.data(), medianSegs_.size()},
             cfg_.medianColor, cfg_.medianWidth);
     }
 
     if (cfg_.showMeans && meanCount_ >= 2) {
-        meanRenderer_.init(device, renderPass, samples, r.pipelineCache());
-        meanRenderer_.upload(device, queue, pool, allocator,
-            std::span{meanSegs_.data(), meanSegs_.size()},
+        if (!meanRenderer_) meanRenderer_ = r.gpu().createLineSegmentRenderer();
+        meanRenderer_->upload(std::span{meanSegs_.data(), meanSegs_.size()},
             cfg_.meanColor, cfg_.medianWidth);
     }
 
     if (cfg_.showOutliers && outlierCount_ > 0) {
-        outlierRenderer_.init(device, renderPass, samples,
-            r.descriptorPool(), r.pipelineCache());
-        outlierRenderer_.upload(device, queue, pool, allocator,
-            std::span{outlierPoints_.data(), outlierPoints_.size()},
+        if (!outlierRenderer_) outlierRenderer_ = r.gpu().createPointRenderer();
+        outlierRenderer_->upload(std::span{outlierPoints_.data(), outlierPoints_.size()},
             std::span{outlierColors_.data(), outlierColors_.size()},
             std::span{outlierSizes_.data(), outlierSizes_.size()});
     }
@@ -337,27 +324,27 @@ void BoxPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void BoxPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void BoxPlot::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     // Draw order: box fill → box edges + whiskers → median line → outliers.
     if (cfg_.fillBox && boxFillCount_ >= 3)
-        boxFillRenderer_.draw(cmd, vrect, t);
+        boxFillRenderer_->draw(cmd, vrect, t);
 
     if (boxEdgeCount_ >= 2)
-        boxEdgeRenderer_.draw(cmd, vrect, t, boxEdgeCount_);
+        boxEdgeRenderer_->draw(cmd, vrect, t, boxEdgeCount_);
 
     if (medianCount_ >= 2)
-        medianRenderer_.draw(cmd, vrect, t, medianCount_);
+        medianRenderer_->draw(cmd, vrect, t, medianCount_);
 
     if (cfg_.showMeans && meanCount_ >= 2)
-        meanRenderer_.draw(cmd, vrect, t, meanCount_);
+        meanRenderer_->draw(cmd, vrect, t, meanCount_);
 
     if (cfg_.showOutliers && outlierCount_ > 0)
-        outlierRenderer_.draw(cmd, vrect, t, outlierCount_);
+        outlierRenderer_->draw(cmd, vrect, t, outlierCount_);
 }
 
 void BoxPlot::contributeToAutoscale(Viewport& v) const {
@@ -397,8 +384,8 @@ void BoxPlot::contributeToAutoscaleGpu(
     // so we reduce over both to include outlier extremes in the viewport.
     bool gotAny = false;
     if (boxEdgeCount_ > 0) {
-        auto r = reducer.reduceMinMax2D(boxEdgeRenderer_.pointBuffer(),
-                                        boxEdgeRenderer_.pointCount());
+        auto r = reducer.reduceMinMax2D(boxEdgeRenderer_->pointBuffer(),
+                                        boxEdgeRenderer_->pointCount());
         if (r) {
             v.x.min = std::min(v.x.min, r->minX);
             v.x.max = std::max(v.x.max, r->maxX);
@@ -408,8 +395,8 @@ void BoxPlot::contributeToAutoscaleGpu(
         }
     }
     if (cfg_.showOutliers && outlierCount_ > 0) {
-        auto r = reducer.reduceMinMax2D(outlierRenderer_.pointBuffer(),
-                                        outlierRenderer_.pointCount());
+        auto r = reducer.reduceMinMax2D(outlierRenderer_->pointBuffer(),
+                                        outlierRenderer_->pointCount());
         if (r) {
             v.x.min = std::min(v.x.min, r->minX);
             v.x.max = std::max(v.x.max, r->maxX);

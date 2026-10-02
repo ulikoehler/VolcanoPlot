@@ -14,9 +14,9 @@ public:
     void prepare(render::Renderer& r) override;
     /// GPU pre-pass: solid (non-dashed) lines are tessellated on the GPU
     /// into a vertex soup consumed by draw() in the same frame.
-    void preDraw(vk::CommandBuffer cmd, render::Renderer& r,
+    void preDraw(render::Cmd& cmd, render::Renderer& r,
                  const Axes& axes, Rect2D rect) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Log/logit scales drop out-of-domain points from the data limits.
     void contributeToAutoscaleScaled(Viewport& v, const AxisScale& xscale,
@@ -105,8 +105,8 @@ public:
     void setXdata(std::vector<float> x);
     void setYdata(std::vector<float> y);
     /// GPU point buffer — stable handle lets tests verify in-place reuse.
-    [[nodiscard]] vk::Buffer pointBuffer() const noexcept {
-        return renderer_.pointBuffer();
+    [[nodiscard]] render::GpuBuf pointBuffer() const noexcept {
+        return renderer_->pointBuffer();
     }
 
     Series2D& series() noexcept { return series_; }
@@ -123,11 +123,11 @@ private:
         float edgeWidth = -1.0f;  // <0 → series_.markerEdgeWidth
     };
     /// Raster marker pass (series_.marker / markerPath / markerTex).
-    void drawMarkersAtPoints(vk::CommandBuffer cmd, render::Renderer& r,
+    void drawMarkersAtPoints(render::Cmd& cmd, render::Renderer& r,
                              const Axes& axes, Rect2D rect,
                              const MarkerFx* fx = nullptr);
     Series2D series_;
-    render::primitives::LineRenderer renderer_;
+    std::unique_ptr<render::primitives::LineRenderer> renderer_;
     /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).
     std::vector<render::primitives::GpuLineRenderer::Mesh> gpuMeshes_;
     uint64_t gpuMeshSeq_ = 0;

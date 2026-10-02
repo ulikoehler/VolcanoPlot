@@ -21,7 +21,7 @@ void AxhLine::prepare(render::Renderer& /*r*/) {
     prepared_ = true;
 }
 
-void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void AxhLine::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     // Convert data y to pixel y (Y-up data → Y-down pixel).
@@ -33,8 +33,8 @@ void AxhLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {static_cast<float>(rect.x + rect.width) + 10.0f, py}
     };
     // Clip to the axes patch (matplotlib clips these lines to the axes).
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
 
@@ -51,7 +51,7 @@ void AxvLine::prepare(render::Renderer& /*r*/) {
     prepared_ = true;
 }
 
-void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void AxvLine::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     // Convert data x to pixel x.
@@ -62,8 +62,8 @@ void AxvLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {px, static_cast<float>(rect.y) - 10.0f},
         {px, static_cast<float>(rect.y + rect.height) + 10.0f}
     };
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
 
@@ -80,7 +80,7 @@ void AxLine::prepare(render::Renderer& /*r*/) {
     prepared_ = true;
 }
 
-void AxLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void AxLine::draw(render::Cmd& cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     // mpl axline clips to the axes patch; the line is infinite in data
@@ -103,8 +103,8 @@ void AxLine::draw(vk::CommandBuffer cmd, render::Renderer& r,
         {p1.x - dx * ext, p1.y - dy * ext},
         {p1.x + dx * ext, p1.y + dy * ext}
     };
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    r.spineRenderer().drawLineStrip(cmd, clip, r.backend().extent(),
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
                                     std::span{pts, 2}, color_, width_);
 }
 
@@ -120,9 +120,7 @@ void AxLine::contributeToAutoscale(Viewport& v) const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void AxhSpan::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     // Filled rectangle from (-inf, y1) to (+inf, y2).
     float lo = std::min(y1_, y2_);
     float hi = std::max(y1_, y2_);
@@ -131,18 +129,16 @@ void AxhSpan::prepare(render::Renderer& r) {
         {kAxisSpan, lo}, {kAxisSpan, hi}, {-kAxisSpan, hi}
     };
     Color colors[6] = {color_, color_, color_, color_, color_, color_};
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{verts, 6}, std::span{colors, 6});
+    renderer_->upload(std::span{verts, 6}, std::span{colors, 6});
     prepared_ = true;
 }
 
-void AxhSpan::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void AxhSpan::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void AxhSpan::contributeToAutoscale(Viewport& v) const {
@@ -155,9 +151,7 @@ void AxhSpan::contributeToAutoscale(Viewport& v) const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void AxvSpan::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     // Filled rectangle from (x1, -inf) to (x2, +inf).
     float lo = std::min(x1_, x2_);
     float hi = std::max(x1_, x2_);
@@ -166,18 +160,16 @@ void AxvSpan::prepare(render::Renderer& r) {
         {hi, -kAxisSpan}, {hi, kAxisSpan}, {lo, kAxisSpan}
     };
     Color colors[6] = {color_, color_, color_, color_, color_, color_};
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{verts, 6}, std::span{colors, 6});
+    renderer_->upload(std::span{verts, 6}, std::span{colors, 6});
     prepared_ = true;
 }
 
-void AxvSpan::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void AxvSpan::draw(render::Cmd& cmd, render::Renderer& r,
                    const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t);
 }
 
 void AxvSpan::contributeToAutoscale(Viewport& v) const {
@@ -190,9 +182,7 @@ void AxvSpan::contributeToAutoscale(Viewport& v) const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void Vlines::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     // Build line segments: (x[i], yMin) → (x[i], yMax) for each x.
     std::vector<Point2D> segs;
     segs.reserve(xPositions_.size() * 2);
@@ -201,18 +191,16 @@ void Vlines::prepare(render::Renderer& r) {
         segs.push_back({x, yMax_});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{segs.data(), segs.size()}, color_, width_);
+    renderer_->upload(std::span{segs.data(), segs.size()}, color_, width_);
     prepared_ = true;
 }
 
-void Vlines::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Vlines::draw(render::Cmd& cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t, vertexCount_);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t, vertexCount_);
 }
 
 void Vlines::contributeToAutoscale(Viewport& v) const {
@@ -229,9 +217,7 @@ void Vlines::contributeToAutoscale(Viewport& v) const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void Hlines::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     // Build line segments: (xMin, y[i]) → (xMax, y[i]) for each y.
     std::vector<Point2D> segs;
     segs.reserve(yPositions_.size() * 2);
@@ -240,18 +226,16 @@ void Hlines::prepare(render::Renderer& r) {
         segs.push_back({xMax_, y});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{segs.data(), segs.size()}, color_, width_);
+    renderer_->upload(std::span{segs.data(), segs.size()}, color_, width_);
     prepared_ = true;
 }
 
-void Hlines::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Hlines::draw(render::Cmd& cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || vertexCount_ < 2) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t, vertexCount_);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t, vertexCount_);
 }
 
 void Hlines::contributeToAutoscale(Viewport& v) const {
@@ -396,7 +380,6 @@ void EventPlot::buildRows() {
 
 void EventPlot::prepare(render::Renderer& r) {
     buildRows();
-    auto& ctx = r.backend().context();
     groups_.clear();
     // Rows sharing (color, width) concatenate into one buffer/upload.
     std::map<std::tuple<float, float, float, float, float>, size_t> gidx;
@@ -416,22 +399,18 @@ void EventPlot::prepare(render::Renderer& r) {
                                   rowSegs_[i].begin(), rowSegs_[i].end());
     }
     for (size_t g = 0; g < gverts.size(); ++g) {
-        auto sr = std::make_unique<render::primitives::LineSegmentRenderer>();
-        sr->init(ctx.device.handle(), r.backend().renderPass(),
-                 r.backend().sampleCount(), r.pipelineCache());
-        sr->upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                   ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                   std::span{gverts[g]}, gstyle[g].first, gstyle[g].second);
+        auto sr = r.gpu().createLineSegmentRenderer();
+        sr->upload(std::span{gverts[g]}, gstyle[g].first, gstyle[g].second);
         groups_.push_back({std::move(sr), uint32_t(gverts[g].size())});
     }
     prepared_ = true;
 }
 
-void EventPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void EventPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     for (auto& g : groups_)
         g.r->draw(cmd, vrect, t, g.count);
 }

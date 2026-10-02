@@ -55,10 +55,10 @@ QuiverKeyPlot::Geom QuiverKeyPlot::geometry(const Axes& axes,
     return g;
 }
 
-void QuiverKeyPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void QuiverKeyPlot::draw(render::Cmd& cmd, render::Renderer& r,
                          const Axes& axes, Rect2D rect) {
-    auto ext = r.backend().extent();
-    vk::Rect2D full{vk::Offset2D{0, 0}, ext};
+    auto ext = r.gpu().extent();
+    Rect2D full{0, 0, ext.width, ext.height};
     Geom g = geometry(axes, rect);
     Color col = cfg_.color.a > 0.0f ? cfg_.color
                 : (ref_ ? ref_->legendColor() : Color::black());
@@ -71,7 +71,7 @@ void QuiverKeyPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     Point2D shaftEnd{g.tip.x - dir.x * std::min(g.headLen, len * 0.9f),
                      g.tip.y - dir.y * std::min(g.headLen, len * 0.9f)};
     Point2D shaft[2] = {g.tail, shaftEnd};
-    r.spineRenderer().drawLineStrip(cmd, full, ext,
+    r.gpu().spine().drawLineStrip(cmd, full, ext,
                                     std::span{shaft, 2}, col, g.shaftW);
 
     // mpl notched arrowhead: tip, back corner, axis notch, back corner.
@@ -85,7 +85,7 @@ void QuiverKeyPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     Point2D notch{g.tip.x - dir.x * std::max(hl - hal * 0.5f, 0.0f),
                   g.tip.y - dir.y * std::max(hl - hal * 0.5f, 0.0f)};
     Point2D tri[6] = {g.tip, backR, notch, g.tip, notch, backL};
-    r.spineRenderer().drawTriangles(cmd, full, ext,
+    r.gpu().spine().drawTriangles(cmd, full, ext,
                                     std::span{tri, 6}, col);
 
     // Label.

@@ -741,7 +741,7 @@ TEST(SetDataFastPath, LinePlotInPlaceUpdate) {
     ASSERT_GT(c1.count, 0u);
 
     // Same-size update: buffer must be reused, axes+figure stale.
-    vk::Buffer before = line.pointBuffer();
+    render::GpuBuf before = line.pointBuffer();
     line.setYdata(std::vector<float>{0.8f, 0.8f});
     EXPECT_TRUE(ax->stale());
     EXPECT_TRUE(fig.stale());

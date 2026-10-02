@@ -1,11 +1,14 @@
 // volcano/render/primitives/BarRenderer.cpp
 #include "volcano/render/primitives/BarRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <stdexcept>
 #include <string>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -72,8 +75,12 @@ private:
     bool inited_ = false;
 };
 
-void BarRendererVk::init(vk::Device device, vk::RenderPass renderPass,
-                       vk::SampleCountFlagBits samples, core::PipelineCache& cache {
+void BarRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
+    device_ = device;
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -157,7 +164,11 @@ void BarRendererVk::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void BarRendererVk::upload(const plot::BarData& data {
+void BarRendererVk::upload(const plot::BarData& data) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     // Build a quad per bar: 6 vertices (two triangles).
     std::vector<plot::Point2D> verts;
     std::vector<plot::Color> colors;
@@ -194,7 +205,8 @@ void BarRendererVk::upload(const plot::BarData& data {
 }
 
 void BarRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
-                       const plot::Transform2D& transform const {
+                       const plot::Transform2D& transform) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || vertexCount_ == 0) return;
 
     struct PC {
@@ -237,10 +249,10 @@ void BarRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     cmd.draw(vertexCount_, 1, 0, 0);
 }
 
-} // namespace volcano::render::primitives
-
 std::unique_ptr<BarRenderer> makeBarVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<BarRendererVk>(svcs);
     p->init();
     return p;
 }
+
+} // namespace volcano::render::primitives

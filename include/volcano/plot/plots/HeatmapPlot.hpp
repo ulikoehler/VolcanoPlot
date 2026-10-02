@@ -13,7 +13,7 @@ public:
         zorder = 0.0f;  // mpl AxesImage default zorder
     }
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl sticky edges: tight autoscale, no 5% margin.
     [[nodiscard]] bool tightAutoscale() const override { return true; }
@@ -91,7 +91,7 @@ private:
     const Colormap* cmap_;
     mutable std::shared_ptr<Normalize> norm_;
     float alpha_ = 1.0f;
-    render::primitives::HeatmapRenderer renderer_;
+    std::unique_ptr<render::primitives::HeatmapRenderer> renderer_;
     bool prepared_ = false;
     /// norm/cmap/array changed → re-upload the value texture.
     bool dirty_ = false;

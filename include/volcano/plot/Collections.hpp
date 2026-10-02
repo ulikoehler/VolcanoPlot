@@ -113,9 +113,9 @@ protected:
     /// Fill+edge+hatch one pixel-space polygon soup into the draw lists.
     /// `sketchScale` > 0 applies xkcd-style wobble to stroked edges.
     /// `clipRing` (pixel space) additionally clips all emitted geometry.
-    static void drawSubpaths(vk::CommandBuffer cmd,
+    static void drawSubpaths(render::Cmd& cmd,
                              render::Renderer& r,
-                             vk::Rect2D clip, vk::Extent2D res,
+                             Rect2D clip, Extent2D res,
                              const std::vector<Path::Subpath>& subs,
                              Color face, Color edge, float lw,
                              std::span<const float> dash,
@@ -133,9 +133,9 @@ protected:
     /// mpl patheffects on a collection: replay drawSubpaths/emitSubpaths
     /// once per effect pass (offset shadow copies, stroke overrides) in
     /// list order. An empty `fx` list is a single normal draw.
-    static void drawSubpathsFx(vk::CommandBuffer cmd,
+    static void drawSubpathsFx(render::Cmd& cmd,
                                render::Renderer& r,
-                               vk::Rect2D clip, vk::Extent2D res,
+                               Rect2D clip, Extent2D res,
                                std::vector<Path::Subpath> subs,
                                Color face, Color edge, float lw,
                                std::span<const float> dash,
@@ -161,7 +161,7 @@ class PatchCollection : public Collection {
 public:
     std::vector<Patch> patches;
     explicit PatchCollection(std::vector<Patch> p) : patches(std::move(p)) {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Picking: hit when the data point is inside a patch.
@@ -184,7 +184,7 @@ public:
     /// Set uniform item size (data units).
     void setSize(float sx, float sy) { sizes = {{sx, sy}}; }
 
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -204,7 +204,7 @@ public:
     std::vector<std::vector<Point2D>> segments;
     explicit LineCollection(std::vector<std::vector<Point2D>> segs)
         : segments(std::move(segs)) {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -217,7 +217,7 @@ public:
     std::vector<std::vector<Point2D>> polys;
     explicit PolyCollection(std::vector<std::vector<Point2D>> p)
         : polys(std::move(p)) {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Picking: hit when the data point is inside a polygon.
@@ -238,7 +238,7 @@ public:
              std::vector<Color> colors)
         : rows(rows), cols(cols), corners(std::move(lattice)),
           cellColors(std::move(colors)) {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -254,7 +254,7 @@ public:
     TriMeshCollection(std::vector<Point2D> verts,
                       std::vector<std::array<uint32_t, 3>> tris)
         : vertices(std::move(verts)), triangles(std::move(tris)) {}
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void emitVector(render::VectorCanvas& c, const Axes& axes,

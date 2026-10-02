@@ -8,7 +8,7 @@ class BarPlot : public IPlot {
 public:
     explicit BarPlot(BarData data) : data_(std::move(data)) {}
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
 
     /// Picking: hit when the data point is inside a bar.
@@ -39,7 +39,7 @@ public:
     }
 private:
     BarData data_;
-    render::primitives::BarRenderer renderer_;
+    std::unique_ptr<render::primitives::BarRenderer> renderer_;
     bool prepared_ = false;
 };
 } // namespace volcano::plot

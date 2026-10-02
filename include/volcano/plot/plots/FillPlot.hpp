@@ -13,7 +13,7 @@ public:
     explicit FillPlot(Series2D series) : series_(std::move(series)) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -27,7 +27,7 @@ public:
 
 private:
     Series2D series_;
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     bool prepared_ = false;
 };
 

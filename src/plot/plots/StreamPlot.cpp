@@ -194,10 +194,8 @@ void StreamPlot::generateStreamlines() {
 
 void StreamPlot::prepare(render::Renderer& r) {
     generateStreamlines();
-    auto& ctx = r.backend().context();
 
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
 
     // Convert streamlines to line segments (pairs for eLineList).
     std::vector<Point2D> segments;
@@ -211,27 +209,23 @@ void StreamPlot::prepare(render::Renderer& r) {
     }
 
     if (!segments.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{segments}, config_.color,
+        lineRenderer_->upload(std::span{segments}, config_.color,
                              config_.lineWidth);
     }
 
     if (config_.arrows) {
-        arrowRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                            r.backend().sampleCount(), r.pipelineCache());
+        if (!arrowRenderer_) arrowRenderer_ = r.gpu().createFillRenderer();
     }
 
     prepared_ = true;
 }
 
-void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void StreamPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
     if (!prepared_ || streamlineStarts_.empty()) return;
 
-    auto& ctx = r.backend().context();
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     // Draw streamline segments.
     uint32_t totalVerts = 0;
@@ -240,7 +234,7 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         if (len >= 2) totalVerts += (len - 1) * 2;  // 2 vertices per segment
     }
     if (totalVerts > 0) {
-        lineRenderer_.draw(cmd, vrect, t, totalVerts);
+        lineRenderer_->draw(cmd, vrect, t, totalVerts);
     }
 
     // Draw arrowheads.
@@ -282,16 +276,14 @@ void StreamPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         }
 
         if (!arrowPositions_.empty()) {
-            arrowRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                                  ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                                  std::span{arrowPositions_}, std::span{arrowColors_});
-            auto ext = r.backend().extent();
+            arrowRenderer_->upload(std::span{arrowPositions_}, std::span{arrowColors_});
+            auto ext = r.gpu().extent();
             Transform2D tpix;
             tpix.view.x = {0.0f, static_cast<float>(ext.width)};
             tpix.view.y = {static_cast<float>(ext.height), 0.0f};
             tpix.view.z = {0, 1};
-            vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
-            arrowRenderer_.draw(cmd, fullRect, tpix);
+            Rect2D fullRect{0, 0, ext.width, ext.height};
+            arrowRenderer_->draw(cmd, fullRect, tpix);
         }
     }
 }

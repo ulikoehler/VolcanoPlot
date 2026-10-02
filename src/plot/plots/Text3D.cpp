@@ -44,13 +44,13 @@ void Text3D::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
-void Text3D::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void Text3D::draw(render::Cmd& cmd, render::Renderer& r,
                   const Axes& axes, Rect2D rect) {
     if (!prepared_ || items_.empty()) return;
 
-    auto& text = r.textRenderer();
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
+    auto& text = r.gpu().text();
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
 
     auto vp = camera_.viewProjection();
     float halfW = static_cast<float>(ext.width) * 0.5f;

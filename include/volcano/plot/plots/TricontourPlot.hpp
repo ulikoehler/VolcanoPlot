@@ -57,7 +57,7 @@ public:
     Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -69,7 +69,7 @@ private:
     TricontourConfig config_;
     Camera3D camera_;
 
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     std::vector<Point2D> segments_;
     bool prepared_ = false;
 
@@ -94,7 +94,7 @@ public:
     Camera3D* camera3D() noexcept override { return &camera_; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -106,7 +106,7 @@ private:
     TricontourConfig config_;
     Camera3D camera_;
 
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     std::vector<Point2D> positions_;
     std::vector<Color> colors_;
     bool prepared_ = false;

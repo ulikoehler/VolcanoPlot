@@ -144,19 +144,15 @@ void TriContourPlot::prepare(render::Renderer& r) {
     computeLevels();
     marchingTriangles();
 
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{segments_}, config_.lineColor,
+        renderer_->upload(std::span{segments_}, config_.lineColor,
                          config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void TriContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
     // mpl colors each contour level from the colormap (default:
@@ -166,9 +162,9 @@ void TriContourPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return Point2D{rect.x + f.x * float(rect.width),
                        rect.y + (1.0f - f.y) * float(rect.height)};
     };
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
-    vk::Extent2D res = r.backend().extent();
-    auto& spine = r.spineRenderer();
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
+    Extent2D res = r.gpu().extent();
+    auto& spine = r.gpu().spine();
 
     std::map<float, std::vector<size_t>> byLevel;
     for (size_t i = 0; i + 1 < segments_.size(); i += 2)
@@ -362,23 +358,19 @@ void TriContourfPlot::prepare(render::Renderer& r) {
     computeLevels();
     marchingTrianglesFilled();
 
-    auto& ctx = r.backend().context();
-    fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{positions_}, std::span{colors_});
+        fillRenderer_->upload(std::span{positions_}, std::span{colors_});
     }
     prepared_ = true;
 }
 
-void TriContourfPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void TriContourfPlot::draw(render::Cmd& cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
     if (!prepared_ || positions_.empty()) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    fillRenderer_.draw(cmd, vrect, t);
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    fillRenderer_->draw(cmd, vrect, t);
 }
 
 void TriContourfPlot::contributeToAutoscale(Viewport& v) const {

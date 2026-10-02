@@ -41,24 +41,20 @@ void ChirpPlot::evaluate() {
 void ChirpPlot::prepare(render::Renderer& r) {
     evaluate();
 
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
+    if (!renderer_) renderer_ = r.gpu().createLineRenderer();
     if (points_.size() >= 2) {
-        renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                         ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                         std::span{points_}, config_.color, config_.lineWidth);
+        renderer_->upload(std::span{points_}, config_.color, config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void ChirpPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void ChirpPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_ || points_.size() < 2) return;
 
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    renderer_.draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    renderer_->draw(cmd, vrect, t, static_cast<uint32_t>(points_.size()));
 }
 
 void ChirpPlot::contributeToAutoscale(Viewport& v) const {

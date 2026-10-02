@@ -24,20 +24,14 @@ public:
         : viewport_(viewport), camera_(camera), style_(style) {}
 
     void prepare(render::Renderer& r) override {
-        auto& ctx = r.backend().context();
-        grid_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache(),
-                   ctx.allocator.handle(), ctx.device.graphicsQueue(),
-                   ctx.graphicsPool.handle());
+        r.gpu().ensureGraphics();
         prepared_ = true;
     }
 
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override {
         if (!prepared_) return;
-        vk::Rect2D vrect{vk::Offset2D{rect.x, rect.y},
-                         vk::Extent2D{rect.width, rect.height}};
-        grid_.draw(cmd, vrect, viewport_, camera_, style_);
+        r.gpu().grid3D().draw(cmd, rect, viewport_, camera_, style_);
     }
 
     void contributeToAutoscale(Viewport&) const override {}
@@ -48,7 +42,6 @@ private:
     Viewport viewport_;
     Camera3D camera_;
     Grid3DStyle style_;
-    Grid3DRenderer grid_;
     bool prepared_ = false;
 };
 

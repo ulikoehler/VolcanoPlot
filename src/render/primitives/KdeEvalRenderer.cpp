@@ -1,11 +1,14 @@
 // volcano/render/primitives/KdeEvalRenderer.cpp — GPU KDE evaluation
 #include "volcano/render/primitives/KdeEvalRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include "volcano/core/CommandBuffer.hpp"
 #include "volcano/plot/Types.hpp"
 
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render::primitives {
 
@@ -49,15 +52,43 @@ void main() {
 }
 )";
 
+class KdeEvalRendererVk final : public KdeEvalRenderer {
+public:
+    explicit KdeEvalRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    std::vector<float> eval(const std::vector<plot::Point2D>& samples,
+                            uint32_t gridW, uint32_t gridH,
+                            float xMin, float xMax, float yMin, float yMax,
+                            float bwX, float bwY) override;
+    [[nodiscard]] bool ready() const noexcept override { return inited_; }
+
+private:
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    vk::Queue computeQueue_;
+    vk::CommandPool computePool_;
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    vk::UniqueDescriptorPool descPool_;
+    vk::DescriptorSet descSet_;
+    core::Buffer sampleBuf_;
+    core::Buffer gridBuf_;
+    uint32_t sampleCap_ = 0, gridCap_ = 0;
+    bool inited_ = false;
+};
+
 } // namespace
 
-void KdeEvalRendererVk::init(vk::Device device, VmaAllocator allocator,
-                           vk::Queue computeQueue,
-                           vk::CommandPool computePool {
+void KdeEvalRendererVk::init() {
+    const vk::Device device = svcs_->device();
     device_ = device;
-    allocator_ = allocator;
-    computeQueue_ = computeQueue;
-    computePool_ = computePool;
+    allocator_ = svcs_->allocator();
+    computeQueue_ = svcs_->computeQueue();
+    computePool_ = svcs_->computePool();
 
     vk::DescriptorSetLayoutBinding bindings[2];
     for (int i = 0; i < 2; ++i)
@@ -105,7 +136,7 @@ std::vector<float> KdeEvalRendererVk::eval(
         const std::vector<plot::Point2D>& samples,
         uint32_t gridW, uint32_t gridH,
         float xMin, float xMax, float yMin, float yMax,
-        float bwX, float bwY {
+        float bwX, float bwY) {
     if (!inited_ || samples.empty() || gridW == 0 || gridH == 0)
         return {};
 
@@ -178,6 +209,12 @@ std::vector<float> KdeEvalRendererVk::eval(
     std::memcpy(out.data(), gridBuf_.mappedData(),
                 cells * sizeof(float));
     return out;
+}
+
+std::unique_ptr<KdeEvalRenderer> makeKdeEvalVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<KdeEvalRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

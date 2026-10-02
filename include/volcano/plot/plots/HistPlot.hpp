@@ -76,7 +76,7 @@ public:
         : datasets_(std::move(datasets)), cfg_(std::move(cfg)) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     void contributeToAutoscaleGpu(render::primitives::ReduceRenderer& reducer,
@@ -103,7 +103,7 @@ private:
     HistConfig cfg_;
     std::vector<float> binEdges_;                  // shared, computed in prepare()
     std::vector<std::vector<float>> heights_;      // per-dataset heights
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     /// One segment renderer per dataset (histtype=step, uniform color each).
     std::vector<std::unique_ptr<render::primitives::LineSegmentRenderer>>
         stepRenderers_;

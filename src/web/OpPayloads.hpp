@@ -1,0 +1,97 @@
+// src/web/OpPayloads.hpp — packed payload structs for each op (§2)
+//
+// Layout must match web/src/opcodes.ts byte-for-byte. All structs are
+// trivially copyable, little-endian (WASM/JS are LE on all targets).
+#pragma once
+
+#include "OpStream.hpp"
+#include <volcano/plot/Transform.hpp>
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/primitives/InstancedPathRenderer.hpp>
+
+namespace volcano::web {
+
+/// The 6-vec4 + extras push block, verbatim from the Vulkan impls.
+/// Keep field order identical to each renderer's PC struct.
+struct TransformUBO {
+    float viewMinX, viewMinY, viewSpanX, viewSpanY;  // u_viewMinSpan
+    float rectX, rectY, rectW, rectH;                // u_rect
+    float r, g, b, a;                                 // u_color
+    float sxCode, sxP1, sxP2, sxPad;                  // u_scaleX
+    float syCode, syP1, syP2, syPad;                  // u_scaleY
+    float prCode, thetaOff, thetaDir, prPad;          // u_proj
+    float extra[8];                                   // u_width/u_marker…
+};
+
+[[nodiscard]] inline TransformUBO makeTransformUBO(
+    const plot::Transform2D& t, plot::Rect2D rect, plot::Color c) {
+    TransformUBO u{};
+    u.viewMinX = t.view.x.min;
+    u.viewMinY = t.view.y.min;
+    u.viewSpanX = t.view.x.span();
+    u.viewSpanY = t.view.y.span();
+    u.rectX = float(rect.x); u.rectY = float(rect.y);
+    u.rectW = float(rect.width); u.rectH = float(rect.height);
+    u.r = c.r; u.g = c.g; u.b = c.b; u.a = c.a;
+    u.sxCode = float(int(t.codeX()));
+    u.sxP1 = t.scaleX.param1; u.sxP2 = t.scaleX.param2;
+    u.sxPad = t.scaleX.param3;
+    u.syCode = float(int(t.codeY()));
+    u.syP1 = t.scaleY.param1; u.syP2 = t.scaleY.param2;
+    u.syPad = t.scaleY.param3;
+    u.prCode = float(int(t.projection.kind));
+    u.thetaOff = t.projection.thetaOffset;
+    u.thetaDir = t.projection.thetaDir;
+    return u;
+}
+
+[[nodiscard]] inline Rect2Df toF(plot::Rect2D r) {
+    return {float(r.x), float(r.y), float(r.width), float(r.height)};
+}
+
+#pragma pack(push, 1)
+// ── resource ops ──
+struct PCreateBuffer { uint32_t handle; uint64_t size; uint8_t kind; };
+struct PWriteBuffer  { uint32_t handle; uint64_t dstOff; BufSrc data; };
+struct PReleaseBuffer{ uint32_t handle; };
+struct PCreateTexture{ uint32_t handle, w, h; uint8_t fmt; };
+struct PWriteTexture { uint32_t handle, x, y, w, h; BufSrc data; };
+struct PReleaseTexture{ uint32_t handle; };
+
+// ── pixel-space draws ──
+struct PDrawTrisPx     { Rect2Df clip; BufSrc verts; float r,g,b,a; };
+struct PDrawTrisPxVC   { Rect2Df clip; BufSrc verts; BufSrc colors; };
+struct PDrawLinePx     { Rect2Df clip; BufSrc pts; float r,g,b,a,wPx; };
+struct PDrawTextQuads  { Rect2Df clip; uint32_t atlasTex; BufSrc quads; };
+struct PDrawInstanced  { Rect2Df clip; BufSrc tpl; BufSrc inst;
+                         TransformUBO ubo; };
+
+// ── data-space draws ──
+struct PDrawLines   { Rect2Df clip; Rect2Df viewRect; TransformUBO ubo;
+                      uint32_t buf, count; float r,g,b,a, width; };
+struct PDrawPoints  { Rect2Df clip; Rect2Df viewRect; TransformUBO ubo;
+                      uint32_t posBuf, colBuf, sizeBuf, count;
+                      uint32_t flags;  // bit0 hasCol, bit1 hasSize
+                      float marker[4]; };
+struct PDrawTrisData{ Rect2Df clip; TransformUBO ubo;
+                      uint32_t posBuf, colBuf, vertCount;
+                      float r,g,b,a; };
+struct PDrawTrisGpu { Rect2Df clip; float resW, resH;
+                      uint32_t buf; uint64_t byteOff; uint32_t count; };
+struct PDrawImage   { Rect2Df viewRect; TransformUBO ubo;
+                      uint32_t gridTex, cmapTex; float params[8]; };
+
+// ── compute ops ──
+struct PTessLines  { uint32_t inBuf, inBase, outBuf, outBase;
+                     uint32_t n, nSeg; float hwidth;
+                     uint8_t join, cap; float miterLimit;
+                     float r,g,b,a; };
+struct PEvalFunc   { uint32_t outBuf; double xMin, xMax;
+                     uint32_t count; uint16_t funcId; uint8_t pad[6]; };
+struct PFuncDef    { uint16_t funcId; uint8_t lang; BufSrc body; };
+struct PReduceMinMax{ uint32_t inBuf, count, mailbox; };
+struct PHistBins   { uint32_t srcBuf, n, binsBuf;
+                     float e0, invW; uint32_t nBins, mailbox; };
+#pragma pack(pop)
+
+} // namespace volcano::web

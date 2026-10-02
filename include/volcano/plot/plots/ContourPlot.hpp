@@ -50,7 +50,7 @@ public:
     ContourPlot(Grid2D grid, ContourConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl contour sets tight autoscale on the grid extent.
@@ -81,7 +81,7 @@ private:
     Grid2D grid_;
     ContourConfig config_;
     std::string label_;
-    render::primitives::LineSegmentRenderer renderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     std::vector<Point2D> segments_;  // computed in prepare()
     std::vector<float> segLevels_;   // level of each segment pair (size = segments_/2)
     bool prepared_ = false;
@@ -92,7 +92,7 @@ private:
     /// of the segment closest to the level's centroid of midpoints).
     [[nodiscard]] std::map<float, Point2D> clabelAnchors() const;
     /// Draw clabel text at the representative midpoint of each level.
-    void drawClabels(vk::CommandBuffer cmd, render::Renderer& r,
+    void drawClabels(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect);
 };
 
@@ -105,7 +105,7 @@ public:
     ContourfPlot(Grid2D grid, ContourConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl contour sets tight autoscale on the grid extent.
@@ -137,7 +137,7 @@ private:
     Grid2D grid_;
     ContourConfig config_;
     std::string label_;
-    render::primitives::FillRenderer renderer_;
+    std::unique_ptr<render::primitives::FillRenderer> renderer_;
     std::vector<Point2D> positions_;  // triangle vertices
     std::vector<Color> colors_;       // per-vertex colors
     /// Data-space cell rings per level band (only when hatches set).

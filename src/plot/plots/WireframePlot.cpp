@@ -77,18 +77,14 @@ void WireframePlot::projectWireframe() {
 void WireframePlot::prepare(render::Renderer& r) {
     projectWireframe();
 
-    auto& ctx = r.backend().context();
-    lineRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                       r.backend().sampleCount(), r.pipelineCache());
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        lineRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{segments_}, config_.color, config_.lineWidth);
+        lineRenderer_->upload(std::span{segments_}, config_.color, config_.lineWidth);
     }
     prepared_ = true;
 }
 
-void WireframePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void WireframePlot::draw(render::Cmd& cmd, render::Renderer& r,
                          const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
 
@@ -97,8 +93,8 @@ void WireframePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    lineRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    lineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
 }
 
 void WireframePlot::contributeToAutoscale(Viewport& v) const {

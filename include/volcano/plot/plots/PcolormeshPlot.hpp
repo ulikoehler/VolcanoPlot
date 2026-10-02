@@ -68,7 +68,7 @@ public:
                    PcolormeshConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl sticky edges: tight autoscale, no 5% margin.
@@ -119,21 +119,21 @@ private:
     PcolormeshConfig config_;
     Range valueRange_;
 
-    render::primitives::FillRenderer fillRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
     bool prepared_ = false;
 
     /// Uniform-grid flat shading draws as a single textured quad via
     /// HeatmapRenderer (O(texture) instead of O(6 verts/cell)).
-    render::primitives::HeatmapRenderer texRenderer_;
+    std::unique_ptr<render::primitives::HeatmapRenderer> texRenderer_;
     bool texInit_ = false;
     bool useTex_ = false;
 
     void computeValueRange();
     void buildGeometry();
     /// Compute-shader tessellation into VertexStorage buffers adopted by
-    /// fillRenderer_. Returns false when the GPU path can't be used
+    /// fillRenderer_-> Returns false when the GPU path can't be used
     /// (caller falls back to buildGeometry()).
     bool buildGeometryGpu(render::Renderer& r);
     /// True when flat shading + uniform edges + no cell borders and the

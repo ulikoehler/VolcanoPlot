@@ -52,7 +52,7 @@ public:
         : groups_(std::move(groups)), cfg_(std::move(cfg)) {}
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return cfg_.label; }
@@ -68,9 +68,9 @@ private:
     std::vector<Point2D> bodyEdgeSegs_;
     std::vector<Point2D> innerSegs_;  // box + whisker + median lines
 
-    render::primitives::FillRenderer fillRenderer_;
-    render::primitives::LineSegmentRenderer edgeRenderer_;
-    render::primitives::LineSegmentRenderer innerRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> edgeRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> innerRenderer_;
     bool prepared_ = false;
 
     /// Compute KDE for one group: returns (y_eval, density) pairs.

@@ -1,7 +1,15 @@
 // volcano/text/TextRenderer.cpp — glyb-based bitmap atlas text renderer
 #include "volcano/text/TextRenderer.hpp"
+#ifndef VOLCANO_WEB
+#include "../render/VkFactory.hpp"
+#include "../render/VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
+#include <volcano/core/Image.hpp>
+#include <volcano/core/Buffer.hpp>
+#include <volcano/core/ShaderModule.hpp>
+#include <volcano/core/CommandBuffer.hpp>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -424,13 +432,73 @@ void TextRenderer::initFonts() {
     loadFont();
 }
 
-void TextRenderer::init(vk::Device device, VmaAllocator allocator,
-                        vk::RenderPass renderPass,
-                        vk::SampleCountFlagBits samples,
-                        core::PipelineCache& /*cache*/,
-                        core::DescriptorPool& /*descPool*/) {
+#ifndef VOLCANO_WEB
+namespace {
+
+class TextRendererVk final : public TextRenderer {
+public:
+    explicit TextRendererVk(render::VulkanGpuServices& svcs)
+        : svcs_(&svcs) {}
+
+    void init();
+    void prepareAtlasGpu() override;
+    void resetScratch() override {
+        vbOffset_ = 0;
+        ibOffset_ = 0;
+    }
+    void draw(render::Cmd& cmd, plot::Rect2D rect,
+              std::string_view text, float x, float y,
+              plot::Color color, float scale = 1.0f,
+              float rotation = 0.0f,
+              plot::HAlign lineAlign = plot::HAlign::Left,
+              font_face* face = nullptr) override;
+    void syncAtlas() override;
+
+private:
+    void ensureScratch(size_t vertexBytes, size_t indexBytes);
+    void uploadAtlas();
+
+    render::VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_ = VK_NULL_HANDLE;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    vk::UniqueDescriptorSetLayout descSetLayout_;
+    vk::UniqueDescriptorPool descPool_;
+    vk::DescriptorSet descSet_;
+    vk::UniqueSampler sampler_;
+    bool inited_ = false;
+
+    core::Image atlasImage_;
+    vk::UniqueImageView atlasView_;
+    bool atlasUploaded_ = false;
+    size_t atlasGlyphCount_ = 0;
+
+    core::Buffer scratchVB_;
+    core::Buffer scratchIB_;
+    size_t vbCapacity_ = 0;
+    size_t ibCapacity_ = 0;
+    size_t vbOffset_ = 0;
+    size_t ibOffset_ = 0;
+};
+
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return vk::Rect2D{
+        vk::Offset2D{static_cast<int32_t>(r.x), static_cast<int32_t>(r.y)},
+        vk::Extent2D{r.width, r.height}};
+}
+
+} // namespace
+#endif
+
+
+#ifndef VOLCANO_WEB
+void TextRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
     device_ = device;
-    allocator_ = allocator;
+    allocator_ = svcs_->allocator();
 
     initFonts();
 
@@ -567,6 +635,7 @@ void TextRenderer::init(vk::Device device, VmaAllocator allocator,
     pipeline_ = std::move(rv.value);
     inited_ = true;
 }
+#endif
 
 /// Find DejaVu Serif (regular) — the dejavuserif mathtext fontset face.
 std::string findSerifFontFile() {
@@ -733,13 +802,8 @@ TextRenderer::FaceMatch TextRenderer::faceFor(std::string_view family,
     return m;
 }
 
-void TextRenderer::resetScratch() {
-    // Reset ring-buffer offsets for the new frame.
-    vbOffset_ = 0;
-    ibOffset_ = 0;
-}
-
-void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
+#ifndef VOLCANO_WEB
+void TextRendererVk::ensureScratch(size_t vertexBytes, size_t indexBytes) {
     // Ring-buffered: ensure total capacity is enough for the current frame.
     if (vertexBytes > vbCapacity_) {
         size_t newSize = std::max<size_t>(65536, vertexBytes * 2);
@@ -760,8 +824,10 @@ void TextRenderer::ensureScratch(size_t vertexBytes, size_t indexBytes) {
         ibCapacity_ = newSize;
     }
 }
+#endif
 
-void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
+#ifndef VOLCANO_WEB
+void TextRendererVk::prepareAtlasGpu() {
     if (atlasUploaded_ || !fontFace_) return;
     auto* atlas = fontManager_->getCurrentAtlas(fontFace_);
     prepareAtlasGlyphs();
@@ -771,17 +837,20 @@ void TextRenderer::prepareAtlas(vk::Queue queue, vk::CommandPool pool) {
     // don't need persisting).
     if (atlas && !atlas->loadedFromDisk)
         atlas->save(fontManager_.get(), fontFace_);
-    uploadAtlas(queue, pool);
+    uploadAtlas();
     atlasUploaded_ = true;
     atlasGlyphCount_ = fontManager_->glyph_map.size();
 }
+#endif
 
-void TextRenderer::syncAtlas(vk::Queue queue, vk::CommandPool pool) {
+#ifndef VOLCANO_WEB
+void TextRendererVk::syncAtlas() {
     if (!atlasDirty_ || !atlasUploaded_) return;
-    uploadAtlas(queue, pool);
+    uploadAtlas();
     atlasDirty_ = false;
     atlasGlyphCount_ = fontManager_->glyph_map.size();
 }
+#endif
 
 /// Prerender the ASCII + math-symbol charset so common text is already
 /// in the atlas before the first frame. Extended-script glyphs (CJK,
@@ -813,7 +882,10 @@ void TextRenderer::prepareAtlasGlyphs() {
     textRenderer_->render(*batch, shapes, segment);
 }
 
-void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
+#ifndef VOLCANO_WEB
+void TextRendererVk::uploadAtlas() {
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
     // Get the atlas (populated with glyphs).
     auto* atlas = fontManager_->getCurrentAtlas(fontFace_);
     if (!atlas || !atlas->pixels) return;
@@ -911,11 +983,14 @@ void TextRenderer::uploadAtlas(vk::Queue queue, vk::CommandPool pool) {
         device_.updateDescriptorSets(wds, {});
     }
 }
+#endif
 
-void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+#ifndef VOLCANO_WEB
+void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
                         std::string_view text, float x, float y,
                         plot::Color color, float scale, float rotation,
                         plot::HAlign lineAlign, font_face* face) {
+    const vk::CommandBuffer cmd = render::vkCmd(cmdRef);
     font_face* primary = face ? face : fontFace_;
     if (!inited_ || !primary || text.empty()) return;
 
@@ -1036,7 +1111,7 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                            pipelineLayout_.get(), 0, descSet_, {});
 
     // Push constant: framebuffer resolution.
-    struct PC { float w, h; } pc{float(rect.extent.width), float(rect.extent.height)};
+    struct PC { float w, h; } pc{float(rect.width), float(rect.height)};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
@@ -1045,12 +1120,38 @@ void TextRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     cmd.bindIndexBuffer(scratchIB_.handle(), vk::DeviceSize(ibOffset_ - idxBytes), vk::IndexType::eUint32);
 
     // Set viewport + scissor.
-    vk::Viewport viewport{0, 0, float(rect.extent.width), float(rect.extent.height), 0, 1};
+    vk::Viewport viewport{0, 0, float(rect.width), float(rect.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     // Draw this text's indices only.
     cmd.drawIndexed(uint32_t(idxCount), 1, 0, 0, 0);
+}
+#endif
+
+#ifndef VOLCANO_WEB
+std::unique_ptr<TextRenderer> makeTextVk(render::VulkanGpuServices& svcs) {
+    auto p = std::make_unique<TextRendererVk>(svcs);
+    p->init();
+    return p;
+}
+#endif
+
+namespace {
+/// CPU-only TextRenderer (metrics/measuring; no GPU).
+class CpuTextRenderer final : public TextRenderer {
+public:
+    void prepareAtlasGpu() override {}
+    void resetScratch() override {}
+    void draw(render::Cmd&, plot::Rect2D, std::string_view, float, float,
+              plot::Color, float, float, plot::HAlign,
+              font_face*) override {}
+    void syncAtlas() override {}
+};
+} // namespace
+
+std::unique_ptr<TextRenderer> TextRenderer::createCpuOnly() {
+    return std::make_unique<CpuTextRenderer>();
 }
 
 } // namespace volcano::text

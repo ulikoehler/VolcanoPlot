@@ -41,16 +41,12 @@ void LinePlot::prepare(render::Renderer& r) {
         // In-place update: memcpy into the host-visible buffer (reallocs
         // only on growth). Direct series() writes stay correct — there is
         // no dirty flag to bypass, the upload is just cheap.
-        renderer_.updatePoints(std::span{series_.points});
+        renderer_->updatePoints(std::span{series_.points});
         dataDirty_ = false;
         return;
     }
-    auto& ctx = r.backend().context();
-    renderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                   r.backend().sampleCount(), r.pipelineCache());
-    renderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                     ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                     std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
+    if (!renderer_) renderer_ = r.gpu().createLineRenderer();
+    renderer_->upload(std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
     prepared_ = true;
     dataDirty_ = false;
 }
@@ -147,7 +143,7 @@ std::vector<size_t> markerIndices(const Series2D& series,
 
 } // namespace
 
-void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
+void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_ || series_.points.size() < 2 ||
         series_.lineStyle == LineStyle::None ||
@@ -163,9 +159,9 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
     if (!sp.dashes.empty()) return;
     sp.join = series_.joinStyle;
     sp.cap = series_.capStyle;
-    auto& gpu = r.gpuLineRenderer();
+    auto& gpu = r.gpu().gpuLine();
     if (!gpu.inited()) return;
-    const float W = float(r.backend().extent().width);
+    const float W = float(r.gpu().extent().width);
     const size_t huge =
         size_t(std::max(8192.0f, W * 4.0f));
     // Massively oversampled x-monotonic polylines on linear scales:
@@ -191,13 +187,10 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
         // unsorted x too (atomics), and skips the O(n) host scan.
         // Falls back to the CPU pass on failure.
         std::vector<float> mn, mx;
-        auto& ctx = r.backend().context();
         // Column affine: pixel col = ax + kx * dataX  →  ax folds in the
         // viewport offset so fx0 lands at rect.x.
         const float ax = float(rect.x) - fx0 * kx;
-        bool gpuOk = gpu.envelopeColumns(
-            ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
-            renderer_.pointBuffer(), renderer_.pointCount(),
+        bool gpuOk = gpu.envelopeColumns(renderer_->pointBuffer(), renderer_->pointCount(),
             ax, kx, 0, int(W) - 1, mn, mx);
         std::vector<Point2D> px;
         bool usedGpu = gpuOk && !mn.empty();
@@ -243,7 +236,7 @@ noDecimate:
     gpuMeshSeq_ = r.frameSeq();
 }
 
-void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || series_.points.empty()) return;
     const float dpi = axes.style().dpi;
@@ -307,11 +300,10 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     sp.cap = series_.capStyle;
 
     // mpl clip_on=False → clip to the whole canvas, not the axes rect.
-    auto eff = clipRect(rect, r.backend().extent());
-    vk::Rect2D clip{vk::Offset2D{eff.x, eff.y},
-                    vk::Extent2D{eff.width, eff.height}};
-    vk::Extent2D res = r.backend().extent();
-    auto& spine = r.spineRenderer();
+    auto eff = clipRect(rect, r.gpu().extent());
+    Rect2D clip{eff.x, eff.y, eff.width, eff.height};
+    Extent2D res = r.gpu().extent();
+    auto& spine = r.gpu().spine();
 
     // Solid lines were tessellated on the GPU in preDraw; dashes and
     // patheffects passes fall back to the CPU stroker.
@@ -395,14 +387,13 @@ void LinePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     }
 }
 
-void LinePlot::drawMarkersAtPoints(vk::CommandBuffer cmd,
+void LinePlot::drawMarkersAtPoints(render::Cmd& cmd,
                                    render::Renderer& r,
                                    const Axes& axes, Rect2D rect,
                                    const MarkerFx* fx) {
     if (series_.size <= 0 || series_.marker == MarkerStyle::None) return;
-    auto eff = clipRect(rect, r.backend().extent());
-    vk::Rect2D clip{vk::Offset2D{eff.x, eff.y},
-                    vk::Extent2D{eff.width, eff.height}};
+    auto eff = clipRect(rect, r.gpu().extent());
+    Rect2D clip{eff.x, eff.y, eff.width, eff.height};
     Point2D off = fx ? fx->offset : Point2D{0.0f, 0.0f};
     std::vector<Point2D> px;
     px.reserve(series_.points.size());
@@ -644,7 +635,7 @@ void LinePlot::contributeToAutoscaleScaled(Viewport& v,
 }
 void LinePlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
-    auto r = reducer.reduceMinMax2D(renderer_.pointBuffer(), renderer_.pointCount());
+    auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(), renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX); v.x.max = std::max(v.x.max, r->maxX);
     v.y.min = std::min(v.y.min, r->minY); v.y.max = std::max(v.y.max, r->maxY);

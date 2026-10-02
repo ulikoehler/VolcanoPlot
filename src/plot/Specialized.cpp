@@ -16,7 +16,7 @@ namespace volcano::plot {
 
 // ═══ TablePlot ════════════════════════════════════════════════════════════
 
-void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void TablePlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes&, Rect2D rect) {
     if (cellText.empty()) return;
     size_t rows = cellText.size() + (rowLabels.empty() ? 0 : 0);
@@ -45,11 +45,11 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                    : float(rect.y) + float(rect.height);
     float x0 = float(rect.x);
 
-    auto& spine = r.spineRenderer();
-    auto& text = r.textRenderer();
+    auto& spine = r.gpu().spine();
+    auto& text = r.gpu().text();
     // The table may extend outside the axes rect — clip to the canvas.
-    auto ext = r.backend().extent();
-    vk::Rect2D clip{vk::Offset2D{0, 0}, ext};
+    auto ext = r.gpu().extent();
+    Rect2D clip{0, 0, ext.width, ext.height};
 
     auto cellRect = [&](size_t row, size_t col) {
         return plot::Rect2D{int32_t(x0 + float(col) * cellW),
@@ -61,9 +61,9 @@ void TablePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
                         Color bg) {
         auto cr = cellRect(row, col);
         if (bg.a > 0)
-            spine.drawFilledRect(cmd, clip, r.backend().extent(), cr, bg);
+            spine.drawFilledRect(cmd, clip, r.gpu().extent(), cr, bg);
         // Cell border.
-        spine.drawRect(cmd, clip, r.backend().extent(), cr, edgeColor, 1.0f);
+        spine.drawRect(cmd, clip, r.gpu().extent(), cr, edgeColor, 1.0f);
         // Centered text — draw() takes the baseline origin, so place the
         // baseline at the cell's vertical center + (ascent - height/2).
         auto m = text.measureText(str, cellFontScale);
@@ -410,7 +410,7 @@ void WordCloudPlot::layout(render::Renderer& r, Rect2D rect) {
         size_t wi = order[rank];
         const auto& word = words[wi];
         float scale = toSize(word.weight);
-        auto m = r.textRenderer().measureText(word.text, scale);
+        auto m = r.gpu().text().measureText(word.text, scale);
         float w = m.width, h = m.height;
         bool vertical = rotationRatio > 0.0f && rng.uniform() < rotationRatio;
         float bw = vertical ? h : w;
@@ -449,24 +449,24 @@ void WordCloudPlot::layout(render::Renderer& r, Rect2D rect) {
     }
 }
 
-void WordCloudPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void WordCloudPlot::draw(render::Cmd& cmd, render::Renderer& r,
                          const Axes&, Rect2D rect) {
     if (!laidOut_) layout(r, rect);
     if (placed_.empty() || !r.textReady()) return;
 
-    vk::Rect2D clip = clipRectVk(rect, r.backend().extent());
+    Rect2D clip = clipRectVk(rect, r.gpu().extent());
     for (const auto& p : placed_) {
         const auto& word = words[p.word];
-        auto m = r.textRenderer().measureText(word.text, p.scale);
+        auto m = r.gpu().text().measureText(word.text, p.scale);
         if (p.vertical) {
             // Rotated −90° (reads bottom→top): baseline origin at the
             // box's bottom-right corner.
-            r.textRenderer().draw(cmd, clip, word.text,
+            r.gpu().text().draw(cmd, clip, word.text,
                                   p.x + m.height, p.y + p.w,
                                   p.color, p.scale, -float(M_PI_2));
         } else {
             // (x, y) is the baseline origin: box top + ascent.
-            r.textRenderer().draw(cmd, clip, word.text,
+            r.gpu().text().draw(cmd, clip, word.text,
                                   p.x, p.y + m.ascent,
                                   p.color, p.scale);
         }
@@ -551,14 +551,10 @@ void NetworkPlot::computeLayout() {
 }
 
 void NetworkPlot::prepare(render::Renderer& r) {
-    auto& ctx = r.backend().context();
     if (!laidOut_) computeLayout();
     if (!prepared_) {
-        edgesR_.init(ctx.device.handle(), r.backend().renderPass(),
-                     r.backend().sampleCount(), r.pipelineCache());
-        nodesR_.init(ctx.device.handle(), r.backend().renderPass(),
-                     r.backend().sampleCount(), r.descriptorPool(),
-                     r.pipelineCache());
+        if (!edgesR_) edgesR_ = r.gpu().createLineSegmentRenderer();
+        if (!nodesR_) nodesR_ = r.gpu().createPointRenderer();
         prepared_ = true;
     }
     // Edge endpoint pairs (a,b) per edge.
@@ -570,27 +566,23 @@ void NetworkPlot::prepare(render::Renderer& r) {
         segPts.push_back(pos_[b]);
     }
     if (!segPts.empty())
-        edgesR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                       std::span{segPts}, opts_.edgeColor, opts_.edgeWidth);
+        edgesR_->upload(std::span{segPts}, opts_.edgeColor, opts_.edgeWidth);
     if (!pos_.empty()) {
         std::vector<Color> colors(pos_.size(), opts_.nodeColor);
         std::vector<float> sizes(pos_.size(), opts_.nodeSize);
-        nodesR_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                       ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                       std::span{pos_}, std::span{colors}, std::span{sizes});
+        nodesR_->upload(std::span{pos_}, std::span{colors}, std::span{sizes});
     }
 }
 
-void NetworkPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void NetworkPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
     Transform2D t = axes.transform();
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
-    if (edgesR_.pointCount() >= 2)
-        edgesR_.draw(cmd, vrect, t, edgesR_.pointCount());
-    if (nodesR_.pointCount() > 0)
-        nodesR_.draw(cmd, vrect, t, nodesR_.pointCount());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    if (edgesR_->pointCount() >= 2)
+        edgesR_->draw(cmd, vrect, t, edgesR_->pointCount());
+    if (nodesR_->pointCount() > 0)
+        nodesR_->draw(cmd, vrect, t, nodesR_->pointCount());
     // Node labels (mpl `with_labels=True`).
     if (!opts_.labels.empty() && r.textReady()) {
         for (uint32_t i = 0; i < n_ && i < opts_.labels.size(); ++i) {
@@ -598,9 +590,9 @@ void NetworkPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
             Point2D f = axes.dataToFraction(pos_[i]);
             float px = rect.x + f.x * rect.width;
             float py = rect.y + (1.0f - f.y) * rect.height;
-            auto m = r.textRenderer().measureText(opts_.labels[i],
+            auto m = r.gpu().text().measureText(opts_.labels[i],
                                                   opts_.fontScale);
-            r.textRenderer().draw(cmd, vrect, opts_.labels[i], px,
+            r.gpu().text().draw(cmd, vrect, opts_.labels[i], px,
                                   py + m.ascent - m.height * 0.5f,
                                   Color::black(), opts_.fontScale, 0.0f,
                                   HAlign::Center);

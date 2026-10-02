@@ -51,7 +51,7 @@ public:
                Axes3DConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] bool is3D() const override { return true; }
@@ -86,9 +86,9 @@ private:
     std::vector<Point2D> lineSegs_;
     std::vector<Point2D> axisSegs_;  // tick edges + tick marks (axisColor)
     std::vector<TickLabel> labels_;
-    render::primitives::FillRenderer fillRenderer_;
-    render::primitives::LineSegmentRenderer lineRenderer_;
-    render::primitives::LineSegmentRenderer axisRenderer_;
+    std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> axisRenderer_;
     bool prepared_ = false;
 };
 

@@ -45,7 +45,7 @@ public:
               XCorrConfig config = {});
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r,
+    void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     [[nodiscard]] std::string label() const override { return config_.label; }
@@ -70,8 +70,8 @@ private:
     std::vector<float> lags_;
     std::vector<float> values_;
 
-    render::primitives::LineSegmentRenderer stemRenderer_;
-    render::primitives::PointRenderer markerRenderer_;
+    std::unique_ptr<render::primitives::LineSegmentRenderer> stemRenderer_;
+    std::unique_ptr<render::primitives::PointRenderer> markerRenderer_;
     std::vector<Point2D> stemSegments_;  // pairs of points for eLineList
     std::vector<Point2D> markerPoints_;
     std::vector<Color> markerColors_;

@@ -20,7 +20,7 @@ public:
     KDEPlot& evalRange(Range x, Range y) { evalX_ = x; evalY_ = y; return *this; }
 
     void prepare(render::Renderer& r) override;
-    void draw(vk::CommandBuffer cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
+    void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// mpl sticky edges: tight autoscale, no 5% margin.
     [[nodiscard]] bool tightAutoscale() const override { return true; }
@@ -37,8 +37,8 @@ private:
     float bandwidth_; // 0 = auto (Scott's rule, scipy gaussian_kde default)
     Range evalX_{1.0f, 0.0f}, evalY_{1.0f, 0.0f}; // invalid → data range
     Grid2D grid_;
-    render::primitives::HeatmapRenderer renderer_;
-    render::primitives::KdeEvalRenderer kde_;
+    std::unique_ptr<render::primitives::HeatmapRenderer> renderer_;
+    
     bool prepared_ = false;
     bool kdeInited_ = false;
 

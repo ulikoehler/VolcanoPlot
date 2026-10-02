@@ -7,7 +7,6 @@
 #include "volcano/plot/GridSpec.hpp"
 #include "volcano/plot/Style.hpp"
 
-#include <vulkan/vulkan.hpp>
 
 #include <array>
 #include <map>
@@ -16,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace volcano::render { class Renderer; class VectorCanvas; }
+namespace volcano::render { class Renderer; class VectorCanvas; class Cmd; }
 
 namespace volcano::render::primitives { class ReduceRenderer; }
 
@@ -36,13 +35,13 @@ public:
     /// queue. Use it for compute work that feeds vertex input (e.g. GPU
     /// line tessellation); the results must be consumed by draw() in the
     /// same frame. Default: no pre-pass work.
-    virtual void preDraw(vk::CommandBuffer cmd,
+    virtual void preDraw(render::Cmd& cmd,
                          render::Renderer& renderer,
                          const Axes& axes, Rect2D rect) {
         (void)cmd; (void)renderer; (void)axes; (void)rect;
     }
     /// Called every frame to record draw commands.
-    virtual void draw(vk::CommandBuffer cmd, render::Renderer& renderer,
+    virtual void draw(render::Cmd& cmd, render::Renderer& renderer,
                       const Axes& axes, Rect2D rect) = 0;
     /// Contribute to autoscale (extend the viewport).
     virtual void contributeToAutoscale(Viewport& v) const = 0;
@@ -164,15 +163,15 @@ public:
     /// Effective clip rect for raster draws: `axesRect` when clipOn,
     /// else the full canvas.
     [[nodiscard]] Rect2D clipRect(Rect2D axesRect,
-                                  vk::Extent2D canvas) const {
+                                  Extent2D canvas) const {
         return clipOn ? axesRect
                       : Rect2D{0, 0, canvas.width, canvas.height};
     }
     /// Same as clipRect, as a Vulkan scissor.
-    [[nodiscard]] vk::Rect2D clipRectVk(Rect2D axesRect,
-                                        vk::Extent2D canvas) const {
+    [[nodiscard]] Rect2D clipRectVk(Rect2D axesRect,
+                                        Extent2D canvas) const {
         auto r = clipRect(axesRect, canvas);
-        return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+        return {r.x, r.y, r.width, r.height};
     }
     /// Hit-test (matplotlib `contains` / pick): true when the data-space
     /// point hits this layer. Default: never hit.

@@ -1,10 +1,13 @@
 // volcano/render/primitives/Grid3DRenderer.cpp — fwidth-based 3D dynamic grid
 #include "volcano/render/Grid3DRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include <array>
 #include <stdexcept>
 #include <cmath>
+#include <volcano/core/ShaderModule.hpp>
 
 namespace volcano::render {
 
@@ -165,11 +168,44 @@ std::array<float, 16> mat4Inverse(const std::array<float, 16>& m) {
     return inv;
 }
 
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return vk::Rect2D{
+        vk::Offset2D{static_cast<int32_t>(r.x), static_cast<int32_t>(r.y)},
+        vk::Extent2D{r.width, r.height}};
+}
+
+class Grid3DRendererVk final : public Grid3DRenderer {
+public:
+    explicit Grid3DRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Viewport& viewport,
+              const plot::Camera3D& camera,
+              const Grid3DStyle& style) const override;
+
+private:
+    VulkanGpuServices* svcs_ = nullptr;
+    vk::Device device_ = VK_NULL_HANDLE;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer fullscreenBuffer_;
+    bool inited_ = false;
+};
+
 } // namespace
 
-void Grid3DRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                          vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-                          VmaAllocator allocator, vk::Queue queue, vk::CommandPool pool) {
+void Grid3DRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
+    const VmaAllocator allocator = svcs_->allocator();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
     device_ = device;
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -244,10 +280,11 @@ void Grid3DRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void Grid3DRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+void Grid3DRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
                           const plot::Viewport& viewport,
                           const plot::Camera3D& camera,
                           const Grid3DStyle& style) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_) return;
 
     auto vp = camera.viewProjection();
@@ -268,10 +305,10 @@ void Grid3DRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
         float eyeX, eyeY, eyeZ, _pad3;              // u_eye
     } pc{};
 
-    pc.rectX = static_cast<float>(rect.offset.x);
-    pc.rectY = static_cast<float>(rect.offset.y);
-    pc.rectW = static_cast<float>(rect.extent.width);
-    pc.rectH = static_cast<float>(rect.extent.height);
+    pc.rectX = static_cast<float>(rect.x);
+    pc.rectY = static_cast<float>(rect.y);
+    pc.rectW = static_cast<float>(rect.width);
+    pc.rectH = static_cast<float>(rect.height);
 
     pc.xMin = viewport.x.min;  pc.xMin2 = viewport.x.min;  pc.xSpan = viewport.x.span();
     pc.yMin = viewport.y.min;  pc.yMin2 = viewport.y.min;  pc.ySpan = viewport.y.span();
@@ -303,18 +340,24 @@ void Grid3DRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                       vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
                       0, sizeof(PC), &pc);
     vk::Viewport vp_dyn;
-    vp_dyn.setX(static_cast<float>(rect.offset.x))
-          .setY(static_cast<float>(rect.offset.y))
-          .setWidth(static_cast<float>(rect.extent.width))
-          .setHeight(static_cast<float>(rect.extent.height))
+    vp_dyn.setX(static_cast<float>(rect.x))
+          .setY(static_cast<float>(rect.y))
+          .setWidth(static_cast<float>(rect.width))
+          .setHeight(static_cast<float>(rect.height))
           .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp_dyn);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     std::array<vk::Buffer, 1> buf = { fullscreenBuffer_.handle() };
     std::array<vk::DeviceSize, 1> off = {0};
     cmd.bindVertexBuffers(0, buf, off);
     cmd.draw(3, 1, 0, 0);
+}
+
+std::unique_ptr<Grid3DRenderer> makeGrid3DVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<Grid3DRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render

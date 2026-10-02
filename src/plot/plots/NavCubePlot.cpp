@@ -33,14 +33,14 @@ void NavCubePlot::prepare(render::Renderer&) {
     prepared_ = true;
 }
 
-void NavCubePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void NavCubePlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes&, Rect2D rect) {
     if (!prepared_) return;
 
     const auto& cfg = config_;
-    auto ext = r.backend().extent();
-    vk::Rect2D fullRect{vk::Offset2D{0, 0}, ext};
-    auto& spine = r.spineRenderer();
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
+    auto& spine = r.gpu().spine();
 
     // Indicator center in pixels (Y-down).
     float c = cfg.size + cfg.margin;
@@ -86,7 +86,7 @@ void NavCubePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         });
         for (int ei : order) {
             Point2D pts[] = { px[edges[ei][0]], px[edges[ei][1]] };
-            spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+            spine.drawLineStrip(cmd, fullRect, r.gpu().extent(),
                                 pts, cfg.dimColor, 1.0f);
         }
     }
@@ -115,12 +115,12 @@ void NavCubePlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
         return axes[a].depth > axes[b].depth;
     });
 
-    auto& text = r.textRenderer();
+    auto& text = r.gpu().text();
     for (size_t i = 0; i < numAxes; ++i) {
         const auto& ax = axes[ord[i]];
         Point2D tip = toPixel(ax.dir);
         Point2D pts[] = { origin, tip };
-        spine.drawLineStrip(cmd, fullRect, r.backend().extent(),
+        spine.drawLineStrip(cmd, fullRect, r.gpu().extent(),
                             pts, ax.color, cfg.axisWidth);
 
         // Label at the tip, offset slightly outward.

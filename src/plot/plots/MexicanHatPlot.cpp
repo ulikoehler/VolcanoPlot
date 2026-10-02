@@ -179,29 +179,22 @@ void MexicanHatPlot::prepare(render::Renderer& r) {
     evaluateWavelet();
     projectSurface();
 
-    auto& ctx = r.backend().context();
 
     if (config_.drawSurface && !fillPositions_.empty()) {
-        fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        fillRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{fillPositions_}, std::span{fillColors_});
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
     }
 
     if (config_.drawWireframe && !wireSegments_.empty()) {
-        wireRenderer_.init(ctx.device.handle(), r.backend().renderPass(),
-                           r.backend().sampleCount(), r.pipelineCache());
-        wireRenderer_.upload(ctx.device.handle(), ctx.device.graphicsQueue(),
-                             ctx.graphicsPool.handle(), ctx.allocator.handle(),
-                             std::span{wireSegments_}, config_.wireframeColor,
+        if (!wireRenderer_) wireRenderer_ = r.gpu().createLineSegmentRenderer();
+        wireRenderer_->upload(std::span{wireSegments_}, config_.wireframeColor,
                              config_.wireframeWidth);
     }
 
     prepared_ = true;
 }
 
-void MexicanHatPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
+void MexicanHatPlot::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
@@ -210,13 +203,13 @@ void MexicanHatPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
 
-    vk::Rect2D vrect = clipRectVk(rect, r.backend().extent());
+    Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
     if (config_.drawSurface && !fillPositions_.empty())
-        fillRenderer_.draw(cmd, vrect, t);
+        fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawWireframe && !wireSegments_.empty())
-        wireRenderer_.draw(cmd, vrect, t, static_cast<uint32_t>(wireSegments_.size()));
+        wireRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(wireSegments_.size()));
 }
 
 void MexicanHatPlot::contributeToAutoscale(Viewport& v) const {
