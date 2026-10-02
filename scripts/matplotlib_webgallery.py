@@ -419,6 +419,178 @@ def _(out):
     save(fig, out, "annotate")
 
 
+
+# ── second batch: 3-D + exotic plot types ────────────────────────────
+
+def _ax3d(fig):
+    ax = fig.add_subplot(111, projection='3d')
+    ax.view_init(elev=30, azim=-60)
+    return ax
+
+
+def _helix(n=200):
+    t = np.arange(n) / n * 12.56
+    return np.cos(t), np.sin(t), t / 12.56
+
+
+def _cloud(n=60):
+    i = np.arange(n)
+    a = i * 0.7
+    r = 0.3 + 0.65 * (i % 8) / 8
+    return np.cos(a) * r, np.sin(a) * r, (i % 10) / 10
+
+
+@gen("plot3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    ax.plot(*_helix())
+    save(fig, out, "plot3d")
+
+
+@gen("scatter3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    ax.scatter(*_cloud())
+    save(fig, out, "scatter3d")
+
+
+@gen("quiver3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    x, y, z = _cloud()
+    ax.quiver(x, y, z, -y, x, np.full_like(z, 0.2))
+    save(fig, out, "quiver3d")
+
+
+@gen("errorbar3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    x, y, z = _cloud()
+    ax.errorbar(x, y, z, zerr=0.15, fmt='o')
+    save(fig, out, "errorbar3d")
+
+
+@gen("bar3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    i = np.arange(36)
+    ax.bar3d((i % 6) * 0.25, (i // 6) * 0.25, np.zeros(36),
+             0.15, 0.15, 0.3 + np.abs(np.sin(i * 0.9)) * 0.7)
+    save(fig, out, "bar3d")
+
+
+def _contour3d_grid():
+    return grid2d(30, 24, lambda i, j:
+                  np.sin(np.hypot(i * 0.4 - 6, j * 0.4 - 4.8)))
+
+
+@gen("contour3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    g = _contour3d_grid()
+    X, Y = np.meshgrid(np.arange(g.shape[1]), np.arange(g.shape[0]))
+    ax.contour(X, Y, g)
+    save(fig, out, "contour3d")
+
+
+@gen("contourf3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    g = _contour3d_grid()
+    X, Y = np.meshgrid(np.arange(g.shape[1]), np.arange(g.shape[0]))
+    ax.contourf(X, Y, g)
+    save(fig, out, "contourf3d")
+
+
+@gen("voxels")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    n = 8
+    i, j, k = np.indices((n, n, n))
+    f = (i - 3.5) ** 2 + (j - 3.5) ** 2 + (k - 3.5) ** 2 < 12
+    ax.voxels(f)
+    save(fig, out, "voxels")
+
+
+@gen("text3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    ax.plot([0, 1], [0, 1], [0, 1])
+    ax.text(0.5, 0.5, 0.9, 'peak')
+    save(fig, out, "text3d")
+
+
+@gen("barbs")
+def _(out):
+    fig, ax = fig_ax()
+    n = 10
+    i, j = np.meshgrid(np.arange(n), np.arange(n))
+    ax.barbs(i, j, np.cos(i * 0.6) * 20, np.sin(j * 0.6) * 20)
+    save(fig, out, "barbs")
+
+
+@gen("groupedbar")
+def _(out):
+    fig, ax = fig_ax()
+    heights = np.array([[3, 7, 2, 5], [4, 2, 6, 3], [2, 5, 3, 6]])
+    x = np.arange(heights.shape[1])
+    w = 0.8 / heights.shape[0]
+    for gi, h in enumerate(heights):
+        ax.bar(x + gi * w, h, width=w)
+    save(fig, out, "groupedbar")
+
+
+@gen("figimage")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    w, h = 80, 60
+    i, j = np.meshgrid(np.arange(w), np.arange(h))
+    arr = np.stack([(i * 4) & 0xFF, (j * 4) & 0xFF,
+                    np.full_like(i, 0x80), np.full_like(i, 0xFF)],
+                   axis=-1).astype(np.uint8)
+    fig.figimage(arr)
+    save(fig, out, "figimage")
+
+
+@gen("chirp")
+def _(out):
+    from scipy.signal import chirp as _chirp
+    fig, ax = fig_ax()
+    t = np.linspace(0, 1, 2048)
+    ax.plot(t, _chirp(t, 1, 1, 20))
+    save(fig, out, "chirp")
+
+
+@gen("mexicanhat")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    s, r = 1.5, 8
+    x = np.linspace(-r, r, 50)
+    X, Y = np.meshgrid(x, x)
+    r2 = (X ** 2 + Y ** 2) / s ** 2
+    ax.plot_surface(X, Y, (1 - r2) * np.exp(-r2 / 2), cmap='viridis')
+    save(fig, out, "mexicanhat")
+
+
+@gen("barlabel")
+def _(out):
+    fig, ax = fig_ax()
+    hs = [3, 7, 2, 5]
+    bars = ax.bar(['a', 'b', 'c', 'd'], hs, color='#2a7')
+    ax.bar_label(bars)
+    save(fig, out, "barlabel")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out_dir")

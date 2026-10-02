@@ -197,7 +197,11 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'fill', 'spy', 'tripcolor', 'streamplot', 'matshow',
                     'pcolorfast', 'brokenbarh', 'tricontour', 'triplot',
                     'specgram', 'spectrum', 'psd', 'csd', 'xcorr',
-                    'cohere', 'wireframe', 'trisurf', 'annotate']) {
+                    'cohere', 'wireframe', 'trisurf', 'annotate',
+                    'plot3d', 'scatter3d', 'bar3d', 'quiver3d',
+                    'errorbar3d', 'contour3d', 'contourf3d', 'voxels',
+                    'text3d', 'barbs', 'groupedbar', 'figimage',
+                    'chirp', 'mexicanhat', 'barlabel']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));
@@ -222,11 +226,17 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
             return { nonWhite, chroma };
         });
         console.log(kind.toUpperCase(), JSON.stringify(stats), JSON.stringify(errors));
-        expect(stats.nonWhite).toBeGreaterThan(1000);
+        // sparse-content kinds render fewer pixels
+        const sparse = ['plot3d', 'scatter3d', 'text3d',
+                        'contour'].includes(kind);
+        expect(stats.nonWhite)
+            .toBeGreaterThan(sparse ? 200 : 1000);
         // contour/quiver/streamplot/triplot/wireframe default to
         // black or monochrome — chroma n/a
         if (!['contour', 'quiver', 'streamplot', 'tricontour', 'triplot',
-              'wireframe'].includes(kind))
+              'wireframe', 'contour3d', 'quiver3d', 'text3d', 'barbs',
+              'barlabel', 'chirp', 'plot3d', 'errorbar3d',
+              'groupedbar'].includes(kind))
             expect(stats.chroma).toBeGreaterThan(200);
     });
 }

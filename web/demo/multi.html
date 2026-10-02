@@ -198,6 +198,90 @@ window.vpDone = (async () => {
         vp.title('Annotated'); vp.xlabel('x'); vp.ylabel('y');
         vp.text(0.5, 0.9, 'peak zone', 'axes');
         vp.legend('upper right'); vp.colorbar();
+    } else if (which === 'plot3d') {
+        const n = 200, xs = new Float32Array(n), ys = new Float32Array(n),
+              zs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const t = i / n * 12.56;
+            xs[i] = Math.cos(t); ys[i] = Math.sin(t); zs[i] = t / 12.56;
+        }
+        vp.plot3d(xs, ys, zs);
+    } else if (which === 'scatter3d' || which === 'quiver3d' ||
+               which === 'errorbar3d') {
+        const n = 60, xs = new Float32Array(n), ys = new Float32Array(n),
+              zs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const a = i * 0.7, r = 0.3 + 0.65 * (i % 8) / 8;
+            xs[i] = Math.cos(a) * r; ys[i] = Math.sin(a) * r;
+            zs[i] = (i % 10) / 10;
+        }
+        if (which === 'scatter3d') vp.scatter3d(xs, ys, zs);
+        else if (which === 'quiver3d') {
+            const us = new Float32Array(n), vs = new Float32Array(n),
+                  ws = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+                us[i] = -ys[i]; vs[i] = xs[i]; ws[i] = 0.2;
+            }
+            vp.quiver3d(xs, ys, zs, us, vs, ws);
+        } else {
+            const e = new Float32Array(n).fill(0.15);
+            vp.errorbar3d(xs, ys, zs, e);
+        }
+    } else if (which === 'bar3d') {
+        const n = 36, xs = new Float32Array(n), ys = new Float32Array(n),
+              zs = new Float32Array(n), dx = new Float32Array(n),
+              dy = new Float32Array(n), dz = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = (i % 6) * 0.25; ys[i] = ((i / 6) | 0) * 0.25;
+            zs[i] = 0; dx[i] = dy[i] = 0.15;
+            dz[i] = 0.3 + Math.abs(Math.sin(i * 0.9)) * 0.7;
+        }
+        vp.bar3d(xs, ys, zs, dx, dy, dz);
+    } else if (which === 'contour3d' || which === 'contourf3d') {
+        const W = 30, H = 24, g = new Float32Array(W * H);
+        for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+            const x = i * 0.4 - 6, y = j * 0.4 - 4.8;
+            g[j * W + i] = Math.sin(Math.sqrt(x * x + y * y));
+        }
+        vp.contour3d(g, W, H, which === 'contourf3d');
+    } else if (which === 'voxels') {
+        const n = 8, f = new Uint8Array(n * n * n);
+        for (let z = 0; z < n; z++) for (let y = 0; y < n; y++)
+            for (let x = 0; x < n; x++) {
+                const dx = x - 3.5, dy = y - 3.5, dz = z - 3.5;
+                f[z * n * n + y * n + x] =
+                    dx * dx + dy * dy + dz * dz < 12 ? 1 : 0;
+            }
+        vp.voxels(f, n, n, n);
+    } else if (which === 'text3d') {
+        vp.plot3d([0, 1], [0, 1], [0, 1]);
+        vp.text3d(0.5, 0.5, 0.9, 'peak');
+    } else if (which === 'barbs') {
+        const n = 10, xs = new Float32Array(n * n),
+              ys = new Float32Array(n * n), us = new Float32Array(n * n),
+              vs = new Float32Array(n * n);
+        for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+            xs[j * n + i] = i; ys[j * n + i] = j;
+            us[j * n + i] = Math.cos(i * 0.6) * 20;
+            vs[j * n + i] = Math.sin(j * 0.6) * 20;
+        }
+        vp.barbs(xs, ys, us, vs);
+    } else if (which === 'groupedbar') {
+        vp.groupedBar([[3, 7, 2, 5], [4, 2, 6, 3], [2, 5, 3, 6]]);
+    } else if (which === 'figimage') {
+        const w = 80, h = 60, px = new Uint32Array(w * h);
+        for (let j = 0; j < h; j++) for (let i = 0; i < w; i++)
+            px[j * w + i] = 0xff000000 |
+                ((i * 4) << 16) | ((j * 4) << 8) | 0x80;
+        vp.figimage(px, w, h);
+    } else if (which === 'chirp') {
+        vp.chirp(1, 20, 1, 1);
+    } else if (which === 'mexicanhat') {
+        vp.mexicanHat(1.5, 8);
+    } else if (which === 'barlabel') {
+        const xs = [0, 1, 2, 3], hs = [3, 7, 2, 5];
+        vp.bar(hs, ['a', 'b', 'c', 'd'], '#2a7');
+        vp.barLabel(xs, hs);
     }
     const px = await vp.capture();
     window.vpPixels = px;

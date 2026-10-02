@@ -20,7 +20,8 @@ function mockDevice(calls: Call[], path: string[] = []): any {
         },
         apply(_t, _this, args) {
             calls.push({ path, args });
-            if (path[path.length - 1] === 'getCompilationInfo')
+            if (path[path.length - 1] === 'getCompilationInfo' ||
+                path[path.length - 1] === 'mapAsync')
                 return Promise.resolve({ messages: [] });
             return mockDevice(calls, [...path, '()']);
         },
@@ -36,6 +37,7 @@ Object.assign(globalThis, {
     GPUTextureUsage: { COPY_SRC:1, COPY_DST:2, TEXTURE_BINDING:4,
                        STORAGE_BINDING:8, RENDER_ATTACHMENT:16 },
     GPUShaderStage: { VERTEX:1, FRAGMENT:2, COMPUTE:4 },
+    GPUMapMode: { READ: 1, WRITE: 2 },
 });
 
 const FIXTURE = new URL('../test/fixtures/line_frame.bin', import.meta.url);

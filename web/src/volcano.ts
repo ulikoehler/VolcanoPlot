@@ -119,6 +119,37 @@ interface VolcanoModule {
     _vp_colorbar(a: number): void;
     _vp_text(a: number, x: number, y: number, txt: string,
              coords: number): void;
+    _vp_plot3d(a: number, xs: Float32Array, ys: Float32Array,
+               zs: Float32Array, elev: number, azim: number): number;
+    _vp_scatter3d(a: number, xs: Float32Array, ys: Float32Array,
+                  zs: Float32Array, elev: number, azim: number): number;
+    _vp_bar3d(a: number, xs: Float32Array, ys: Float32Array,
+              zs: Float32Array, dxs: Float32Array, dys: Float32Array,
+              dzs: Float32Array, elev: number, azim: number): number;
+    _vp_quiver3d(a: number, xs: Float32Array, ys: Float32Array,
+                 zs: Float32Array, us: Float32Array, vs: Float32Array,
+                 ws: Float32Array, elev: number, azim: number): number;
+    _vp_errorbar3d(a: number, xs: Float32Array, ys: Float32Array,
+                   zs: Float32Array, zerr: Float32Array,
+                   elev: number, azim: number): number;
+    _vp_contour3d(a: number, values: Float32Array, w: number,
+                  h: number, filled: boolean, elev: number,
+                  azim: number): number;
+    _vp_voxels(a: number, filled: Uint8Array, nx: number, ny: number,
+               nz: number, elev: number, azim: number): number;
+    _vp_text3d(a: number, x: number, y: number, z: number,
+               txt: string, elev: number, azim: number): number;
+    _vp_barbs(a: number, xs: Float32Array, ys: Float32Array,
+              us: Float32Array, vs: Float32Array): number;
+    _vp_groupedBar(a: number, heights: Float32Array[]): number;
+    _vp_figimage(a: number, pixels: Uint32Array, w: number,
+                 h: number): number;
+    _vp_chirp(a: number, f0: number, f1: number, duration: number,
+              xMax: number): number;
+    _vp_mexicanHat(a: number, sigma: number, range: number,
+                   elev: number, azim: number): number;
+    _vp_barLabel(a: number, xs: Float32Array, heights: Float32Array,
+                 baseline: number): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -344,6 +375,129 @@ export class VolcanoCanvas {
         const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
         try { return this.mod._vp_trisurf(this.cur, x, y, z, elev, azim); }
         finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+
+    /** mpl Axes3D.plot — 3-D line through (x,y,z). */
+    plot3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+           zs: ArrayLike<number>, elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_plot3d(this.cur, x, y, z, elev, azim); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** mpl Axes3D.scatter — 3-D point cloud. */
+    scatter3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+              zs: ArrayLike<number>, elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_scatter3d(this.cur, x, y, z, elev, azim); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** mpl Axes3D.bar3d — boxes at (x,y) rising by dz. */
+    bar3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+          zs: ArrayLike<number>, dxs: ArrayLike<number>,
+          dys: ArrayLike<number>, dzs: ArrayLike<number>,
+          elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        const dx = this.stage(dxs), dy = this.stage(dys),
+              dz = this.stage(dzs);
+        try {
+            return this.mod._vp_bar3d(this.cur, x, y, z, dx, dy, dz,
+                                      elev, azim);
+        } finally {
+            for (const v of [x, y, z, dx, dy, dz])
+                this.mod._vp_free(v.byteOffset);
+        }
+    }
+    /** mpl Axes3D.quiver — 3-D vector field. */
+    quiver3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+             zs: ArrayLike<number>, us: ArrayLike<number>,
+             vs: ArrayLike<number>, ws: ArrayLike<number>,
+             elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        const u = this.stage(us), v = this.stage(vs),
+              w = this.stage(ws);
+        try {
+            return this.mod._vp_quiver3d(this.cur, x, y, z, u, v, w,
+                                         elev, azim);
+        } finally {
+            for (const b of [x, y, z, u, v, w])
+                this.mod._vp_free(b.byteOffset);
+        }
+    }
+    /** mpl Axes3D.errorbar — points with z-error bars. */
+    errorbar3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+               zs: ArrayLike<number>, zerr: ArrayLike<number>,
+               elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        const e = this.stage(zerr);
+        try {
+            return this.mod._vp_errorbar3d(this.cur, x, y, z, e,
+                                           elev, azim);
+        } finally {
+            for (const b of [x, y, z, e])
+                this.mod._vp_free(b.byteOffset);
+        }
+    }
+    /** mpl Axes3D.contour/contourf — contours on a projected grid. */
+    contour3d(values: ArrayLike<number>, w: number, h: number,
+              filled = false, elev = 30, azim = -60): number {
+        const v = this.stage(values);
+        try {
+            return this.mod._vp_contour3d(this.cur, v, w, h, filled,
+                                          elev, azim);
+        } finally { this.mod._vp_free(v.byteOffset); }
+    }
+    /** mpl Axes3D.voxels — binary occupancy grid (row-major xyz). */
+    voxels(filled: ArrayLike<number>, nx: number, ny: number,
+           nz: number, elev = 30, azim = -60): number {
+        const f = new Uint8Array(filled.length);
+        for (let i = 0; i < filled.length; i++) f[i] = filled[i] ? 1 : 0;
+        return this.mod._vp_voxels(this.cur, f, nx, ny, nz, elev, azim);
+    }
+    /** mpl ax.text at 3-D coordinates. */
+    text3d(x: number, y: number, z: number, txt: string,
+           elev = 30, azim = -60): number {
+        return this.mod._vp_text3d(this.cur, x, y, z, txt, elev, azim);
+    }
+    /** mpl barbs — wind barbs on a regular grid. */
+    barbs(xs: ArrayLike<number>, ys: ArrayLike<number>,
+          us: ArrayLike<number>, vs: ArrayLike<number>): number {
+        const x = this.stage(xs), y = this.stage(ys);
+        const u = this.stage(us), v = this.stage(vs);
+        try { return this.mod._vp_barbs(this.cur, x, y, u, v); }
+        finally {
+            for (const b of [x, y, u, v])
+                this.mod._vp_free(b.byteOffset);
+        }
+    }
+    /** mpl grouped bars — heights[series][group]. */
+    groupedBar(heights: ArrayLike<number>[]): number {
+        const staged = heights.map(h => this.stage(h));
+        try { return this.mod._vp_groupedBar(this.cur, staged); }
+        finally {
+            for (const s of staged) this.mod._vp_free(s.byteOffset);
+        }
+    }
+    /** mpl figimage — RGBA8 pixels (Uint32Array) on the figure. */
+    figimage(pixels: Uint32Array, w: number, h: number): number {
+        return this.mod._vp_figimage(this.cur, pixels, w, h);
+    }
+    /** Chirp signal demo — swept sinusoid f0→f1 over duration s. */
+    chirp(f0: number, f1: number, duration: number,
+          xMax: number): number {
+        return this.mod._vp_chirp(this.cur, f0, f1, duration, xMax);
+    }
+    /** Mexican-hat (Ricker) 3-D surface, |x|,|y| ≤ range. */
+    mexicanHat(sigma = 1, range = 10, elev = 30,
+               azim = -60): number {
+        return this.mod._vp_mexicanHat(this.cur, sigma, range,
+                                       elev, azim);
+    }
+    /** mpl bar_label — value labels above bar tops. */
+    barLabel(xs: ArrayLike<number>, heights: ArrayLike<number>,
+             baseline = 0): number {
+        const x = this.stage(xs), h = this.stage(heights);
+        try { return this.mod._vp_barLabel(this.cur, x, h, baseline); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(h.byteOffset); }
     }
 
     // ── mpl reference lines / spans / annotations ───────────────────

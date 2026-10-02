@@ -52,7 +52,24 @@
 #include <volcano/plot/plots/CoherePlot.hpp>
 #include <volcano/plot/plots/WireframePlot.hpp>
 #include <volcano/plot/plots/TrisurfPlot.hpp>
+#include <volcano/plot/plots/Plot3D.hpp>
+#include <volcano/plot/plots/Scatter3D.hpp>
+#include <volcano/plot/plots/Bar3D.hpp>
+#include <volcano/plot/plots/Quiver3D.hpp>
+#include <volcano/plot/plots/Errorbar3D.hpp>
+#include <volcano/plot/plots/Contour3D.hpp>
+#include <volcano/plot/plots/VoxelsPlot.hpp>
+#include <volcano/plot/plots/Text3D.hpp>
+#include <volcano/plot/plots/BarbsPlot.hpp>
+#include <volcano/plot/plots/GroupedBarPlot.hpp>
+#include <volcano/plot/plots/FigImagePlot.hpp>
+#include <volcano/plot/plots/ChirpPlot.hpp>
+#include <volcano/plot/plots/MexicanHatPlot.hpp>
+#include <volcano/plot/plots/BarLabelPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
+#include <algorithm>
+#include <limits>
+#include <unordered_map>
 
 using namespace volcano;
 namespace em = emscripten;
@@ -553,6 +570,258 @@ uintptr_t trisurf(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+/// Shared registration for 3D plots: attach a viewInit camera, add,
+/// return the raw handle.
+// Per-axes union of 3D data extents — mpl's Axes3D shares one
+// (4,4,3) box normalization across all 3D artists, so every new 3D
+// plot widens the box on every existing 3D camera.
+std::unordered_map<uint32_t, std::pair<plot::Point3D, plot::Point3D>>
+    axes3DBox;
+
+void expandBox(std::pair<plot::Point3D, plot::Point3D>& b,
+               plot::Point3D lo, plot::Point3D hi) {
+    auto mn = [](float a, float c) { return std::min(a, c); };
+    auto mx = [](float a, float c) { return std::max(a, c); };
+    b.first = {mn(b.first.x, lo.x), mn(b.first.y, lo.y),
+               mn(b.first.z, lo.z)};
+    b.second = {mx(b.second.x, hi.x), mx(b.second.y, hi.y),
+                mx(b.second.z, hi.z)};
+}
+
+template <typename P, typename... Args>
+uintptr_t add3D(uint32_t axesIdx, double elevDeg, double azimDeg,
+                plot::Point3D dataMin, plot::Point3D dataMax,
+                Args&&... args) {
+    auto plot = std::make_shared<P>(std::forward<Args>(args)...);
+    plot->setCamera(
+        plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+    auto* ax = targetAxes(axesIdx);
+    auto& box = axes3DBox[axesIdx];
+    if (box.first.x == 0.0f && box.second.x == 0.0f &&
+        box.first.y == 0.0f && box.second.y == 0.0f &&
+        box.first.z == 0.0f && box.second.z == 0.0f) {
+        // first 3D plot on this axes
+        box = {dataMin, dataMax};
+    } else {
+        expandBox(box, dataMin, dataMax);
+    }
+    // mpl (4,4,3) box normalization — shared extents across artists.
+    for (auto& p : ax->plots())
+        if (auto* c = p->camera3D()) {
+            c->dataMin = box.first;
+            c->dataMax = box.second;
+        }
+    plot->camera3D()->dataMin = box.first;
+    plot->camera3D()->dataMax = box.second;
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+/// Min/max of three f32 arrays → camera box extents.
+plot::Point3D min3(const std::vector<float>& a,
+                   const std::vector<float>& b,
+                   const std::vector<float>& c) {
+    auto m = [](const std::vector<float>& v) {
+        return v.empty() ? 0.0f
+            : *std::ranges::min_element(v); };
+    return {m(a), m(b), m(c)};
+}
+plot::Point3D max3(const std::vector<float>& a,
+                   const std::vector<float>& b,
+                   const std::vector<float>& c) {
+    auto m = [](const std::vector<float>& v) {
+        return v.empty() ? 0.0f
+            : *std::ranges::max_element(v); };
+    return {m(a), m(b), m(c)};
+}
+
+/// mpl Axes3D.plot — 3D line.
+uintptr_t plot3d(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                 double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    return add3D<plot::Plot3D>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, z),
+        std::move(x), std::move(y), std::move(z), plot::Plot3DConfig{});
+}
+
+/// mpl Axes3D.scatter — 3D point cloud.
+uintptr_t scatter3d(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                    double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    return add3D<plot::Scatter3D>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, z),
+        std::move(x), std::move(y), std::move(z),
+        plot::Scatter3DConfig{});
+}
+
+/// mpl Axes3D.bar3d — x/y bases, z heights, dx/dy/dz sizes.
+uintptr_t bar3d(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                em::val dxs, em::val dys, em::val dzs,
+                double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    auto dx = f32vec(dxs), dy = f32vec(dys), dz = f32vec(dzs);
+    // bar tops = z + dz
+    std::vector<float> zt(z.size());
+    for (size_t i = 0; i < z.size(); ++i) zt[i] = z[i] + dz[i];
+    return add3D<plot::Bar3D>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, zt),
+        std::move(x), std::move(y), std::move(z),
+        std::move(dx), std::move(dy), std::move(dz),
+        plot::Bar3DConfig{});
+}
+
+/// mpl Axes3D.quiver — 3D vector field.
+uintptr_t quiver3d(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                   em::val us, em::val vs, em::val ws,
+                   double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    auto u = f32vec(us), v = f32vec(vs), w = f32vec(ws);
+    std::vector<float> xe(x.size()), ye(y.size()), ze(z.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        xe[i] = x[i] + u[i]; ye[i] = y[i] + v[i]; ze[i] = z[i] + w[i];
+    }
+    return add3D<plot::Quiver3D>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(xe, ye, ze),
+        std::move(x), std::move(y), std::move(z),
+        std::move(u), std::move(v), std::move(w),
+        plot::Quiver3DConfig{});
+}
+
+/// mpl Axes3D.errorbar — points with optional z-error bars (via config).
+uintptr_t errorbar3d(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                     em::val zerr, double elevDeg, double azimDeg) {
+    plot::Errorbar3DConfig cfg;
+    cfg.zerrLower = cfg.zerrUpper = f32vec(zerr);
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    std::vector<float> zt(z.size());
+    for (size_t i = 0; i < z.size(); ++i)
+        zt[i] = z[i] + cfg.zerrUpper[i];
+    return add3D<plot::Errorbar3D>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, zt),
+        std::move(x), std::move(y), std::move(z), std::move(cfg));
+}
+
+/// mpl Axes3D.contour / contourf on a z=const projected surface.
+uintptr_t contour3d(uint32_t axesIdx, em::val values, uint32_t w,
+                    uint32_t h, bool filled, double elevDeg,
+                    double azimDeg) {
+    plot::Grid2D g;
+    g.values = f32vec(values);
+    g.width = w; g.height = h;
+    g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    // Enable the mpl (4,4,3) box normalization: project3D collapses
+    // everything to a constant point if the data sits far from the
+    // orbit target. Same box extents mpl uses for a grid plot.
+    float vmin = std::numeric_limits<float>::max(),
+          vmax = std::numeric_limits<float>::lowest();
+    for (float v : g.values) {
+        vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+    }
+    auto fixup = [&](auto& plot) {
+        auto* c = plot->camera3D();
+        c->dataMin = {g.xRange.min, g.yRange.min, vmin};
+        c->dataMax = {g.xRange.max, g.yRange.max, vmax};
+    };
+    auto mk = [&](auto P) {
+        auto* ax = targetAxes(axesIdx);
+        auto plot = std::make_shared<decltype(P)>(std::move(P));
+        plot->setCamera(plot::Camera3D::viewInit(float(elevDeg),
+                                               float(azimDeg)));
+        fixup(plot);
+        auto* raw = plot.get();
+        ax->addPlot(std::move(plot));
+        S().figure.markStale();
+        return reinterpret_cast<uintptr_t>(raw);
+    };
+    if (filled) {
+        // mpl contourf defaults to image.cmap (viridis).
+        plot::Contour3DConfig cfg;
+        cfg.cmap = &plot::Colormap::byName("viridis");
+        return mk(plot::Contourf3D(std::move(g), std::move(cfg)));
+    }
+    return mk(plot::Contour3D(std::move(g)));
+}
+
+/// mpl Axes3D.voxels — binary occupancy grid.
+uintptr_t voxels(uint32_t axesIdx, em::val filled, uint32_t nx,
+                 uint32_t ny, uint32_t nz, double elevDeg,
+                 double azimDeg) {
+    std::vector<uint8_t> f;
+    const size_t n = filled["length"].as<size_t>();
+    f.resize(n);
+    em::val mem = em::val(em::memory_view<uint8_t>(n, f.data()));
+    mem.call<void>("set", filled);
+    return add3D<plot::VoxelsPlot>(axesIdx, elevDeg, azimDeg,
+        plot::Point3D{0, 0, 0},
+        plot::Point3D{float(nx), float(ny), float(nz)},
+        std::move(f), nx, ny, nz, plot::VoxelsConfig{});
+}
+
+/// mpl ax.text with 3D coords (single item convenience).
+uintptr_t text3d(uint32_t axesIdx, double x, double y, double z,
+                 const std::string& txt, double elevDeg,
+                 double azimDeg) {
+    return add3D<plot::Text3D>(axesIdx, elevDeg, azimDeg,
+        plot::Point3D{float(x), float(y), float(z)},
+        plot::Point3D{float(x) + 1.0f, float(y) + 1.0f, float(z) + 1.0f},
+        float(x), float(y), float(z), txt);
+}
+
+/// mpl barbs — wind barbs on a regular grid.
+uintptr_t barbs(uint32_t axesIdx, em::val xs, em::val ys,
+                em::val us, em::val vs) {
+    return addPlot<plot::BarbsPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                    f32vec(us), f32vec(vs),
+                                    plot::BarbsConfig{});
+}
+
+/// mpl grouped bars — `heights` is a JS array of Float32Arrays
+/// (one per series).
+uintptr_t groupedBar(uint32_t axesIdx, em::val heights) {
+    std::vector<std::vector<float>> hs;
+    const size_t n = heights["length"].as<size_t>();
+    hs.reserve(n);
+    for (size_t i = 0; i < n; ++i) hs.push_back(f32vec(heights[i]));
+    return addPlot<plot::GroupedBarPlot>(axesIdx, std::move(hs));
+}
+
+/// mpl figimage — RGBA8 pixels (uint32 per px) overlaid on the figure.
+uintptr_t figimage(uint32_t axesIdx, em::val pixels, uint32_t w,
+                   uint32_t h) {
+    std::vector<uint32_t> px;
+    const size_t n = pixels["length"].as<size_t>();
+    px.resize(n);
+    em::val mem = em::val(em::memory_view<uint32_t>(n, px.data()));
+    mem.call<void>("set", pixels);
+    return addPlot<plot::FigImagePlot>(axesIdx, std::move(px), w, h);
+}
+
+/// Chirp signal demo (f0→f1 over duration, xRange in seconds).
+uintptr_t chirp(uint32_t axesIdx, double f0, double f1, double duration,
+                double xMax) {
+    return addPlot<plot::ChirpPlot>(axesIdx, f0, f1, duration,
+                                    plot::Range{0.f, float(xMax)});
+}
+
+/// Mexican-hat (Ricker) 2D surface on a sigma-scaled grid.
+uintptr_t mexicanHat(uint32_t axesIdx, double sigma, double range,
+                     double elevDeg, double azimDeg) {
+    return add3D<plot::MexicanHatPlot>(axesIdx, elevDeg, azimDeg,
+        plot::Point3D{-float(range), -float(range), -0.25f},
+        plot::Point3D{float(range), float(range), 1.0f},
+        float(sigma), plot::Range{-float(range), float(range)},
+        plot::Range{-float(range), float(range)});
+}
+
+/// mpl bar_label — value labels on bar tops.
+uintptr_t barLabel(uint32_t axesIdx, em::val xs, em::val heights,
+                   double baseline) {
+    return addPlot<plot::BarLabelPlot>(axesIdx, f32vec(xs),
+                                       f32vec(heights), float(baseline));
+}
+
 // ── reference lines / spans / annotations ───────────────────────────
 plot::Color colorOr(em::val v, plot::Color def) {
     if (v.typeOf().as<std::string>() == "string")
@@ -744,6 +1013,20 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_legend", &legend);
     em::function("_vp_colorbar", &colorbar);
     em::function("_vp_text", &axesText);
+    em::function("_vp_plot3d", &plot3d);
+    em::function("_vp_scatter3d", &scatter3d);
+    em::function("_vp_bar3d", &bar3d);
+    em::function("_vp_quiver3d", &quiver3d);
+    em::function("_vp_errorbar3d", &errorbar3d);
+    em::function("_vp_contour3d", &contour3d);
+    em::function("_vp_voxels", &voxels);
+    em::function("_vp_text3d", &text3d);
+    em::function("_vp_barbs", &barbs);
+    em::function("_vp_groupedBar", &groupedBar);
+    em::function("_vp_figimage", &figimage);
+    em::function("_vp_chirp", &chirp);
+    em::function("_vp_mexicanHat", &mexicanHat);
+    em::function("_vp_barLabel", &barLabel);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

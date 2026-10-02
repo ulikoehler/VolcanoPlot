@@ -13,6 +13,9 @@ const KINDS = process.argv[3]?.split(',') ?? [
     'fill', 'spy', 'tripcolor', 'streamplot', 'matshow', 'pcolorfast',
     'brokenbarh', 'tricontour', 'triplot', 'specgram', 'spectrum', 'psd',
     'csd', 'xcorr', 'cohere', 'wireframe', 'trisurf', 'annotate',
+    'plot3d', 'scatter3d', 'bar3d', 'quiver3d', 'errorbar3d',
+    'contour3d', 'contourf3d', 'voxels', 'text3d', 'barbs',
+    'groupedbar', 'figimage', 'chirp', 'mexicanhat', 'barlabel',
 ];
 
 const MIME = {
@@ -33,8 +36,13 @@ const port = server.address().port;
 
 const browser = await chromium.launch({
     channel: 'chrome',
-    args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader',
-           '--enable-features=Vulkan', '--no-sandbox'],
+    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan',
+           '--no-sandbox'],
+    env: {
+        ...process.env,
+        // Pin WebGPU to the Intel iGPU (SwiftShader uses too much RAM).
+        VK_DRIVER_FILES: '/usr/share/vulkan/icd.d/intel_icd.json',
+    },
 });
 const page = await browser.newPage();
 page.on('pageerror', e => console.error('PAGEERR:', String(e)));

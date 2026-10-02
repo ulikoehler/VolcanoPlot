@@ -212,8 +212,10 @@ export class Interpreter {
             size: 4 << 20,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
+        // 64 MB — contour3d and other segment-heavy plots can push
+        // many MB of CPU-tessellated vertex data through one frame.
         this.scratch = this.device.createBuffer({
-            size: 8 << 20,
+            size: 64 << 20,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
         const mk = (key: string, s: PipeSpec,
@@ -979,10 +981,11 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         case Op.DrawTrisPx: {     // {clip, verts, rgba}
             this.scissor(pass, p);
             const vOff = this.scratchWrite(r.bulk(p, 16));
-            const ubo = new Float32Array(6);
+            // PxUBO: vec2f canvasWH @0, vec4f color @16 (vec4 alignment).
+            const ubo = new Float32Array(8);
             ubo.set(canvasWH, 0);
             ubo.set([p.getFloat32(40, true), p.getFloat32(44, true),
-                     p.getFloat32(48, true), p.getFloat32(52, true)], 2);
+                     p.getFloat32(48, true), p.getFloat32(52, true)], 4);
             const off = this.uboWrite(ubo);
             pass.setPipeline(this.activePipes.get('px.tris')!);
             pass.setBindGroup(0, this.bindGroup('px.tris', [
@@ -1017,10 +1020,10 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         case Op.DrawSegmentsPx: { // {clip, pts, rgba, wPx}
             this.scissor(pass, p);
             const vOff = this.scratchWrite(r.bulk(p, 16));
-            const ubo = new Float32Array(6);
+            const ubo = new Float32Array(8);
             ubo.set(canvasWH, 0);
             ubo.set([p.getFloat32(40, true), p.getFloat32(44, true),
-                     p.getFloat32(48, true), p.getFloat32(52, true)], 2);
+                     p.getFloat32(48, true), p.getFloat32(52, true)], 4);
             const off = this.uboWrite(ubo);
             const key = op === Op.DrawLineStripPx ? 'px.lineStrip'
                                                   : 'px.segs';
