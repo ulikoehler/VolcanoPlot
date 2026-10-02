@@ -451,6 +451,34 @@ uintptr_t streamplot(uint32_t axesIdx, em::val us, em::val vs,
                                      std::move(gv), plot::StreamConfig{});
 }
 
+// ── axes/figure styling ─────────────────────────────────────────────
+void setXlim(uint32_t a, double lo, double hi) {
+    targetAxes(a)->setXlim(float(lo), float(hi)); S().figure.markStale();
+}
+void setYlim(uint32_t a, double lo, double hi) {
+    targetAxes(a)->setYlim(float(lo), float(hi)); S().figure.markStale();
+}
+void setXscale(uint32_t a, const std::string& name) {
+    targetAxes(a)->setXscale(name); S().figure.markStale();
+}
+void setYscale(uint32_t a, const std::string& name) {
+    targetAxes(a)->setYscale(name); S().figure.markStale();
+}
+void setTitle(uint32_t a, const std::string& t) {
+    targetAxes(a)->setTitle(t); S().figure.markStale();
+}
+void setXlabel(uint32_t a, const std::string& t) {
+    targetAxes(a)->style().xAxis.label = t; S().figure.markStale();
+}
+void setYlabel(uint32_t a, const std::string& t) {
+    targetAxes(a)->style().yAxis.label = t; S().figure.markStale();
+}
+void setGrid(uint32_t a, bool on) {
+    auto& st = targetAxes(a)->style();
+    st.xAxis.grid = st.yAxis.grid = on; S().figure.markStale();
+}
+void suptitle(const std::string& t) { S().figure.suptitle(t); }
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -521,6 +549,15 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_spy", &spy);
     em::function("_vp_tripcolor", &tripcolor);
     em::function("_vp_streamplot", &streamplot);
+    em::function("_vp_xlim", &setXlim);
+    em::function("_vp_ylim", &setYlim);
+    em::function("_vp_xscale", &setXscale);
+    em::function("_vp_yscale", &setYscale);
+    em::function("_vp_title", &setTitle);
+    em::function("_vp_xlabel", &setXlabel);
+    em::function("_vp_ylabel", &setYlabel);
+    em::function("_vp_grid", &setGrid);
+    em::function("_vp_suptitle", &suptitle);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

@@ -145,6 +145,27 @@ test('interaction: scroll-zoom changes the viewport', async ({ page }) => {
     expect(diff).toBeGreaterThan(100); // zoomed curve occupies new pixels
 });
 
+test('styling setters affect the render', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto(`http://localhost:${port}/demo/smoke.html`);
+    await page.waitForFunction(() => (window as any).vpResult !== undefined,
+        { timeout: 30_000 });
+    const res = await page.evaluate(async () => {
+        const vp = (window as any).vp;
+        const prev = (window as any).vpPixels;
+        vp.title('Sine'); vp.xlabel('t'); vp.ylabel('y');
+        vp.grid(); vp.ylim(-2, 2); vp.xscale('linear');
+        const px = await vp.capture();
+        let changed = 0;
+        for (let i = 0; i < px.length; i += 4)
+            if (px[i] !== prev[i] || px[i+1] !== prev[i+1]) changed++;
+        return changed;
+    });
+    expect(errors).toEqual([]);
+    expect(res).toBeGreaterThan(1000);  // labels + grid + wider ylim
+});
+
 test('toSvg() exports vector markup', async ({ page }) => {
     await page.goto(`http://localhost:${port}/demo/smoke.html`);
     await page.waitForFunction(() => (window as any).vpResult !== undefined,

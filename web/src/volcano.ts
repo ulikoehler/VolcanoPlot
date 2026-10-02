@@ -78,6 +78,15 @@ interface VolcanoModule {
     _vp_setInteractive(on: boolean): void;
     _vp_dispatch(type: number, x: number, y: number,
                  button: number, step: number): boolean;
+    _vp_xlim(a: number, lo: number, hi: number): void;
+    _vp_ylim(a: number, lo: number, hi: number): void;
+    _vp_xscale(a: number, name: string): void;
+    _vp_yscale(a: number, name: string): void;
+    _vp_title(a: number, t: string): void;
+    _vp_xlabel(a: number, t: string): void;
+    _vp_ylabel(a: number, t: string): void;
+    _vp_grid(a: number, on: boolean): void;
+    _vp_suptitle(t: string): void;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -275,6 +284,19 @@ export class VolcanoCanvas {
             cv.removeEventListener('wheel', wheel);
         };
     }
+
+    // ── mpl axes/figure styling ─────────────────────────────────────
+    xlim(lo: number, hi: number) { this.mod._vp_xlim(this.cur, lo, hi); }
+    ylim(lo: number, hi: number) { this.mod._vp_ylim(this.cur, lo, hi); }
+    /** "linear"|"log"|"symlog"|"logit"|"asinh"|"mercator" */
+    xscale(name: string) { this.mod._vp_xscale(this.cur, name); }
+    yscale(name: string) { this.mod._vp_yscale(this.cur, name); }
+    title(t: string)  { this.mod._vp_title(this.cur, t); }
+    xlabel(t: string) { this.mod._vp_xlabel(this.cur, t); }
+    ylabel(t: string) { this.mod._vp_ylabel(this.cur, t); }
+    grid(on = true)   { this.mod._vp_grid(this.cur, on); }
+    /** Figure-level suptitle. */
+    suptitle(t: string) { this.mod._vp_suptitle(t); }
 
     line(xs: ArrayLike<number>, ys: ArrayLike<number>,
          color = ''): number {
