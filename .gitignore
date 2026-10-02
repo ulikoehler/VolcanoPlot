@@ -64,3 +64,7 @@ _deps/
 /src/cli/volcano_screen
 Testing/
 DartConfiguration.tcl
+
+# Python extension build artifacts
+*.so
+*.cpython-*.so
