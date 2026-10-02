@@ -35,6 +35,29 @@ interface VolcanoModule {
                 h: number, cmap: string): number;
     _vp_surface(axes: number, values: Float32Array, w: number,
                 h: number, elev: number, azim: number): number;
+    _vp_errorbar(axes: number, xs: Float32Array, ys: Float32Array,
+                 yerr: Float32Array, color: string): number;
+    _vp_stem(axes: number, xs: Float32Array,
+             ys: Float32Array): number;
+    _vp_step(axes: number, xs: Float32Array, ys: Float32Array,
+             where: string): number;
+    _vp_ecdf(axes: number, samples: Float32Array): number;
+    _vp_fillBetween(axes: number, xs: Float32Array, y1: Float32Array,
+                    y2: Float32Array, color: string): number;
+    _vp_boxplot(axes: number, groups: Float32Array[]): number;
+    _vp_hist2d(axes: number, xs: Float32Array, ys: Float32Array,
+               bins: number, cmap: string): number;
+    _vp_hexbin(axes: number, xs: Float32Array,
+               ys: Float32Array): number;
+    _vp_quiver(axes: number, xs: Float32Array, ys: Float32Array,
+               us: Float32Array, vs: Float32Array): number;
+    _vp_contour(axes: number, values: Float32Array, w: number,
+                h: number, levels: number, cmap: string): number;
+    _vp_pcolormesh(axes: number, xs: Float32Array, ys: Float32Array,
+                   cs: Float32Array, nCols: number,
+                   nRows: number): number;
+    _vp_kde(axes: number, xs: Float32Array, ys: Float32Array,
+            cmap: string): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -163,6 +186,99 @@ export class VolcanoCanvas {
         const v = this.stage(values);
         try { return this.mod._vp_surface(0, v, w, h, elev, azim); }
         finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    errorbar(xs: ArrayLike<number>, ys: ArrayLike<number>,
+             yerr: ArrayLike<number>, color = ''): number {
+        const a = this.stage(xs), b = this.stage(ys),
+              e = this.stage(yerr);
+        try { return this.mod._vp_errorbar(0, a, b, e, color); }
+        finally { for (const v of [a, b, e])
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    stem(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_stem(0, a, b); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
+    }
+
+    step(xs: ArrayLike<number>, ys: ArrayLike<number>,
+         where: 'pre' | 'post' | 'mid' = 'pre'): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_step(0, a, b, where); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
+    }
+
+    ecdf(samples: ArrayLike<number>): number {
+        const v = this.stage(samples);
+        try { return this.mod._vp_ecdf(0, v); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    fillBetween(xs: ArrayLike<number>, y1: ArrayLike<number>,
+                y2: ArrayLike<number>, color = ''): number {
+        const a = this.stage(xs), b = this.stage(y1),
+              c = this.stage(y2);
+        try { return this.mod._vp_fillBetween(0, a, b, c, color); }
+        finally { for (const v of [a, b, c])
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    boxplot(groups: ArrayLike<number>[]): number {
+        const staged = groups.map(g => this.stage(g));
+        try { return this.mod._vp_boxplot(0, staged); }
+        finally { for (const v of staged)
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    hist2d(xs: ArrayLike<number>, ys: ArrayLike<number>, bins = 10,
+           cmap = 'viridis'): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_hist2d(0, a, b, bins, cmap); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
+    }
+
+    hexbin(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_hexbin(0, a, b); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
+    }
+
+    quiver(xs: ArrayLike<number>, ys: ArrayLike<number>,
+           us: ArrayLike<number>, vs: ArrayLike<number>): number {
+        const s = [xs, ys, us, vs].map(a => this.stage(a));
+        try { return this.mod._vp_quiver(0, s[0], s[1], s[2], s[3]); }
+        finally { for (const v of s) this.mod._vp_free(v.byteOffset); }
+    }
+
+    contour(values: ArrayLike<number>, w: number, h: number,
+            levels = 10, cmap = 'viridis'): number {
+        const v = this.stage(values);
+        try { return this.mod._vp_contour(0, v, w, h, levels, cmap); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    pcolormesh(xs: ArrayLike<number>, ys: ArrayLike<number>,
+               cs: ArrayLike<number>, nCols: number,
+               nRows: number): number {
+        const a = this.stage(xs), b = this.stage(ys),
+              c = this.stage(cs);
+        try { return this.mod._vp_pcolormesh(0, a, b, c, nCols, nRows); }
+        finally { for (const v of [a, b, c])
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    kde(xs: ArrayLike<number>, ys: ArrayLike<number>,
+        cmap = 'viridis'): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_kde(0, a, b, cmap); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
     }
 
     /** In-place update for a handle from line()/scatter() — the

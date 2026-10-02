@@ -121,7 +121,9 @@ test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
     expect(stats.red).toBeGreaterThan(500);   // sin(10x) curve pixels
 });
 
-for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface']) {
+for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
+                    'contour', 'hist2d', 'kde', 'box', 'stem',
+                    'quiver']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));
@@ -147,6 +149,8 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface']) {
         });
         console.log(kind.toUpperCase(), JSON.stringify(stats), JSON.stringify(errors));
         expect(stats.nonWhite).toBeGreaterThan(1000);
-        expect(stats.chroma).toBeGreaterThan(200);
+        // contour/quiver default to black line color — chroma n/a
+        if (kind !== 'contour' && kind !== 'quiver')
+            expect(stats.chroma).toBeGreaterThan(200);
     });
 }

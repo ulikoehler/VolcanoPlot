@@ -268,7 +268,7 @@ export class Interpreter {
                       topology: 'line-strip', bindings: [ud, S(1)] });
         mk('linesegs', { src: LINES_WGSL, transform: true,
                          topology: 'line-list', bindings: [ud, S(1)] });
-        mk('points.cs', { src: POINTS_WGSL, transform: true,
+        mk('points.c.s', { src: POINTS_WGSL, transform: true,
                           defines: ['HAS_COL', 'HAS_SIZE'],
                           topology: 'triangle-list',
                           bindings: [ud, S(1), S(2), S(3)] });
@@ -395,8 +395,17 @@ export class Interpreter {
         // resources+computes into `enc`, then draws into the render
         // pass. (Resource ops are queue-level, not pass-scoped.)
         const drawOps: { op: number; p: DataView<ArrayBuffer> }[] = [];
+        // Release ops are deferred to after submit: a release recorded
+        // mid-stream (a renderer replacing its own buffer) must not
+        // invalidate a handle still referenced by earlier draw ops —
+        // WebGPU keeps resources referenced by recorded commands alive.
+        const releases: { op: number; p: DataView<ArrayBuffer> }[] = [];
         for (const { op, p } of r.ops()) {
-            if (op <= Op.ReleaseTexture) this.execResource(r, op, p);
+            if (op <= Op.ReleaseTexture) {
+                if (op === Op.ReleaseBuffer || op === Op.ReleaseTexture)
+                    releases.push({ op, p });
+                else this.execResource(r, op, p);
+            }
             else if (op >= Op.TessLines && !((globalThis as any).VP_NO_COMPUTE)) this.execCompute(r, enc, op, p);
             else {
             const only = (globalThis as any).VP_ONLY as Set<number> | undefined;
@@ -442,6 +451,7 @@ export class Interpreter {
         }
         this.device.queue.submit([enc.finish()]);
         depthTex?.destroy();
+        for (const { op, p } of releases) this.execResource(r, op, p);
         this.flushMailbox();
         this.uniformCursor = 0;
         this.scratchCursor = 0;

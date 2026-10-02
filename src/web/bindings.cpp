@@ -19,6 +19,18 @@
 #include <volcano/plot/plots/PiePlot.hpp>
 #include <volcano/plot/plots/HeatmapPlot.hpp>
 #include <volcano/plot/plots/SurfacePlot.hpp>
+#include <volcano/plot/plots/ErrorbarPlot.hpp>
+#include <volcano/plot/plots/StemPlot.hpp>
+#include <volcano/plot/plots/StepPlot.hpp>
+#include <volcano/plot/plots/ECDFPlot.hpp>
+#include <volcano/plot/plots/FillBetweenPlot.hpp>
+#include <volcano/plot/plots/BoxPlot.hpp>
+#include <volcano/plot/plots/Hist2DPlot.hpp>
+#include <volcano/plot/plots/HexbinPlot.hpp>
+#include <volcano/plot/plots/QuiverPlot.hpp>
+#include <volcano/plot/plots/ContourPlot.hpp>
+#include <volcano/plot/plots/PcolormeshPlot.hpp>
+#include <volcano/plot/plots/KDEPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
 
 using namespace volcano;
@@ -222,6 +234,119 @@ uintptr_t surface(uint32_t axesIdx, em::val values, uint32_t w,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+/// Register a freshly-built plot on `axesIdx`; returns a JS handle.
+template <typename P, typename... Args>
+uintptr_t addPlot(uint32_t axesIdx, Args&&... args) {
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<P>(std::forward<Args>(args)...);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+uintptr_t errorbar(uint32_t axesIdx, em::val xs, em::val ys,
+                   em::val yerr, em::val color) {
+    plot::ErrorbarConfig cfg;
+    cfg.yerr = f32vec(yerr);
+    if (color.typeOf().as<std::string>() == "string") {
+        if (auto c = plot::Color::parse(color.as<std::string>())) {
+            cfg.color = *c; cfg.markerColor = *c; cfg.errorbarColor = *c;
+        }
+    }
+    return addPlot<plot::ErrorbarPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                       std::move(cfg));
+}
+
+uintptr_t stem(uint32_t axesIdx, em::val xs, em::val ys) {
+    return addPlot<plot::StemPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                   plot::StemConfig{});
+}
+
+uintptr_t step(uint32_t axesIdx, em::val xs, em::val ys,
+               const std::string& where) {
+    auto w = where == "post" ? plot::StepWhere::Post
+           : where == "mid"  ? plot::StepWhere::Mid
+                             : plot::StepWhere::Pre;
+    return addPlot<plot::StepPlot>(axesIdx, f32vec(xs), f32vec(ys), w);
+}
+
+uintptr_t ecdf(uint32_t axesIdx, em::val samples) {
+    return addPlot<plot::ECDFPlot>(axesIdx, f32vec(samples));
+}
+
+uintptr_t fillBetween(uint32_t axesIdx, em::val xs, em::val y1,
+                      em::val y2, em::val color) {
+    plot::Color col = plot::Color::fromRgba8(31, 119, 180, 128);
+    if (color.typeOf().as<std::string>() == "string") {
+        if (auto c = plot::Color::parse(color.as<std::string>()))
+            col = *c;
+    }
+    return addPlot<plot::FillBetweenPlot>(axesIdx, f32vec(xs), f32vec(y1),
+                                          f32vec(y2), col);
+}
+
+uintptr_t boxplot(uint32_t axesIdx, em::val groups) {
+    std::vector<std::vector<float>> gs;
+    const size_t n = groups["length"].as<size_t>();
+    gs.reserve(n);
+    for (size_t i = 0; i < n; ++i) gs.push_back(f32vec(groups[i]));
+    return addPlot<plot::BoxPlot>(axesIdx, std::move(gs));
+}
+
+uintptr_t hist2d(uint32_t axesIdx, em::val xs, em::val ys,
+                 uint32_t bins, const std::string& cmapName) {
+    plot::Hist2DConfig cfg;
+    cfg.bins = plot::Hist2DBinMethod::Fixed;
+    cfg.nBinsX = cfg.nBinsY = int(bins ? bins : 10);
+    cfg.cmap = &plot::Colormap::byName(cmapName);
+    return addPlot<plot::Hist2DPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                     std::move(cfg));
+}
+
+uintptr_t hexbin(uint32_t axesIdx, em::val xs, em::val ys) {
+    return addPlot<plot::HexbinPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                     plot::HexbinConfig{});
+}
+
+uintptr_t quiver(uint32_t axesIdx, em::val xs, em::val ys,
+                 em::val us, em::val vs) {
+    return addPlot<plot::QuiverPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                     f32vec(us), f32vec(vs),
+                                     plot::QuiverConfig{});
+}
+
+uintptr_t contour(uint32_t axesIdx, em::val values, uint32_t w,
+                  uint32_t h, uint32_t levels, const std::string& cmapName) {
+    plot::Grid2D g;
+    g.values = f32vec(values);
+    g.width = w; g.height = h;
+    g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    plot::ContourConfig cfg;
+    cfg.numLevels = int(levels ? levels : 10);
+    cfg.cmap = &plot::Colormap::byName(cmapName);
+    return addPlot<plot::ContourPlot>(axesIdx, std::move(g), std::move(cfg));
+}
+
+uintptr_t pcolormesh(uint32_t axesIdx, em::val xs, em::val ys,
+                     em::val cs, uint32_t nCols, uint32_t nRows) {
+    return addPlot<plot::PcolormeshPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                         f32vec(cs), nCols, nRows,
+                                         plot::PcolormeshConfig{});
+}
+
+uintptr_t kde(uint32_t axesIdx, em::val xs, em::val ys,
+              const std::string& cmapName) {
+    size_t nx = 0, ny = 0;
+    const float* px = f32Span(xs, nx);
+    const float* py = f32Span(ys, ny);
+    const size_t n = std::min(nx, ny);
+    std::vector<plot::Point2D> pts(n);
+    for (size_t i = 0; i < n; ++i) pts[i] = {px[i], py[i]};
+    return addPlot<plot::KDEPlot>(axesIdx, std::move(pts), 256, 256, 0.0f,
+                                  plot::Colormap::byName(cmapName));
+}
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -271,5 +396,17 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_pie", &pie);
     em::function("_vp_heatmap", &heatmap);
     em::function("_vp_surface", &surface);
+    em::function("_vp_errorbar", &errorbar);
+    em::function("_vp_stem", &stem);
+    em::function("_vp_step", &step);
+    em::function("_vp_ecdf", &ecdf);
+    em::function("_vp_fillBetween", &fillBetween);
+    em::function("_vp_boxplot", &boxplot);
+    em::function("_vp_hist2d", &hist2d);
+    em::function("_vp_hexbin", &hexbin);
+    em::function("_vp_quiver", &quiver);
+    em::function("_vp_contour", &contour);
+    em::function("_vp_pcolormesh", &pcolormesh);
+    em::function("_vp_kde", &kde);
 }
 #endif // __EMSCRIPTEN__

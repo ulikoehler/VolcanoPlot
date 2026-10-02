@@ -34,6 +34,38 @@ window.vpDone = (async () => {
                 g[j * W + i] = Math.sin(Math.sqrt(x * x + y * y));
             }
         vp.surface(g, W, H);
+    } else if (which === 'contour') {
+        const W = 50, H = 40, g = new Float32Array(W * H);
+        for (let j = 0; j < H; j++)
+            for (let i = 0; i < W; i++) {
+                const x = i * 0.2 - 5, y = j * 0.2 - 4;
+                g[j * W + i] = Math.sin(Math.sqrt(x * x + y * y));
+            }
+        vp.contour(g, W, H, 8);
+    } else if (which === 'hist2d' || which === 'kde') {
+        const n = 4000, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = Math.sin(i * 0.61) + Math.sin(i * 1.13) * 0.4;
+            ys[i] = Math.cos(i * 0.37) + Math.cos(i * 0.83) * 0.4;
+        }
+        if (which === 'hist2d') vp.hist2d(xs, ys, 24);
+        else vp.kde(xs, ys);
+    } else if (which === 'box') {
+        vp.boxplot([[1, 2, 3, 4, 5, 2.5], [2, 4, 6, 8, 3],
+                    [0.5, 1, 1.5, 2, 9]]);
+    } else if (which === 'stem') {
+        const n = 40, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) { xs[i] = i; ys[i] = Math.sin(i * 0.4); }
+        vp.stem(xs, ys);
+    } else if (which === 'quiver') {
+        const n = 100, xs = new Float32Array(n), ys = new Float32Array(n),
+              us = new Float32Array(n), vs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const x = (i % 10) / 9, y = ((i / 10) | 0) / 9;
+            xs[i] = x; ys[i] = y;
+            us[i] = -Math.sin(y * 6.28); vs[i] = Math.cos(x * 6.28);
+        }
+        vp.quiver(xs, ys, us, vs);
     }
     const px = await vp.capture();
     window.vpPixels = px;
