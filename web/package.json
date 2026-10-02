@@ -3,9 +3,21 @@
     "version": "0.0.1",
     "type": "module",
     "description": "VolcanoPlot WebGPU front-end — WASM engine + op-stream interpreter",
-    "main": "dist/interpreter.js",
+    "exports": {
+        ".": {
+            "types": "./dist/volcano.d.ts",
+            "import": "./dist/bundle.mjs"
+        }
+    },
+    "files": [
+        "dist/bundle.mjs",
+        "dist/volcanoplot.js",
+        "dist/volcanoplot.wasm",
+        "dist/volcanoplot.data",
+        "dist/*.d.ts"
+    ],
     "scripts": {
-        "build": "tsc -p tsconfig.json",
+        "build": "tsc -p tsconfig.json && node build.mjs",
         "test": "vitest run",
         "test:e2e": "playwright test"
     },

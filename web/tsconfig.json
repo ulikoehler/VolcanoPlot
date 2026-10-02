@@ -6,7 +6,9 @@
         "strict": true,
         "types": ["@webgpu/types", "node"],
         "outDir": "dist",
+        "declaration": true,
         "skipLibCheck": true
     },
-    "include": ["src/**/*.ts"]
+    "include": ["src/**/*.ts"],
+    "exclude": ["src/*.test.ts"]
 }
