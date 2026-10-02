@@ -44,6 +44,8 @@ public:
     }
     /// Lossy quality hint 0-100 (JPEG). Default: ignored.
     virtual void setQuality(int q) { (void)q; }
+    /// Deflate/compression level hint (PNG zlib 0-9). Default: ignored.
+    virtual void setCompressionLevel(int level) { (void)level; }
     /// Resolution hint in DPI (TIFF tags, PDF page size). Default: ignored.
     virtual void setDpi(float dpi) { (void)dpi; }
 
@@ -81,6 +83,10 @@ struct SaveOptions {
     float padInches = 0.1f;
     /// Lossy quality for JPEG (pil_kwargs quality equivalent).
     int quality = 95;
+    /// zlib compression level for PNG (0-9); -1 = encoder default.
+    /// matplotlib writes zlib level 6; 3 is ~2.4x faster for ~50%
+    /// larger files on typical plot frames.
+    int compressionLevel = -1;
     /// Per-format metadata (matplotlib savefig metadata=...).
     std::map<std::string, std::string> metadata;
     /// Explicit format override (matplotlib format="pdf"); when set the
@@ -99,9 +105,12 @@ struct SaveOptions {
 /// options.format). `rgba` is the RGBA8 framebuffer readback; for
 /// transparent output the caller should have rendered with a clear
 /// alpha of 0.
+/// `override` — caller-supplied encoder (e.g. a GPU encoder cached on the
+/// renderer); used only when its format() matches the resolved format.
 [[nodiscard]] bool saveImage(std::span<const uint8_t> rgba,
                              uint32_t width, uint32_t height,
                              const std::filesystem::path& path,
-                             const SaveOptions& options = {});
+                             const SaveOptions& options = {},
+                             IImageEncoder* override = nullptr);
 
 } // namespace volcano::encode

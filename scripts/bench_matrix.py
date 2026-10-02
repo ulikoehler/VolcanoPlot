@@ -1,29 +1,63 @@
 #!/usr/bin/env python3
-"""Three-way benchmark matrix: mpl-Agg vs mpl+VolcanoPlot vs native VP.
+"""Three-way benchmark matrix: mpl-Agg vs mpl+VolcanoPlot vs native C++ VP.
 
-For each case the *same logical plot* is built on all three stacks and
-timed end-to-end via savefig (draw + encode + write), which is the fair
-comparison for headless use:
+Every case builds the *same logical plot* — same data, same figure size
+(6.4x4.8in), same dpi — on all three stacks:
 
-    # one process per stack (backend is process-global):
+    agg    stock matplotlib, Agg backend          (python3 ... agg)
+    vp     matplotlib frontend + VP backend       (PYTHONPATH=build/python ... vp)
+    cpp    raw C++ API, zero Python               (built example binary)
+
+Vulkan initialization is measured separately and never included in the
+per-case metric — the numbers represent steady-state ("the user wants to
+make 100 plots"), so each stack gets a global warm-up (recorded as the
+"_init" pseudo-case) and each case gets one untimed warm-up rep before
+the timed reps (first-use pipeline compilation is excluded).
+
+Usage (each stack runs in its own process — the backend is
+process-global):
+
+    python3 scripts/bench_matrix.py all [--outdir gallery/benchmark]
+
+which is equivalent to:
+
+    python3 scripts/bench_matrix.py dump
     MPLBACKEND=Agg python3 scripts/bench_matrix.py agg
     PYTHONPATH=build/python python3 scripts/bench_matrix.py vp
-    PYTHONPATH=build/python python3 scripts/bench_matrix.py native
-
-Writes /tmp/bench_matrix_<stack>.json; merge + print with:
-
+    python3 scripts/bench_matrix.py cpp
     python3 scripts/bench_matrix.py report
+
+Outputs (in --outdir, default gallery/benchmark/):
+
+    <case>_<stack>.png         rendered output for visual comparison
+    data/<fn>/*.npy            identical input arrays shared with the
+                               C++ bench (data manifest: data/manifest.tsv)
+    bench_matrix_<stack>.json  per-case median timings
+    benchmark_report.md        merged report with per-case images
 """
+import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 
 import numpy as np
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_OUTDIR = os.path.join(ROOT_DIR, "gallery", "benchmark")
+CPP_BENCH = os.path.join(ROOT_DIR, "build", "examples", "example_bench_matrix")
+
+STACKS = ("agg", "vp", "cpp")          # stacks 'all' runs
+REPORT_ORDER = ("agg", "vp", "cpp", "native")  # any json found is reported
+
 # -------------------------------------------------------------------
 # cases: (name, category, build(ax), figure-kwargs)
 # build() receives an Axes-like object; must be API-compatible across
-# matplotlib Axes and volcanoplot Axes.
+# matplotlib Axes and volcanoplot Axes. Each build is also replayed
+# against a recording stub to dump identical input data for the C++
+# bench — keep random data generation inside build() so the recorded
+# arrays are exactly what was plotted.
 # -------------------------------------------------------------------
 
 
@@ -84,6 +118,14 @@ def c_text_50(ax):
 def c_pie(ax):
     ax.pie([15, 30, 45, 10], labels=["a", "b", "c", "d"],
            autopct="%1.0f%%")
+
+
+def c_multi_line2k(ax):
+    # The 50-figure amortized workload's per-figure content.
+    x = np.linspace(0, 10, 2000)
+    r = _rng(3)
+    for j in range(3):
+        ax.plot(x, np.sin(x + j) + r.normal(0, 0.05, x.size))
 
 
 # ── medium ────────────────────────────────────────────────────────────
@@ -264,7 +306,7 @@ def c_pcolormesh_7M(ax):
 def c_quadmesh_1M(ax):
     x = np.linspace(0, 1, 1001)
     y = np.linspace(0, 1, 1001)
-    c = np.sin(x[:-1][None, :] * 20) * np.cos(y[:-1][:, None] * 20)
+    c = np.sin(x[:-1][:, None] * 20) * np.cos(y[:-1][None, :] * 20)
     ax.pcolormesh(x, y, c, shading="auto", cmap="viridis")
 
 
@@ -341,6 +383,8 @@ CASES = [
     ("contourf_400",        c_contourf_400,    {},               "large"),
 ]
 
+NMULTI = 50
+
 
 def _new_fig_ax(stack, dpi):
     if stack == "native":
@@ -361,7 +405,27 @@ def _close(stack, fig):
         plt.close(fig)
 
 
-def run(stack, repeats=3):
+def _warmup(stack, outdir):
+    """One mixed-primitive figure: brings up the Vulkan instance/device,
+    font atlas and the common render pipelines. Its savefig wall time is
+    reported as the per-stack "_init" metric and never added to a case."""
+    fig, ax = _new_fig_ax(stack, 100)
+    x = np.linspace(0, 1, 100)
+    r = _rng(0)
+    ax.plot(x, x)
+    ax.scatter(r.random(20), r.random(20))
+    ax.bar(np.arange(4), [1.0, 2.0, 0.5, 1.5])
+    ax.imshow(r.random((8, 8)), cmap="viridis")
+    ax.text(0.5, 0.5, "warmup")
+    t0 = time.perf_counter()
+    fig.savefig(os.path.join(outdir, "_warmup.png"))
+    dt = time.perf_counter() - t0
+    _close(stack, fig)
+    return dt * 1e3
+
+
+def run(stack, outdir, repeats=3):
+    os.makedirs(outdir, exist_ok=True)
     if stack == "native":
         import volcanoplot as vp  # noqa: F401
     else:
@@ -370,11 +434,18 @@ def run(stack, repeats=3):
                        if stack == "vp" else "Agg")
         import matplotlib.pyplot as plt  # noqa: F401
 
-    out = {}
+    out = {"_init": {"cat": "meta", "ms": _warmup(stack, outdir),
+                     "min_ms": None, "err": None,
+                     "note": "vulkan/pipeline init — excluded from all"
+                             " case metrics"}}
+    print(f"[{stack:6}] {'_init':<22} {out['_init']['ms']:9.1f} ms",
+          flush=True)
+
     for name, fn, kw, cat in CASES:
         ts = []
         err = None
-        for _ in range(repeats):
+        # rep 0 is an untimed warm-up (pipeline compile, font glyphs, …)
+        for rep in range(repeats + 1):
             fig, ax = _new_fig_ax(stack, kw.get("dpi", 100))
             try:
                 fn(ax)
@@ -384,12 +455,13 @@ def run(stack, repeats=3):
                 break
             t0 = time.perf_counter()
             try:
-                fig.savefig(f"/tmp/bm_{stack}_{name}.png")
+                fig.savefig(os.path.join(outdir, f"{name}_{stack}.png"))
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 _close(stack, fig)
                 break
-            ts.append(time.perf_counter() - t0)
+            if rep > 0:
+                ts.append(time.perf_counter() - t0)
             _close(stack, fig)
         out[name] = {"cat": cat,
                      "ms": (float(np.median(ts)) * 1e3) if ts else None,
@@ -400,54 +472,219 @@ def run(stack, repeats=3):
               f"{'ms' if ts else err or ''}", flush=True)
 
     # same-config multi-figure workload (amortized setup)
-    rng = np.random.default_rng(3)
-    nmulti = 50
     t0 = time.perf_counter()
-    for _ in range(nmulti):
+    for _ in range(NMULTI):
         fig, ax = _new_fig_ax(stack, 100)
-        x = np.linspace(0, 10, 2000)
-        for j in range(3):
-            ax.plot(x, np.sin(x + j) + rng.normal(0, 0.05, x.size))
-        fig.savefig("/tmp/bm_multi.png")
+        c_multi_line2k(ax)
+        fig.savefig(os.path.join(outdir, f"multi_50x_line2k_{stack}.png"))
         _close(stack, fig)
     dt = time.perf_counter() - t0
-    out["multi_50x_line2k"] = {"cat": "multi", "ms": dt / nmulti * 1e3,
-                               "min_ms": dt / nmulti * 1e3, "err": None}
-    print(f"[{stack:6}] multi_50x_line2k      {dt / nmulti * 1e3:9.1f} "
+    out["multi_50x_line2k"] = {"cat": "multi", "ms": dt / NMULTI * 1e3,
+                               "min_ms": dt / NMULTI * 1e3, "err": None}
+    print(f"[{stack:6}] multi_50x_line2k      {dt / NMULTI * 1e3:9.1f} "
           f"ms/plot", flush=True)
 
-    with open(f"/tmp/bench_matrix_{stack}.json", "w") as f:
+    with open(os.path.join(outdir, f"bench_matrix_{stack}.json"), "w") as f:
         json.dump(out, f, indent=1)
     return out
 
 
-def report():
-    stacks = {}
-    for s in ("agg", "vp", "native"):
+# -------------------------------------------------------------------
+# data dump — identical inputs for the C++ bench
+# -------------------------------------------------------------------
+
+class _RecordingAx:
+    """Stub Axes: swallows every method call and dumps each array-like
+    argument as <fn_name>/<method><call#>.<pos|kwarg>.npy so the C++
+    bench can replay byte-identical inputs."""
+
+    def __init__(self, datadir):
+        os.makedirs(datadir, exist_ok=True)
+        self._dir = datadir
+        self._calls = {}
+
+    def __getattr__(self, method):
+        def rec(*args, **kw):
+            k = self._calls.get(method, 0)
+            self._calls[method] = k + 1
+            for i, a in enumerate(args):
+                self._dump(f"{method}{k}.{i}", a)
+            for key, a in kw.items():
+                self._dump(f"{method}{k}.{key}", a)
+        return rec
+
+    def _dump(self, tag, v):
         try:
-            stacks[s] = json.load(open(f"/tmp/bench_matrix_{s}.json"))
+            a = np.asarray(v)
+        except Exception:
+            return
+        if a.ndim == 0 or a.dtype.kind not in "fiub":
+            return
+        np.save(os.path.join(self._dir, f"{tag}.npy"), a)
+
+
+def dump_data(outdir):
+    """Write data/<fn>/*.npy + manifest.tsv (case<TAB>dpi<TAB>fn<TAB>cat)."""
+    data_root = os.path.join(outdir, "data")
+    os.makedirs(data_root, exist_ok=True)
+    manifest = []
+    seen = set()
+    for name, fn, kw, cat in CASES + [("multi_50x_line2k",
+                                      c_multi_line2k, {}, "multi")]:
+        dataname = fn.__name__[2:]  # c_line_10M -> line_10M (shared by
+        # dpi variants — the data does not depend on dpi)
+        manifest.append(f"{name}\t{kw.get('dpi', 100)}\t{dataname}\t{cat}")
+        if dataname not in seen:
+            seen.add(dataname)
+            fn(_RecordingAx(os.path.join(data_root, dataname)))
+    with open(os.path.join(data_root, "manifest.tsv"), "w") as f:
+        f.write("#case\tdpi\tdata\tcat\n")
+        f.write("\n".join(manifest) + "\n")
+    print(f"dumped {len(seen)} case data sets to {data_root}", flush=True)
+
+
+# -------------------------------------------------------------------
+# C++ stack
+# -------------------------------------------------------------------
+
+def run_cpp(outdir):
+    if not os.path.isfile(os.path.join(outdir, "data", "manifest.tsv")):
+        dump_data(outdir)
+    if not os.path.isfile(CPP_BENCH):
+        subprocess.run(
+            ["cmake", "--build", "build",
+             "--target", "example_bench_matrix", "-j4"],
+            cwd=ROOT_DIR, check=True)
+    subprocess.run([CPP_BENCH, outdir], cwd=ROOT_DIR, check=True)
+
+
+# -------------------------------------------------------------------
+# report
+# -------------------------------------------------------------------
+
+def _load_stacks(outdir):
+    stacks = {}
+    for s in REPORT_ORDER:
+        p = os.path.join(outdir, f"bench_matrix_{s}.json")
+        try:
+            stacks[s] = json.load(open(p))
         except OSError:
             pass
+    return stacks
+
+
+def report(outdir):
+    stacks = _load_stacks(outdir)
+    present = [s for s in REPORT_ORDER if s in stacks]
     names = [n for n, *_ in CASES] + ["multi_50x_line2k"]
-    hdr = f"{'case':<22} {'Agg':>9} {'mpl+VP':>9} {'native':>9} " \
-          f"{'VP/Agg':>7} {'nat/Agg':>7}"
+    hdr = f"{'case':<22}" + "".join(f"{s:>9}" for s in present) + \
+          "".join(f"{f'{s}/Agg':>9}" for s in present if s != "agg")
     print(hdr)
     print("-" * len(hdr))
+    init = " ".join(f"{s}={stacks[s].get('_init', {}).get('ms'):.0f}ms"
+                    for s in present
+                    if stacks[s].get("_init", {}).get("ms"))
+    print(f"init (separate, warm-up): {init}")
     for n in names:
         row = [f"{n:<22}"]
         a = stacks.get("agg", {}).get(n, {}).get("ms")
-        v = stacks.get("vp", {}).get(n, {}).get("ms")
-        nv = stacks.get("native", {}).get(n, {}).get("ms")
-        for x in (a, v, nv):
-            row.append(f"{x:9.1f}" if x else f"{'—':>9}")
-        row.append(f"{a / v:6.2f}x" if a and v else "      -")
-        row.append(f"{a / nv:6.2f}x" if a and nv else "      -")
+        for s in present:
+            x = stacks[s].get(n, {}).get("ms")
+            e = stacks[s].get(n, {}).get("err")
+            row.append(f"{x:9.1f}" if x else f"{'ERR' if e else '—':>9}")
+        for s in present:
+            if s == "agg":
+                continue
+            v = stacks[s].get(n, {}).get("ms")
+            row.append(f"{a / v:8.2f}x" if a and v else f"{'—':>9}")
         print(" ".join(row))
+
+    # markdown report into the gallery folder, with per-case images
+    lines = ["# Benchmark report", "",
+             "Stack columns: `agg` = stock matplotlib, `vp` = matplotlib "
+             "+ VolcanoPlot backend, `cpp` = native VolcanoPlot C++ API, "
+             "`native` = VolcanoPlot python bindings.", "",
+             "Median `savefig` wall time in ms (warm; init excluded — "
+             "steady-state '100 plots' metric).", "",
+             f"Init (measured separately): {init}", ""]
+    for cat in ("small", "medium", "large", "multi"):
+        rows = [n for n, *_ in CASES if dict((nm, c) for nm, _, _, c in
+                CASES)[n] == cat] or (["multi_50x_line2k"]
+                                      if cat == "multi" else [])
+        if not rows:
+            continue
+        lines.append(f"## {cat}\n")
+        lines.append("| case | " + " | ".join(present) + " | " +
+                     " | ".join(f"{s}/Agg" for s in present if s != "agg")
+                     + " |")
+        lines.append("|---|" + "---:|" * (len(present) +
+                     max(0, len(present) - 1)))
+        for n in rows:
+            a = stacks.get("agg", {}).get(n, {}).get("ms")
+            cells = []
+            for s in present:
+                x = stacks[s].get(n, {}).get("ms")
+                cells.append(f"{x:.1f}" if x else "—")
+            for s in present:
+                if s == "agg":
+                    continue
+                v = stacks[s].get(n, {}).get("ms")
+                cells.append(f"{a / v:.2f}x" if a and v else "—")
+            lines.append(f"| {n} | " + " | ".join(cells) + " |")
+        lines.append("")
+    lines.append("## Rendered output (same logical plot per row)\n")
+    for n in names:
+        imgs = " ".join(f"![{n} {s}]({n}_{s}.png)"
+                        for s in present
+                        if os.path.isfile(os.path.join(
+                            outdir, f"{n}_{s}.png")))
+        if imgs:
+            lines.append(f"### {n}\n\n{imgs}\n")
+    rp = os.path.join(outdir, "benchmark_report.md")
+    with open(rp, "w") as f:
+        f.write("\n".join(lines))
+    print(f"\nwrote {rp}")
+
+
+# -------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("cmd", nargs="?", default="all",
+                    choices=["all", "agg", "vp", "native", "cpp",
+                             "dump", "report"])
+    ap.add_argument("--outdir", default=DEFAULT_OUTDIR)
+    ap.add_argument("--repeats", type=int, default=3)
+    args = ap.parse_args()
+    outdir = args.outdir
+    os.makedirs(outdir, exist_ok=True)
+
+    if args.cmd in ("agg", "vp", "native"):
+        run(args.cmd, outdir, args.repeats)
+        return
+    if args.cmd == "dump":
+        dump_data(outdir)
+        return
+    if args.cmd == "cpp":
+        run_cpp(outdir)
+        return
+    if args.cmd == "report":
+        report(outdir)
+        return
+
+    # all: dump identical data, then one process per stack (sequential —
+    # parallel runs would contend for the GPU/CPU and skew timings)
+    dump_data(outdir)
+    env_agg = dict(os.environ, MPLBACKEND="Agg")
+    env_vp = dict(os.environ,
+                  PYTHONPATH=os.path.join(ROOT_DIR, "build/python"))
+    for stack, env in (("agg", env_agg), ("vp", env_vp)):
+        subprocess.run([sys.executable, os.path.abspath(__file__), stack,
+                        "--outdir", outdir], env=env, cwd=ROOT_DIR,
+                       check=True)
+    run_cpp(outdir)
+    report(outdir)
 
 
 if __name__ == "__main__":
-    which = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if which == "report":
-        report()
-    else:
-        run(which)
+    main()

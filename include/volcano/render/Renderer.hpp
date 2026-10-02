@@ -17,9 +17,12 @@
 #include <volcano/encode/ImageEncoder.hpp>
 
 #include <vulkan/vulkan.hpp>
+#include <future>
 
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <optional>
 
@@ -87,6 +90,16 @@ public:
     [[nodiscard]] bool savefig(plot::Figure& figure,
                                const std::filesystem::path& path,
                                const encode::SaveOptions& options = {});
+
+    /// savefig variant that runs the CPU encode + file write on a worker
+    /// thread while the caller is free to render the next figure —
+    /// overlaps encode(N) with render(N+1) in multi-figure workloads.
+    /// The file is complete once the returned future resolves. Always
+    /// uses a per-call CPU encoder (GPU encoders are not thread-safe).
+    /// Vector formats run synchronously; the future is already ready.
+    [[nodiscard]] std::future<bool> savefigAsync(
+        plot::Figure& figure, const std::filesystem::path& path,
+        const encode::SaveOptions& options = {});
 
     [[nodiscard]] backend::IBackend& backend() noexcept { return backend_; }
     [[nodiscard]] core::PipelineCache& pipelineCache() noexcept { return *pipelineCache_; }
@@ -183,6 +196,13 @@ private:
     bool prepared_ = false;
     bool frameValid_ = false;
 
+    /// Cached GPU encoders for savefig (PNG filtering / YUV conversion on
+    /// the GPU + fast CPU bitstream). Keyed by ImageFormat; a null entry
+    /// marks a failed creation attempt (CPU fallback).
+    std::map<encode::ImageFormat, std::unique_ptr<encode::IImageEncoder>>
+        gpuEncs_;
+    std::set<encode::ImageFormat> gpuEncTried_;
+
     /// Draw axis labels, tick labels, and title for one axes.
     void drawText(vk::CommandBuffer cmd, const plot::Axes& axes,
                   plot::Rect2D rect);
@@ -248,6 +268,18 @@ private:
                                      const std::filesystem::path& path,
                                      const encode::SaveOptions& options,
                                      encode::ImageFormat fmt);
+
+    /// savefig raster prefix: transparent/facecolor juggling, prepare,
+    /// renderFrame, restore, readback. Returns the RGBA8 framebuffer
+    /// (empty on failure) and writes the pixel extent into w/h.
+    [[nodiscard]] std::vector<uint8_t> savefigPixels(
+        plot::Figure& figure, const encode::SaveOptions& opts,
+        uint32_t& w, uint32_t& h);
+
+    /// Apply the savefig PNG compression-level default (level 3, env
+    /// VOLCANO_PNG_LEVEL overrides) — shared by savefig/savefigAsync.
+    static encode::SaveOptions resolveSaveOpts(encode::SaveOptions opts,
+                                               encode::ImageFormat fmt);
 
     // --- legend internals (shared by axes + figure legends) ---
     /// One legend row: label + handle color/shape.

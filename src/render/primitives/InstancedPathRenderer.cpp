@@ -43,11 +43,11 @@ void main() {
 
 } // namespace
 
-void InstancedPathRenderer::init(vk::Device device, VmaAllocator allocator,
+void InstancedPathRendererVk::init(vk::Device device, VmaAllocator allocator,
                                  vk::RenderPass renderPass,
                                  vk::SampleCountFlagBits samples,
                                  core::PipelineCache& /*cache*/,
-                                 core::DescriptorPool& /*descPool*/) {
+                                 core::DescriptorPool& /*descPool*/ {
     device_ = device;
     allocator_ = allocator;
 
@@ -146,9 +146,9 @@ void InstancedPathRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void InstancedPathRenderer::setTemplate(vk::Device device, vk::Queue queue,
+void InstancedPathRendererVk::setTemplate(vk::Device device, vk::Queue queue,
                                         vk::CommandPool pool,
-                                        std::span<const plot::Point2D> triVerts) {
+                                        std::span<const plot::Point2D> triVerts {
     templateVerts_ = uint32_t(triVerts.size());
     if (triVerts.empty()) { templateVB_ = {}; return; }
     // A draw recorded earlier this frame may still reference the old
@@ -165,7 +165,7 @@ void InstancedPathRenderer::setTemplate(vk::Device device, vk::Queue queue,
             bdesc.size));
 }
 
-void InstancedPathRenderer::ensureScratch(size_t byteCount) {
+void InstancedPathRendererVk::ensureScratch(size_t byteCount {
     if (scratchOffset_ + byteCount <= scratchCapacity_) return;
     size_t needed = scratchOffset_ + byteCount;
     size_t newSize = std::max<size_t>(1u << 20, needed * 2);
@@ -182,9 +182,9 @@ void InstancedPathRenderer::ensureScratch(size_t byteCount) {
     scratchOffset_ = 0;
 }
 
-void InstancedPathRenderer::drawInstanced(
-        vk::CommandBuffer cmd, vk::Rect2D clip, vk::Extent2D resolution,
-        std::span<const PathInstance> instances) {
+void InstancedPathRendererVk::drawInstanced(
+        Cmd& cmdRef, plot::Rect2D clip, plot::Extent2D resolution,
+        std::span<const PathInstance> instances {
     if (!inited_ || instances.empty() || templateVerts_ == 0) return;
 
     size_t byteSize = instances.size() * sizeof(PathInstance);
@@ -207,7 +207,7 @@ void InstancedPathRenderer::drawInstanced(
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
 
     cmd.draw(templateVerts_, uint32_t(instances.size()), 0, 0);
 

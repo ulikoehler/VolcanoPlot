@@ -36,3 +36,13 @@ add_executable(example_microgallery microgallery.cpp)
 target_link_libraries(example_microgallery PRIVATE
     volcano_backend volcano_render volcano_plot volcano_text volcano_encode
 )
+
+add_executable(example_bench_matrix bench_matrix.cpp)
+target_link_libraries(example_bench_matrix PRIVATE
+    volcano_backend volcano_render volcano_plot volcano_text volcano_encode
+)
+
+add_executable(bench_encode bench_encode.cpp)
+target_link_libraries(bench_encode PRIVATE
+    volcano_backend volcano_render volcano_plot volcano_text volcano_encode
+)

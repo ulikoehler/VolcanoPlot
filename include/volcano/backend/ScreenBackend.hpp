@@ -23,16 +23,21 @@ public:
     std::vector<InputEvent> takeEvents() override;
     void setWindowTitle(std::string_view title) override;
     void toggleFullscreen() override;
-    vk::CommandBuffer beginFrame() override;
+    std::unique_ptr<render::Cmd> beginFrame() override;
     void endFrame() override;
+    render::GpuServices& gpu() override;
 
-    [[nodiscard]] GpuContext& context() noexcept override { return ctx_; }
-    [[nodiscard]] const GpuContext& context() const noexcept override { return ctx_; }
-    [[nodiscard]] vk::Extent2D extent() const noexcept override { return extent_; }
-    [[nodiscard]] vk::Format colorFormat() const noexcept override { return colorFormat_; }
-    [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept override { return samples_; }
-    [[nodiscard]] vk::RenderPass renderPass() const noexcept override { return renderPass_.get(); }
-    [[nodiscard]] vk::Format depthFormat() const noexcept override { return depthFormat_; }
+    // Vulkan-specific accessors (native only — used by VulkanGpuServices
+    // and native callers; not part of IBackend).
+    [[nodiscard]] GpuContext& context() noexcept { return ctx_; }
+    [[nodiscard]] const GpuContext& context() const noexcept { return ctx_; }
+    [[nodiscard]] plot::Extent2D extent() const noexcept override {
+        return {extent_.width, extent_.height};
+    }
+    [[nodiscard]] vk::Format colorFormat() const noexcept { return colorFormat_; }
+    [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept { return samples_; }
+    [[nodiscard]] vk::RenderPass renderPass() const noexcept { return renderPass_.get(); }
+    [[nodiscard]] vk::Format depthFormat() const noexcept { return depthFormat_; }
 
 private:
     void createSurface();
@@ -99,6 +104,10 @@ private:
     bool resized_ = false;
     /// Queued input events translated during pollEvents().
     std::vector<InputEvent> pendingEvents_;
+
+    /// GPU service facade (lazily created by gpu()).
+    std::unique_ptr<render::GpuServices> gpuServices_;
+
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 };
 

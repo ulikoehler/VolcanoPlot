@@ -13,6 +13,7 @@ set(VOLCANO_ENCODE_SOURCES
 if(VOLCANO_GPU_ENCODE)
     list(APPEND VOLCANO_ENCODE_SOURCES
         ${VOLCANO_ROOT}/src/encode/GpuPngEncoder.cpp
+        ${VOLCANO_ROOT}/src/encode/GpuYuvEncoders.cpp
     )
 endif()
 
@@ -21,8 +22,10 @@ find_package(JPEG QUIET)
 find_package(ZLIB QUIET)
 
 set(_defs)
+set(_pub_defs)
 if(VOLCANO_GPU_ENCODE)
-    list(APPEND _defs VOLCANO_GPU_ENCODE=1)
+    # Public: Renderer.cpp, examples and dependents branch on it too.
+    list(APPEND _pub_defs VOLCANO_GPU_ENCODE=1)
 endif()
 if(PNG_FOUND)
     list(APPEND _defs VOLCANO_HAS_LIBPNG=1)
@@ -56,5 +59,6 @@ volcano_add_component(volcano_encode
     PUBLIC_LINK volcano_core
     PRIVATE_LINK ${_priv_link}
     PUBLIC_INC include/volcano/encode
+    PUBLIC_DEFS ${_pub_defs}
     PRIVATE_DEFS ${_defs}
 )

@@ -5,6 +5,7 @@
 #include "volcano/encode/WebpEncoder.hpp"
 #ifdef VOLCANO_GPU_ENCODE
 #include "volcano/encode/GpuPngEncoder.hpp"
+#include "volcano/encode/GpuYuvEncoder.hpp"
 #endif
 
 #include <algorithm>
@@ -53,6 +54,12 @@ std::unique_ptr<IImageEncoder> createGpuEncoder(ImageFormat fmt,
 #ifdef VOLCANO_GPU_ENCODE
     if (fmt == ImageFormat::Png) {
         return std::make_unique<GpuPngEncoder>(device, queue, pool, allocator);
+    }
+    if (fmt == ImageFormat::Jpeg) {
+        return std::make_unique<GpuJpegEncoder>(device, queue, pool, allocator);
+    }
+    if (fmt == ImageFormat::Webp) {
+        return std::make_unique<GpuWebpEncoder>(device, queue, pool, allocator);
     }
 #endif
     (void)device; (void)queue; (void)pool; (void)allocator;
@@ -151,7 +158,8 @@ Padded pad(std::vector<uint8_t> px, uint32_t w, uint32_t h,
 } // namespace
 
 bool saveImage(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
-               const std::filesystem::path& path, const SaveOptions& opts) {
+               const std::filesystem::path& path, const SaveOptions& opts,
+               IImageEncoder* override) {
     ImageFormat fmt = ImageFormat::Png;
     if (opts.format) {
         fmt = *opts.format;
@@ -160,7 +168,9 @@ bool saveImage(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
         if (!inferred) return false;
         fmt = *inferred;
     }
-    auto enc = createCpuEncoder(fmt);
+    auto cpuEnc = createCpuEncoder(fmt);
+    IImageEncoder* enc =
+        (override && override->format() == fmt) ? override : cpuEnc.get();
     if (!enc) return false; // e.g. Pgf — no encoder
 
     std::vector<uint8_t> px(rgba.begin(), rgba.end());
@@ -194,6 +204,8 @@ bool saveImage(std::span<const uint8_t> rgba, uint32_t width, uint32_t height,
 
     enc->setMetadata(opts.metadata);
     enc->setQuality(opts.quality);
+    if (opts.compressionLevel >= 0)
+        enc->setCompressionLevel(opts.compressionLevel);
     enc->setDpi(opts.dpi);
     return enc->encodeToFile(px, w, h, path);
 }

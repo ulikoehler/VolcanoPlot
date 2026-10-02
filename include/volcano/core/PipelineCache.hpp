@@ -4,8 +4,18 @@
 #include <vulkan/vulkan.hpp>
 
 #include <filesystem>
+#include <mutex>
 
 namespace volcano::core {
+
+/// Mutex serializing vkCreate*Pipelines calls that share a VkPipelineCache
+/// (the cache object requires external synchronization). Callers that pass
+/// VK_NULL_HANDLE do not need it. Used by the parallel renderer init in
+/// Renderer::prepare().
+inline std::mutex& pipelineCreationMutex() {
+    static std::mutex m;
+    return m;
+}
 
 class PipelineCache {
 public:

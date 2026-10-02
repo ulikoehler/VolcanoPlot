@@ -1,97 +1,54 @@
-// volcano/render/primitives/GpuLineRenderer.hpp — GPU polyline stroker
+// volcano/render/primitives/GpuLineRenderer.hpp — compute polyline stroker
 //
-// Solid (non-dashed) polylines are stroked on the GPU: a compute shader
-// reads pixel-space points and expands them into a LineVertex triangle
-// soup (segment quads + miter/bevel/round join wedges + butt/square/
-// round caps) in a device-local vertex buffer. The result is drawn with
-// the spine fill pipeline via drawTrianglesGpu.
-//
-// This mirrors plot::strokePolyline (CPU) for the solid case; dashed
-// lines stay on the CPU path (dash walks need sequential arc length).
+// Backend-neutral interface (Vulkan impl: GpuLineRendererVk).
+// The shared instance comes from GpuServices::gpuLine().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
 #include <volcano/plot/Stroke.hpp>
 #include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
-#include <vulkan/vulkan.hpp>
-#include <vk_mem_alloc.h>
-
-#include <optional>
+#include <cstdint>
+#include <span>
 #include <vector>
-
-namespace volcano::core { class PipelineCache; class DescriptorPool; }
 
 namespace volcano::render::primitives {
 
+/// Compute-side polyline tessellation: strokes a pixel-space polyline
+/// into a LineVertex triangle soup entirely on the GPU. Used by LinePlot
+/// when the point count makes CPU stroking the bottleneck.
 class GpuLineRenderer {
 public:
-    GpuLineRenderer() = default;
-    void init(vk::Device device, VmaAllocator allocator,
-              core::DescriptorPool& descPool,
-              core::PipelineCache& cache);
+    virtual ~GpuLineRenderer() = default;
 
-    /// Per-frame reset of the bump allocators; frees buffers retired by
-    /// mid-frame growth (previous frame is complete by then).
-    void resetScratch();
-
+    /// A GPU-resident triangle mesh produced by tessellate().
     struct Mesh {
-        vk::Buffer buffer;
-        vk::DeviceSize firstVertex = 0;
+        GpuBuf buffer = 0;
+        uint64_t firstVertex = 0;   ///< byte offset of the first vertex
         uint32_t vertexCount = 0;
     };
 
-    /// Record the tessellation dispatch(es) on `cmd` (a pre-pass
-    /// command buffer recorded outside/before the render pass).
-    /// Returns the buffer+range spans to draw with
-    /// SpineRenderer::drawTrianglesGpu — usually one entry; huge inputs
-    /// are chunked so no single output buffer exceeds the device
-    /// allocation limit (seam points get caps instead of joins).
-    std::vector<Mesh> tessellate(vk::CommandBuffer cmd,
-                               std::span<const plot::Point2D> px,
-                               const plot::StrokeParams& sp,
-                               plot::Color color);
+    /// Record (Vulkan) or emit (op stream) the compute pass that strokes
+    /// `px` into triangle meshes. Returns one Mesh per emitted soup —
+    /// consumed by SpineRenderer::drawTrianglesGpu in draw().
+    virtual std::vector<Mesh> tessellate(Cmd& cmd,
+                                         std::span<const plot::Point2D> px,
+                                         const plot::StrokeParams& sp,
+                                         plot::Color color) = 0;
 
-    [[nodiscard]] bool inited() const noexcept { return inited_; }
+    /// Column-wise min/max envelope over a point buffer (compute).
+    /// Returns false when unavailable — callers fall back to CPU.
+    /// On the op-stream backend the result arrives via a mailbox next
+    /// frame; the v1 implementation returns false.
+    [[nodiscard]] virtual bool envelopeColumns(GpuBuf points,
+                                               uint32_t count,
+                                               float ax, float kx,
+                                               int cx0, int cx1,
+                                               std::vector<float>& mn,
+                                               std::vector<float>& mx) = 0;
 
-private:
-    static constexpr uint32_t kJoinVerts = 8 * 3;  // round fan: 8 tris
-    static constexpr uint32_t kCapVerts = 8 * 3;   // semicircle fan
-    static constexpr uint32_t kSegVerts = 6;       // segment quad
-    // verts per input point: (n-1) quads in region A + n join/cap slots
-    // in region B → total = kSegVerts*(n-1) + kJoinVerts*n.
-
-    /// Upper bound for a single out/in buffer allocation — physical
-    /// devices cap vkAllocateMemory (often ~4 GB), and geometric growth
-    /// of the bump buffer would otherwise cross it.
-    static constexpr vk::DeviceSize kMaxBufferBytes =
-        vk::DeviceSize(3) << 30;
-    /// Max input points per tessellate chunk so the output stays
-    /// comfortably under kMaxBufferBytes (~720 MB per chunk).
-    static constexpr size_t kMaxChunkPoints = 1'000'000;
-
-    Mesh tessellateChunk(vk::CommandBuffer cmd,
-                         std::span<const plot::Point2D> px,
-                         const plot::StrokeParams& sp,
-                         plot::Color color);
-    void ensureIn(size_t points);
-    void ensureOut(size_t verts);
-    void rebind();
-
-    vk::Device device_;
-    VmaAllocator allocator_ = nullptr;
-    core::DescriptorPool* descPool_ = nullptr;
-    bool inited_ = false;
-
-    vk::UniqueDescriptorSetLayout descLayout_;
-    vk::UniquePipelineLayout pipeLayout_;
-    vk::UniquePipeline pipe_;
-    vk::DescriptorSet dset_;
-
-    core::Buffer inBuf_;   // host-visible storage: vec2 points
-    core::Buffer outBuf_;  // device-local VertexStorage: LineVertex soup
-    std::vector<core::Buffer> retiredIn_, retiredOut_;
-    vk::DeviceSize inOff_ = 0, outOff_ = 0;   // bump offsets (elem units)
+    virtual void resetScratch() = 0;
+    [[nodiscard]] virtual bool inited() const noexcept = 0;
 };
 
 } // namespace volcano::render::primitives

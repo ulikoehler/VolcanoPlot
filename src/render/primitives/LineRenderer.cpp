@@ -48,8 +48,49 @@ void main() { outColor = v_color; }
 
 } // namespace
 
-void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                        vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class LineRendererVk final : public LineRenderer {
+public:
+    explicit LineRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+    void upload(std::span<const plot::Point2D> points,
+                plot::Color color, float width) override;
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Transform2D& transform,
+              uint32_t pointCount) const override;
+    [[nodiscard]] GpuBuf pointBuffer() const noexcept override {
+        return externalBuf_ ? externalBuf_ : GpuBuf(VkBuffer(pointBuffer_.handle()));
+    }
+    [[nodiscard]] uint32_t pointCount() const noexcept override { return count_; }
+    void updatePoints(std::span<const plot::Point2D> points) override;
+    void bindExternalBuffer(GpuBuf buf, uint32_t count) override {
+        externalBuf_ = buf;
+        count_ = count;
+    }
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer pointBuffer_;
+    GpuBuf externalBuf_ = 0;
+    VmaAllocator allocator_ = nullptr;
+    plot::Color color_;
+    float width_ = 1.0f;
+    uint32_t count_ = 0;
+    uint32_t capacity_ = 0;      ///< allocated point capacity
+    bool inited_ = false;
+};
+
+void LineRendererVk::init(vk::Device device, vk::RenderPass renderPass,
+                        vk::SampleCountFlagBits samples, core::PipelineCache& cache {
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -129,9 +170,12 @@ void LineRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void LineRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                          VmaAllocator allocator, std::span<const plot::Point2D> points,
+void LineRendererVk::upload(std::span<const plot::Point2D> points,
                           plot::Color color, float width) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     allocator_ = allocator;
     core::BufferDesc d;
     d.size = points.size_bytes();
@@ -144,10 +188,10 @@ void LineRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool po
     width_ = width;
     count_ = static_cast<uint32_t>(points.size());
     capacity_ = count_;
-    externalBuf_ = VK_NULL_HANDLE;
+    externalBuf_ = 0;
 }
 
-void LineRenderer::updatePoints(std::span<const plot::Point2D> points) {
+void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
     if (points.size() <= capacity_) {
         std::memcpy(pointBuffer_.mappedData(), points.data(),
                     points.size_bytes());
@@ -165,8 +209,9 @@ void LineRenderer::updatePoints(std::span<const plot::Point2D> points) {
     capacity_ = count_;
 }
 
-void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+void LineRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
                         const plot::Transform2D& transform, uint32_t pointCount) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || pointCount < 2) return;
     struct PC {
         float viewMinX, viewMinY, viewSpanX, viewSpanY;  // u_viewMinSpan
@@ -181,10 +226,10 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.viewMinY = transform.view.y.min;
     pc.viewSpanX = transform.view.x.span();
     pc.viewSpanY = transform.view.y.span();
-    pc.rectX = static_cast<float>(rect.offset.x);
-    pc.rectY = static_cast<float>(rect.offset.y);
-    pc.rectW = static_cast<float>(rect.extent.width);
-    pc.rectH = static_cast<float>(rect.extent.height);
+    pc.rectX = static_cast<float>(rect.x);
+    pc.rectY = static_cast<float>(rect.y);
+    pc.rectW = static_cast<float>(rect.width);
+    pc.rectH = static_cast<float>(rect.height);
     pc.r = color_.r; pc.g = color_.g; pc.b = color_.b; pc.a = color_.a;
     pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
     pc.sxP1 = transform.scaleX.param1;
@@ -205,19 +250,26 @@ void LineRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                       vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
                       0, sizeof(PC), &pc);
     vk::Viewport vp;
-    vp.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
-    std::array<vk::Buffer, 1> buf = { externalBuf_ ? externalBuf_
-                                                  : pointBuffer_.handle() };
+    std::array<vk::Buffer, 1> buf = { svcs_->vkBufferOf(
+        externalBuf_ ? externalBuf_
+                     : GpuBuf(VkBuffer(pointBuffer_.handle()))) };
     std::array<vk::DeviceSize, 1> off = {0};
     cmd.bindVertexBuffers(0, buf, off);
     cmd.draw(pointCount, 1, 0, 0);
 }
 
 } // namespace volcano::render::primitives
+
+std::unique_ptr<LineRenderer> makeLineVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<LineRendererVk>(svcs);
+    p->init();
+    return p;
+}

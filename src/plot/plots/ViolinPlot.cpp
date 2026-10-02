@@ -2,9 +2,16 @@
 #include "volcano/plot/plots/ViolinPlot.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include "volcano/core/Buffer.hpp"
+#include "volcano/core/CommandBuffer.hpp"
+#include "volcano/core/DescriptorPool.hpp"
+#include "volcano/core/ShaderModule.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
 
 namespace volcano::plot {
 
@@ -29,10 +36,143 @@ float gaussianKernel(float x) {
     return std::exp(-0.5f * x * x) * 0.39894228f;  // 1/sqrt(2*pi)
 }
 
+// 1D Gaussian KDE in a compute shader: one thread per evaluation point
+// sums the kernel over all samples (samples×evals work is trivially
+// parallel). Device-keyed static pipeline, lazily built.
+const char* kKde1dGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) readonly buffer Src { float v[]; } src;
+layout(set = 0, binding = 1) writeonly buffer Dst { float d[]; } dst;
+layout(push_constant) uniform PC {
+    uint ns;    // sample count
+    uint ne;    // evaluation points
+    float lo;   // first evaluation x
+    float step; // evaluation spacing
+    float bw;   // bandwidth
+} pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.ne) return;
+    float y = pc.lo + float(i) * pc.step;
+    float sum = 0.0;
+    for (uint s = 0u; s < pc.ns; ++s) {
+        float t = (y - src.v[s]) / pc.bw;
+        sum += exp(-0.5 * t * t) * 0.39894228;
+    }
+    dst.d[i] = sum / (float(pc.ns) * pc.bw);
+}
+)GLSL";
+
+struct Kde1dPipe {
+    vk::Device device;
+    vk::UniqueDescriptorSetLayout descLayout;
+    vk::UniquePipelineLayout pipeLayout;
+    vk::UniquePipeline pipe;
+    bool ready = false;
+};
+
+Kde1dPipe& kde1dPipe(vk::Device device) {
+    static std::unordered_map<VkDevice, Kde1dPipe> m;
+    static std::mutex mu;
+    std::lock_guard lk(mu);
+    auto& p = m[VkDevice(device)];
+    if (p.ready || p.device) return p;
+    p.device = device;
+    auto spv = core::ShaderModule::compileGlsl(kKde1dGlsl, "comp");
+    core::ShaderModule shader(device, spv);
+    vk::DescriptorSetLayoutBinding b[2];
+    for (uint32_t i = 0; i < 2; ++i)
+        b[i].setBinding(i)
+           .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+           .setDescriptorCount(1)
+           .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+    vk::DescriptorSetLayoutCreateInfo dlci{};
+    dlci.setBindings(b);
+    p.descLayout = device.createDescriptorSetLayoutUnique(dlci);
+    vk::PushConstantRange pcr{};
+    pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute).setOffset(0)
+       .setSize(20);
+    vk::PipelineLayoutCreateInfo plci{};
+    plci.setSetLayouts(p.descLayout.get()).setPushConstantRanges(pcr);
+    p.pipeLayout = device.createPipelineLayoutUnique(plci);
+    vk::ComputePipelineCreateInfo ci{};
+    ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+        .setModule(shader.handle()).setPName("main");
+    ci.setLayout(p.pipeLayout.get());
+    auto res = device.createComputePipelineUnique(nullptr, ci);
+    if (res.result == vk::Result::eSuccess) {
+        p.pipe = std::move(res.value);
+        p.ready = true;
+    }
+    return p;
+}
+
+/// GPU 1D KDE over `data` at `n` points from lo with spacing `step`.
+/// Returns empty on failure.
+std::vector<float> gpuKde1d(render::Renderer& r,
+                            const std::vector<float>& data,
+                            float lo, float step, float bw, uint32_t n) {
+    auto& ctx = r.backend().context();
+    auto& p = kde1dPipe(ctx.device.handle());
+    if (!p.ready) return {};
+
+    core::BufferDesc sd{};
+    sd.size = data.size() * 4;
+    sd.usage = core::BufferUsage::Storage;
+    sd.hostVisible = true;
+    core::Buffer srcBuf(ctx.allocator.handle(), sd);
+    std::memcpy(srcBuf.mappedData(), data.data(), sd.size);
+
+    core::BufferDesc dd{};
+    dd.size = size_t(n) * 4;
+    dd.usage = core::BufferUsage::Storage;
+    dd.hostVisible = true;
+    dd.hostCached = true;
+    core::Buffer dstBuf(ctx.allocator.handle(), dd);
+
+    vk::DescriptorPoolSize ps{};
+    ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(2);
+    core::DescriptorPool onePool(ctx.device.handle(), {ps}, 1);
+    vk::DescriptorSet set = onePool.allocate(p.descLayout.get());
+    vk::DescriptorBufferInfo ii{}, oi{};
+    ii.setBuffer(srcBuf.handle()).setOffset(0).setRange(sd.size);
+    oi.setBuffer(dstBuf.handle()).setOffset(0).setRange(dd.size);
+    vk::WriteDescriptorSet w[2];
+    w[0].setDstSet(set).setDstBinding(0)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setBufferInfo(ii);
+    w[1].setDstSet(set).setDstBinding(1)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setBufferInfo(oi);
+    ctx.device.handle().updateDescriptorSets(w, {});
+
+    {
+        core::OneTimeCommands cmd(ctx.device.handle(),
+                                ctx.graphicsPool.handle(),
+                                ctx.device.graphicsQueue());
+        cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
+                                  p.pipe.get());
+        cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                                        p.pipeLayout.get(), 0, set, {});
+        struct { uint32_t ns, ne; float lo, step, bw; } pcv{
+            uint32_t(data.size()), n, lo, step, bw};
+        cmd.handle().pushConstants(p.pipeLayout.get(),
+                                   vk::ShaderStageFlagBits::eCompute, 0,
+                                   20, &pcv);
+        cmd.handle().dispatch((n + 255) / 256, 1, 1);
+    }
+    dstBuf.invalidate();
+    std::vector<float> out(n);
+    std::memcpy(out.data(), dstBuf.mappedData(), dd.size);
+    return out;
+}
+
 } // namespace
 
 std::pair<std::vector<float>, std::vector<float>>
-ViolinPlot::computeKde(const std::vector<float>& data) const {
+ViolinPlot::computeKde(const std::vector<float>& data,
+                       render::Renderer* r) const {
     if (data.empty()) return {};
     float bw = cfg_.bandwidth > 0.0f ? cfg_.bandwidth : scottBandwidth(data);
     if (bw <= 0.0f) bw = 1.0f;
@@ -45,9 +185,21 @@ ViolinPlot::computeKde(const std::vector<float>& data) const {
     uint32_t n = cfg_.numPoints;
     if (n < 2) n = 2;
 
+    // GPU path for heavy kernels (upload+eval beats the serial sum once
+    // samples × evals is large enough).
+    const float step = (hi - lo) / float(n - 1);
+    if (r && double(data.size()) * n >= 200'000.0) {
+        if (auto dens = gpuKde1d(*r, data, lo, step, bw, n);
+            !dens.empty()) {
+            std::vector<float> yEval(n);
+            for (uint32_t i = 0; i < n; ++i) yEval[i] = lo + step * i;
+            return {yEval, std::move(dens)};
+        }
+    }
+
     std::vector<float> yEval(n), density(n);
     for (uint32_t i = 0; i < n; ++i) {
-        float y = lo + (hi - lo) * i / (n - 1);
+        float y = lo + step * i;
         yEval[i] = y;
         float sum = 0.0f;
         for (float d : data)
@@ -72,7 +224,7 @@ ViolinPlot::Stats ViolinPlot::computeStats(const std::vector<float>& data) const
             sorted.front(), sorted.back()};
 }
 
-void ViolinPlot::buildGeometry() {
+void ViolinPlot::buildGeometry(render::Renderer* r) {
     bodyFillPos_.clear();
     bodyFillColors_.clear();
     bodyEdgeSegs_.clear();
@@ -91,7 +243,7 @@ void ViolinPlot::buildGeometry() {
             return cfg_.vert ? Point2D{c, v} : Point2D{v, c};
         };
 
-        auto [yEval, density] = computeKde(groups_[g]);
+        auto [yEval, density] = computeKde(groups_[g], r);
         if (yEval.size() < 2) continue;
 
         // Normalize density to max=1, then scale by halfW.
@@ -184,7 +336,7 @@ void ViolinPlot::buildGeometry() {
 }
 
 void ViolinPlot::prepare(render::Renderer& r) {
-    buildGeometry();
+    buildGeometry(&r);
     auto& ctx = r.backend().context();
 
     fillRenderer_.init(ctx.device.handle(), r.backend().renderPass(),

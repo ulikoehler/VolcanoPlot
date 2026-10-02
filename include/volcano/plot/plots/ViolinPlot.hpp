@@ -74,11 +74,12 @@ private:
     bool prepared_ = false;
 
     /// Compute KDE for one group: returns (y_eval, density) pairs.
+    /// Large kernels run on the GPU (compute shader) when `r` is given.
     std::pair<std::vector<float>, std::vector<float>>
-    computeKde(const std::vector<float>& data) const;
+    computeKde(const std::vector<float>& data, render::Renderer* r) const;
 
     /// Build geometry for all groups.
-    void buildGeometry();
+    void buildGeometry(render::Renderer* r = nullptr);
 
     /// Compute statistics (median, quartiles) for one group.
     struct Stats { float q1, median, q3, min, max; };

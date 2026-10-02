@@ -1,35 +1,24 @@
-// volcano/render/primitives/BarRenderer.hpp — bar chart renderer (stub, expandable)
+// volcano/render/primitives/BarRenderer.hpp — bar chart renderer
+//
+// Backend-neutral interface (Vulkan impl: BarRendererVk).
+// Instances come from GpuServices::createBarRenderer().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/plot/Transform.hpp>
-#include <volcano/core/ShaderModule.hpp>
-#include <volcano/plot/Types.hpp>
 #include <volcano/plot/DataSeries.hpp>
-#include <vulkan/vulkan.hpp>
-
-namespace volcano::core { class PipelineCache; }
+#include <volcano/plot/Transform.hpp>
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
 namespace volcano::render::primitives {
 
+/// Draws bar chart rectangles (per-vertex colors from BarData).
 class BarRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache);
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator, const plot::BarData& data);
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-              const plot::Transform2D& transform) const;
-private:
-    vk::Device device_;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer posBuffer_;
-    core::Buffer colorBuffer_;
-    uint32_t vertexCount_ = 0;
-    bool inited_ = false;
+    virtual ~BarRenderer() = default;
+
+    virtual void upload(const plot::BarData& data) = 0;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Transform2D& transform) const = 0;
 };
 
 } // namespace volcano::render::primitives

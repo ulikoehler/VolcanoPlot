@@ -176,11 +176,7 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
         series_.drawStyle == DrawStyle::Default &&
         axes.projection().kind == ProjectionKind::Rectilinear &&
         axes.xscale().kind == ScaleKind::Linear &&
-        axes.yscale().kind == ScaleKind::Linear &&
-        std::is_sorted(series_.points.begin(), series_.points.end(),
-                       [](const Point2D& a, const Point2D& b) {
-                           return a.x < b.x;
-                       })) {
+        axes.yscale().kind == ScaleKind::Linear) {
         const auto& vp = axes.viewport();
         float fx0 = axes.xscale().forward(vp.x.min);
         float fx1 = axes.xscale().forward(vp.x.max);
@@ -190,9 +186,31 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
         float ky = (fy1 != fy0) ? 1.0f / (fy1 - fy0) : 0.0f;
         float pyA = float(rect.y) + float(rect.height);
         float pyB = float(rect.height) * ky;
+        // GPU envelope: the uploaded point buffer is reduced on-device by
+        // a compute shader into per-pixel-column min/max — works for
+        // unsorted x too (atomics), and skips the O(n) host scan.
+        // Falls back to the CPU pass on failure.
+        std::vector<float> mn, mx;
+        auto& ctx = r.backend().context();
+        // Column affine: pixel col = ax + kx * dataX  →  ax folds in the
+        // viewport offset so fx0 lands at rect.x.
+        const float ax = float(rect.x) - fx0 * kx;
+        bool gpuOk = gpu.envelopeColumns(
+            ctx.device.graphicsQueue(), ctx.graphicsPool.handle(),
+            renderer_.pointBuffer(), renderer_.pointCount(),
+            ax, kx, 0, int(W) - 1, mn, mx);
         std::vector<Point2D> px;
-        for (auto& run : plot::envelopeDecimateData(
-                 series_.points, float(rect.x), kx, 0, int(W) - 1)) {
+        bool usedGpu = gpuOk && !mn.empty();
+        if (!usedGpu &&
+            !std::is_sorted(series_.points.begin(), series_.points.end(),
+                            [](const Point2D& a, const Point2D& b) {
+                                return a.x < b.x;
+                            }))
+            goto noDecimate; // CPU path still needs sorted x
+        for (auto& run : usedGpu
+                 ? plot::envelopeRuns(mn, mx, 0)
+                 : plot::envelopeDecimateData(
+                       series_.points, ax, kx, 0, int(W) - 1)) {
             if (!px.empty()) px.push_back(
                 {std::numeric_limits<float>::quiet_NaN(),
                  std::numeric_limits<float>::quiet_NaN()});
@@ -203,6 +221,7 @@ void LinePlot::preDraw(vk::CommandBuffer cmd, render::Renderer& r,
         gpuMeshSeq_ = r.frameSeq();
         return;
     }
+noDecimate:
     auto px = pixelPoints(series_, axes, rect, transform.get());
     // Same envelope trick post-transform for the general case (custom
     // mpl transforms, nonlinear scales, steps draw styles).

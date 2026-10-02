@@ -1,10 +1,17 @@
-// volcano/render/primitives/SpineRenderer.cpp
+// volcano/render/primitives/SpineRenderer.cpp — Vulkan impl (SpineRendererVk)
 #include "volcano/render/primitives/SpineRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/DescriptorPool.hpp>
+#include <volcano/core/ShaderModule.hpp>
+
+#include <vulkan/vulkan.hpp>
+#include <vk_mem_alloc.h>
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace volcano::render::primitives {
 
@@ -45,13 +52,82 @@ void main() {
 
 } // namespace
 
-void SpineRenderer::init(vk::Device device, VmaAllocator allocator,
-                         vk::RenderPass renderPass,
-                         vk::SampleCountFlagBits samples,
-                         core::PipelineCache& /*cache*/,
-                         core::DescriptorPool& /*descPool*/) {
-    device_ = device;
-    allocator_ = allocator;
+/// Convert the backend-neutral scissor to a vk::Rect2D (same top-left
+/// convention — no Y-flip in scissor space).
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class SpineRendererVk final : public SpineRenderer {
+public:
+    explicit SpineRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    void drawRect(Cmd& cmd, plot::Rect2D clip,
+                  plot::Extent2D resolution,
+                  plot::Rect2D rect, plot::Color color,
+                  float lineWidth) override;
+    void drawFilledRect(Cmd& cmd, plot::Rect2D clip,
+                        plot::Extent2D resolution,
+                        plot::Rect2D rect, plot::Color color) override;
+    void resetScratch() override {
+        scratchOffset_ = 0;
+        retiredScratch_.clear();
+    }
+    void drawTicks(Cmd& cmd, plot::Rect2D clip,
+                   plot::Extent2D resolution,
+                   plot::Rect2D rect,
+                   std::span<const float> positions,
+                   plot::Color color, float tickLength,
+                   bool yAxis, float dataMin, float dataMax,
+                   float inFrac = 0.0f, bool farSide = false,
+                   float tickWidth = 2.0f) override;
+    void drawLineStrip(Cmd& cmd, plot::Rect2D clip,
+                       plot::Extent2D resolution,
+                       std::span<const plot::Point2D> points,
+                       plot::Color color, float width) override;
+    void drawTriangles(Cmd& cmd, plot::Rect2D clip,
+                       plot::Extent2D resolution,
+                       std::span<const plot::Point2D> triVerts,
+                       plot::Color color) override;
+    void drawTrianglesVC(Cmd& cmd, plot::Rect2D clip,
+                         plot::Extent2D resolution,
+                         std::span<const plot::Point2D> triVerts,
+                         std::span<const plot::Color> colors) override;
+    void drawTrianglesGpu(Cmd& cmd, plot::Rect2D clip,
+                          plot::Extent2D resolution,
+                          GpuBuf buffer, uint64_t byteOffset,
+                          uint32_t vertexCount) override;
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;        // line strip pipeline
+    vk::UniquePipeline fillPipeline_;    // triangle list pipeline (filled rects)
+    bool inited_ = false;
+
+    /// Scratch vertex buffer (host-visible, ring-buffered).
+    core::Buffer scratchVB_;
+    /// Scratch buffers retired by ensureScratch growth this frame; kept
+    /// alive because recorded draw commands still reference them.
+    std::vector<core::Buffer> retiredScratch_;
+    size_t scratchCapacity_ = 0;
+    size_t scratchOffset_ = 0;
+
+    void ensureScratch(size_t byteCount);
+};
+
+void SpineRendererVk::init() {
+    device_ = svcs_->device();
+    allocator_ = svcs_->allocator();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    const vk::Device device = device_;
 
     auto vertSpv = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto fragSpv = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -153,7 +229,7 @@ void SpineRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void SpineRenderer::ensureScratch(size_t byteCount) {
+void SpineRendererVk::ensureScratch(size_t byteCount) {
     if (scratchOffset_ + byteCount <= scratchCapacity_) return;
     size_t needed = scratchOffset_ + byteCount;
     size_t newSize = std::max<size_t>(1u << 20, needed * 2);
@@ -170,10 +246,11 @@ void SpineRenderer::ensureScratch(size_t byteCount) {
     scratchOffset_ = 0;
 }
 
-void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D clip,
-                                  vk::Extent2D resolution,
+void SpineRendererVk::drawLineStrip(Cmd& cmdRef, plot::Rect2D clip,
+                                  plot::Extent2D resolution,
                                   std::span<const plot::Point2D> points,
                                   plot::Color color, float width) {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || points.empty()) return;
 
     size_t byteSize = points.size() * sizeof(LineVertex);
@@ -201,7 +278,7 @@ void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D clip,
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
     cmd.setLineWidth(width);
 
     cmd.draw(static_cast<uint32_t>(points.size()), 1, 0, 0);
@@ -209,8 +286,8 @@ void SpineRenderer::drawLineStrip(vk::CommandBuffer cmd, vk::Rect2D clip,
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawRect(vk::CommandBuffer cmd, vk::Rect2D clip,
-                             vk::Extent2D resolution,
+void SpineRendererVk::drawRect(Cmd& cmd, plot::Rect2D clip,
+                             plot::Extent2D resolution,
                              plot::Rect2D rect, plot::Color color,
                              float lineWidth) {
     if (!inited_) return;
@@ -225,9 +302,10 @@ void SpineRenderer::drawRect(vk::CommandBuffer cmd, vk::Rect2D clip,
     drawLineStrip(cmd, clip, resolution, pts, color, lineWidth);
 }
 
-void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D clip,
-                                   vk::Extent2D resolution,
+void SpineRendererVk::drawFilledRect(Cmd& cmdRef, plot::Rect2D clip,
+                                   plot::Extent2D resolution,
                                    plot::Rect2D rect, plot::Color color) {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_) return;
     // 6 vertices for two triangles forming a rectangle.
     float x0 = float(rect.x), y0 = float(rect.y);
@@ -259,17 +337,18 @@ void SpineRenderer::drawFilledRect(vk::CommandBuffer cmd, vk::Rect2D clip,
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
 
     cmd.draw(6, 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
-                                  vk::Extent2D resolution,
+void SpineRendererVk::drawTriangles(Cmd& cmdRef, plot::Rect2D clip,
+                                  plot::Extent2D resolution,
                                   std::span<const plot::Point2D> triVerts,
                                   plot::Color color) {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || triVerts.empty()) return;
 
     size_t count = triVerts.size();
@@ -298,17 +377,18 @@ void SpineRenderer::drawTriangles(vk::CommandBuffer cmd, vk::Rect2D clip,
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
 
     cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawTrianglesVC(
-    vk::CommandBuffer cmd, vk::Rect2D clip, vk::Extent2D resolution,
+void SpineRendererVk::drawTrianglesVC(
+    Cmd& cmdRef, plot::Rect2D clip, plot::Extent2D resolution,
     std::span<const plot::Point2D> triVerts,
     std::span<const plot::Color> colors) {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || triVerts.empty()) return;
     size_t count = triVerts.size();
     if (colors.size() < count) return;
@@ -338,19 +418,21 @@ void SpineRenderer::drawTrianglesVC(
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
 
     cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 
-void SpineRenderer::drawTrianglesGpu(vk::CommandBuffer cmd, vk::Rect2D clip,
-                                     vk::Extent2D resolution,
-                                     vk::Buffer buffer,
-                                     vk::DeviceSize byteOffset,
+void SpineRendererVk::drawTrianglesGpu(Cmd& cmdRef, plot::Rect2D clip,
+                                     plot::Extent2D resolution,
+                                     GpuBuf buffer,
+                                     uint64_t byteOffset,
                                      uint32_t vertexCount) {
-    if (!inited_ || vertexCount == 0 || !buffer) return;
+    const auto cmd = vkCmd(cmdRef);
+    const auto buf = svcs_->vkBufferOf(buffer);
+    if (!inited_ || vertexCount == 0 || !buf) return;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
@@ -359,18 +441,18 @@ void SpineRenderer::drawTrianglesGpu(vk::CommandBuffer cmd, vk::Rect2D clip,
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
-    cmd.bindVertexBuffers(0, buffer, {byteOffset});
+    cmd.bindVertexBuffers(0, buf, {vk::DeviceSize(byteOffset)});
 
     vk::Viewport viewport{0, 0, float(resolution.width),
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
-    cmd.setScissor(0, clip);
+    cmd.setScissor(0, vkScissor(clip));
 
     cmd.draw(vertexCount, 1, 0, 0);
 }
 
-void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D clip,
-                              vk::Extent2D resolution,
+void SpineRendererVk::drawTicks(Cmd& cmd, plot::Rect2D clip,
+                              plot::Extent2D resolution,
                               plot::Rect2D rect, std::span<const float> positions,
                               plot::Color color, float tickLength,
                               bool yAxis, float dataMin, float dataMax,
@@ -413,6 +495,12 @@ void SpineRenderer::drawTicks(vk::CommandBuffer cmd, vk::Rect2D clip,
         std::span<const plot::Point2D> seg(&points[i], 2);
         drawLineStrip(cmd, clip, resolution, seg, color, tickWidth);
     }
+}
+
+std::unique_ptr<SpineRenderer> makeSpineVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<SpineRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

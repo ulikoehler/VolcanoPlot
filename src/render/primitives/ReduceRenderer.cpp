@@ -99,8 +99,8 @@ uint32_t divRoundUp(uint32_t n, uint32_t d) {
 
 } // namespace
 
-void ReduceRenderer::init(vk::Device device, VmaAllocator allocator,
-                          vk::Queue computeQueue, vk::CommandPool computePool) {
+void ReduceRendererVk::init(vk::Device device, VmaAllocator allocator,
+                          vk::Queue computeQueue, vk::CommandPool computePool {
     device_ = device;
     allocator_ = allocator;
     computeQueue_ = computeQueue;
@@ -181,7 +181,7 @@ void ReduceRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-void ReduceRenderer::ensureIntermediateCapacity(uint32_t slots) {
+void ReduceRendererVk::ensureIntermediateCapacity(uint32_t slots {
     if (slots <= interSlots_) return;
     vk::DeviceSize bytes = vk::DeviceSize(slots) * sizeof(float) * 4;
     core::BufferDesc desc{};
@@ -193,9 +193,9 @@ void ReduceRenderer::ensureIntermediateCapacity(uint32_t slots) {
     interSlots_ = slots;
 }
 
-void ReduceRenderer::recordPass(vk::CommandBuffer cmd, vk::DescriptorSet descSet,
-                                vk::Buffer inBuf, uint32_t inCount,
-                                vk::Buffer outBuf, bool isFinal, bool vec2Input) {
+void ReduceRendererVk::recordPass(Cmd& cmdRef, vk::DescriptorSet descSet,
+                                GpuBuf inBuf, uint32_t inCount,
+                                GpuBuf outBuf, bool isFinal, bool vec2Input {
     // Update this pass's descriptor set bindings (host-side; takes effect
     // before the command buffer is submitted).
     vk::DescriptorBufferInfo inInfo{};
@@ -245,8 +245,8 @@ void ReduceRenderer::recordPass(vk::CommandBuffer cmd, vk::DescriptorSet descSet
     }
 }
 
-std::optional<MinMax2D> ReduceRenderer::reduceMinMax2D(vk::Buffer pointBuffer,
-                                                       uint32_t count) {
+std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
+                                                       uint32_t count {
     if (!inited_ || count == 0 || !pointBuffer) return std::nullopt;
 
     uint32_t slots = divRoundUp(count, kWorkgroup);

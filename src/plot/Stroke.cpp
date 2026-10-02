@@ -140,6 +140,36 @@ void strokeRun(TriMesh& m, std::span<const Point2D> pts,
 } // namespace
 
 std::vector<std::vector<Point2D>>
+envelopeRuns(std::span<const float> mn, std::span<const float> mx,
+             int cx0) {
+    std::vector<std::vector<Point2D>> runs;
+    std::vector<Point2D>* cur = nullptr;
+    bool high = false;
+    for (size_t i = 0; i < mn.size(); ++i) {
+        if (!std::isfinite(mn[i])) {
+            cur = nullptr;
+            high = false;
+            continue;
+        }
+        if (!cur) {
+            runs.emplace_back();
+            cur = &runs.back();
+            high = false;
+        }
+        float x = float(cx0) + float(i) + 0.5f;
+        if (!high) {
+            cur->push_back({x, mn[i]});
+            cur->push_back({x, mx[i]});
+        } else {
+            cur->push_back({x, mx[i]});
+            cur->push_back({x, mn[i]});
+        }
+        high = !high;
+    }
+    return runs;
+}
+
+std::vector<std::vector<Point2D>>
 columnDecimate(std::span<const Point2D> pts, int cx0, int cx1) {
     int W = cx1 - cx0 + 1;
     if (W <= 0 || pts.size() < 2) return {};
@@ -175,31 +205,7 @@ columnDecimate(std::span<const Point2D> pts, int cx0, int cx1) {
             upd(c, lo, hi);
         }
     }
-    std::vector<std::vector<Point2D>> runs;
-    std::vector<Point2D>* cur = nullptr;
-    bool high = false;
-    for (int i = 0; i < W; ++i) {
-        if (!std::isfinite(mn[i])) {
-            cur = nullptr;
-            high = false;
-            continue;
-        }
-        if (!cur) {
-            runs.emplace_back();
-            cur = &runs.back();
-            high = false;
-        }
-        float x = float(cx0 + i) + 0.5f;
-        if (!high) {
-            cur->push_back({x, mn[i]});
-            cur->push_back({x, mx[i]});
-        } else {
-            cur->push_back({x, mx[i]});
-            cur->push_back({x, mn[i]});
-        }
-        high = !high;
-    }
-    return runs;
+    return envelopeRuns(mn, mx, cx0);
 }
 
 std::vector<std::vector<Point2D>>
@@ -248,31 +254,7 @@ envelopeDecimateData(std::span<const Point2D> pts, float ax, float kx,
             upd(c, lo, hi);
         }
     }
-    std::vector<std::vector<Point2D>> runs;
-    std::vector<Point2D>* cur = nullptr;
-    bool high = false;
-    for (int i = 0; i < W; ++i) {
-        if (!std::isfinite(mn[i])) {
-            cur = nullptr;
-            high = false;
-            continue;
-        }
-        if (!cur) {
-            runs.emplace_back();
-            cur = &runs.back();
-            high = false;
-        }
-        float x = float(cx0 + i) + 0.5f;
-        if (!high) {
-            cur->push_back({x, mn[i]});
-            cur->push_back({x, mx[i]});
-        } else {
-            cur->push_back({x, mx[i]});
-            cur->push_back({x, mn[i]});
-        }
-        high = !high;
-    }
-    return runs;
+    return envelopeRuns(mn, mx, cx0);
 }
 
 std::vector<std::vector<Point2D>>

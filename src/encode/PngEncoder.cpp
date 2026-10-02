@@ -2,6 +2,7 @@
 #include "volcano/encode/PngEncoder.hpp"
 
 #include <fstream>
+#include <cmath>
 #include <stdexcept>
 
 #ifdef VOLCANO_HAS_LIBPNG
@@ -37,6 +38,9 @@ EncodeResult CpuPngEncoder::encode(std::span<const uint8_t> rgba, uint32_t width
         return res;
     }
 
+    if (level_ >= 0)
+        png_set_compression_level(png, level_);
+
     png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGBA,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
                  PNG_FILTER_TYPE_DEFAULT);
@@ -55,6 +59,11 @@ EncodeResult CpuPngEncoder::encode(std::span<const uint8_t> rgba, uint32_t width
     if (!texts.empty())
         png_set_text(png, info, texts.data(), int(texts.size()));
 #endif
+
+    if (dpi_ > 0.0f) {
+        auto ppm = png_uint_32(std::lround(dpi_ / 0.0254f));
+        png_set_pHYs(png, info, ppm, ppm, PNG_RESOLUTION_METER);
+    }
 
     png_write_info(png, info);
 

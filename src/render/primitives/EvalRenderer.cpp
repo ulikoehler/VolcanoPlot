@@ -48,8 +48,8 @@ uint32_t divRoundUp(uint32_t n, uint32_t d) { return (n + d - 1) / d; }
 
 } // namespace
 
-void EvalRenderer::init(vk::Device device, VmaAllocator allocator,
-                        vk::Queue computeQueue, vk::CommandPool computePool) {
+void EvalRendererVk::init(vk::Device device, VmaAllocator allocator,
+                        vk::Queue computeQueue, vk::CommandPool computePool {
     device_ = device;
     allocator_ = allocator;
     computeQueue_ = computeQueue;
@@ -87,7 +87,7 @@ void EvalRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-bool EvalRenderer::compile(const std::string& body) {
+bool EvalRendererVk::compile(const std::string& body {
     if (!inited_) return false;
     std::vector<uint32_t> spv;
     try {
@@ -114,15 +114,15 @@ bool EvalRenderer::compile(const std::string& body) {
     return true;
 }
 
-core::Buffer EvalRenderer::makeOutput(uint32_t count) const {
+core::Buffer EvalRendererVk::makeOutput(uint32_t count const {
     core::BufferDesc desc{};
     desc.size = vk::DeviceSize(count) * sizeof(float) * 2;
     desc.usage = core::BufferUsage::VertexStorage;
     return core::Buffer(allocator_, desc);
 }
 
-void EvalRenderer::eval(vk::Buffer out, double xMin, double xMax,
-                        uint32_t count) {
+void EvalRendererVk::eval(GpuBuf out, double xMin, double xMax,
+                        uint32_t count {
     if (!pipeline_ || !out || count == 0) return;
 
     // Bind this evaluation's output buffer.

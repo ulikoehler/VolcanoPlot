@@ -20,10 +20,11 @@ public:
     ~HeadlessBackend() override;
 
     bool pollEvents() override { return true; }
-    vk::CommandBuffer beginFrame() override;
-    vk::CommandBuffer beginFrameLoad() override;
+    std::unique_ptr<render::Cmd> beginFrame() override;
+    std::unique_ptr<render::Cmd> beginFrameLoad() override;
     void endFrame() override;
     std::vector<uint8_t> readbackRgba8() override;
+    render::GpuServices& gpu() override;
 
     bool blitCapture() override;
     [[nodiscard]] bool blitCaptured() const override { return blitCaptured_; }
@@ -33,13 +34,16 @@ public:
     /// pipelines remain valid.
     void resize(uint32_t width, uint32_t height) override;
 
-    [[nodiscard]] GpuContext& context() noexcept override { return ctx_; }
-    [[nodiscard]] const GpuContext& context() const noexcept override { return ctx_; }
-    [[nodiscard]] vk::Extent2D extent() const noexcept override { return extent_; }
-    [[nodiscard]] vk::Format colorFormat() const noexcept override { return colorFormat_; }
-    [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept override { return samples_; }
-    [[nodiscard]] vk::RenderPass renderPass() const noexcept override { return renderPass_.get(); }
-    [[nodiscard]] vk::Format depthFormat() const noexcept override { return depthFormat_; }
+    // Vulkan-specific accessors (native only — not part of IBackend).
+    [[nodiscard]] GpuContext& context() noexcept { return ctx_; }
+    [[nodiscard]] const GpuContext& context() const noexcept { return ctx_; }
+    [[nodiscard]] plot::Extent2D extent() const noexcept override {
+        return {extent_.width, extent_.height};
+    }
+    [[nodiscard]] vk::Format colorFormat() const noexcept { return colorFormat_; }
+    [[nodiscard]] vk::SampleCountFlagBits sampleCount() const noexcept { return samples_; }
+    [[nodiscard]] vk::RenderPass renderPass() const noexcept { return renderPass_.get(); }
+    [[nodiscard]] vk::Format depthFormat() const noexcept { return depthFormat_; }
 
 private:
     void createRenderPass();
@@ -80,6 +84,9 @@ private:
     vk::UniqueRenderPass renderPassLoad_;
     core::Image blitImage_;
     bool blitCaptured_ = false;
+
+    /// GPU service facade (lazily created by gpu()).
+    std::unique_ptr<render::GpuServices> gpuServices_;
 };
 
 } // namespace volcano::backend

@@ -7,14 +7,19 @@ matplotlib**, measured across the three ways you can render:
 |---|---|
 | **mpl (Agg)** | Stock matplotlib, `Agg` backend — the CPU-rasterization baseline |
 | **mpl+VP** | `matplotlib.use("module://volcanoplot.mpl_backend")` — the full matplotlib frontend (artists, transforms, layout, ticks) with VolcanoPlot as the rasterization backend |
-| **volcanoplot** | `import volcanoplot` — the native API: VolcanoPlot's own lightweight frontend *and* renderer |
+| **VP (C++)** | `example_bench_matrix` — the raw C++ API with zero Python: figures, axes and plot layers built directly against `volcano::plot` |
 
 Understanding the split matters: **mpl+VP** replaces only the rasterizer —
 matplotlib still creates artists, walks collections, applies transforms, and
-emits draw calls in Python. **volcanoplot** skips all of that: data goes from
-NumPy arrays to GPU buffers through a thin binding layer. The two are not
-always directly comparable (the native API is not a 1:1 matplotlib clone), but
-the performance shape is instructive.
+emits draw calls in Python. **VP (C++)** skips all of that: data goes from
+input arrays to GPU buffers with no frontend interpreter at all. The two are
+not always directly comparable (the C++ API is not a 1:1 matplotlib clone),
+but the performance shape is instructive.
+
+(A fourth stack — `import volcanoplot`, the same C++ engine driven through
+the pybind11 bindings — can still be run manually via
+`bench_matrix.py native`; the pybind layer only adds figure-setup overhead,
+so its numbers track the C++ column closely.)
 
 ---
 
@@ -39,18 +44,100 @@ the performance shape is instructive.
 
 ## Methodology
 
-`scripts/bench_matrix.py` builds the *same logical plot* on all three stacks
-and times `fig.savefig(...)` end-to-end (record + raster + encode + write) —
-the fair comparison for headless/batch use. Each case gets a fresh figure;
-numbers are **medians of 3 runs** on a warm process.
+`scripts/bench_matrix.py` builds the *same logical plot* — identical input
+data, figure size (6.4×4.8in) and dpi — on all three stacks and times
+`fig.savefig(...)` end-to-end (record + raster + encode + write) — the fair
+comparison for headless/batch use. For the C++ stack the Python harness
+first dumps every case's input arrays to `data/<case>/*.npy`
+(`bench_matrix.py dump`), which `example_bench_matrix` replays verbatim, so
+all three stacks see byte-identical inputs.
+
+**Vulkan init is measured separately, never included in the case metrics** —
+the reported numbers are steady-state ("the user wants to make 100 plots").
+Each stack runs a global warm-up figure first (recorded as the `_init`
+pseudo-case), and each case gets one untimed rep before the timed reps.
+Numbers are **medians of 3 timed runs** on a warm process.
+
+### Timing boundary
+
+The per-case metric is `savefig` wall time only:
+
+- **agg / vp**: `fig.savefig(path)` — artist traversal, recording,
+  rasterization, PNG encode, file write. Figure *construction*
+  (`plt.figure`, `ax.plot`, ...) happens before the timer starts.
+- **cpp**: `renderer.savefig(fig, path)` — `prepare` (data upload) +
+  `renderFrame` + readback + encode + write. `plot::Figure`/`Axes`/plot
+  construction and `.npy` data loading happen before the timer starts.
+
+Exception: the `multi_50x_line2k` workload deliberately times the *whole*
+loop (figure construction + plot calls + savefig + close, total ÷ 50) —
+that is the "100 plots" amortized number.
+
+### What `_init` covers
+
+`_init` = wall time of one identical warm-up figure (line + scatter + bar +
+imshow + text, 640×480) rendered once per stack before any case runs — i.e.
+"cost of the first figure". What that physically includes per stack:
+
+| stack | `_init` contains |
+|---|---|
+| `agg` | matplotlib's first-save overhead only (no Vulkan): backend state, font cache, first `FigureCanvasAgg` draw. ~0.1 s. |
+| `vp` | pooled headless canvas creation for 640×480 → Vulkan instance/device bring-up, shader compile + pipeline creation for the primitives the figure touches, font atlas raster+upload, first readback+encode. ~2.7 s. |
+| `cpp` | `sharedGpuContext()` + `HeadlessBackend` + `Renderer` construction + the same warm-up figure's `savefig`. ~3.6 s. |
+
+Deliberately **not** in `_init` (and therefore not in any metric):
+
+- process start — module imports, `matplotlib.use(...)`, shared-library
+  loading. `_init` is defined as first-*figure* cost, not interpreter
+  start-up. Note the GPU context itself *is* inside `_init` for both Vulkan
+  stacks: it is created lazily by the first `savefig` (canvas pool) on `vp`
+  and inside the warm-up's `rendererFor` on `cpp`.
+- process teardown.
+
+### What rep 0 absorbs
+
+Each case runs rep 0 untimed on **all** stacks so that first-use costs stay
+out of the metric:
+
+- plot-type-specific pipeline compiles the global warm-up figure didn't
+  touch (e.g. quiver/violin/contour pipelines),
+- matplotlib-side first-touch caches on the agg/vp stacks,
+- OS/driver-level page-in for that case's buffers.
+
+The warm-up figure only touches the *common* pipelines (line, point, bar,
+image, text), so `vp`'s `_init` is somewhat smaller than `cpp`'s, which
+builds a wider pipeline set up front — both measure "first figure", the
+difference is just which pipelines it happened to compile.
+
+### Identical inputs
+
+`bench_matrix.py dump` replays each case's `build(ax)` against a recording
+stub and dumps every array argument to `data/<case>/*.npy`
+(`manifest.tsv` maps `case → dpi, data dir, category`; dpi variants share
+one data dir since the data doesn't depend on dpi). The C++ bench loads
+those files, so all three stacks draw **byte-identical** data at identical
+figure size/dpi — the same RNG seeds produce the same arrays everywhere.
 
 ```bash
-# one process per stack (the mpl backend is process-global)
+# everything: dump data, run all three stacks sequentially, merge report
+python3 scripts/bench_matrix.py all
+
+# or step by step (one process per stack — the mpl backend is process-global)
+python3 scripts/bench_matrix.py dump          # data/*.npy for the C++ bench
 MPLBACKEND=Agg python3 scripts/bench_matrix.py agg
 PYTHONPATH=build/python python3 scripts/bench_matrix.py vp
-PYTHONPATH=build/python python3 scripts/bench_matrix.py native
-python3 scripts/bench_matrix.py report        # merged table
+python3 scripts/bench_matrix.py cpp           # builds + runs example_bench_matrix
+python3 scripts/bench_matrix.py report        # merged table + markdown
 ```
+
+All output lands in `gallery/benchmark/` (override with `--outdir`):
+
+| File | Content |
+|---|---|
+| `<case>_<stack>.png` | rendered output of every case on every stack — direct visual comparison |
+| `data/<case>/*.npy` | the shared input arrays (manifest: `data/manifest.tsv`) |
+| `bench_matrix_<stack>.json` | per-case timings + init |
+| `benchmark_report.md` | merged report: timing table + embedded per-case PNGs |
 
 `scripts/bench_mpl_backend.py` (finer draw-level breakdown) and
 `scripts/bench_native_vs_mpl.py` cover related workloads.
@@ -72,65 +159,65 @@ Median `savefig` wall time, milliseconds (smaller = better).
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_100 | 51.6 | 57.5 | 31.5 | 0.90× | 1.64× |
-| line_2k + scatter + legend | 58.7 | 92.0 | 104.4 | 0.64× | 0.56× |
-| scatter_100 | 44.8 | 59.9 | 57.9 | 0.75× | 0.77× |
-| bar_10 | 39.4 | 56.5 | 38.2 | 0.70× | 1.03× |
-| errorbar_50 | 40.9 | 60.2 | 97.4 | 0.68× | 0.42× |
-| boxplot_6 | 43.0 | 61.0 | 81.3 | 0.71× | 0.53× |
-| text_50 | 71.4 | 63.5 | 34.5 | 1.12× | 2.07× |
-| pie_4 | 21.0 | 32.1 | 32.2 | 0.65× | 0.65× |
-| **50 figures × line_2k** (ms/fig) | 48.1 | 71.4 | 54.4 | 0.67× | 0.88× |
+| line_100 | 80.6 | 95.5 | 15.3 | 0.84× | 5.28× |
+| line_2k + scatter + legend | 97.1 | 69.5 | 16.3 | 1.40× | 5.96× |
+| scatter_100 | 49.1 | 72.0 | 14.7 | 0.68× | 3.34× |
+| bar_10 | 48.2 | 70.0 | 14.2 | 0.69× | 3.40× |
+| errorbar_50 | 46.7 | 62.5 | 11.9 | 0.75× | 3.93× |
+| boxplot_6 | 47.4 | 71.5 | 13.9 | 0.66× | 3.40× |
+| text_50 | 105.9 | 55.4 | 13.3 | 1.91× | 7.98× |
+| pie_4 | 21.3 | 19.6 | 13.1 | 1.09× | 1.63× |
+| **50 figures × line_2k** (ms/fig) | 71.0 | 169.9 | 5.9 | 0.42× | 12.10× |
 
 ### Medium
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_10k | 34.8 | 58.8 | 33.9 | 0.59× | 1.03× |
-| line_100k | 49.1 | 54.0 | 36.4 | 0.91× | 1.35× |
-| multiline_20×100k | 246.7 | 189.6 | 295.0 | 1.30× | 0.84× |
-| scatter_10k | 199.9 | 108.6 | 99.4 | 1.84× | 2.01× |
-| scatter_50k | 683.7 | 154.9 | 128.7 | 4.41× | 5.31× |
-| hist_100k | 48.9 | 63.3 | 29.2 | 0.77× | 1.67× |
-| bar_1k | 153.5 | 194.9 | 36.0 | 0.79× | 4.27× |
-| bar_5k | 618.1 | 665.0 | 45.5 | 0.93× | 13.6× |
-| contourf_100 | 42.6 | 69.1 | 59.0 | 0.62× | 0.72× |
-| quiver_30×30 | 37.4 | 59.9 | 45.5 | 0.62× | 0.82× |
-| step_50k | 53.8 | 63.8 | 40.6 | 0.84× | 1.32× |
-| fill_100k | 62.5 | 59.3 | 60.4 | 1.05× | 1.03× |
-| eventplot_2k | 522.6 | 755.0 | 44.1 | 0.69× | 11.9× |
-| stackplot_5×1k | 80.9 | 59.4 | 39.5 | 1.36× | 2.05× |
-| errorbar_5k | 73.0 | 82.6 | 42.6 | 0.88× | 1.71× |
-| violin_8×2k | 42.3 | 51.6 | 63.7 | 0.82× | 0.66× |
-| stem_2k | 75.6 | 253.5 | 74.0 | 0.30× | 1.02× |
+| line_10k | 70.3 | 53.0 | 13.9 | 1.33× | 5.07× |
+| line_100k | 73.9 | 69.2 | 14.1 | 1.07× | 5.22× |
+| multiline_20×100k | 245.1 | 134.9 | 46.2 | 1.82× | 5.31× |
+| scatter_10k | 222.2 | 111.2 | 37.8 | 2.00× | 5.88× |
+| scatter_50k | 903.5 | 112.6 | 38.4 | 8.02× | 23.55× |
+| hist_100k | 67.2 | 80.8 | 14.3 | 0.83× | 4.70× |
+| bar_1k | 257.9 | 242.7 | 14.0 | 1.06× | 18.47× |
+| bar_5k | 1118.8 | 1148.0 | 16.2 | 0.97× | 69.26× |
+| contourf_100 | 48.9 | 73.9 | 18.3 | 0.66× | 2.67× |
+| quiver_30×30 | 71.3 | 68.7 | 13.9 | 1.04× | 5.13× |
+| step_50k | 73.3 | 61.9 | 13.1 | 1.18× | 5.60× |
+| fill_100k | 81.4 | 68.3 | 39.3 | 1.19× | 2.07× |
+| eventplot_2k | 1079.1 | 1077.4 | 16.9 | 1.00× | 63.79× |
+| stackplot_5×1k | 146.4 | 64.1 | 14.3 | 2.28× | 10.24× |
+| errorbar_5k | 149.2 | 67.4 | 12.5 | 2.21× | 11.91× |
+| violin_8×2k | 104.5 | 83.8 | 27.5 | 1.25× | 3.80× |
+| stem_2k | 167.5 | 70.1 | 15.6 | 2.39× | 10.77× |
 
 ### Large
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_1M | 118.7 | 70.0 | 58.0 | 1.70× | 2.05× |
-| line_10M | 677.8 | 254.4 | 257.9 | 2.66× | 2.63× |
-| line_10M @ dpi300 | 811.8 | 410.4 | 386.6 | 1.98× | 2.10× |
-| scatter_200k | 2459.2 | 317.0 | 205.0 | 7.76× | 12.0× |
-| scatter_200k @ dpi300 | 4619.1 | 1089.1 | 889.4 | 4.24× | 5.19× |
-| scatter_1M | 10719.0 | 598.5 | 336.8 | 17.9× | 31.8× |
-| scatter_2M @ dpi400 | 2992.3 | 1466.3 | 1634.8 | 2.04× | 1.83× |
-| scatter_sz_200k (per-point s,c) | 3005.3 | 272.3 | 185.3 | 11.0× | 16.2× |
-| scatter_sz_1M @ dpi400 | 32759.8 | 3090.8 | 2212.5 | 10.6× | 14.8× |
-| markers_100k (`plot('o')`) | 127.7 | 115.1 | 74.8 | 1.11× | 1.71× |
-| hist_10M | 60.3 | 87.2 | 118.8 | 0.69× | 0.51× |
-| fill_1M | 180.8 | 110.4 | 48.5 | 1.64× | 3.73× |
-| fill_1M @ dpi300 | 406.1 | 216.2 | 197.9 | 1.88× | 2.05× |
-| bar_50k | 5592.5 | 6363.3 | 88.2 | 0.88× | **63.4×** |
-| eventplot_20k | 2430.4 | 3805.2 | 41.7 | 0.64× | **58.3×** |
-| pcolormesh_2M | 686.1 | 253.3 | 594.8 | 2.71× | 1.15× |
-| pcolormesh_2M @ dpi300 | 925.3 | 487.0 | 845.5 | 1.90× | 1.09× |
-| pcolormesh_7M @ dpi400 | 2943.7 | 1317.3 | 2739.6 | 2.23× | 1.07× |
-| quadmesh_1M @ dpi400 | 771.5 | 528.9 | 911.5 | 1.46× | 0.85× |
-| imshow_4M none @ dpi300 | 560.6 | 472.3 | 465.0 | 1.19× | 1.21× |
-| imshow_16M none @ dpi400 | 1160.8 | 1118.6 | 944.1 | 1.04× | 1.23× |
-| imshow_9M bilinear | 690.2 | 827.0 | 342.3 | 0.83× | 2.02× |
-| contourf_400 | 38.2 | 77.0 | 172.0 | 0.50× | 0.22× |
+| line_1M | 174.0 | 77.2 | 19.5 | 2.25× | 8.94× |
+| line_10M | 1111.6 | 1726.6 | 83.2 | 0.64× | 13.36× |
+| line_10M @ dpi300 | 1552.5 | 914.5 | 83.7 | 1.70× | 18.56× |
+| scatter_200k | 4214.4 | 182.1 | 43.0 | 23.15× | 98.06× |
+| scatter_200k @ dpi300 | 8743.1 | 745.0 | 69.7 | 11.74× | 125.37× |
+| scatter_1M | 12902.9 | 491.6 | 65.2 | 26.25× | 197.94× |
+| scatter_2M @ dpi400 | 3987.0 | 519.6 | 81.3 | 7.67× | 49.01× |
+| scatter_sz_200k (per-point s,c) | 3688.1 | 156.0 | 49.0 | 23.65× | 75.25× |
+| scatter_sz_1M @ dpi400 | 41948.5 | 929.6 | 114.1 | 45.12× | 367.70× |
+| markers_100k (`plot('o')`) | 117.5 | 52.2 | 19.8 | 2.25× | 5.94× |
+| hist_10M | 80.3 | 84.3 | 82.1 | 0.95× | 0.98× |
+| fill_1M | 205.7 | 89.1 | 36.9 | 2.31× | 5.58× |
+| fill_1M @ dpi300 | 410.5 | 198.4 | 59.0 | 2.07× | 6.96× |
+| bar_50k | 9001.0 | 11061.8 | 15.4 | 0.81× | 584.35× |
+| eventplot_20k | 3999.6 | 6658.1 | 17.1 | 0.60× | 233.79× |
+| pcolormesh_2M | 802.3 | 251.3 | 38.4 | 3.19× | 20.89× |
+| pcolormesh_2M @ dpi300 | 1074.5 | 479.7 | 68.2 | 2.24× | 15.75× |
+| pcolormesh_7M @ dpi400 | 3769.9 | 6814.3 | 94.8 | 0.55× | 39.78× |
+| quadmesh_1M @ dpi400 | 921.9 | 732.2 | 64.0 | 1.26× | 14.40× |
+| imshow_4M none @ dpi300 | 2253.9 | 726.9 | 114.9 | 3.10× | 19.61× |
+| imshow_16M none @ dpi400 | 4403.6 | 2155.3 | 270.5 | 2.04× | 16.28× |
+| imshow_9M bilinear | 1719.2 | 3379.3 | 177.4 | 0.51× | 9.69× |
+| contourf_400 | 53.6 | 64.2 | 71.9 | 0.83× | 0.75× |
 
 ---
 
@@ -234,20 +321,23 @@ than trusting this table.
 ## When native loses
 
 - **`contourf`** (see above — CPU tessellation, row-parallel but still
-  behind Agg's scanline filler, ~0.2–0.7×).
+  behind Agg's scanline filler, ~0.75×).
 - **`hist` on huge inputs**: `np.histogram`-scale binning is already
   C-fast. Our binning uses `minmax`/`nth_element` quantiles and parallel
-  counting above 1M samples, but the auto-bin (FD) path still does
-  quantile work `np.histogram`'s fixed-width path avoids — roughly
-  parity at 10M, slightly behind.
+  counting above 1M samples — parity at 10M (~0.98×). A compute-shader
+  binner exists but is opt-in (`VOLCANO_GPU_HIST=1`): uploading the
+  samples to a host-visible buffer costs more than the CPU count on
+  discrete GPUs; it may win on unified-memory/integrated setups.
 - **`quadmesh`/`pcolormesh` on irregular grids** — only uniform grids
   take the texture path; irregular edges still tessellate per cell
   (6 verts/cell uploads dominate at multi-million cells).
 - **Mixed small complex figures** (`line_2k`+legend+scatter, `errorbar_50`,
   `boxplot_6`, `violin`): fixed per-figure layout + GPU sync can make native
   ~1.5–2.5× slower than Agg at millisecond scale.
-- **First figure in a process**: one-time Vulkan init ~1–2 s (device,
-  pipelines, shader compile). Amortized across subsequent figures —
+- **First figure in a process**: one-time Vulkan init ~0.8–1.7 s
+  (device, pipelines; SPIR-V modules are cached on disk under
+  `$XDG_CACHE_HOME/volcanoplot/shaders` so repeat runs skip shaderc).
+  Amortized across subsequent figures —
   irrelevant for batch jobs, noticeable for one-shot plots.
 - **Exotic markers** (`marker=Path(...)`, TeX `'$…$'` markers, unfilled or
   half-filled styles, distinct `markeredgecolor`): these take the
@@ -270,9 +360,38 @@ than trusting this table.
   pattern is a subprocess per backend, or pick the backend for the dominant
   workload and accept the small-plot penalty.
 
+## Tuning knobs and async encode
+
+Measured on this machine (RX 7800 XT; see `bench_encode`):
+
+- **PNG deflate level** — `savefig` defaults PNG to zlib level 3
+  (~2.4× faster encode than level 6, ~50% larger files on plot frames;
+  the encoder stage was ~14 ms/figure of a ~16 ms savefig floor).
+  Override per-process with `VOLCANO_PNG_LEVEL=0..9` or per-call via
+  `SaveOptions::compressionLevel`.
+- **`Renderer::savefigAsync`** — runs the CPU encode + file write on a
+  worker thread while the next figure renders. In the 50-figure bench
+  (`multi_50x`) this took the native stack to ~6 ms/figure. The file is
+  complete when the returned `future` resolves.
+- **GPU-hybrid encoders are opt-in** (`VOLCANO_GPU_ENCODERS=1`): PNG
+  scanline filtering / JPEG+WebP YUV conversion run on-GPU, but the
+  host-visible-buffer round trip loses to the CPU encoders on discrete
+  GPUs (measured: PNG 58 vs 14 ms @640×480; JPEG hybrid 29 vs 1.7 ms).
+  They exist for unified-memory targets.
+- **`VOLCANO_GPU_HIST=1`** — GPU atomic histogram binning (same story:
+  slower than the 8-thread CPU count on dGPU, opt-in).
+- **SPIR-V disk cache** — compiled shaders persist under
+  `$XDG_CACHE_HOME/volcanoplot/shaders` (or `$VOLCANO_CACHE_DIR`);
+  `_init` dropped ~3.6 s → ~0.8–1.7 s.
+
+`examples/bench_encode` (built as `build/examples/bench_encode`)
+isolates the encode stage: fixed plot/noise frames at 640×480 and
+1920×1440 through every encoder, reporting median ms + output size.
+
 ## Reproducing
 
 See [Methodology](#methodology). The benchmark writes timings to
-`/tmp/bench_matrix_<stack>.json` and the rendered images to
-`/tmp/bm_<stack>_<case>.png`, so you can eyeball output parity alongside
-the numbers.
+`gallery/benchmark/bench_matrix_<stack>.json`, the rendered images to
+`gallery/benchmark/<case>_<stack>.png`, and a merged
+`gallery/benchmark/benchmark_report.md` (table + side-by-side images), so
+you can eyeball output parity alongside the numbers.

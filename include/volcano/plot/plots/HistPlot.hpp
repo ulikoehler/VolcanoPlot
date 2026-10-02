@@ -96,7 +96,7 @@ public:
 
     /// Eagerly (re)compute the derived arrays so bindings can return
     /// mpl's `(values, ...) ` tuples before the first draw. Idempotent.
-    void ensureComputed() { computeBins(); }
+    void ensureComputed() { computeBins(nullptr); }
 
 private:
     std::vector<std::vector<float>> datasets_;
@@ -112,8 +112,10 @@ private:
     std::vector<Point2D> uploadedPoints_;  // for GPU autoscale
     bool prepared_ = false;
 
-    /// Compute shared bin edges and per-dataset heights.
-    void computeBins();
+    /// Compute shared bin edges and per-dataset heights. When `r` is
+    /// given and the sample count is large, uniform-bin counting runs on
+    /// the GPU (atomicAdd histogram in a compute shader).
+    void computeBins(render::Renderer* r);
 
     /// Build triangle vertices for the histogram bars / step fills.
     void buildBarVertices(std::vector<Point2D>& positions,

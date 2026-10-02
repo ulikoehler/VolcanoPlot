@@ -33,6 +33,10 @@ cmake --build build -j4
 # Run headless scatter example (writes headless_scatter.png)
 ./build/examples/example_headless_scatter
 
+# Run the full 3-stack benchmark (mpl-Agg vs mpl+VP vs C++) into
+# gallery/benchmark/ — timings + per-case PNGs + benchmark_report.md
+python3 scripts/bench_matrix.py all
+
 # Generate side-by-side matplotlib vs VolcanoPlot gallery
 ./scripts/generate_gallery.py gallery
 
@@ -321,6 +325,6 @@ The regression test system has found and verified fixes for:
 
 ## See Also
 
-- `FEATURES-TODO.md` — matplotlib feature parity tracking + next major
-  features roadmap (§18)
+- `FEATURES-TODO.md` — remaining parity gaps and open performance items
+  (completed items were pruned; git history has the full record)
 - `docs/` — design documents

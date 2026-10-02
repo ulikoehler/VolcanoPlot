@@ -1,50 +1,33 @@
-// volcano/render/primitives/LineSegmentRenderer.hpp — disconnected line segments
+// volcano/render/primitives/LineSegmentRenderer.hpp — segment list renderer
+//
+// Backend-neutral interface (Vulkan impl: LineSegmentRendererVk).
+// Instances come from GpuServices::createLineSegmentRenderer().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
-#include <volcano/plot/Types.hpp>
 #include <volcano/plot/Transform.hpp>
-#include <vulkan/vulkan.hpp>
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
-namespace volcano::core { class PipelineCache; }
+#include <cstdint>
+#include <span>
 
 namespace volcano::render::primitives {
 
-/// Renders disconnected line segments using `eLineList` topology.
-/// Each pair of vertices forms one line segment. Used for error bars,
-/// caps, vlines/hlines, reference lines, etc.
-///
-/// Color and width are uniform (push constants), same as LineRenderer.
+/// Draws independent line segments (two vertices each) with per-draw
+/// line type. On Vulkan this uses the line-list topology; on WebGPU the
+/// interpreter tessellates since line width is fixed at 1 px there.
 class LineSegmentRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache);
+    virtual ~LineSegmentRenderer() = default;
 
-    /// Upload line segment endpoints. Each consecutive pair of points
-    /// forms one line segment. `points` must have an even number of elements.
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator, std::span<const plot::Point2D> points,
-                plot::Color color, float width);
+    virtual void upload(std::span<const plot::Point2D> points,
+                        plot::Color color, float width) = 0;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Transform2D& transform,
+                      uint32_t vertexCount) const = 0;
 
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-              const plot::Transform2D& transform, uint32_t vertexCount) const;
-
-    /// GPU handle to the uploaded position buffer (for GPU autoscale).
-    [[nodiscard]] vk::Buffer pointBuffer() const { return pointBuffer_.handle(); }
-    [[nodiscard]] uint32_t pointCount() const { return count_; }
-
-private:
-    vk::Device device_ = VK_NULL_HANDLE;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer pointBuffer_;
-    plot::Color color_;
-    float width_ = 1.0f;
-    uint32_t count_ = 0;
-    bool inited_ = false;
+    [[nodiscard]] virtual GpuBuf pointBuffer() const noexcept = 0;
+    [[nodiscard]] virtual uint32_t pointCount() const noexcept = 0;
 };
 
 } // namespace volcano::render::primitives

@@ -1,50 +1,27 @@
-// volcano/render/primitives/HeatmapRenderer.hpp — heatmap/KDE renderer
+// volcano/render/primitives/HeatmapRenderer.hpp — colormapped grid renderer
+//
+// Backend-neutral interface (Vulkan impl: HeatmapRendererVk).
+// Instances come from GpuServices::createHeatmapRenderer().
 #pragma once
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
-#include <volcano/plot/Transform.hpp>
-#include <volcano/core/Image.hpp>
+
 #include <volcano/plot/DataSeries.hpp>
-#include <volcano/plot/Colormap.hpp>
-#include <vulkan/vulkan.hpp>
-namespace volcano::core { class PipelineCache; class DescriptorPool; }
+#include <volcano/plot/Transform.hpp>
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
+
+namespace volcano::plot { class Colormap; }
+
 namespace volcano::render::primitives {
+
+/// Draws a 2D grid as a colormapped quad (imshow/pcolormesh/hist2d).
 class HeatmapRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-              core::DescriptorPool& descPool);
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator, const plot::Grid2D& grid,
-                const plot::Colormap& cmap,
-                bool nanTransparent = false);
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Transform2D& transform) const;
-private:
-    vk::Device device_;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniqueDescriptorSetLayout descLayout_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Image gridImage_;
-    core::Image cmapImage_; // 1D colormap LUT
-    vk::UniqueImageView gridView_;
-    vk::UniqueImageView cmapView_;
-    vk::UniqueSampler sampler_;
-    vk::UniqueSampler samplerNearest_;
-    vk::DescriptorSet descSet_;
-    core::Buffer quadBuffer_;
-    float valueMin_ = 0, valueMax_ = 1;
-    plot::Range gridXRange_{0,1}, gridYRange_{0,1};
-    bool originLower_ = false;
-    /// mpl imshow interpolation: 0 = nearest, 1 = bilinear, 2 = bicubic.
-    int interpMode_ = 0;
-    /// RGB(A) imshow: the grid texture holds RGBA8 texels and is
-    /// sampled directly (no colormap LUT).
-    bool rgbaMode_ = false;
-    /// pcolormesh-style NaN cells: sample as transparent instead of
-    /// clamping to a LUT edge color.
-    bool nanTransparent_ = false;
-    bool inited_ = false;
+    virtual ~HeatmapRenderer() = default;
+
+    virtual void upload(const plot::Grid2D& grid, const plot::Colormap& cmap,
+                        bool nanTransparent = false) = 0;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Transform2D& transform) const = 0;
 };
+
 } // namespace volcano::render::primitives

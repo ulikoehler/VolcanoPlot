@@ -1,29 +1,23 @@
-// volcano/render/primitives/PieRenderer.hpp — pie/donut chart renderer
+// volcano/render/primitives/PieRenderer.hpp — pie chart renderer
+//
+// Backend-neutral interface (Vulkan impl: PieRendererVk).
+// Instances come from GpuServices::createPieRenderer().
 #pragma once
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
+
 #include <volcano/plot/DataSeries.hpp>
-#include <vulkan/vulkan.hpp>
-namespace volcano::core { class PipelineCache; }
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
+
 namespace volcano::render::primitives {
+
+/// Draws pie/donut slices in the axes' pixel rect (pie coordinates are
+/// handled by the viewport mapping — see the NDC fix in AGENTS.md).
 class PieRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache);
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator, const plot::PieData& data);
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect) const;
-private:
-    vk::Device device_;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer posBuffer_;
-    core::Buffer colorBuffer_;
-    /// mpl `center` in pie data units (set by upload, used by draw).
-    plot::Point2D center_{0.0f, 0.0f};
-    uint32_t vertexCount_ = 0;
-    bool inited_ = false;
+    virtual ~PieRenderer() = default;
+
+    virtual void upload(const plot::PieData& data) = 0;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect) const = 0;
 };
+
 } // namespace volcano::render::primitives

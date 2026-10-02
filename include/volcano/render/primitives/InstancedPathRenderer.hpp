@@ -1,17 +1,14 @@
 // volcano/render/primitives/InstancedPathRenderer.hpp — instanced path fill
+//
+// Backend-neutral interface (Vulkan impl: InstancedPathRendererVk).
+// Instances come from GpuServices::createInstancedPathRenderer().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
 #include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
-#include <vulkan/vulkan.hpp>
-#include <vk_mem_alloc.h>
-
+#include <cstdint>
 #include <span>
-#include <vector>
-
-namespace volcano::core { class PipelineCache; class DescriptorPool; }
 
 namespace volcano::render::primitives {
 
@@ -28,58 +25,22 @@ struct PathInstance {
 /// scatter) off the per-item CPU tessellation path.
 class InstancedPathRenderer {
 public:
-    InstancedPathRenderer() = default;
-    void init(vk::Device device, VmaAllocator allocator,
-              vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples,
-              core::PipelineCache& cache,
-              core::DescriptorPool& descPool);
+    virtual ~InstancedPathRenderer() = default;
 
-    [[nodiscard]] bool inited() const noexcept { return inited_; }
-    [[nodiscard]] uint32_t templateVertCount() const noexcept {
-        return templateVerts_;
-    }
+    [[nodiscard]] virtual bool inited() const noexcept = 0;
+    [[nodiscard]] virtual uint32_t templateVertCount() const noexcept = 0;
 
     /// Upload the template triangle soup (template space, unit-ish).
-    void setTemplate(vk::Device device, vk::Queue queue,
-                     vk::CommandPool pool,
-                     std::span<const plot::Point2D> triVerts);
+    virtual void setTemplate(std::span<const plot::Point2D> triVerts) = 0;
 
     /// One instanced draw of the template at each instance transform.
     /// `clip` is the scissor rect; `resolution` is the framebuffer extent.
-    void drawInstanced(vk::CommandBuffer cmd, vk::Rect2D clip,
-                       vk::Extent2D resolution,
-                       std::span<const PathInstance> instances);
+    virtual void drawInstanced(Cmd& cmd, plot::Rect2D clip,
+                               plot::Extent2D resolution,
+                               std::span<const PathInstance> instances) = 0;
 
-    /// Reset the scratch instance buffer offset (call once per frame).
-    /// Also releases buffers retired by mid-frame growth.
-    void resetScratch() {
-        scratchOffset_ = 0;
-        retiredScratch_.clear();
-        retiredTemplates_.clear();
-    }
-
-private:
-    vk::Device device_;
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    bool inited_ = false;
-
-    core::Buffer templateVB_;
-    uint32_t templateVerts_ = 0;
-    /// Templates replaced mid-frame; draws recorded earlier may still
-    /// reference them — freed on resetScratch().
-    std::vector<core::Buffer> retiredTemplates_;
-
-    core::Buffer scratchVB_;
-    std::vector<core::Buffer> retiredScratch_;
-    size_t scratchCapacity_ = 0;
-    size_t scratchOffset_ = 0;
-
-    void ensureScratch(size_t byteCount);
+    /// Per-frame scratch release (retired buffers/templates).
+    virtual void resetScratch() = 0;
 };
 
 } // namespace volcano::render::primitives

@@ -5,10 +5,17 @@
 #include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
+#include "volcano/core/Buffer.hpp"
+#include "volcano/core/CommandBuffer.hpp"
+#include "volcano/core/DescriptorPool.hpp"
+#include "volcano/core/ShaderModule.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <mutex>
 #include <numeric>
 #include <thread>
+#include <unordered_map>
 
 namespace volcano::plot {
 
@@ -46,9 +53,162 @@ int fdBins(const std::vector<float>& sorted, float dataMin, float dataMax) {
     return static_cast<int>(std::ceil((dataMax - dataMin) / binWidth));
 }
 
+// GPU uniform-bin counting: workgroup-private bins in shared memory
+// (≤1024 bins) merged via global atomics. Returns empty on failure.
+const char* kHistGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0) readonly buffer Src  { float v[]; } src;
+layout(set = 0, binding = 1) buffer Bins { uint b[]; } dst;
+layout(push_constant) uniform PC {
+    uint n; uint nbins; float e0; float invW;
+} pc;
+shared uint sbins[1024];
+void main() {
+    uint lid = gl_LocalInvocationIndex;
+    bool useShared = pc.nbins <= 1024u;
+    if (useShared)
+        for (uint i = lid; i < pc.nbins; i += 256u) sbins[i] = 0u;
+    barrier();
+    uint total = gl_NumWorkGroups.x * 256u;
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += total) {
+        float s = src.v[i];
+        if (isnan(s) || isinf(s)) continue;
+        if (s < pc.e0 || s > pc.e0 + float(pc.nbins) / pc.invW) continue;
+        uint idx = uint((s - pc.e0) * pc.invW);
+        if (idx >= pc.nbins) idx = pc.nbins - 1u;
+        if (useShared) atomicAdd(sbins[idx], 1u);
+        else           atomicAdd(dst.b[idx], 1u);
+    }
+    if (useShared) {
+        barrier();
+        for (uint i = lid; i < pc.nbins; i += 256u)
+            if (sbins[i] > 0u) atomicAdd(dst.b[i], sbins[i]);
+    }
+}
+)GLSL";
+
+struct GpuHistPipe {
+    vk::Device device;
+    vk::UniqueDescriptorSetLayout descLayout;
+    vk::UniquePipelineLayout pipeLayout;
+    vk::UniquePipeline pipe;
+    bool ready = false;
+};
+
+GpuHistPipe& gpuHistPipe(vk::Device device) {
+    static std::unordered_map<VkDevice, GpuHistPipe> m;
+    static std::mutex mu;
+    std::lock_guard lk(mu);
+    auto& p = m[VkDevice(device)];
+    if (p.ready || p.device) return p;
+    p.device = device;
+    auto spv = core::ShaderModule::compileGlsl(kHistGlsl, "comp");
+    core::ShaderModule shader(device, spv);
+    vk::DescriptorSetLayoutBinding b[2];
+    for (uint32_t i = 0; i < 2; ++i)
+        b[i].setBinding(i)
+           .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+           .setDescriptorCount(1)
+           .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+    vk::DescriptorSetLayoutCreateInfo dlci{};
+    dlci.setBindings(b);
+    p.descLayout = device.createDescriptorSetLayoutUnique(dlci);
+    vk::PushConstantRange pcr{};
+    pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute).setOffset(0)
+       .setSize(16);
+    vk::PipelineLayoutCreateInfo plci{};
+    plci.setSetLayouts(p.descLayout.get()).setPushConstantRanges(pcr);
+    p.pipeLayout = device.createPipelineLayoutUnique(plci);
+    vk::ComputePipelineCreateInfo ci{};
+    ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+        .setModule(shader.handle()).setPName("main");
+    ci.setLayout(p.pipeLayout.get());
+    auto res = device.createComputePipelineUnique(nullptr, ci);
+    if (res.result == vk::Result::eSuccess) {
+        p.pipe = std::move(res.value);
+        p.ready = true;
+    }
+    return p;
+}
+
+/// GPU histogram of `data` into `nBins` uniform bins starting at e0.
+/// Returns per-bin counts, or empty on failure.
+std::vector<uint32_t> gpuHistCount(render::Renderer& r,
+                                   std::span<const float> data,
+                                   float e0, float invW, size_t nBins) {
+    auto& ctx = r.backend().context();
+    auto& p = gpuHistPipe(ctx.device.handle());
+    if (!p.ready) return {};
+
+    core::BufferDesc inDesc{};
+    inDesc.size = data.size_bytes();
+    inDesc.usage = core::BufferUsage::Storage;
+    inDesc.hostVisible = true;
+    core::Buffer inBuf(ctx.allocator.handle(), inDesc);
+    std::memcpy(inBuf.mappedData(), data.data(), data.size_bytes());
+
+    const vk::DeviceSize binsBytes = vk::DeviceSize(nBins) * 4;
+    core::BufferDesc binDesc{};
+    binDesc.size = binsBytes;
+    binDesc.usage = core::BufferUsage::Storage;
+    binDesc.hostVisible = true;
+    core::Buffer binBuf(ctx.allocator.handle(), binDesc);
+
+    vk::DescriptorPoolSize ps{};
+    ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(2);
+    core::DescriptorPool onePool(ctx.device.handle(), {ps}, 1);
+    vk::DescriptorSet set = onePool.allocate(p.descLayout.get());
+    vk::DescriptorBufferInfo ii{}, oi{};
+    ii.setBuffer(inBuf.handle()).setOffset(0).setRange(inDesc.size);
+    oi.setBuffer(binBuf.handle()).setOffset(0).setRange(binsBytes);
+    vk::WriteDescriptorSet w[2];
+    w[0].setDstSet(set).setDstBinding(0)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setBufferInfo(ii);
+    w[1].setDstSet(set).setDstBinding(1)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setBufferInfo(oi);
+    ctx.device.handle().updateDescriptorSets(w, {});
+
+    {
+        core::OneTimeCommands cmd(ctx.device.handle(),
+                                ctx.graphicsPool.handle(),
+                                ctx.device.graphicsQueue());
+        cmd.handle().fillBuffer(binBuf.handle(), 0, binsBytes, 0);
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
+           .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
+                             vk::AccessFlagBits2::eShaderWrite);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        cmd.handle().pipelineBarrier2(dep);
+        cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
+                                  p.pipe.get());
+        cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                                        p.pipeLayout.get(), 0, set, {});
+        struct { uint32_t n, nbins; float e0, invW; } pcv{
+            uint32_t(data.size()), uint32_t(nBins), e0, invW};
+        cmd.handle().pushConstants(p.pipeLayout.get(),
+                                   vk::ShaderStageFlagBits::eCompute, 0,
+                                   16, &pcv);
+        // ~16 samples per thread keeps the workgroup-private merge
+        // amortized; cap groups so `total` in-shader stays sane.
+        uint32_t threads = uint32_t(std::min<size_t>(
+            data.size(), size_t(64) * 1024));
+        cmd.handle().dispatch((threads + 255) / 256, 1, 1);
+    }
+    binBuf.invalidate();
+    std::vector<uint32_t> out(nBins);
+    std::memcpy(out.data(), binBuf.mappedData(), binsBytes);
+    return out;
+}
+
 } // namespace
 
-void HistPlot::computeBins() {
+void HistPlot::computeBins(render::Renderer* r) {
     // Merge all samples for shared bin-edge computation.
     std::vector<float> all;
     size_t total = 0;
@@ -143,7 +303,24 @@ void HistPlot::computeBins() {
         constexpr size_t kPar = 1'000'000;
         unsigned nt = std::min<unsigned>(std::thread::hardware_concurrency(),
                                          8u);
-        if (uniform && data.size() >= kPar && nt > 1) {
+        bool done = false;
+        // GPU binning is opt-in: uploading the samples to a host-visible
+        // buffer costs more than the 8-thread CPU count on discrete GPUs
+        // (measured: 118 ms GPU vs ~50 ms CPU at 10M). Unified-memory
+        // setups may win — VOLCANO_GPU_HIST=1.
+        static const bool gpuHistOn_ = [] {
+            const char* v = std::getenv("VOLCANO_GPU_HIST");
+            return v && v[0] == '1';
+        }();
+        if (gpuHistOn_ && uniform && r && data.size() >= kPar) {
+            if (auto counts = gpuHistCount(*r, data, e0, invW, nBins);
+                !counts.empty()) {
+                for (size_t i = 0; i < nBins; ++i)
+                    heights_[d][i] += float(counts[i]);
+                done = true;
+            }
+        }
+        if (!done && uniform && data.size() >= kPar && nt > 1) {
             std::vector<std::vector<float>> parts(
                 nt, std::vector<float>(nBins, 0.0f));
             std::vector<std::thread> workers;
@@ -319,7 +496,7 @@ void HistPlot::prepare(render::Renderer& r) {
     renderer_.init(ctx.device.handle(), r.backend().renderPass(),
                    r.backend().sampleCount(), r.pipelineCache());
 
-    computeBins();
+    computeBins(&r);
 
     if (cfg_.histtype == HistType::Step) {
         buildStepSegments();
@@ -383,7 +560,7 @@ void HistPlot::draw(vk::CommandBuffer cmd, render::Renderer& r,
 
 void HistPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                           Rect2D rect) {
-    if (binEdges_.empty()) computeBins();
+    if (binEdges_.empty()) computeBins(nullptr);
     auto toPx = pxMapper(axes, rect);
     auto setColor = [&](size_t d) {
         return d < cfg_.colors.size() ? cfg_.colors[d] : cfg_.color;

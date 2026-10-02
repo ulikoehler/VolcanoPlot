@@ -181,9 +181,53 @@ constexpr float kQuad[] = {
 
 } // namespace
 
-void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class HeatmapRendererVk final : public HeatmapRenderer {
+public:
+    explicit HeatmapRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+    void upload(const plot::Grid2D& grid, const plot::Colormap& cmap,
+                bool nanTransparent = false) override;
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Transform2D& transform) const override;
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Image gridImage_;
+    core::Image cmapImage_; // 1D colormap LUT
+    vk::UniqueImageView gridView_;
+    vk::UniqueImageView cmapView_;
+    vk::UniqueSampler sampler_;
+    vk::UniqueSampler samplerNearest_;
+    vk::DescriptorSet descSet_;
+    core::Buffer quadBuffer_;
+    float valueMin_ = 0, valueMax_ = 1;
+    plot::Range gridXRange_{0,1}, gridYRange_{0,1};
+    bool originLower_ = false;
+    /// mpl imshow interpolation: 0 = nearest, 1 = bilinear, 2 = bicubic.
+    int interpMode_ = 0;
+    /// RGB(A) imshow: the grid texture holds RGBA8 texels and is
+    /// sampled directly (no colormap LUT).
+    bool rgbaMode_ = false;
+    /// pcolormesh-style NaN cells: sample as transparent instead of
+    /// clamping to a LUT edge color.
+    bool nanTransparent_ = false;
+    bool inited_ = false;
+};
+
+void HeatmapRendererVk::init(vk::Device device, vk::RenderPass renderPass,
                            vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-                           core::DescriptorPool& descPool) {
+                           core::DescriptorPool& descPool {
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -285,10 +329,9 @@ void HeatmapRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                             VmaAllocator allocator, const plot::Grid2D& grid,
+void HeatmapRendererVk::upload(const plot::Grid2D& grid,
                              const plot::Colormap& cmap,
-                             bool nanTransparent) {
+                             bool nanTransparent {
     nanTransparent_ = nanTransparent;
     rgbaMode_ = !grid.rgba.empty();
     const vk::Format gridFmt = rgbaMode_ ? vk::Format::eR8G8B8A8Unorm
@@ -456,8 +499,8 @@ void HeatmapRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
     originLower_ = grid.origin == "lower";
 }
 
-void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-                           const plot::Transform2D& transform) const {
+void HeatmapRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
+                           const plot::Transform2D& transform const {
     if (!inited_ || !quadBuffer_.handle()) return;
 
     struct PC {
@@ -504,13 +547,13 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                       0, sizeof(PC), &pc);
 
     vk::Viewport vp;
-    vp.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     std::array<vk::Buffer, 1> buf = { quadBuffer_.handle() };
     std::array<vk::DeviceSize, 1> off = {0};
@@ -519,3 +562,9 @@ void HeatmapRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
 }
 
 } // namespace volcano::render::primitives
+
+std::unique_ptr<HeatmapRenderer> makeHeatmapVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<HeatmapRendererVk>(svcs);
+    p->init();
+    return p;
+}

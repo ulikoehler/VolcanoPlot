@@ -1,7 +1,10 @@
-// volcano/render/primitives/PointRenderer.cpp
+// volcano/render/primitives/PointRenderer.cpp — Vulkan impl
 #include "volcano/render/primitives/PointRenderer.hpp"
+#include "../VkFactory.hpp"
+#include "../VulkanGpuServices.hpp"
 #include "volcano/core/Device.hpp"
 #include "volcano/core/DescriptorPool.hpp"
+#include "volcano/core/PipelineCache.hpp"
 
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
@@ -224,9 +227,64 @@ void main() {
 
 } // namespace
 
-void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                         vk::SampleCountFlagBits samples, core::DescriptorPool& /*descPool*/,
-                         core::PipelineCache& cache) {
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class PointRendererVk final : public PointRenderer {
+public:
+    explicit PointRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+
+    void upload(std::span<const plot::Point2D> points,
+                std::span<const plot::Color> colors,
+                std::span<const float> sizes) override;
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Transform2D& transform,
+              uint32_t pointCount, MarkerParams marker = {}) const override;
+    void draw(Cmd& cmd, plot::Rect2D viewport, plot::Rect2D scissor,
+              const plot::Transform2D& transform,
+              uint32_t pointCount, MarkerParams marker = {}) const override;
+
+    [[nodiscard]] GpuBuf pointBuffer() const noexcept override {
+        return GpuBuf(VkBuffer(pointBuffer_.handle()));
+    }
+    [[nodiscard]] uint32_t pointCount() const noexcept override { return count_; }
+    [[nodiscard]] bool hasData() const noexcept override { return capacity_ > 0; }
+    void updatePoints(std::span<const plot::Point2D> points,
+                      std::span<const plot::Color> colors,
+                      std::span<const float> sizes) override;
+    void resetScratch() override { retired_.clear(); pendingDraw_ = false; }
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniqueDescriptorSetLayout descLayout_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer pointBuffer_;
+    core::Buffer colorBuffer_;
+    core::Buffer sizeBuffer_;
+    std::vector<core::Buffer> retired_;
+    vk::UniqueDescriptorSet descSet_;
+    VmaAllocator allocator_ = nullptr;
+    uint32_t count_ = 0;
+    uint32_t capacity_ = 0;
+    bool inited_ = false;
+    /// Set once a draw command referencing the current buffers has been
+    /// recorded this frame — updatePoints() must then allocate fresh
+    /// buffers instead of overwriting data the pending draw reads.
+    mutable bool pendingDraw_ = false;
+};
+
+void PointRendererVk::init() {
+    const vk::Device device = svcs_->device();
+    const auto renderPass = svcs_->renderPass();
+    const auto samples = svcs_->samples();
+    auto& cache = svcs_->pipelineCache();
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -315,15 +373,21 @@ void PointRenderer::init(vk::Device device, vk::RenderPass renderPass,
         .setRenderPass(renderPass)
         .setSubpass(0);
 
+    // Shared pipeline cache requires external synchronization.
+    std::lock_guard lock(core::pipelineCreationMutex());
     auto res = device.createGraphicsPipelineUnique(cache.handle(), gpci);
     if (res.result != vk::Result::eSuccess) throw std::runtime_error("Failed to create point pipeline");
     pipeline_ = std::move(res.value);
     inited_ = true;
 }
 
-void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                           VmaAllocator allocator, std::span<const plot::Point2D> points,
-                           std::span<const plot::Color> colors, std::span<const float> sizes) {
+void PointRendererVk::upload(std::span<const plot::Point2D> points,
+                           std::span<const plot::Color> colors,
+                           std::span<const float> sizes) {
+    const vk::Device device = svcs_->device();
+    const vk::Queue queue = svcs_->graphicsQueue();
+    const vk::CommandPool pool = svcs_->graphicsPool();
+    const VmaAllocator allocator = svcs_->allocator();
     allocator_ = allocator;
     core::BufferDesc pdesc{};
     pdesc.size = points.size_bytes();
@@ -352,7 +416,7 @@ void PointRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool p
                         std::as_bytes(std::span{sizes.data(), sizes.size()}));
 }
 
-void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
+void PointRendererVk::updatePoints(std::span<const plot::Point2D> points,
                                  std::span<const plot::Color> colors,
                                  std::span<const float> sizes) {
     if (!pendingDraw_ && points.size() <= capacity_) {
@@ -387,16 +451,17 @@ void PointRenderer::updatePoints(std::span<const plot::Point2D> points,
     capacity_ = count_;
 }
 
-void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+void PointRendererVk::draw(Cmd& cmd, plot::Rect2D rect,
                          const plot::Transform2D& transform, uint32_t pointCount,
                          MarkerParams marker) const {
     draw(cmd, rect, rect, transform, pointCount, marker);
 }
 
-void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-                         vk::Rect2D scissor,
+void PointRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
+                         plot::Rect2D scissor,
                          const plot::Transform2D& transform,
                          uint32_t pointCount, MarkerParams marker) const {
+    const auto cmd = vkCmd(cmdRef);
     if (!inited_ || pointCount == 0) return;
 
     struct PC {
@@ -411,10 +476,10 @@ void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     pc.viewMinY = transform.view.y.min;
     pc.viewSpanX = transform.view.x.span();
     pc.viewSpanY = transform.view.y.span();
-    pc.rectX = static_cast<float>(rect.offset.x);
-    pc.rectY = static_cast<float>(rect.offset.y);
-    pc.rectW = static_cast<float>(rect.extent.width);
-    pc.rectH = static_cast<float>(rect.extent.height);
+    pc.rectX = static_cast<float>(rect.x);
+    pc.rectY = static_cast<float>(rect.y);
+    pc.rectW = static_cast<float>(rect.width);
+    pc.rectH = static_cast<float>(rect.height);
     pc.sxCode = static_cast<float>(static_cast<int>(transform.codeX()));
     pc.sxP1 = transform.scaleX.param1;
     pc.sxP2 = transform.scaleX.param2;
@@ -438,19 +503,25 @@ void PointRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                       0, sizeof(PC), &pc);
 
     vk::Viewport vp;
-    vp.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, scissor);
+    cmd.setScissor(0, vkScissor(scissor));
 
     std::array<vk::Buffer, 3> buffers = { pointBuffer_.handle(), colorBuffer_.handle(), sizeBuffer_.handle() };
     std::array<vk::DeviceSize, 3> offsets = {0,0,0};
     cmd.bindVertexBuffers(0, buffers, offsets);
     cmd.draw(pointCount, 1, 0, 0);
     pendingDraw_ = true;
+}
+
+std::unique_ptr<PointRenderer> makePointVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<PointRendererVk>(svcs);
+    p->init();
+    return p;
 }
 
 } // namespace volcano::render::primitives

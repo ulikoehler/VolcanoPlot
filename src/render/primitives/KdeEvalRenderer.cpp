@@ -51,9 +51,9 @@ void main() {
 
 } // namespace
 
-void KdeEvalRenderer::init(vk::Device device, VmaAllocator allocator,
+void KdeEvalRendererVk::init(vk::Device device, VmaAllocator allocator,
                            vk::Queue computeQueue,
-                           vk::CommandPool computePool) {
+                           vk::CommandPool computePool {
     device_ = device;
     allocator_ = allocator;
     computeQueue_ = computeQueue;
@@ -101,11 +101,11 @@ void KdeEvalRenderer::init(vk::Device device, VmaAllocator allocator,
     inited_ = true;
 }
 
-std::vector<float> KdeEvalRenderer::eval(
+std::vector<float> KdeEvalRendererVk::eval(
         const std::vector<plot::Point2D>& samples,
         uint32_t gridW, uint32_t gridH,
         float xMin, float xMax, float yMin, float yMax,
-        float bwX, float bwY) {
+        float bwX, float bwY {
     if (!inited_ || samples.empty() || gridW == 0 || gridH == 0)
         return {};
 

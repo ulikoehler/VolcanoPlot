@@ -15,6 +15,7 @@
 #include <volcano/backend/Backend.hpp>
 #include <volcano/encode/ImageDecoder.hpp>
 #include <volcano/encode/MovieWriter.hpp>
+#include <volcano/encode/PngEncoder.hpp>
 #include <volcano/text/TextRenderer.hpp>
 #include <volcano/text/MathText.hpp>
 #include <volcano/render/Renderer.hpp>
@@ -92,6 +93,7 @@
 #include <deque>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <numeric>
@@ -31303,6 +31305,170 @@ del _nt
                  py::arg("title"))
             .def("toggle_fullscreen",
                  &render::MplCanvas::toggleFullscreen);
+
+        // Per-pixel-column min/max envelope for massively oversampled
+        // polylines, computed natively (the Python-side equivalent
+        // costs ~15 numpy passes over the vertex array). Only valid for
+        // near-diagonal affine transforms — returns None otherwise.
+        // Splits runs at MOVETO codes; non-finite points break columns.
+        mp.def("decimate_polyline",
+               [](py::handle verts, py::handle codes,
+                  double m00, double m01, double m02,
+                  double m10, double m11, double m12,
+                  int width) -> py::object {
+            // px = m00*x + m01*y + m02, py = m10*x + m11*y + m12.
+            // Require (near-)diagonal: pixel column driven by data x.
+            if (width <= 0 || m00 == 0.0 ||
+                !std::isfinite(m00) || !std::isfinite(m11) ||
+                std::abs(m01) > 1e-6 || std::abs(m10) > 1e-6)
+                return py::none();
+            auto va = py::array_t<double,
+                py::array::c_style | py::array::forcecast>::ensure(verts);
+            if (!va || va.ndim() != 2 || va.shape(1) != 2 ||
+                va.shape(0) < 4)
+                return py::none();
+            const size_t n = size_t(va.shape(0));
+            const double* vd = va.data();
+            // Run boundaries from MOVETO codes; anything beyond
+            // MOVETO/LINETO (curves, closepoly) declines.
+            std::vector<size_t> bounds;
+            if (!codes.is_none()) {
+                auto ca = py::array_t<uint8_t,
+                    py::array::c_style | py::array::forcecast>::ensure(
+                    codes);
+                if (!ca || size_t(ca.size()) != n) return py::none();
+                const uint8_t* cd = ca.data();
+                for (size_t i = 0; i < n; ++i) {
+                    if (cd[i] == plot::Path::MoveTo) bounds.push_back(i);
+                    else if (cd[i] != plot::Path::LineTo)
+                        return py::none();
+                }
+            }
+            if (bounds.empty()) bounds.push_back(0);
+            bounds.push_back(n);
+
+            std::vector<plot::Point2D> pts(n);
+            for (size_t i = 0; i < n; ++i)
+                pts[i] = {float(vd[2 * i]), float(vd[2 * i + 1])};
+
+            std::vector<double> ov;
+            std::vector<uint8_t> oc;
+            size_t covered = 0;
+            for (size_t r = 0; r + 1 < bounds.size(); ++r) {
+                size_t s = bounds[r], e = bounds[r + 1];
+                if (e - s < 2) continue;
+                for (auto& run : plot::envelopeDecimateData(
+                         std::span<const plot::Point2D>{pts.data() + s,
+                                                        e - s},
+                         float(m02), float(m00), 0, width - 1)) {
+                    covered += run.size() / 2;
+                    bool first = true;
+                    for (auto p : run) {
+                        ov.push_back(double(p.x));
+                        ov.push_back(m11 * double(p.y) + m12);
+                        oc.push_back(first ? plot::Path::MoveTo
+                                           : plot::Path::LineTo);
+                        first = false;
+                    }
+                }
+            }
+            // Only worth it when ≥4 input points collapse per column.
+            if (oc.empty() || covered * 4 >= n) return py::none();
+            py::array_t<double> va_out({oc.size(), size_t(2)});
+            std::memcpy(va_out.mutable_data(), ov.data(),
+                        ov.size() * sizeof(double));
+            py::array_t<uint8_t> ca_out(oc.size());
+            std::memcpy(ca_out.mutable_data(), oc.data(), oc.size());
+            return py::make_tuple(va_out, ca_out);
+        },
+        py::arg("verts"), py::arg("codes"),
+        py::arg("m00"), py::arg("m01"), py::arg("m02"),
+        py::arg("m10"), py::arg("m11"), py::arg("m12"),
+        py::arg("width"));
+
+        // PNG-encode an RGBA8 buffer natively (libpng + pHYs dpi +
+        // tEXt metadata). Returns None when libpng is unavailable —
+        // callers then fall back to PIL.
+        mp.def("png_encode",
+               [](py::bytes rgba, uint32_t w, uint32_t h, float dpi,
+                  py::handle metadata) -> py::object {
+            std::string buf = rgba;
+            if (buf.size() < size_t(w) * h * 4) return py::none();
+            encode::CpuPngEncoder enc;
+            enc.setDpi(dpi);
+            if (!metadata.is_none()) {
+                std::map<std::string, std::string> mm;
+                for (auto kv : metadata.cast<py::dict>())
+                    mm[kv.first.cast<std::string>()] =
+                        kv.second.cast<std::string>();
+                enc.setMetadata(std::move(mm));
+            }
+            auto r = enc.encode(
+                {reinterpret_cast<const uint8_t*>(buf.data()),
+                 buf.size()}, w, h);
+            if (!r.success) return py::none();
+            return py::bytes(
+                reinterpret_cast<const char*>(r.bytes.data()),
+                py::ssize_t(r.bytes.size()));
+        },
+        py::arg("rgba"), py::arg("w"), py::arg("h"), py::arg("dpi"),
+        py::arg("metadata"));
+
+        // Fan-triangulate a closed convex LINETO polygon — the C++ port
+        // of the backend's _convex_tris (per-patch Python loop was ~10us
+        // ×50k calls on bar-heavy figures). Returns (3k,2) float64 tris
+        // or None when the polygon isn't a closed convex poly.
+        mp.def("convex_tris",
+               [](py::handle verts, py::handle codes) -> py::object {
+            auto va = py::array_t<double,
+                py::array::c_style | py::array::forcecast>::ensure(verts);
+            if (!va || va.ndim() != 2 || va.shape(1) != 2) return py::none();
+            const ssize_t n = va.shape(0);
+            if (n < 4 || n > 257) return py::none();
+            const double* v = va.data();
+            size_t m; // polygon vertex count (without closing point)
+            if (!codes.is_none()) {
+                auto ca = py::array_t<uint8_t,
+                    py::array::c_style | py::array::forcecast>::ensure(
+                    codes);
+                if (!ca || ca.size() != n) return py::none();
+                const uint8_t* cd = ca.data();
+                if (cd[0] != plot::Path::MoveTo ||
+                    cd[n - 1] != plot::Path::ClosePoly)
+                    return py::none();
+                for (ssize_t i = 1; i < n - 1; ++i)
+                    if (cd[i] != plot::Path::LineTo) return py::none();
+                m = size_t(n) - 1;
+            } else {
+                if (v[0] != v[2 * (n - 1)] || v[1] != v[2 * (n - 1) + 1])
+                    return py::none();
+                m = size_t(n) - 1;
+            }
+            if (m < 3) return py::none();
+            // Convexity: all non-zero scalar crosses share a sign.
+            int sign = 0;
+            for (size_t i = 0; i < m; ++i) {
+                size_t i1 = (i + 1) % m, i2 = (i + 2) % m;
+                double x0 = v[2 * i], y0 = v[2 * i + 1];
+                double z = (v[2 * i1] - x0) * (v[2 * i2 + 1] - v[2 * i1 + 1])
+                         - (v[2 * i1 + 1] - y0) * (v[2 * i2] - v[2 * i1]);
+                if (z != 0.0) {
+                    int s = z > 0.0 ? 1 : -1;
+                    if (sign == 0) sign = s;
+                    else if (s != sign) return py::none();
+                }
+            }
+            py::array_t<double> out({3 * (m - 2), size_t(2)});
+            double* o = out.mutable_data();
+            for (size_t i = 1; i + 1 < m; ++i) {
+                std::memcpy(o, v, 16);
+                std::memcpy(o + 2, v + 2 * i, 16);
+                std::memcpy(o + 4, v + 2 * i + 2, 16);
+                o += 6;
+            }
+            return py::object(std::move(out));
+        },
+        py::arg("verts"), py::arg("codes"));
     }
 
     // The Python-side backend module. Written as a real module into
@@ -31741,15 +31907,24 @@ class RendererVolcano(RendererBase):
         lw = self.points_to_pixels(
             _gv(gc, '_linewidth', 'get_linewidth'))
         dashes = _gv(gc, '_dashes', 'get_dashes')
-        # Huge x-monotonic stroked polylines: envelope-decimate in data
-        # space BEFORE transforming — one numpy reduceat pass over the
-        # vertex list instead of a full transform + stroke of every
-        # point. Produces the same per-column coverage at ~2·W verts.
+        # Huge stroked polylines: envelope-decimate in data space BEFORE
+        # transforming — a single C++ pass over the vertex list instead
+        # of a full transform + stroke of every point. Produces the same
+        # per-column coverage at ~2·W verts. The C++ implementation is
+        # segment-based (per-segment column coverage), so it also handles
+        # non-x-monotonic polylines.
         if (face is None and (dashes[1] is None or len(dashes[1]) == 0)
                 and len(path.vertices) > 65536
                 and _gv(gc, '_hatch', 'get_hatch') is None
                 and not _has_clip_path(gc)):
-            dec = self._decimate_polyline(path, transform)
+            try:
+                m = (transform + self._flip).frozen().get_matrix()
+                dec = _vmpl.decimate_polyline(
+                    path.vertices, path.codes,
+                    m[0, 0], m[0, 1], m[0, 2],
+                    m[1, 0], m[1, 1], m[1, 2], int(self.width))
+            except Exception:
+                dec = self._decimate_polyline(path, transform)
             if dec is not None:
                 verts, codes = dec
                 clip, ring = _clip(gc, self.height, self._clip_memo)
@@ -31787,7 +31962,7 @@ class RendererVolcano(RendererBase):
                             return
                         codes = path.codes
                         if hasF:
-                            tris = _convex_tris(tv, codes)
+                            tris = _vmpl.convex_tris(tv, codes)
                             if tris is not None:
                                 self._defer(
                                     't', clip, tris,
@@ -32644,6 +32819,21 @@ class FigureCanvasVolcano(FigureCanvasBase):
 
     def print_png(self, filename_or_obj, *, metadata=None,
                   pil_kwargs=None, **kwargs):
+        # Fast path: libpng in C++ (pHYs dpi + tEXt metadata), skipping
+        # the PIL round trip. PIL stays for explicit pil_kwargs.
+        if not pil_kwargs:
+            self.buffer_rgba()
+            if self._rgba is not None:
+                data = _vmpl.png_encode(
+                    self._rgba, *self._rgba_size,
+                    float(self.figure.dpi), metadata)
+                if data is not None:
+                    if hasattr(filename_or_obj, 'write'):
+                        filename_or_obj.write(data)
+                    else:
+                        with open(filename_or_obj, 'wb') as f:
+                            f.write(data)
+                    return
         self._print_pil(filename_or_obj, "png", pil_kwargs, metadata)
 
     def print_jpg(self, filename_or_obj, *, pil_kwargs=None, **kwargs):

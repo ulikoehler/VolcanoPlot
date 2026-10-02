@@ -14,6 +14,16 @@ public:
                                     uint32_t width, uint32_t height,
                                     const std::filesystem::path& path) override;
     [[nodiscard]] ImageFormat format() const noexcept override { return ImageFormat::Png; }
+
+    /// Write a pHYs chunk (pixels-per-meter) when dpi > 0 — matplotlib
+    /// savefig(dpi=...) parity.
+    void setDpi(float dpi) override { dpi_ = dpi; }
+    /// zlib level 0-9 (-1 keeps the libpng default).
+    void setCompressionLevel(int level) override { level_ = level; }
+
+private:
+    float dpi_ = 0.0f;
+    int level_ = -1;
 };
 
 /// CPU BMP encoder (no dependency).

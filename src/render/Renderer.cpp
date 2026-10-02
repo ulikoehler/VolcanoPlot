@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <format>
 #include <cstdlib>
@@ -159,27 +160,35 @@ void Renderer::prepare(plot::Figure& figure) {
                                    ctx.graphicsPool.handle());
         textReady_ = true;
     }
-    // Init spine renderer once.
+    // Init the independent primitive renderers once, in parallel: each
+    // compiles its own shaders (process-wide memo + disk cache) and
+    // creates its own pipelines. Shared parents (pipeline cache,
+    // descriptor pool) are serialized internally.
     if (!spineInited_) {
-        spineRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
-                            backend_.renderPass(), backend_.sampleCount(),
-                            *pipelineCache_, *descriptorPool_);
-        instancedPathRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
-                                    backend_.renderPass(),
-                                    backend_.sampleCount(),
-                                    *pipelineCache_, *descriptorPool_);
-        gpuLineRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
-                              *descriptorPool_, *pipelineCache_);
-        pointRenderer_.init(ctx.device.handle(), backend_.renderPass(),
-                            backend_.sampleCount(), *descriptorPool_,
-                            *pipelineCache_);
+        auto dev = ctx.device.handle();
+        auto alloc = ctx.allocator.handle();
+        auto rp = backend_.renderPass();
+        auto samples = backend_.sampleCount();
+        auto runAll = [&](auto... init) {
+            std::vector<std::future<void>> futs;
+            (futs.push_back(std::async(std::launch::async, init)), ...);
+            for (auto& f : futs) f.get(); // propagate init failures
+        };
+        runAll(
+            [&] { spineRenderer_.init(dev, alloc, rp, samples,
+                                     *pipelineCache_, *descriptorPool_); },
+            [&] { instancedPathRenderer_.init(dev, alloc, rp, samples,
+                                              *pipelineCache_,
+                                              *descriptorPool_); },
+            [&] { gpuLineRenderer_.init(dev, alloc, *descriptorPool_,
+                                        *pipelineCache_); },
+            [&] { pointRenderer_.init(dev, rp, samples, *descriptorPool_,
+                                      *pipelineCache_); },
+            // ReduceRenderer owns its descriptor pool and submits nothing
+            // during init — safe to join the parallel group.
+            [&] { reduceRenderer_.init(dev, alloc, ctx.device.computeQueue(),
+                                       ctx.computePool.handle()); });
         spineInited_ = true;
-    }
-    // Init GPU autoscale reduce pipeline once.
-    if (!reduceInited_) {
-        reduceRenderer_.init(ctx.device.handle(), ctx.allocator.handle(),
-                             ctx.device.computeQueue(),
-                             ctx.computePool.handle());
         reduceInited_ = true;
     }
 
@@ -2787,6 +2796,99 @@ bool Renderer::savefig(plot::Figure& figure,
     // mpl savefig(transparent=True): every Axes patch and the Figure
     // patch become transparent unless facecolor is given (mpl applies
     // facecolor via kwargs.setdefault → it wins over 'none').
+    encode::SaveOptions o = resolveSaveOpts(opts, fmt);
+
+    uint32_t w = 0, h = 0;
+    auto pixels = savefigPixels(figure, o, w, h);
+    if (pixels.empty()) return false;
+
+    // Raster formats via the GPU encoders where available: PNG does
+    // adaptive per-row filtering in a compute shader (+ fast deflate),
+    // JPEG/WebP do colorspace conversion + chroma downsampling on the GPU
+    // and hand the planes to libjpeg/libwebp for the bitstream.
+    encode::IImageEncoder* enc = nullptr;
+#ifdef VOLCANO_GPU_ENCODE
+    // Opt-in: GPU-hybrid encoding pays a host-visible-buffer round trip
+    // that loses to the CPU encoders on discrete GPUs (bench_encode);
+    // it can win on integrated/APU setups. VOLCANO_GPU_ENCODERS=1 to try.
+    static const bool gpuEncOn_ = [] {
+        const char* v = std::getenv("VOLCANO_GPU_ENCODERS");
+        return v && v[0] == '1';
+    }();
+    if (gpuEncOn_ &&
+        (fmt == encode::ImageFormat::Png ||
+         fmt == encode::ImageFormat::Jpeg ||
+         fmt == encode::ImageFormat::Webp)) {
+        if (!gpuEncTried_.count(fmt)) {
+            gpuEncTried_.insert(fmt);
+            try {
+                auto& ctx = backend_.context();
+                gpuEncs_[fmt] = encode::createGpuEncoder(
+                    fmt, ctx.device.handle(), ctx.device.graphicsQueue(),
+                    ctx.graphicsPool.handle(), ctx.allocator.handle());
+            } catch (const std::exception&) {
+                gpuEncs_.erase(fmt); // CPU fallback
+            }
+        }
+        if (auto it = gpuEncs_.find(fmt); it != gpuEncs_.end())
+            enc = it->second.get();
+    }
+#endif
+    return encode::saveImage(pixels, w, h, path, o, enc);
+}
+
+std::future<bool> Renderer::savefigAsync(
+    plot::Figure& figure, const std::filesystem::path& path,
+    const encode::SaveOptions& options) {
+    encode::SaveOptions opts = options;
+    opts.canvasDpi = figure.style().dpi;
+    auto fmt = opts.format
+        ? *opts.format
+        : encode::formatFromPath(path).value_or(encode::ImageFormat::Png);
+    // Vector formats stay synchronous — they're CPU-only anyway.
+    if (fmt == encode::ImageFormat::Pdf ||
+        fmt == encode::ImageFormat::Svg ||
+        fmt == encode::ImageFormat::Eps ||
+        fmt == encode::ImageFormat::Pgf) {
+        std::promise<bool> p;
+        p.set_value(savefigVector(figure, path, opts, fmt));
+        return p.get_future();
+    }
+
+    encode::SaveOptions o = resolveSaveOpts(opts, fmt);
+    uint32_t w = 0, h = 0;
+    auto pixels = savefigPixels(figure, o, w, h);
+    if (pixels.empty()) {
+        std::promise<bool> p;
+        p.set_value(false);
+        return p.get_future();
+    }
+    // Fresh CPU encoder per task — the cached GPU encoders aren't
+    // thread-safe and (measured) slower than CPU on discrete GPUs.
+    return std::async(std::launch::async,
+        [px = std::move(pixels), w, h, path, o]() mutable {
+            return encode::saveImage(px, w, h, path, o, nullptr);
+        });
+}
+
+encode::SaveOptions Renderer::resolveSaveOpts(encode::SaveOptions opts,
+                                              encode::ImageFormat fmt) {
+    if (fmt == encode::ImageFormat::Png && opts.compressionLevel < 0) {
+        // Faster-than-libpng-default deflate for savefig: level 3 is
+        // ~2.4x faster for ~50% larger PNGs (bench_encode). Override
+        // with VOLCANO_PNG_LEVEL=0..9.
+        static const int lvl = [] {
+            const char* v = std::getenv("VOLCANO_PNG_LEVEL");
+            return v ? std::clamp(std::atoi(v), 0, 9) : 3;
+        }();
+        opts.compressionLevel = lvl;
+    }
+    return opts;
+}
+
+std::vector<uint8_t> Renderer::savefigPixels(plot::Figure& figure,
+                                             const encode::SaveOptions& opts,
+                                             uint32_t& w, uint32_t& h) {
     auto savedFc = figure.style().faceColor;
     std::vector<plot::Color> savedAxFc;
     if (opts.transparent) {
@@ -2824,9 +2926,11 @@ bool Renderer::savefig(plot::Figure& figure,
     }
 
     auto pixels = backend_.readbackRgba8();
-    if (pixels.empty()) return false;
+    if (pixels.empty()) return {};
     auto ext = backend_.extent();
-    return encode::saveImage(pixels, ext.width, ext.height, path, opts);
+    w = ext.width;
+    h = ext.height;
+    return pixels;
 }
 
 namespace {

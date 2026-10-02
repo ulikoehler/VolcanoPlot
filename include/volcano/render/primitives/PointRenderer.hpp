@@ -1,24 +1,20 @@
-// volcano/render/primitives/PointRenderer.hpp — MSAA scatter point renderer
+// volcano/render/primitives/PointRenderer.hpp — scatter point renderer
+//
+// Backend-neutral interface. Vulkan impl: PointRendererVk in
+// src/render/primitives/PointRenderer.cpp; WebGPU: op recorder in
+// src/web/. Instances come from GpuServices::createPointRenderer().
 #pragma once
-
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/PipelineCache.hpp>
-#include <volcano/core/ShaderModule.hpp>
 
 #include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
-#include <vulkan/vulkan.hpp>
-
-#include <memory>
-#include <vector>
-
-namespace volcano::core { class Device; class DescriptorPool; }
-namespace volcano::render { struct RenderContext; }
+#include <cstdint>
+#include <span>
 
 namespace volcano::render::primitives {
 
-/// Renders scatter points as point sprites with per-marker SDF shading.
+/// Renders scatter points with per-marker SDF shading.
 /// Supports the matplotlib marker set (polygons, stars, tripods, carets,
 /// ticks) plus fill styles via `MarkerParams`.
 struct MarkerParams {
@@ -27,62 +23,40 @@ struct MarkerParams {
     float numsides = 5.0f;  ///< for Polygon/StarN/AsteriskN/CircledN
     float angle = 0.0f;     ///< marker rotation, radians
 };
+
 class PointRenderer {
 public:
-    PointRenderer() = default;
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::DescriptorPool& descPool,
-              core::PipelineCache& cache);
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator, std::span<const plot::Point2D> points,
-                std::span<const plot::Color> colors, std::span<const float> sizes);
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect, const plot::Transform2D& transform,
-              uint32_t pointCount, MarkerParams marker = {}) const;
+    virtual ~PointRenderer() = default;
+
+    virtual void upload(std::span<const plot::Point2D> points,
+                        std::span<const plot::Color> colors,
+                        std::span<const float> sizes) = 0;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Transform2D& transform,
+                      uint32_t pointCount, MarkerParams marker = {}) const = 0;
     /// Same as draw() but with a scissor rect distinct from the viewport
     /// (e.g. canvas-space viewport + axes clip).
-    void draw(vk::CommandBuffer cmd, vk::Rect2D viewport, vk::Rect2D scissor,
-              const plot::Transform2D& transform,
-              uint32_t pointCount, MarkerParams marker = {}) const;
+    virtual void draw(Cmd& cmd, plot::Rect2D viewport, plot::Rect2D scissor,
+                      const plot::Transform2D& transform,
+                      uint32_t pointCount, MarkerParams marker = {}) const = 0;
 
-    /// GPU handle to the uploaded point buffer (vec2 data), for GPU autoscale.
-    [[nodiscard]] vk::Buffer pointBuffer() const noexcept { return pointBuffer_.handle(); }
+    /// Opaque token for the uploaded point buffer (vec2 data), for GPU
+    /// autoscale / compute consumption. 0 when nothing is uploaded.
+    [[nodiscard]] virtual GpuBuf pointBuffer() const noexcept = 0;
     /// Number of uploaded points (0 until upload() is called).
-    [[nodiscard]] uint32_t pointCount() const noexcept { return count_; }
+    [[nodiscard]] virtual uint32_t pointCount() const noexcept = 0;
     /// True once attribute buffers have been allocated (upload() or
     /// updatePoints()) — updatePoints() is safe to call only then.
-    [[nodiscard]] bool hasData() const noexcept { return capacity_ > 0; }
-    /// In-place data update: memcpy into the host-visible point buffer
-    /// when the new count fits the existing allocation, else reallocate
-    /// all three attribute buffers. Reallocated buffers are retired (not
-    /// destroyed) until the next resetScratch() so recorded draw commands
-    /// from the same frame stay valid.
-    void updatePoints(std::span<const plot::Point2D> points,
-                      std::span<const plot::Color> colors,
-                      std::span<const float> sizes);
-    /// Free buffers retired by updatePoints() reallocations — call once
-    /// per frame before recording draw commands.
-    void resetScratch() { retired_.clear(); pendingDraw_ = false; }
-
-private:
-    vk::Device device_;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniqueDescriptorSetLayout descLayout_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer pointBuffer_;
-    core::Buffer colorBuffer_;
-    core::Buffer sizeBuffer_;
-    std::vector<core::Buffer> retired_;
-    vk::UniqueDescriptorSet descSet_;
-    VmaAllocator allocator_ = nullptr;
-    uint32_t count_ = 0;
-    uint32_t capacity_ = 0;
-    bool inited_ = false;
-    /// Set once a draw command referencing the current buffers has been
-    /// recorded this frame — updatePoints() must then allocate fresh
-    /// buffers instead of overwriting data the pending draw reads.
-    mutable bool pendingDraw_ = false;
+    [[nodiscard]] virtual bool hasData() const noexcept = 0;
+    /// In-place data update: overwrite the point buffer when the new
+    /// count fits the existing allocation, else reallocate.
+    /// Implementations must keep buffers referenced by recorded commands
+    /// alive until the next resetScratch().
+    virtual void updatePoints(std::span<const plot::Point2D> points,
+                              std::span<const plot::Color> colors,
+                              std::span<const float> sizes) = 0;
+    /// Per-frame scratch release (retired buffers, pending state).
+    virtual void resetScratch() = 0;
 };
 
 } // namespace volcano::render::primitives

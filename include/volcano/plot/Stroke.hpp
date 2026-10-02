@@ -58,6 +58,14 @@ columnDecimate(std::span<const Point2D> pts, int cx0, int cx1);
 envelopeDecimateData(std::span<const Point2D> pts, float ax, float kx,
                      int cx0, int cx1);
 
+/// Build the alternating (min,max) zigzag runs from per-column min/max
+/// envelopes — shared tail of columnDecimate/envelopeDecimateData and
+/// the GPU envelope path. `mn[i]`/`mx[i]` are the envelope of column
+/// `cx0+i`; non-finite mn means an uncovered column (run break).
+[[nodiscard]] std::vector<std::vector<Point2D>>
+envelopeRuns(std::span<const float> mn, std::span<const float> mx,
+             int cx0);
+
 /// xkcd-style sketch wobble (mpl `Path.sketch`): resample the polyline and
 /// perturb it with smooth correlated perpendicular noise.
 /// `scale` = amplitude in px, `length` = wobble wavelength in px.

@@ -32,6 +32,12 @@ public:
     [[nodiscard]] std::vector<uint8_t> filterScanlines(std::span<const uint8_t> rgba,
                                                        uint32_t width, uint32_t height);
 
+    /// DPI metadata → PNG pHYs chunk (mpl savefig dpi).
+    void setDpi(float dpi) override { dpi_ = dpi; }
+    /// zlib deflate level (1..9). Default 3 — the "fast" encoder traded
+    /// for speed; adaptive GPU filtering keeps the size close.
+    void setCompressionLevel(int level) override { level_ = level; }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -39,6 +45,8 @@ private:
     vk::Queue queue_;
     vk::CommandPool pool_;
     VmaAllocator allocator_;
+    float dpi_ = 0.0f;
+    int level_ = 3;
 };
 
 } // namespace volcano::encode

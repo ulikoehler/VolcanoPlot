@@ -1,59 +1,38 @@
 // volcano/render/primitives/FillRenderer.hpp — filled polygon renderer
+//
+// Backend-neutral interface (Vulkan impl: FillRendererVk).
+// Instances come from GpuServices::createFillRenderer().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
-#include <volcano/plot/Types.hpp>
 #include <volcano/plot/Transform.hpp>
-#include <vulkan/vulkan.hpp>
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
-namespace volcano::core { class PipelineCache; }
+#include <cstdint>
+#include <span>
 
 namespace volcano::render::primitives {
 
-/// Renders filled polygons (triangle lists) in data-space coordinates.
-/// Used by FillPlot (filled polygon) and FillBetweenPlot (fill between
-/// two curves or a curve and a baseline).
-///
-/// The renderer accepts pre-built triangle vertex lists. Each vertex has
-/// a position (Point2D, data coords) and a color (Color, RGBA float).
-/// The vertex shader maps data coords to NDC using the viewport transform
-/// (same as BarRenderer).
+/// Draws a filled polygon / triangle fan with per-vertex colors.
+/// Used by fill_between, histograms, KDE areas, box bodies, etc.
 class FillRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache);
+    virtual ~FillRenderer() = default;
 
-    /// Upload triangle vertices. The caller builds the triangle list
-    /// (e.g., via a triangle-strip-to-list or ear-clipping tessellation).
-    void upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                VmaAllocator allocator,
-                std::span<const plot::Point2D> positions,
-                std::span<const plot::Color> colors);
+    virtual void upload(std::span<const plot::Point2D> positions,
+                        std::span<const plot::Color> colors) = 0;
 
-    /// Adopt buffers filled externally (e.g. by a compute-shader
-    /// tessellator). Same layout as upload(): vec2 pos + vec4 color,
-    /// `count` vertices. The caller must ensure writes are visible.
-    void adoptBuffers(core::Buffer positions, core::Buffer colors,
-                      uint32_t count);
+    /// Adopt buffers produced by another service (e.g. the pcolormesh
+    /// tessellator). The resources are owned by GpuServices; the tokens
+    /// stay valid for the services' lifetime.
+    virtual void adoptBuffers(GpuBuf positions, GpuBuf colors,
+                              uint32_t count) = 0;
 
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-              const plot::Transform2D& transform) const;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Transform2D& transform) const = 0;
 
-    /// GPU handle to the uploaded position buffer (for GPU autoscale).
-    [[nodiscard]] vk::Buffer pointBuffer() const { return posBuffer_.handle(); }
-    [[nodiscard]] uint32_t pointCount() const { return vertexCount_; }
-
-private:
-    vk::Device device_ = VK_NULL_HANDLE;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer posBuffer_;
-    core::Buffer colorBuffer_;
-    uint32_t vertexCount_ = 0;
-    bool inited_ = false;
+    [[nodiscard]] virtual GpuBuf pointBuffer() const noexcept = 0;
+    [[nodiscard]] virtual uint32_t pointCount() const noexcept = 0;
 };
 
 } // namespace volcano::render::primitives

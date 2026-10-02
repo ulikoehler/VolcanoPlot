@@ -96,8 +96,38 @@ void main() {
 
 } // namespace
 
-void SurfaceRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                           vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class SurfaceRendererVk final : public SurfaceRenderer {
+public:
+    explicit SurfaceRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+    void upload(const plot::Grid2D& grid) override;
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Camera3D& camera, bool shade = true,
+              float lightAzdeg = 315.0f,
+              float lightAltdeg = 45.0f) const override;
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer vertexBuffer_;
+    core::Buffer indexBuffer_;
+    uint32_t indexCount_ = 0;
+    float valueMin_ = 0, valueMax_ = 1;
+    plot::Range gridXRange_{0,1}, gridYRange_{0,1};
+    bool inited_ = false;
+};
+
+void SurfaceRendererVk::init(vk::Device device, vk::RenderPass renderPass,
+                           vk::SampleCountFlagBits samples, core::PipelineCache& cache {
     device_ = device;
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -165,8 +195,7 @@ void SurfaceRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void SurfaceRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                             VmaAllocator allocator, const plot::Grid2D& grid) {
+void SurfaceRendererVk::upload(const plot::Grid2D& grid {
     // Build vertex grid: (width × height) vertices, each with (x, y, z=value).
     std::vector<plot::Point3D> verts(grid.width * grid.height);
     float xMin = grid.xRange.min, xMax = grid.xRange.max;
@@ -214,9 +243,9 @@ void SurfaceRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool
     gridYRange_ = grid.yRange;
 }
 
-void SurfaceRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
+void SurfaceRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
                            const plot::Camera3D& camera, bool shade,
-                           float lightAzdeg, float lightAltdeg) const {
+                           float lightAzdeg, float lightAltdeg const {
     if (!inited_ || indexCount_ == 0) return;
 
     struct PC {
@@ -250,13 +279,13 @@ void SurfaceRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
                       0, sizeof(PC), &pc);
 
     vk::Viewport vp2;
-    vp2.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp2.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp2);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     std::array<vk::Buffer, 1> buf = { vertexBuffer_.handle() };
     std::array<vk::DeviceSize, 1> off = {0};
@@ -266,3 +295,9 @@ void SurfaceRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
 }
 
 } // namespace volcano::render::primitives
+
+std::unique_ptr<SurfaceRenderer> makeSurfaceVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<SurfaceRendererVk>(svcs);
+    p->init();
+    return p;
+}

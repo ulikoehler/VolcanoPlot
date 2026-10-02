@@ -1,13 +1,12 @@
 // volcano/render/Grid3DRenderer.hpp — fwidth-based 3D dynamic grid
+//
+// Backend-neutral interface (Vulkan impl: Grid3DRendererVk).
+// The shared instance comes from GpuServices::grid3D().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
-#include <volcano/plot/Types.hpp>
 #include <volcano/plot/Transform.hpp>
-#include <vulkan/vulkan.hpp>
-
-namespace volcano::core { class PipelineCache; }
+#include <volcano/plot/Types.hpp>
+#include <volcano/render/Cmd.hpp>
 
 namespace volcano::render {
 
@@ -30,35 +29,19 @@ struct Grid3DStyle {
 /// The grid is drawn on the floor (X-Z plane) and optionally on the back
 /// and side walls of the 3D axes box. Grid lines are computed in the
 /// fragment shader using fwidth for anti-aliasing, so they never quantize
-/// under zoom — the same technique as the 2D GridRenderer.
+/// under zoom — the same technique as the 2D grid approach.
 ///
 /// The renderer uses a fullscreen triangle and ray-casts into the 3D
 /// scene to find the intersection with the floor/wall planes, then
 /// computes grid line distances in world space.
 class Grid3DRenderer {
 public:
-    void init(vk::Device device, vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-              VmaAllocator allocator, vk::Queue queue, vk::CommandPool pool);
+    virtual ~Grid3DRenderer() = default;
 
-    /// Draw the 3D grid for the given camera and viewport.
-    /// `rect` is the pixel rectangle of the axes.
-    /// `viewport` is the data-space viewport (x, y, z ranges).
-    /// `camera` is the 3D camera.
-    /// `style` controls which planes get grids and grid appearance.
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-              const plot::Viewport& viewport,
-              const plot::Camera3D& camera,
-              const Grid3DStyle& style) const;
-
-private:
-    vk::Device device_ = VK_NULL_HANDLE;
-    core::ShaderModule vert_;
-    core::ShaderModule frag_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    core::Buffer fullscreenBuffer_;
-    bool inited_ = false;
+    virtual void draw(Cmd& cmd, plot::Rect2D rect,
+                      const plot::Viewport& viewport,
+                      const plot::Camera3D& camera,
+                      const Grid3DStyle& style) const = 0;
 };
 
 } // namespace volcano::render

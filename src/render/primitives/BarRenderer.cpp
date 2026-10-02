@@ -46,8 +46,34 @@ void main() { outColor = v_color; }
 
 } // namespace
 
-void BarRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                       vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class BarRendererVk final : public BarRenderer {
+public:
+    explicit BarRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+    void upload(const plot::BarData& data) override;
+    void draw(Cmd& cmd, plot::Rect2D rect,
+              const plot::Transform2D& transform) const override;
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer posBuffer_;
+    core::Buffer colorBuffer_;
+    uint32_t vertexCount_ = 0;
+    bool inited_ = false;
+};
+
+void BarRendererVk::init(vk::Device device, vk::RenderPass renderPass,
+                       vk::SampleCountFlagBits samples, core::PipelineCache& cache {
     device_ = device;
     auto vertSrc = std::string(kVertHead) + shaders::kScaleFn +
                    shaders::kProjFn + kVertMain;
@@ -131,8 +157,7 @@ void BarRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void BarRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                         VmaAllocator allocator, const plot::BarData& data) {
+void BarRendererVk::upload(const plot::BarData& data {
     // Build a quad per bar: 6 vertices (two triangles).
     std::vector<plot::Point2D> verts;
     std::vector<plot::Color> colors;
@@ -168,8 +193,8 @@ void BarRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
                         std::as_bytes(std::span{colors.data(), colors.size()}));
 }
 
-void BarRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-                       const plot::Transform2D& transform) const {
+void BarRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
+                       const plot::Transform2D& transform const {
     if (!inited_ || vertexCount_ == 0) return;
 
     struct PC {
@@ -198,13 +223,13 @@ void BarRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex, 0, sizeof(PC), &pc);
 
     vk::Viewport vp;
-    vp.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     std::array<vk::Buffer, 2> buf = { posBuffer_.handle(), colorBuffer_.handle() };
     std::array<vk::DeviceSize, 2> off = {0, 0};
@@ -213,3 +238,9 @@ void BarRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect,
 }
 
 } // namespace volcano::render::primitives
+
+std::unique_ptr<BarRenderer> makeBarVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<BarRendererVk>(svcs);
+    p->init();
+    return p;
+}

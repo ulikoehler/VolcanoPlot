@@ -1,12 +1,15 @@
 // volcano/text/TextRenderer.hpp — glyb-based bitmap atlas text renderer
+//
+// Base class holding the CPU side (FreeType rasterization, HarfBuzz
+// shaping, glyph atlas bitmap, measurement). GPU transport is backend
+// virtual: TextRendererVk uploads the atlas to a Vulkan texture and
+// draws textured quads; the WebGPU impl records WriteTexture +
+// DrawTextQuads ops into the stream.
+// Instances come from GpuServices::text() — never constructed directly.
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/Image.hpp>
-#include <volcano/core/ShaderModule.hpp>
 #include <volcano/plot/Types.hpp>
-#include <vulkan/vulkan.hpp>
-#include <vk_mem_alloc.h>
+#include <volcano/render/Cmd.hpp>
 
 #include <memory>
 #include <string>
@@ -19,8 +22,6 @@ struct font_manager_ft;
 struct text_shaper_hb;
 struct text_renderer_ft;
 struct font_face;
-
-namespace volcano::core { class PipelineCache; class DescriptorPool; }
 
 namespace volcano::text {
 
@@ -40,33 +41,28 @@ struct FontFileInfo {
 FontFileInfo fontFileInfo(const std::string& path);
 
 /// Renders text using glyb's FreeType + HarfBuzz bitmap atlas.
-/// Glyphs are rasterized on-demand into a font atlas bitmap, uploaded
-/// to a Vulkan texture, and rendered as textured quads. This correctly
+/// Glyphs are rasterized on-demand into a font atlas bitmap; the GPU
+/// implementation uploads it and draws textured quads. This correctly
 /// handles glyph holes (o, 0, A, etc.) via FreeType's span rasterizer.
 class TextRenderer {
 public:
     TextRenderer();
-    ~TextRenderer();
+    virtual ~TextRenderer();
 
     TextRenderer(const TextRenderer&) = delete;
     TextRenderer& operator=(const TextRenderer&) = delete;
 
-    void init(vk::Device device, VmaAllocator allocator,
-              vk::RenderPass renderPass,
-              vk::SampleCountFlagBits samples, core::PipelineCache& cache,
-              core::DescriptorPool& descPool);
-
-    /// CPU-only font init — loads faces/shaper without a Vulkan pipeline
-    /// so measureText()/faceFor() work headless (mathtext metrics).
+    /// CPU-only font init — loads faces/shaper so measureText()/
+    /// faceFor() work without any GPU (mathtext metrics, WASM).
     void initFonts();
 
-    /// Pre-render common ASCII glyphs and upload the atlas texture.
-    /// Must be called after init() and before any draw() calls.
-    /// Uses a one-time command buffer (outside any render pass).
-    void prepareAtlas(vk::Queue queue, vk::CommandPool pool);
+    /// Upload the atlas / finish GPU-side init.
+    /// Vulkan: one-time command submission outside any render pass.
+    /// Op backend: emits WriteTexture ops into the current stream.
+    virtual void prepareAtlasGpu() = 0;
 
     /// Reset per-frame scratch buffers. Call at the start of each frame.
-    void resetScratch();
+    virtual void resetScratch() = 0;
 
     /// Draw a UTF-8 string at (x, y) in pixel coords with the given color.
     /// (x, y) is the baseline position (top-left of the text block).
@@ -76,12 +72,12 @@ public:
     /// aligned within the block according to `lineAlign`.
     /// `face` selects a non-default face (e.g. serif for dejavuserif
     /// mathtext); nullptr uses the primary face.
-    void draw(vk::CommandBuffer cmd, vk::Rect2D rect,
-              std::string_view text, float x, float y,
-              plot::Color color, float scale = 1.0f,
-              float rotation = 0.0f,
-              plot::HAlign lineAlign = plot::HAlign::Left,
-              font_face* face = nullptr);
+    virtual void draw(render::Cmd& cmd, plot::Rect2D rect,
+                      std::string_view text, float x, float y,
+                      plot::Color color, float scale = 1.0f,
+                      float rotation = 0.0f,
+                      plot::HAlign lineAlign = plot::HAlign::Left,
+                      font_face* face = nullptr) = 0;
 
     /// Measure the bounding box of a UTF-8 string at the given scale.
     /// Returns {width, height, ascent} in pixels.
@@ -115,21 +111,11 @@ public:
     /// since the last GPU upload (e.g. first CJK/extended characters).
     /// Call syncAtlas() outside a render pass, then re-render the frame.
     [[nodiscard]] bool atlasDirty() const noexcept { return atlasDirty_; }
-    /// Re-upload the atlas texture to the GPU (outside any render pass).
-    void syncAtlas(vk::Queue queue, vk::CommandPool pool);
+    /// Re-upload the atlas texture (outside any render pass).
+    virtual void syncAtlas() = 0;
 
-private:
-    vk::Device device_ = VK_NULL_HANDLE;
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    vk::UniqueDescriptorSetLayout descSetLayout_;
-    vk::UniqueDescriptorPool descPool_;
-    vk::DescriptorSet descSet_;
-    vk::UniqueSampler sampler_;
-    bool inited_ = false;
-
-    // glyb font manager, shaper, and renderer
+protected:
+    // glyb font manager, shaper, and renderer (CPU side)
     std::unique_ptr<font_manager_ft> fontManager_;
     std::unique_ptr<text_shaper_hb> shaper_;
     std::unique_ptr<text_renderer_ft> textRenderer_;
@@ -142,37 +128,21 @@ private:
     /// Lazily-resolved faces for fontproperties (family/style/weight).
     std::unordered_map<std::string, FaceMatch> faceCache_;
 
-    // Atlas texture (uploaded lazily, re-uploaded when it grows)
-    core::Image atlasImage_;
-    vk::UniqueImageView atlasView_;
-    bool atlasUploaded_ = false;
+    /// Set by impls when draw() rasterizes previously-unseen glyphs into
+    /// the CPU atlas bitmap (needs a re-upload).
     bool atlasDirty_ = false;
-    size_t atlasGlyphCount_ = 0;
+    /// Atlas bitmap dimensions (CPU side); impls upload this to GPU.
     int atlasWidth_ = 0;
     int atlasHeight_ = 0;
-
-    // Scratch buffers for vertices and indices (ring-buffered per frame)
-    core::Buffer scratchVB_;
-    core::Buffer scratchIB_;
-    size_t vbCapacity_ = 0;
-    size_t ibCapacity_ = 0;
-    size_t vbOffset_ = 0;   // current write offset within scratchVB_
-    size_t ibOffset_ = 0;   // current write offset within scratchIB_
 
     // glyb draw list (reused per draw call, allocated in init)
     // Stored as void* to avoid pulling glyb headers into this header.
     void* batch_ = nullptr;
 
-    /// Ensure scratch buffers can hold the given vertex/index counts.
-    void ensureScratch(size_t vertexBytes, size_t indexBytes);
-
     /// Find and load a system font.
     void loadFont();
     /// Pre-render the ASCII + math-symbol charset into the CPU atlas.
     void prepareAtlasGlyphs();
-    /// Upload the current atlas bitmap to the GPU. Called by
-    /// prepareAtlas (first upload) and syncAtlas (growth re-upload).
-    void uploadAtlas(vk::Queue queue, vk::CommandPool pool);
 };
 
 } // namespace volcano::text

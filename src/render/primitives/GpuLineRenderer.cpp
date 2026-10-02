@@ -1,11 +1,13 @@
 // volcano/render/primitives/GpuLineRenderer.cpp
 #include "volcano/render/primitives/GpuLineRenderer.hpp"
 
+#include <volcano/core/CommandBuffer.hpp>
 #include <volcano/core/DescriptorPool.hpp>
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/core/ShaderModule.hpp>
 
 #include <cstring>
+#include <mutex>
 
 namespace volcano::render::primitives {
 
@@ -184,11 +186,72 @@ void main() {
 }
 )GLSL";
 
+// Envelope reduce: one thread per segment updates the pixel-column
+// min/max envelope with atomicMin/Max on order-preserving float bits.
+// Mirrors the scan in plot::envelopeDecimateData (pixel-x via the
+// hoisted affine ax + kx*x, boundary interpolation in data y).
+const char* kEnvelopeGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src   { vec2 p[]; } src;
+layout(set = 0, binding = 1) buffer ColMin { uint m[]; } cmn;
+layout(set = 0, binding = 2) buffer ColMax { uint m[]; } cmx;
+
+layout(push_constant) uniform PC {
+    float ax; float kx;
+    int   cx0; int cx1;
+    uint  n;
+} pc;
+
+// Order-preserving float→uint map for atomics.
+uint ord(float f) {
+    uint u = floatBitsToUint(f);
+    return u ^ (((u & 0x80000000u) != 0u) ? 0xFFFFFFFFu : 0x80000000u);
+}
+
+void upd(int c, float lo, float hi) {
+    int i = c - pc.cx0;
+    if (i < 0 || i >= pc.cx1 - pc.cx0 + 1) return;
+    atomicMin(cmn.m[i], ord(lo));
+    atomicMax(cmx.m[i], ord(hi));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i == 0u || i >= pc.n) return;
+    vec2 a = src.p[i - 1u], b = src.p[i];
+    if (isnan(a.x) || isinf(a.x) || isnan(a.y) || isinf(a.y) ||
+        isnan(b.x) || isinf(b.x) || isnan(b.y) || isinf(b.y))
+        return;
+    float xa = pc.ax + pc.kx * a.x, xb = pc.ax + pc.kx * b.x;
+    float xlo = min(xa, xb), xhi = max(xa, xb);
+    int s = max(pc.cx0, int(floor(xlo)));
+    int e = min(pc.cx1, int(floor(xhi)));
+    if (s > e) return;
+    if (s == e) { upd(s, min(a.y, b.y), max(a.y, b.y)); return; }
+    for (int c = s; c <= e; ++c) {
+        float lo, hi;
+        if (xhi - xlo < 1e-6) {
+            lo = min(a.y, b.y); hi = max(a.y, b.y);
+        } else {
+            float xl = max(xlo, float(c)), xr = min(xhi, float(c + 1));
+            float t0 = (xl - xa) / (xb - xa);
+            float t1 = (xr - xa) / (xb - xa);
+            float yl = a.y + (b.y - a.y) * t0;
+            float yr = a.y + (b.y - a.y) * t1;
+            lo = min(yl, yr); hi = max(yl, yr);
+        }
+        upd(c, lo, hi);
+    }
+}
+)GLSL";
+
 } // namespace
 
-void GpuLineRenderer::init(vk::Device device, VmaAllocator allocator,
+void GpuLineRendererVk::init(vk::Device device, VmaAllocator allocator,
                            core::DescriptorPool& descPool,
-                           core::PipelineCache& cache) {
+                           core::PipelineCache& cache {
     if (inited_) return;
     device_ = device;
     allocator_ = allocator;
@@ -218,23 +281,145 @@ void GpuLineRenderer::init(vk::Device device, VmaAllocator allocator,
     ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
         .setModule(shader.handle()).setPName("main");
     ci.setLayout(pipeLayout_.get());
+    // Shared pipeline cache requires external synchronization (the other
+    // primitive renderers init in parallel in Renderer::prepare).
+    std::lock_guard lock(core::pipelineCreationMutex());
     auto res = device.createComputePipelineUnique(cache.handle(), ci);
     if (res.result != vk::Result::eSuccess)
         throw std::runtime_error("GpuLineRenderer pipeline creation failed");
     pipe_ = std::move(res.value);
 
     dset_ = descPool.allocate(descLayout_.get());
+
+    // Envelope reduce pipeline (3 storage buffers, 20B push constants).
+    auto envSpv = core::ShaderModule::compileGlsl(kEnvelopeGlsl, "comp");
+    core::ShaderModule envShader(device, envSpv);
+    vk::DescriptorSetLayoutBinding envB[3];
+    for (uint32_t b = 0; b < 3; ++b)
+        envB[b].setBinding(b)
+               .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+               .setDescriptorCount(1)
+               .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+    vk::DescriptorSetLayoutCreateInfo edlci{};
+    edlci.setBindings(envB);
+    envDescLayout_ = device.createDescriptorSetLayoutUnique(edlci);
+    vk::PushConstantRange epcr{};
+    epcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
+        .setOffset(0).setSize(20);
+    vk::PipelineLayoutCreateInfo eplci{};
+    eplci.setSetLayouts(envDescLayout_.get()).setPushConstantRanges(epcr);
+    envPipeLayout_ = device.createPipelineLayoutUnique(eplci);
+    vk::ComputePipelineCreateInfo eci{};
+    eci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+        .setModule(envShader.handle()).setPName("main");
+    eci.setLayout(envPipeLayout_.get());
+    {
+        auto eres = device.createComputePipelineUnique(cache.handle(), eci);
+        if (eres.result != vk::Result::eSuccess)
+            throw std::runtime_error(
+                "GpuLineRenderer envelope pipeline creation failed");
+        envPipe_ = std::move(eres.value);
+    }
+
     inited_ = true;
 }
 
-void GpuLineRenderer::resetScratch() {
+void GpuLineRendererVk::resetScratch( {
     inOff_ = 0;
     outOff_ = 0;
     retiredIn_.clear();
     retiredOut_.clear();
 }
 
-void GpuLineRenderer::ensureIn(size_t points) {
+namespace {
+// Inverse of the shader's order-preserving map.
+float unord(uint32_t u) {
+    u ^= (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+    float f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+constexpr uint32_t kOrdPosInf = 0xFF800000u; // ord(+inf)
+constexpr uint32_t kOrdNegInf = 0x007FFFFFu; // ord(-inf)
+} // namespace
+
+bool GpuLineRendererVk::envelopeColumns(vk::Queue queue, vk::CommandPool pool,
+                                      GpuBuf points, uint32_t count,
+                                      float ax, float kx,
+                                      int cx0, int cx1,
+                                      std::vector<float>& mn,
+                                      std::vector<float>& mx {
+    if (!inited_ || !points || count < 2 || cx1 < cx0) return false;
+    const uint32_t W = uint32_t(cx1 - cx0 + 1);
+    const vk::DeviceSize outBytes = vk::DeviceSize(W) * 2 * 4;
+
+    core::BufferDesc outDesc{};
+    outDesc.size = outBytes;
+    outDesc.usage = core::BufferUsage::Storage;
+    outDesc.hostVisible = true;
+    core::Buffer outBuf(allocator_, outDesc);
+
+    // Fresh descriptor set per call (same pattern as GpuPngEncoder).
+    vk::DescriptorPoolSize ps{};
+    ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(3);
+    core::DescriptorPool onePool(device_, {ps}, 1);
+    vk::DescriptorSet set = onePool.allocate(envDescLayout_.get());
+
+    vk::DescriptorBufferInfo infos[3];
+    infos[0].setBuffer(points).setOffset(0)
+             .setRange(vk::DeviceSize(count) * 8);
+    infos[1].setBuffer(outBuf.handle()).setOffset(0)
+             .setRange(vk::DeviceSize(W) * 4);
+    infos[2].setBuffer(outBuf.handle()).setOffset(vk::DeviceSize(W) * 4)
+             .setRange(vk::DeviceSize(W) * 4);
+    vk::WriteDescriptorSet writes[3];
+    for (int i = 0; i < 3; ++i)
+        writes[i].setDstSet(set).setDstBinding(i)
+                 .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                 .setBufferInfo(infos[i]);
+    device_.updateDescriptorSets(writes, {});
+
+    {
+        core::OneTimeCommands cmd(device_, pool, queue);
+        // Init: columns to ord(+inf) / ord(-inf) identities.
+        cmd.handle().fillBuffer(outBuf.handle(), 0, vk::DeviceSize(W) * 4,
+                                kOrdPosInf);
+        cmd.handle().fillBuffer(outBuf.handle(), vk::DeviceSize(W) * 4,
+                                vk::DeviceSize(W) * 4, kOrdNegInf);
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
+           .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
+                             vk::AccessFlagBits2::eShaderWrite);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        cmd.handle().pipelineBarrier2(dep);
+
+        cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
+                                  envPipe_.get());
+        cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                                        envPipeLayout_.get(), 0, set, {});
+        struct { float ax, kx; int32_t cx0, cx1; uint32_t n; } pcv{
+            ax, kx, cx0, cx1, count};
+        cmd.handle().pushConstants(envPipeLayout_.get(),
+                                   vk::ShaderStageFlagBits::eCompute, 0,
+                                   20, &pcv);
+        cmd.handle().dispatch((count + 255) / 256, 1, 1);
+    } // submit + wait in ~OneTimeCommands
+
+    outBuf.invalidate();
+    const auto* words = static_cast<const uint32_t*>(outBuf.mappedData());
+    mn.resize(W);
+    mx.resize(W);
+    for (uint32_t i = 0; i < W; ++i) {
+        mn[i] = unord(words[i]);
+        mx[i] = unord(words[W + i]);
+    }
+    return true;
+}
+
+void GpuLineRendererVk::ensureIn(size_t points {
     if (inOff_ + points <= inBuf_.size() / sizeof(float) / 2) return;
     retiredIn_.push_back(std::move(inBuf_));
     size_t cap = std::max<size_t>(points + inOff_, 4096) * 2;
@@ -250,7 +435,7 @@ void GpuLineRenderer::ensureIn(size_t points) {
     rebind();
 }
 
-void GpuLineRenderer::ensureOut(size_t verts) {
+void GpuLineRendererVk::ensureOut(size_t verts {
     if (outOff_ + verts <= outBuf_.size() / (sizeof(float) * 6)) return;
     retiredOut_.push_back(std::move(outBuf_));
     size_t cap = std::max<size_t>(verts + outOff_, 16384) * 2;
@@ -263,7 +448,7 @@ void GpuLineRenderer::ensureOut(size_t verts) {
     rebind();
 }
 
-void GpuLineRenderer::rebind() {
+void GpuLineRendererVk::rebind( {
     if (!inBuf_.handle() || !outBuf_.handle()) return;
     vk::DescriptorBufferInfo infos[2];
     infos[0].setBuffer(inBuf_.handle()).setOffset(0).setRange(inBuf_.size());
@@ -276,11 +461,11 @@ void GpuLineRenderer::rebind() {
     device_.updateDescriptorSets(writes, {});
 }
 
-std::vector<GpuLineRenderer::Mesh>
-GpuLineRenderer::tessellate(vk::CommandBuffer cmd,
+std::vector<GpuLineRendererVk::Mesh>
+GpuLineRendererVk::tessellate(Cmd& cmdRef,
                             std::span<const plot::Point2D> px,
                             const plot::StrokeParams& sp,
-                            plot::Color color) {
+                            plot::Color color {
     std::vector<Mesh> out;
     if (px.size() < 2) return out;
     // Huge inputs are split so each chunk's output stays under the
@@ -300,11 +485,11 @@ GpuLineRenderer::tessellate(vk::CommandBuffer cmd,
     return out;
 }
 
-GpuLineRenderer::Mesh
-GpuLineRenderer::tessellateChunk(vk::CommandBuffer cmd,
+GpuLineRendererVk::Mesh
+GpuLineRendererVk::tessellateChunk(Cmd& cmdRef,
                                  std::span<const plot::Point2D> px,
                                  const plot::StrokeParams& sp,
-                                 plot::Color color) {
+                                 plot::Color color {
     const uint32_t n = uint32_t(px.size());
     if (n < 2) return {};
     const uint32_t nSeg = n - 1;

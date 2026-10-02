@@ -16,6 +16,7 @@
 #include <zlib.h>
 #endif
 
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -236,7 +237,7 @@ EncodeResult GpuPngEncoder::encode(std::span<const uint8_t> rgba,
     uLongf bound = compressBound(uLong(scan.size()));
     std::vector<uint8_t> z(bound);
     if (compress2(z.data(), &bound, scan.data(), uLong(scan.size()),
-                  Z_DEFAULT_COMPRESSION) != Z_OK) {
+                  level_) != Z_OK) {
         res.error = "deflate failed";
         return res;
     }
@@ -248,6 +249,22 @@ EncodeResult GpuPngEncoder::encode(std::span<const uint8_t> rgba,
     putU32be(ihdr, height);
     ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
     pngChunk(res.bytes, "IHDR", ihdr);
+    for (auto& [k, v] : metadata_) {
+        // PNG tEXt: keyword\0value
+        std::vector<uint8_t> t(k.begin(), k.end());
+        t.push_back(0);
+        t.insert(t.end(), v.begin(), v.end());
+        pngChunk(res.bytes, "tEXt", t);
+    }
+    if (dpi_ > 0.0f) {
+        // pHYs: ppm_x, ppm_y, unit=meter
+        auto ppm = uint32_t(std::lround(dpi_ / 0.0254f));
+        std::vector<uint8_t> phys;
+        putU32be(phys, ppm);
+        putU32be(phys, ppm);
+        phys.push_back(1);
+        pngChunk(res.bytes, "pHYs", phys);
+    }
     pngChunk(res.bytes, "IDAT", z);
     pngChunk(res.bytes, "IEND", {});
     res.success = true;

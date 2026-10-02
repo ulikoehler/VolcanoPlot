@@ -43,8 +43,35 @@ void main() { outColor = v_color; }
 
 } // namespace
 
-void PieRenderer::init(vk::Device device, vk::RenderPass renderPass,
-                       vk::SampleCountFlagBits samples, core::PipelineCache& cache) {
+[[nodiscard]] inline vk::Rect2D vkScissor(plot::Rect2D r) noexcept {
+    return {vk::Offset2D{r.x, r.y}, vk::Extent2D{r.width, r.height}};
+}
+
+class PieRendererVk final : public PieRenderer {
+public:
+    explicit PieRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
+
+    void init();
+    void upload(const plot::PieData& data) override;
+    void draw(Cmd& cmd, plot::Rect2D rect) const override;
+
+private:
+    VulkanGpuServices* svcs_;
+    vk::Device device_;
+    core::ShaderModule vert_;
+    core::ShaderModule frag_;
+    vk::UniquePipelineLayout pipelineLayout_;
+    vk::UniquePipeline pipeline_;
+    core::Buffer posBuffer_;
+    core::Buffer colorBuffer_;
+    /// mpl `center` in pie data units (set by upload, used by draw).
+    plot::Point2D center_{0.0f, 0.0f};
+    uint32_t vertexCount_ = 0;
+    bool inited_ = false;
+};
+
+void PieRendererVk::init(vk::Device device, vk::RenderPass renderPass,
+                       vk::SampleCountFlagBits samples, core::PipelineCache& cache {
     device_ = device;
     auto v = core::ShaderModule::compileGlsl(kVertGlsl, "vert");
     auto f = core::ShaderModule::compileGlsl(kFragGlsl, "frag");
@@ -125,8 +152,7 @@ void PieRenderer::init(vk::Device device, vk::RenderPass renderPass,
     inited_ = true;
 }
 
-void PieRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
-                         VmaAllocator allocator, const plot::PieData& data) {
+void PieRendererVk::upload(const plot::PieData& data {
     float total = 0;
     for (auto v : data.values) total += v;
     if (total <= 0) return;
@@ -204,13 +230,13 @@ void PieRenderer::upload(vk::Device device, vk::Queue queue, vk::CommandPool poo
                         std::as_bytes(std::span{colors.data(), colors.size()}));
 }
 
-void PieRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect) const {
+void PieRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect const {
     if (!inited_ || vertexCount_ == 0) return;
 
     // NDC per pie-data unit, per axis. The mpl pie view spans ±1.25,
     // so 1 data unit covers 1/1.25 = 0.8 of the half-extent.
-    float halfW = static_cast<float>(rect.extent.width) * 0.5f;
-    float halfH = static_cast<float>(rect.extent.height) * 0.5f;
+    float halfW = static_cast<float>(rect.width) * 0.5f;
+    float halfH = static_cast<float>(rect.height) * 0.5f;
     float halfMin = std::min(halfW, halfH);
 
     struct PC {
@@ -226,13 +252,13 @@ void PieRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect) const {
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex, 0, sizeof(PC), &pc);
 
     vk::Viewport vp;
-    vp.setX(static_cast<float>(rect.offset.x))
-       .setY(static_cast<float>(rect.offset.y))
-       .setWidth(static_cast<float>(rect.extent.width))
-       .setHeight(static_cast<float>(rect.extent.height))
+    vp.setX(static_cast<float>(rect.x))
+       .setY(static_cast<float>(rect.y))
+       .setWidth(static_cast<float>(rect.width))
+       .setHeight(static_cast<float>(rect.height))
        .setMinDepth(0.0f).setMaxDepth(1.0f);
     cmd.setViewport(0, vp);
-    cmd.setScissor(0, rect);
+    cmd.setScissor(0, vkScissor(rect));
 
     std::array<vk::Buffer, 2> buf = { posBuffer_.handle(), colorBuffer_.handle() };
     std::array<vk::DeviceSize, 2> off = {0, 0};
@@ -241,3 +267,9 @@ void PieRenderer::draw(vk::CommandBuffer cmd, vk::Rect2D rect) const {
 }
 
 } // namespace volcano::render::primitives
+
+std::unique_ptr<PieRenderer> makePieVk(VulkanGpuServices& svcs) {
+    auto p = std::make_unique<PieRendererVk>(svcs);
+    p->init();
+    return p;
+}

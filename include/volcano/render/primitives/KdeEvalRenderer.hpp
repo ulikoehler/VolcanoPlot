@@ -1,57 +1,30 @@
 // volcano/render/primitives/KdeEvalRenderer.hpp — GPU KDE evaluation
 //
-// Streams raw 2D samples to the GPU and evaluates a 2D Gaussian kernel
-// density estimate into a W×H grid via compute shader (one thread per
-// cell, gather over the sample buffer). The density grid lands in a
-// host-visible buffer for the heatmap upload path.
+// Backend-neutral interface (Vulkan impl: KdeEvalRendererVk).
+// The shared instance comes from GpuServices::kdeEval().
 #pragma once
 
-#include <volcano/core/Buffer.hpp>
-#include <volcano/core/ShaderModule.hpp>
+#include <volcano/plot/Types.hpp>
 
-#include <vulkan/vulkan.hpp>
-#include <vk_mem_alloc.h>
-
+#include <cstdint>
 #include <vector>
-
-namespace volcano::plot { struct Point2D; }
 
 namespace volcano::render::primitives {
 
-/// Compute-shader 2D Gaussian KDE evaluator.
+/// Evaluates a 2D kernel-density estimate over a regular grid from raw
+/// samples (compute shader). Synchronous on Vulkan; returns an empty
+/// vector on backends without compute — callers fall back to CPU KDE.
 class KdeEvalRenderer {
 public:
-    KdeEvalRenderer() = default;
+    virtual ~KdeEvalRenderer() = default;
 
-    /// Initialize the pipeline (fixed kernel — no per-call compile).
-    void init(vk::Device device, VmaAllocator allocator,
-              vk::Queue computeQueue, vk::CommandPool computePool);
+    virtual std::vector<float> eval(const std::vector<plot::Point2D>& samples,
+                                    uint32_t gridW, uint32_t gridH,
+                                    float xMin, float xMax,
+                                    float yMin, float yMax,
+                                    float bwX, float bwY) = 0;
 
-    /// Evaluate the KDE of `samples` into a gridW×gridH grid covering
-    /// [xMin,xMax]×[yMin,yMax] with per-axis bandwidths bwX/bwY.
-    /// Returns the density values (row-major, gridW*gridH) or an empty
-    /// vector on failure — callers fall back to CPU.
-    std::vector<float> eval(const std::vector<plot::Point2D>& samples,
-                            uint32_t gridW, uint32_t gridH,
-                            float xMin, float xMax, float yMin, float yMax,
-                            float bwX, float bwY);
-
-    [[nodiscard]] bool ready() const noexcept { return inited_; }
-
-private:
-    vk::Device device_;
-    VmaAllocator allocator_ = VK_NULL_HANDLE;
-    vk::Queue computeQueue_;
-    vk::CommandPool computePool_;
-    vk::UniqueDescriptorSetLayout descLayout_;
-    vk::UniquePipelineLayout pipelineLayout_;
-    vk::UniquePipeline pipeline_;
-    vk::UniqueDescriptorPool descPool_;
-    vk::DescriptorSet descSet_;
-    core::Buffer sampleBuf_;
-    core::Buffer gridBuf_;
-    uint32_t sampleCap_ = 0, gridCap_ = 0;
-    bool inited_ = false;
+    [[nodiscard]] virtual bool ready() const noexcept = 0;
 };
 
 } // namespace volcano::render::primitives
