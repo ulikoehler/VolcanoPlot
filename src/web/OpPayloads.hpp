@@ -108,6 +108,11 @@ struct PKdeEval2D  { uint32_t inBuf, n, outBuf, gridW, gridH;
                      float xMin, xStep, yMin, yStep;
                      float inv2bwX2, inv2bwY2, norm;
                      uint32_t mailbox; };
+/// Pcolormesh tessellation: x/y edge arrays + normalized t + 259-entry
+/// vec4 LUT → pos (vec2)/col (vec4) vertex buffers consumed by a later
+/// DrawTrisData in the same stream. flags: bit0 cmap.bad, bit1 skipNaN.
+struct PPcmTess    { uint32_t xBuf, yBuf, tBuf, lutBuf, posBuf, colBuf;
+                     uint32_t nCols, nRows, gouraud, flags; };
 #pragma pack(pop)
 
 } // namespace volcano::web

@@ -172,7 +172,7 @@ test('toSvg() exports vector markup', async ({ page }) => {
 
 for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'contour', 'hist2d', 'kde', 'box', 'stem',
-                    'quiver', 'subplot']) {
+                    'quiver', 'subplot', 'pcm']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));

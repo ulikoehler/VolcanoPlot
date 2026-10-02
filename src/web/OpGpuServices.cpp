@@ -141,6 +141,40 @@ void OpGpuServices::writeBuffer(render::GpuBuf buf, uint64_t offset,
                                 std::span<const std::byte> data) {
     writeBufferRaw(uint32_t(buf), offset, data.data(), data.size());
 }
+bool OpGpuServices::pcmTessellate(std::span<const float> x,
+                                  std::span<const float> y,
+                                  std::span<const float> t,
+                                  std::span<const plot::Color> lut,
+                                  uint32_t nCols, uint32_t nRows,
+                                  bool gouraud, uint32_t flags,
+                                  render::GpuBuf& posOut,
+                                  render::GpuBuf& colOut) {
+    const uint32_t cells = gouraud ? (nCols - 1) * (nRows - 1)
+                                   : nCols * nRows;
+    const uint32_t vertsPerCell = gouraud ? 12 : 6;
+    const uint64_t nVerts = uint64_t(cells) * vertsPerCell;
+    if (cells == 0 || nVerts > (1ull << 31)) return false;
+    auto stage = [&](const void* d, size_t bytes) {
+        uint32_t h = createBufferRaw(bytes + 16, 1 | 2);
+        writeBufferRaw(h, 0, d, bytes);
+        return h;
+    };
+    PPcmTess p{
+        .xBuf = stage(x.data(), x.size_bytes()),
+        .yBuf = stage(y.data(), y.size_bytes()),
+        .tBuf = stage(t.data(), t.size_bytes()),
+        .lutBuf = stage(lut.data(), lut.size_bytes()),
+        .posBuf = createBufferRaw(nVerts * 8 + 16, 1 | 2),
+        .colBuf = createBufferRaw(nVerts * 16 + 16, 1 | 2),
+        .nCols = nCols, .nRows = nRows,
+        .gouraud = uint32_t(gouraud), .flags = flags,
+    };
+    stream_.emit(Op::PcmTess, p);
+    posOut = render::GpuBuf(p.posBuf);
+    colOut = render::GpuBuf(p.colBuf);
+    return true;
+}
+
 void OpGpuServices::destroyBuffer(render::GpuBuf buf) {
     releaseBuffer(uint32_t(buf));
 }

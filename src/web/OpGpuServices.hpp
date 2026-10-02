@@ -138,6 +138,14 @@ public:
     void writeBuffer(render::GpuBuf buf, uint64_t offset,
                      std::span<const std::byte> data) override;
     void destroyBuffer(render::GpuBuf buf) override;
+    bool pcmTessellate(std::span<const float> x,
+                       std::span<const float> y,
+                       std::span<const float> t,
+                       std::span<const plot::Color> lut,
+                       uint32_t nCols, uint32_t nRows,
+                       bool gouraud, uint32_t flags,
+                       render::GpuBuf& posOut,
+                       render::GpuBuf& colOut) override;
 
     void beginFrameScratch() override;
     std::unique_ptr<render::Cmd> beginPrePass() override;

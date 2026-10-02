@@ -20,6 +20,7 @@ import TESS_WGSL from './shaders/TessLines.wgsl?raw';
 import SURFACE_WGSL from './shaders/DrawSurface.wgsl?raw';
 import GRID3D_WGSL from './shaders/DrawGrid3D.wgsl?raw';
 import KDE_WGSL from './shaders/KdeEval2D.wgsl?raw';
+import PCM_WGSL from './shaders/PcmTess.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -544,6 +545,31 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'main' } });
     }
 
+    private pcmPipe?: GPUComputePipeline;
+    private pcmBgl?: GPUBindGroupLayout;
+
+    private ensurePcm() {
+        if (this.pcmPipe) return;
+        const sb = (w: boolean): GPUBufferBindingLayout =>
+            ({ type: w ? 'storage' : 'read-only-storage' });
+        this.pcmBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 4].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: sb(false) })),
+            { binding: 5, visibility: GPUShaderStage.COMPUTE,
+              buffer: sb(true) },
+            { binding: 6, visibility: GPUShaderStage.COMPUTE,
+              buffer: sb(true) },
+        ]});
+        const mod = this.device.createShaderModule({ code: PCM_WGSL });
+        this.pcmPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.pcmBgl] }),
+            compute: { module: mod, entryPoint: 'main' } });
+    }
+
     private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
                            slot: number }[] = [];
     private reducePipe?: GPUComputePipeline;
@@ -722,8 +748,36 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
 
     private execCompute(r: OpReader, enc: GPUCommandEncoder,
                         op: number, p: DataView<ArrayBuffer>) {
-        // TODO: HistBins / PcmTess / ViolinKde — CPU fallbacks cover
-        // them today; emitters don't exist yet on the C++ side either.
+        // TODO: HistBins / ViolinKde — CPU fallbacks cover them today;
+        // emitters don't exist yet on the C++ side either.
+        if (op === Op.PcmTess) {
+            // PPcmTess {xBuf,yBuf,tBuf,lutBuf,posBuf,colBuf,
+            //           nCols,nRows,gouraud,flags}
+            this.ensurePcm();
+            const gouraud = p.getUint32(32, true);
+            const cells = gouraud
+                ? (p.getUint32(24, true) - 1) * (p.getUint32(28, true) - 1)
+                : p.getUint32(24, true) * p.getUint32(28, true);
+            if (!cells) return;
+            const pc = new DataView(new ArrayBuffer(16));
+            for (let k = 0; k < 4; k++)
+                pc.setUint32(k * 4, p.getUint32(24 + k * 4, true), true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.pcmPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.pcmBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 16 } },
+                    ...[1, 2, 3, 4, 5, 6].map(binding =>
+                        ({ binding, resource: { buffer:
+                            this.bufRef(p.getUint32((binding - 1) * 4,
+                                                    true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(cells / 256));
+            cpass.end();
+            return;
+        }
         if (op === Op.FuncDef) { this.funcDef(r, p); return; }
         if (op === Op.KdeEval2D) {
             // PKdeEval2D {inBuf, n, outBuf, gridW, gridH, xMin, xStep,
