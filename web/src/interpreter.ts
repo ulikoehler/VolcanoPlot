@@ -413,6 +413,9 @@ export class Interpreter {
             if (kind & K_UNIFORM) usage |= GPUBufferUsage.UNIFORM;
             // vertex-pulling shaders read vertex bufs as storage
             if (kind & K_VERTEX) usage |= GPUBufferUsage.STORAGE;
+            // Per-frame resources are recreated each render — destroy the
+            // previous handle's buffer so frames don't leak GPU memory.
+            this.buffers.get(h)?.buf.destroy();
             this.buffers.set(h, {
                 buf: this.device.createBuffer({ size, usage }), size });
             break;
@@ -430,6 +433,7 @@ export class Interpreter {
             break;
         case Op.CreateTexture: {
             const h = p.getUint32(0, true);
+            this.textures.get(h)?.tex.destroy();
             const w = p.getUint32(4, true), hh = p.getUint32(8, true);
             const fmt = TEXFMTS[p.getUint8(12)] ?? 'rgba8unorm';
             const tex = this.device.createTexture({

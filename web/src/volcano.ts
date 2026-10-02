@@ -133,6 +133,11 @@ export async function createCanvas(
         device, format: navigator.gpu.getPreferredCanvasFormat(),
         alphaMode: 'opaque',
     });
-    const mod = await moduleFactory();
+    // Emscripten resolves side files (.wasm/.data) against the page URL;
+    // point it at the module's own directory instead.
+    const mod = await moduleFactory({
+        locateFile: (p: string) =>
+            new URL(p, import.meta.resolve('./volcanoplot.js')).href,
+    });
     return new VolcanoCanvas(mod, canvas, device, gpuCtx, adapter);
 }

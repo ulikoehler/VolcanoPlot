@@ -44,6 +44,10 @@ target_link_options(volcanoplot_web PRIVATE
     -sENVIRONMENT=web,node
     --bind
     "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32"
+    # Font assets → MEMFS /fonts (TextRenderer searches /fonts on
+    # Emscripten; no system font dirs exist in WASM).
+    "--preload-file=${VOLCANO_ROOT}/dependencies/glyb/fonts/DejaVuSans.ttf@/fonts/DejaVuSans.ttf"
+    "--preload-file=${VOLCANO_ROOT}/dependencies/glyb/fonts/DejaVuSerif.ttf@/fonts/DejaVuSerif.ttf"
     -fexceptions
     -O3
 )

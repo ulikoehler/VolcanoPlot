@@ -89,25 +89,28 @@ TEST(OpStream, HandlesMonotonicAcrossFrames) {
 TEST(OpStream, ResourceOpsRecordedBetweenFramesArePackedNextFinish) {
     // Uploads during Renderer::prepare() land on the stream *before*
     // beginFrame — finish() must still see them (record order ==
-    // execution order). Regression test for the beginFrame-resets-stream
-    // bug.
+    // execution order). finish() does NOT consume records: a repaint
+    // subset's second finish() must still contain the first subset's
+    // ops. Callers reset() at render-cycle start (bindings).
     OpStream s;
     s.emit(Op::CreateBuffer, uint32_t{42});      // "prepare-phase" op
     s.finish(1, 1, 1, false, 0);                 // frame 1 packed it
-    s.emit(Op::WriteBuffer, uint32_t{42});       // between frames
+    s.emit(Op::WriteBuffer, uint32_t{42});       // repaint subset
     auto [ptr, len] = s.finish(2, 1, 1, false, 0);
     Reader r{ptr, len};
-    EXPECT_EQ(r.u32(24), 1u);
-    EXPECT_EQ(r.u16(sizeof(OpHeader)), uint16_t(Op::WriteBuffer));
+    EXPECT_EQ(r.u32(24), 2u);                    // both subsets' ops
+    EXPECT_EQ(r.u16(sizeof(OpHeader)), uint16_t(Op::CreateBuffer));
 }
 
-TEST(OpStream, FinishClearsRecordsButNotHandles) {
+TEST(OpStream, FinishAccumulatesUntilReset) {
     OpStream s;
     s.emit(Op::CreateBuffer, uint32_t{1});
     s.finish(1, 1, 1, false, 0);
     auto [ptr, len] = s.finish(2, 1, 1, false, 0);
-    EXPECT_EQ((Reader{ptr, len}).u32(24), 0u);
-    EXPECT_EQ((Reader{ptr, len}).u32(28), len);    // empty arena
+    EXPECT_EQ((Reader{ptr, len}).u32(24), 1u);   // still in stream
+    s.reset();                                   // render-cycle start
+    auto [ptr2, len2] = s.finish(3, 1, 1, false, 0);
+    EXPECT_EQ((Reader{ptr2, len2}).u32(24), 0u);
 }
 
 } // namespace

@@ -95,11 +95,10 @@ public:
 
     OpStream() { reset(); }
 
-    /// Clears records/arena. Called automatically by finish() after
-    /// packing — the stream is session-long: resource ops recorded
-    /// between frames (uploads during Renderer::prepare) must survive
-    /// into the next finished frame, since record order == execution
-    /// order. Handles are never reset.
+    /// Clears records/arena (handles never reset). Called by the
+    /// embedding at the start of each render cycle — NOT by finish(),
+    /// because a repaint (atlas-dirty) packs a second subset whose
+    /// frame must still contain the first subset's ops.
     void reset() {
         records_.clear();
         arena_.clear();

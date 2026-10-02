@@ -95,9 +95,13 @@ void main() {
 // Find a system font file (DejaVu Sans or similar).
 std::string findSystemFontFile() {
     std::vector<std::filesystem::path> dirs = {
+#ifdef __EMSCRIPTEN__
+        "/fonts",
+#else
         "/usr/share/fonts", "/usr/local/share/fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+#endif
     };
     // Filter out non-regular weights/styles.
     auto isRegular = [](const std::string& name) {
@@ -177,9 +181,13 @@ int probeFontCoverage(FT_Library ftlib, const std::filesystem::path& path) {
 std::string findFallbackFontFile(FT_Library ftlib,
                                  const std::string& primaryPath) {
     std::vector<std::filesystem::path> dirs = {
+#ifdef __EMSCRIPTEN__
+        "/fonts",
+#else
         "/usr/share/fonts", "/usr/local/share/fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+#endif
     };
     int bestScore = probeFontCoverage(ftlib, primaryPath);
     std::string best;
@@ -223,7 +231,12 @@ public:
         defaulAtlas = nullptr;
         // MSDF atlas: vector-crisp glyphs at any scale (median-of-3 in
         // the fragment shader) instead of the grayscale bitmap atlas.
+#ifdef __EMSCRIPTEN__
+        msdf_enabled = false;   // r8unorm gray atlas; msdfgen absent
+        msdf_autoload = false;
+#else
         msdf_enabled = true;
+#endif
         // Persist the MSDF atlas to the user cache dir — regenerating
         // ~350 glyphs through msdfgen costs ~8 s per process, which
         // dominates headless/test startup. The cache is keyed by font
@@ -640,9 +653,13 @@ void TextRendererVk::init() {
 /// Find DejaVu Serif (regular) — the dejavuserif mathtext fontset face.
 std::string findSerifFontFile() {
     std::vector<std::filesystem::path> dirs = {
+#ifdef __EMSCRIPTEN__
+        "/fonts",
+#else
         "/usr/share/fonts", "/usr/local/share/fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+#endif
     };
     for (const auto& d : dirs) {
         if (!std::filesystem::exists(d)) continue;
@@ -731,9 +748,13 @@ std::string findFaceFile(const std::string& tag, bool bold, bool ital) {
     else if (bold)     suffix = "-Bold";
     else if (ital)     suffix = serifTag ? "-Italic" : "-Oblique";
     std::vector<std::filesystem::path> dirs = {
+#ifdef __EMSCRIPTEN__
+        "/fonts",
+#else
         "/usr/share/fonts", "/usr/local/share/fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".fonts",
         std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".local/share/fonts",
+#endif
     };
     auto scan = [&](const std::string& want) -> std::string {
         for (const auto& d : dirs) {
@@ -870,7 +891,8 @@ void TextRenderer::prepareAtlasGlyphs() {
                "×÷±∓⋅⋯…≤≥≠≈≃≅≡∼∝≪≫∈∉∋⊂⊃⊆⊇∪∩∖∅∀∃∄¬∧∨"
                "→←⇒⇐↔⇔↦↑↓∑∏∐∫∬∭∮⋃⋂⨁⨂⨀⨄⨆⋁⋀∂∇∞ℏℓℜℑ℘ℵıȷ"
                "°∘•⋆∗′⊕⊖⊗⊘⊙⊥∥∠△□■⋄⟨⟩⌈⌉⌊⌋∣⊤⊢⊣⊨∴∵√"
-               "̂̃̄̇̈⃗̆̌́̀";
+               "̂̃̄̇̈⃗̆̌́̀"
+               "−–—";  // mpl unicode_minus + dashes used by tick labels
 
     int font_size = int(16.0f * 64.0f);  // 16px in 26.6 fixed-point
     std::string lang = "en";
@@ -985,29 +1007,22 @@ void TextRendererVk::uploadAtlas() {
 }
 #endif
 
-#ifndef VOLCANO_WEB
-void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
-                        std::string_view text, float x, float y,
-                        plot::Color color, float scale, float rotation,
-                        plot::HAlign lineAlign, font_face* face) {
-    const vk::CommandBuffer cmd = render::vkCmd(cmdRef);
+// Shared shaping: fills batch_ with quads for `text` positioned at
+// (x, y) in pixel space (reference size; callers apply scale/rotation
+// when converting vertices). Sets atlasDirty_ if glyphs were lazily
+// rasterized. Compiled for all backends — glyb is CPU-side.
+bool TextRenderer::shapeText(std::string_view text, float x, float y,
+                             uint32_t rgba, plot::HAlign lineAlign,
+                             font_face* face) {
     font_face* primary = face ? face : fontFace_;
-    if (!inited_ || !primary || text.empty()) return;
+    if (!batch_ || !primary || text.empty()) return false;
 
-    // Glyphs are shaped at the fixed reference size (the atlas stores 16px
-    // bitmaps); `scale` is applied to vertex positions below.
     constexpr int font_size = kRefFontSize;
-    uint32_t rgba = (uint32_t(color.r * 255) << 24) |
-                    (uint32_t(color.g * 255) << 16) |
-                    (uint32_t(color.b * 255) << 8)  |
-                    (uint32_t(color.a * 255));
-
     auto* batch = static_cast<draw_list*>(batch_);
     draw_list_clear(*batch);
 
     // Split into lines; each line is shaped at its own offset so the
-    // whole block rotates around (x, y). All layout offsets are in
-    // unscaled reference space — `scale` is applied to vertices below.
+    // whole block rotates around (x, y).
     float lineH = lineHeight(1.0f);
     float blockW = lineAlign == plot::HAlign::Left
                        ? 0.0f : measureText(text, 1.0f, primary).width;
@@ -1021,7 +1036,6 @@ void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
             auto runs = splitFontRuns(line, primary, fallbackFace_);
             float lineX = x;
             if (lineAlign != plot::HAlign::Left) {
-                // Per-line alignment within the block width.
                 float lw = 0.0f;
                 for (const auto& r : runs)
                     lw += runAdvance(shaper_.get(), r.face,
@@ -1043,12 +1057,54 @@ void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
 
     // Lazily-rasterized glyphs (CJK, fallback-face runs, …) grow the CPU
     // atlas — flag it so the renderer re-uploads before the next frame.
-    if (fontManager_->glyph_map.size() != atlasGlyphCount_) {
-        atlasGlyphCount_ = fontManager_->glyph_map.size();
-        if (atlasUploaded_) atlasDirty_ = true;
+    if (fontManager_ && fontManager_->glyph_map.size() != shapedGlyphs_) {
+        shapedGlyphs_ = fontManager_->glyph_map.size();
+        atlasDirty_ = true;
     }
+    return !batch->vertices.empty() && !batch->indices.empty();
+}
 
-    if (batch->vertices.empty() || batch->indices.empty()) return;
+std::span<const TextRenderer::GlyphVert>
+TextRenderer::batchVertices() const {
+    if (!batch_) return {};
+    auto* batch = static_cast<const draw_list*>(batch_);
+    return {reinterpret_cast<const GlyphVert*>(batch->vertices.data()),
+            batch->vertices.size()};
+}
+std::span<const uint32_t> TextRenderer::batchIndices() const {
+    if (!batch_) return {};
+    auto* batch = static_cast<const draw_list*>(batch_);
+    return {batch->indices.data(), batch->indices.size()};
+}
+const void* TextRenderer::atlasPixels(int& w, int& h, int& depth) const {
+    w = h = depth = 0;
+    if (!fontManager_ || !fontFace_) return nullptr;
+    auto* atlas = fontManager_->getCurrentAtlas(fontFace_);
+    if (!atlas || !atlas->pixels) return nullptr;
+    w = int(atlas->width); h = int(atlas->height);
+    depth = atlas->depth;
+    return atlas->pixels;
+}
+size_t TextRenderer::glyphCount() const {
+    return fontManager_ ? fontManager_->glyph_map.size() : 0;
+}
+
+#ifndef VOLCANO_WEB
+void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
+                        std::string_view text, float x, float y,
+                        plot::Color color, float scale, float rotation,
+                        plot::HAlign lineAlign, font_face* face) {
+    const vk::CommandBuffer cmd = render::vkCmd(cmdRef);
+    font_face* primary = face ? face : fontFace_;
+    if (!inited_ || !primary || text.empty()) return;
+
+    uint32_t rgba = (uint32_t(color.r * 255) << 24) |
+                    (uint32_t(color.g * 255) << 16) |
+                    (uint32_t(color.b * 255) << 8)  |
+                    (uint32_t(color.a * 255));
+    if (!shapeText(text, x, y, rgba, lineAlign, face)) return;
+
+    auto* batch = static_cast<draw_list*>(batch_);
 
     // Atlas must have been uploaded via prepareAtlas() before any draw calls.
     if (!atlasUploaded_) return;

@@ -25,7 +25,11 @@ OpStream::finish(uint64_t frameSeq, uint32_t w, uint32_t h, bool loadOp,
     if (!arena_.empty())
         std::memcpy(out_.data() + sizeof(hdr) + recBytes, arena_.data(),
                     arena_.size());
-    reset();   // records/arena consumed; out_ stays valid until next finish
+    // Records/arena are NOT consumed: Renderer::renderFrame may pack
+    // multiple subsets into one logical frame (atlas-dirty repaint), and
+    // each subset's endFrame→finish must include the ops recorded by the
+    // earlier subsets. The caller resets the stream at render start
+    // (bindings::_vp_render), before prepare-phase uploads record.
     return {out_.data(), out_.size()};
 }
 

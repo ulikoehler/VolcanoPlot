@@ -135,6 +135,7 @@ protected:
     /// Set by impls when draw() rasterizes previously-unseen glyphs into
     /// the CPU atlas bitmap (needs a re-upload).
     bool atlasDirty_ = false;
+    size_t shapedGlyphs_ = 0;  // glyph_map size at last shapeText()
     /// Atlas bitmap dimensions (CPU side); impls upload this to GPU.
     int atlasWidth_ = 0;
     int atlasHeight_ = 0;
@@ -147,6 +148,28 @@ protected:
     void loadFont();
     /// Pre-render the ASCII + math-symbol charset into the CPU atlas.
     void prepareAtlasGlyphs();
+
+    /// glyb draw_vertex POD mirror: pos[3], uv[2], color(u32 RGBA8),
+    /// shape(f32). Struct layout must match glyb's draw_vertex (28 B).
+    struct GlyphVert {
+        float px, py, pz, u, v;
+        uint32_t color;
+        float shape;
+    };
+    /// Shape `text` into the shared draw list (positions in pixel space
+    /// at reference size, pre-scale/rotation; (x,y) is the block origin).
+    /// Clears the batch first. Returns false when nothing was emitted.
+    /// Sets atlasDirty_ when new glyphs were rasterized.
+    bool shapeText(std::string_view text, float x, float y,
+                   uint32_t rgba8, plot::HAlign lineAlign,
+                   font_face* face);
+    /// Shaped vertices/indices of the last shapeText() call.
+    std::span<const GlyphVert> batchVertices() const;
+    std::span<const uint32_t> batchIndices() const;
+    /// Current atlas bitmap (nullptr until a font loaded). `depth` is
+    /// bytes per pixel (1 = gray, 4 = msdf/color).
+    const void* atlasPixels(int& w, int& h, int& depth) const;
+    size_t glyphCount() const;
 };
 
 } // namespace volcano::text

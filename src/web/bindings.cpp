@@ -34,12 +34,14 @@ size_t frameLen() { return S().backend.lastFrame().second; }
 void resize(uint32_t w, uint32_t h) { S().backend.resize(w, h); }
 bool renderNow() {
     // Renderer reads the canvas extent from the backend each frame.
+    S().backend.resetStream();
     S().renderer.prepare(S().figure);
     S().renderer.renderFrame(S().figure);
     return true;
 }
 bool renderIfStale() {
     if (!S().figure.stale()) return false;
+    S().backend.resetStream();
     S().renderer.prepare(S().figure);
     S().renderer.renderFrame(S().figure);
     return true;

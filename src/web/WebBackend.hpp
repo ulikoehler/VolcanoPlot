@@ -46,6 +46,10 @@ public:
                 | (uint32_t(clearColor_[3] * 255) << 24));
     }
 
+    /// Reset the session stream — call at the start of each render
+    /// cycle (bindings::_vp_render*), before prepare-phase uploads.
+    void resetStream() { svc_.stream().reset(); }
+
     [[nodiscard]] render::GpuServices& gpu() override { return svc_; }
     [[nodiscard]] plot::Extent2D extent() const noexcept override {
         return extent_;
