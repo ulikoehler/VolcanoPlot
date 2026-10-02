@@ -121,6 +121,30 @@ test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
     expect(stats.red).toBeGreaterThan(500);   // sin(10x) curve pixels
 });
 
+test('interaction: scroll-zoom changes the viewport', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(String(e)));
+    await page.goto(`http://localhost:${port}/demo/smoke.html`);
+    await page.waitForFunction(() => (window as any).vpResult !== undefined,
+        { timeout: 30_000 });
+    const diff = await page.evaluate(async () => {
+        const vp = (window as any).vp;
+        const prev = (window as any).vpPixels;
+        // mpl Scroll event (type 3), step +1 at canvas center → zoom in.
+        vp.enableInteraction();
+        const cv = document.getElementById('c') as HTMLCanvasElement;
+        (vp as any).mod._vp_dispatch(3, cv.width / 2,
+                                     cv.height / 2, 0, 1);
+        const px = await vp.capture();
+        let changed = 0;
+        for (let i = 0; i < px.length; i += 4)
+            if (px[i] !== prev[i] || px[i+1] !== prev[i+1]) changed++;
+        return changed;
+    });
+    expect(errors).toEqual([]);
+    expect(diff).toBeGreaterThan(100); // zoomed curve occupies new pixels
+});
+
 for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'contour', 'hist2d', 'kde', 'box', 'stem',
                     'quiver', 'subplot']) {

@@ -11,6 +11,8 @@
 #include "WebBackend.hpp"
 #include <volcano/render/Renderer.hpp>
 #include <volcano/plot/Plot.hpp>
+#include <volcano/plot/Interaction.hpp>
+#include <volcano/plot/Events.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
 #include <volcano/plot/plots/FunctionPlot.hpp>
@@ -86,6 +88,29 @@ uint32_t subplot(uint32_t nrows, uint32_t ncols, uint32_t index) {
     for (uint32_t k = 0; k < all.size(); ++k)
         if (all[k] == created) return k;
     return 0;
+}
+
+/// Enable mpl-style interaction: button-1 drag pans, scroll zooms
+/// (scale-aware) about the cursor. Figure::dispatch does hit-testing,
+/// widget routing and legend dragging on its own.
+void setInteractive(bool on) {
+    auto& nav = S().figure.nav();
+    nav.scrollZoom = on;
+    const bool panMode = nav.mode() == plot::Navigation::Mode::Pan;
+    if (on != panMode) nav.pan();
+}
+
+/// Feed a UI event into the figure's mpl-style dispatch. Returns true
+/// when the event changed the figure (caller should re-render).
+bool dispatchEvent(uint32_t type, double x, double y, int32_t button,
+                   double step) {
+    auto& fig = S().figure;
+    plot::Event e;
+    e.type = static_cast<plot::Event::Type>(type);
+    e.x = float(x); e.y = float(y);
+    e.button = button; e.step = float(step);
+    fig.dispatch(std::move(e));
+    return fig.stale();
 }
 
 /// A Float32Array view over the WASM heap carries its linear-memory
@@ -420,5 +445,7 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_pcolormesh", &pcolormesh);
     em::function("_vp_kde", &kde);
     em::function("_vp_subplot", &subplot);
+    em::function("_vp_setInteractive", &setInteractive);
+    em::function("_vp_dispatch", &dispatchEvent);
 }
 #endif // __EMSCRIPTEN__

@@ -60,6 +60,9 @@ interface VolcanoModule {
     _vp_kde(axes: number, xs: Float32Array, ys: Float32Array,
             cmap: string): number;
     _vp_subplot(nrows: number, ncols: number, index: number): number;
+    _vp_setInteractive(on: boolean): void;
+    _vp_dispatch(type: number, x: number, y: number,
+                 button: number, step: number): boolean;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -184,6 +187,63 @@ export class VolcanoCanvas {
 
     /** Select an existing axes by index (as returned by subplot()). */
     axes(i: number) { this.cur = i; }
+
+    private detachInteraction?: () => void;
+
+    /** mpl-style interaction: left-drag pans, scroll zooms about the
+     * cursor (scale-aware). Event coordinates are converted to device
+     * px; the figure re-renders whenever an event touches it. */
+    enableInteraction(on = true) {
+        this.mod._vp_setInteractive(on);
+        this.detachInteraction?.();
+        this.detachInteraction = undefined;
+        if (!on) return;
+        const cv = this.canvas;
+        // Event types must match plot::Event::Type order.
+        const PRESS = 0, RELEASE = 1, MOTION = 2, SCROLL = 3;
+        const pos = (e: MouseEvent | WheelEvent) => {
+            const r = cv.getBoundingClientRect();
+            return [
+                (e.clientX - r.left) * cv.width / r.width,
+                (e.clientY - r.top) * cv.height / r.height,
+            ];
+        };
+        const send = (type: number, x: number, y: number,
+                      button = 0, step = 0) => {
+            if (this.mod._vp_dispatch(type, x, y, button, step))
+                this.renderIfStale();
+        };
+        const down = (e: MouseEvent) => {
+            if (e.button > 2) return;
+            const [x, y] = pos(e);
+            send(PRESS, x, y, e.button + 1);
+        };
+        const move = (e: MouseEvent) => {
+            const [x, y] = pos(e);
+            send(MOTION, x, y);
+        };
+        const up = (e: MouseEvent) => {
+            const [x, y] = pos(e);
+            send(RELEASE, x, y, e.button + 1);
+        };
+        const wheel = (e: WheelEvent) => {
+            e.preventDefault();
+            const [x, y] = pos(e);
+            // mpl step: +1 scroll-up (zoom in), -1 scroll-down.
+            send(SCROLL, x, y, 0, e.deltaY < 0 ? 1 : -1);
+        };
+        cv.addEventListener('mousedown', down);
+        cv.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+        cv.addEventListener('wheel', wheel, { passive: false });
+        cv.addEventListener('contextmenu', e => e.preventDefault());
+        this.detachInteraction = () => {
+            cv.removeEventListener('mousedown', down);
+            cv.removeEventListener('mousemove', move);
+            window.removeEventListener('mouseup', up);
+            cv.removeEventListener('wheel', wheel);
+        };
+    }
 
     line(xs: ArrayLike<number>, ys: ArrayLike<number>,
          color = ''): number {
