@@ -135,6 +135,53 @@ window.vpDone = (async () => {
             u[j * n + i] = Math.sin(y); v[j * n + i] = Math.cos(x);
         }
         vp.streamplot(u, v, n, n);
+    } else if (which === 'matshow') {
+        const n = 24, d = new Float32Array(n * n);
+        for (let j = 0; j < n; j++) for (let i = 0; i < n; i++)
+            d[j * n + i] = Math.sin(i * 0.5) * Math.cos(j * 0.4);
+        vp.matshow(d, n, n);
+    } else if (which === 'pcolorfast') {
+        const n = 24, c = new Float32Array(n * n);
+        for (let j = 0; j < n; j++) for (let i = 0; i < n; i++)
+            c[j * n + i] = Math.sin(i * 0.5) * Math.cos(j * 0.4);
+        vp.pcolorfast(c, n, n);
+    } else if (which === 'brokenbarh') {
+        vp.brokenBarh([10, 40, 15, 10,   180, 30, 15, 10,
+                       50, 110, 5, 10,   122, 25, 5, 10]);
+    } else if (which === 'tricontour' || which === 'triplot' ||
+               which === 'trisurf') {
+        const N = 80, xs = new Float32Array(N), ys = new Float32Array(N),
+              zs = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const a = i * 0.7, r = 0.2 + 0.75 * (i % 9) / 9;
+            xs[i] = Math.cos(a) * r; ys[i] = Math.sin(a) * r;
+            zs[i] = Math.sin(xs[i] * 8) + Math.cos(ys[i] * 8);
+        }
+        if (which === 'tricontour') vp.tricontour(xs, ys, zs);
+        else if (which === 'triplot') vp.triplot(xs, ys);
+        else vp.trisurf(xs, ys, zs);
+    } else if (which === 'specgram' || which === 'spectrum' ||
+               which === 'psd' || which === 'csd' || which === 'xcorr' ||
+               which === 'cohere') {
+        const n = 2048, s = new Float32Array(n), s2 = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            s[i] = Math.sin(i * 0.3) + Math.sin(i * 1.1) * 0.4 +
+                   (Math.random() - 0.5) * 0.3;
+            s2[i] = Math.sin(i * 0.3 + 0.5) + (Math.random() - 0.5) * 0.3;
+        }
+        if (which === 'specgram') vp.specgram(s, 100);
+        else if (which === 'spectrum') vp.spectrum(s, 100);
+        else if (which === 'psd') vp.psd(s, 100);
+        else if (which === 'csd') vp.csd(s, s2, 100);
+        else if (which === 'xcorr') vp.xcorr(s, s2);
+        else vp.cohere(s, s2, 100);
+    } else if (which === 'wireframe') {
+        const W = 30, H = 24, g = new Float32Array(W * H);
+        for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+            const x = i * 0.4 - 6, y = j * 0.4 - 4.8;
+            g[j * W + i] = Math.sin(Math.sqrt(x * x + y * y));
+        }
+        vp.wireframe(g, W, H);
     }
     const px = await vp.capture();
     window.vpPixels = px;

@@ -39,6 +39,19 @@
 #include <volcano/plot/plots/SpyPlot.hpp>
 #include <volcano/plot/plots/TripcolorPlot.hpp>
 #include <volcano/plot/plots/StreamPlot.hpp>
+#include <volcano/plot/plots/MatshowPlot.hpp>
+#include <volcano/plot/plots/PcolorfastPlot.hpp>
+#include <volcano/plot/plots/BrokenBarHPlot.hpp>
+#include <volcano/plot/plots/TriContourPlot.hpp>
+#include <volcano/plot/plots/TriplotPlot.hpp>
+#include <volcano/plot/plots/SpecgramPlot.hpp>
+#include <volcano/plot/plots/SpectrumPlot.hpp>
+#include <volcano/plot/plots/PsdPlot.hpp>
+#include <volcano/plot/plots/CsdPlot.hpp>
+#include <volcano/plot/plots/XCorrPlot.hpp>
+#include <volcano/plot/plots/CoherePlot.hpp>
+#include <volcano/plot/plots/WireframePlot.hpp>
+#include <volcano/plot/plots/TrisurfPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
 
 using namespace volcano;
@@ -451,6 +464,95 @@ uintptr_t streamplot(uint32_t axesIdx, em::val us, em::val vs,
                                      std::move(gv), plot::StreamConfig{});
 }
 
+uintptr_t matshow(uint32_t axesIdx, em::val data, uint32_t nrows,
+                  uint32_t ncols) {
+    return addPlot<plot::MatshowPlot>(axesIdx, f32vec(data), nrows, ncols);
+}
+
+uintptr_t pcolorfast(uint32_t axesIdx, em::val C, uint32_t nCols,
+                     uint32_t nRows, double x0, double x1, double y0,
+                     double y1) {
+    return addPlot<plot::PcolorfastPlot>(axesIdx, f32vec(C), nCols, nRows,
+        plot::Range{float(x0), float(x1)},
+        plot::Range{float(y0), float(y1)});
+}
+
+/// mpl broken_barh: flat [xStart, xWidth, yStart, yHeight]* tuples.
+uintptr_t brokenBarh(uint32_t axesIdx, em::val segs) {
+    std::vector<float> f = f32vec(segs);
+    std::vector<plot::BarHSegment> s(f.size() / 4);
+    for (size_t i = 0; i < s.size(); ++i)
+        s[i] = {f[i*4], f[i*4+1], f[i*4+2], f[i*4+3]};
+    return addPlot<plot::BrokenBarHPlot>(axesIdx, std::move(s));
+}
+
+uintptr_t tricontour(uint32_t axesIdx, em::val xs, em::val ys, em::val zs) {
+    return addPlot<plot::TriContourPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                         f32vec(zs));
+}
+
+uintptr_t triplot(uint32_t axesIdx, em::val xs, em::val ys) {
+    return addPlot<plot::TriplotPlot>(axesIdx, f32vec(xs), f32vec(ys));
+}
+
+uintptr_t specgram(uint32_t axesIdx, em::val signal, double fs) {
+    plot::SpecgramConfig c; c.sampleRate = float(fs);
+    return addPlot<plot::SpecgramPlot>(axesIdx, f32vec(signal), c);
+}
+
+uintptr_t spectrum(uint32_t axesIdx, em::val signal, double fs) {
+    plot::SpectrumConfig c; c.sampleRate = float(fs);
+    return addPlot<plot::SpectrumPlot>(axesIdx, f32vec(signal), c);
+}
+
+uintptr_t psd(uint32_t axesIdx, em::val signal, double fs) {
+    plot::PsdConfig c; c.sampleRate = float(fs);
+    return addPlot<plot::PsdPlot>(axesIdx, f32vec(signal), c);
+}
+
+uintptr_t csd(uint32_t axesIdx, em::val xs, em::val ys, double fs) {
+    plot::CsdConfig c; c.sampleRate = float(fs);
+    return addPlot<plot::CsdPlot>(axesIdx, f32vec(xs), f32vec(ys), c);
+}
+
+uintptr_t xcorr(uint32_t axesIdx, em::val xs, em::val ys) {
+    return addPlot<plot::XCorrPlot>(axesIdx, f32vec(xs), f32vec(ys));
+}
+
+uintptr_t cohere(uint32_t axesIdx, em::val xs, em::val ys, double fs) {
+    plot::CohereConfig c; c.sampleRate = float(fs);
+    return addPlot<plot::CoherePlot>(axesIdx, f32vec(xs), f32vec(ys), c);
+}
+
+/// 3D wireframe: row-major height grid + viewInit camera.
+uintptr_t wireframe(uint32_t axesIdx, em::val values, uint32_t w,
+                    uint32_t h, double elevDeg, double azimDeg) {
+    plot::Grid2D g;
+    g.values = f32vec(values);
+    g.width = w; g.height = h;
+    g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    auto plot = std::make_shared<plot::WireframePlot>(std::move(g));
+    plot->setCamera(plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+    auto* ax = targetAxes(axesIdx);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+/// mpl plot_trisurf: Delaunay-triangulated scattered (x,y,z).
+uintptr_t trisurf(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
+                  double elevDeg, double azimDeg) {
+    auto plot = std::make_shared<plot::TrisurfPlot>(
+        f32vec(xs), f32vec(ys), f32vec(zs));
+    plot->setCamera(plot::Camera3D::viewInit(float(elevDeg), float(azimDeg)));
+    auto* ax = targetAxes(axesIdx);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
 // ── axes/figure styling ─────────────────────────────────────────────
 void setXlim(uint32_t a, double lo, double hi) {
     targetAxes(a)->setXlim(float(lo), float(hi)); S().figure.markStale();
@@ -558,6 +660,19 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_ylabel", &setYlabel);
     em::function("_vp_grid", &setGrid);
     em::function("_vp_suptitle", &suptitle);
+    em::function("_vp_matshow", &matshow);
+    em::function("_vp_pcolorfast", &pcolorfast);
+    em::function("_vp_brokenBarh", &brokenBarh);
+    em::function("_vp_tricontour", &tricontour);
+    em::function("_vp_triplot", &triplot);
+    em::function("_vp_specgram", &specgram);
+    em::function("_vp_spectrum", &spectrum);
+    em::function("_vp_psd", &psd);
+    em::function("_vp_csd", &csd);
+    em::function("_vp_xcorr", &xcorr);
+    em::function("_vp_cohere", &cohere);
+    em::function("_vp_wireframe", &wireframe);
+    em::function("_vp_trisurf", &trisurf);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

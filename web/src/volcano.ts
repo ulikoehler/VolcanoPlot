@@ -87,6 +87,26 @@ interface VolcanoModule {
     _vp_ylabel(a: number, t: string): void;
     _vp_grid(a: number, on: boolean): void;
     _vp_suptitle(t: string): void;
+    _vp_matshow(a: number, data: Float32Array, nrows: number,
+                ncols: number): number;
+    _vp_pcolorfast(a: number, C: Float32Array, nCols: number, nRows: number,
+                   x0: number, x1: number, y0: number, y1: number): number;
+    _vp_brokenBarh(a: number, segs: Float32Array): number;
+    _vp_tricontour(a: number, xs: Float32Array, ys: Float32Array,
+                   zs: Float32Array): number;
+    _vp_triplot(a: number, xs: Float32Array, ys: Float32Array): number;
+    _vp_specgram(a: number, signal: Float32Array, fs: number): number;
+    _vp_spectrum(a: number, signal: Float32Array, fs: number): number;
+    _vp_psd(a: number, signal: Float32Array, fs: number): number;
+    _vp_csd(a: number, xs: Float32Array, ys: Float32Array,
+            fs: number): number;
+    _vp_xcorr(a: number, xs: Float32Array, ys: Float32Array): number;
+    _vp_cohere(a: number, xs: Float32Array, ys: Float32Array,
+               fs: number): number;
+    _vp_wireframe(a: number, values: Float32Array, w: number, h: number,
+                  elev: number, azim: number): number;
+    _vp_trisurf(a: number, xs: Float32Array, ys: Float32Array,
+                zs: Float32Array, elev: number, azim: number): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -229,6 +249,90 @@ export class VolcanoCanvas {
     axes(i: number) { this.cur = i; }
 
     private detachInteraction?: () => void;
+
+    /** mpl matshow — nearest-neighbor matrix display. */
+    matshow(data: ArrayLike<number>, nrows: number, ncols: number): number {
+        const d = this.stage(data);
+        try { return this.mod._vp_matshow(this.cur, d, nrows, ncols); }
+        finally { this.mod._vp_free(d.byteOffset); }
+    }
+    /** mpl pcolorfast on a regular grid with the given extent. */
+    pcolorfast(C: ArrayLike<number>, nCols: number, nRows: number,
+               x0 = 0, x1 = nCols, y0 = 0, y1 = nRows): number {
+        const c = this.stage(C);
+        try { return this.mod._vp_pcolorfast(this.cur, c, nCols, nRows,
+                                           x0, x1, y0, y1); }
+        finally { this.mod._vp_free(c.byteOffset); }
+    }
+    /** mpl broken_barh — flat [xStart, xWidth, yStart, yHeight]* tuples. */
+    brokenBarh(segs: ArrayLike<number>): number {
+        const s = this.stage(segs);
+        try { return this.mod._vp_brokenBarh(this.cur, s); }
+        finally { this.mod._vp_free(s.byteOffset); }
+    }
+    /** mpl tricontour — Delaunay-triangulates scattered (x,y,z). */
+    tricontour(xs: ArrayLike<number>, ys: ArrayLike<number>,
+               zs: ArrayLike<number>): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_tricontour(this.cur, x, y, z); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** mpl triplot — triangle edges + vertex markers. */
+    triplot(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
+        const x = this.stage(xs), y = this.stage(ys);
+        try { return this.mod._vp_triplot(this.cur, x, y); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); }
+    }
+    /** mpl specgram — spectrogram of a 1-D signal. */
+    specgram(signal: ArrayLike<number>, fs = 2.0): number {
+        const s = this.stage(signal);
+        try { return this.mod._vp_specgram(this.cur, s, fs); }
+        finally { this.mod._vp_free(s.byteOffset); }
+    }
+    /** mpl spectrum — magnitude spectrum of a 1-D signal. */
+    spectrum(signal: ArrayLike<number>, fs = 2.0): number {
+        const s = this.stage(signal);
+        try { return this.mod._vp_spectrum(this.cur, s, fs); }
+        finally { this.mod._vp_free(s.byteOffset); }
+    }
+    /** mpl psd — power spectral density. */
+    psd(signal: ArrayLike<number>, fs = 2.0): number {
+        const s = this.stage(signal);
+        try { return this.mod._vp_psd(this.cur, s, fs); }
+        finally { this.mod._vp_free(s.byteOffset); }
+    }
+    /** mpl csd — cross power spectral density of two signals. */
+    csd(xs: ArrayLike<number>, ys: ArrayLike<number>, fs = 2.0): number {
+        const x = this.stage(xs), y = this.stage(ys);
+        try { return this.mod._vp_csd(this.cur, x, y, fs); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); }
+    }
+    /** mpl xcorr — cross-correlation of two signals. */
+    xcorr(xs: ArrayLike<number>, ys: ArrayLike<number>): number {
+        const x = this.stage(xs), y = this.stage(ys);
+        try { return this.mod._vp_xcorr(this.cur, x, y); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); }
+    }
+    /** mpl cohere — coherence of two signals. */
+    cohere(xs: ArrayLike<number>, ys: ArrayLike<number>, fs = 2.0): number {
+        const x = this.stage(xs), y = this.stage(ys);
+        try { return this.mod._vp_cohere(this.cur, x, y, fs); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); }
+    }
+    /** mpl wireframe — 3-D wireframe of a row-major height grid. */
+    wireframe(values: ArrayLike<number>, w: number, h: number,
+              elev = 30, azim = -60): number {
+        const v = this.stage(values);
+        try { return this.mod._vp_wireframe(this.cur, v, w, h, elev, azim); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+    /** mpl plot_trisurf — triangulated 3-D surface of scattered points. */
+    trisurf(xs: ArrayLike<number>, ys: ArrayLike<number>,
+            zs: ArrayLike<number>, elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_trisurf(this.cur, x, y, z, elev, azim); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
 
     /** mpl-style interaction: left-drag pans, scroll zooms about the
      * cursor (scale-aware). Event coordinates are converted to device
