@@ -648,15 +648,15 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
 
 ## 14. Implementation status (as built)
 
-**Verified in real Chrome + SwiftShader: 19/19 browser pixel tests, 8/8 vitest,
+**Verified in real Chrome + SwiftShader: 40/40 browser pixel tests, 8/8 vitest,
 1616/1616 native tests.**
 
 | Component | Status |
 |---|---|
 | VPOP stream + all Op renderers | done |
-| embind API (all bound plot types + setData + subplot + events) | done |
+| embind API: 41 plot types bound + setData + subplot + events + axes styling (xlim/ylim/scales/title/labels/grid), reference lines/spans, legend/colorbar/text | done |
 | WGSL pipelines (lines/points/tris/instanced/image/text/surface/grid3D) | done |
-| Compute: TessLines, ReduceMinMax (autoscale), FuncDef/EvalFunc, KdeEval2D, PcmTess | done |
+| Compute: TessLines, ReduceMinMax (autoscale), FuncDef/EvalFunc, KdeEval2D, PcmTess, ViolinKde (kde1d) | done |
 | Text atlas (glyb→WASM, fonts via --preload-file) | done |
 | Mailbox: 4-float (autoscale) + bulk bytes (KDE grids) via _vp_mailboxDest/Done | done |
 | Depth pass (3D surface) + depth-compatible 2D pipeline variants | done |
@@ -667,8 +667,9 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
 | Device-lost handling, adapter retention | done |
 | npm packaging + README | done |
 | HistBins GPU | skipped deliberately — GPU binning is slower than 8-thread CPU even natively (measured); opt-in upstream |
-| ViolinKde GPU | open — ViolinPlot isn't bound to JS |
 | Text as vector outlines in SVG export | open — glyphs are atlas-rasterized upstream |
+| Canvas2D fallback for 3D ops | open — surface/grid3D degrade to nothing |
+| Remaining unbound plot types (Bar3D, Plot3D, Scatter3D, Voxels, barbs, eventplot, figimage, table, NavCube, ...) | open — thin wrappers, same pattern |
 
 Notable divergences from the plan text: single session-long OpStream reset at
 render start (repaints append to the same frame — `finish()` must not consume

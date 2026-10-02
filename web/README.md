@@ -41,9 +41,15 @@ otherwise look the same).
 | `scatter(xs, ys, color?)` | point markers |
 | `func(body, xMin?, xMax?, color?)` | GPU-evaluated `y = f(x)`; `body` is a GLSL/WGSL expression in `x`, e.g. `'sin(10.0*x)'` |
 | `bar(heights, labels?, color?)` / `hist(samples, bins?, color?)` / `pie(values, labels?)` | categorical plots |
-| `heatmap(values, w, h, cmap?)` / `hist2d(xs, ys, bins?, cmap?)` / `kde(xs, ys, cmap?)` / `pcolormesh(xs, ys, c, cols, rows)` | 2D fields; `cmap` e.g. `'viridis'` |
-| `surface(values, w, h, elev?, azim?)` | shaded 3D surface (WebGPU only) |
-| `contour(values, w, h, levels?, cmap?)` / `stem(xs, ys)` / `quiver(xs, ys, us, vs)` / `errorbar(xs, ys, err, color?)` / `hexbin(xs, ys)` / `boxplot(...)` | more plot types |
+| `heatmap(values, w, h, cmap?)` / `hist2d(xs, ys, bins?, cmap?)` / `kde(xs, ys, cmap?)` / `pcolormesh(xs, ys, c, cols, rows)` / `matshow(data, rows, cols)` / `pcolorfast(C, cols, rows, x0?, x1?, y0?, y1?)` / `spy(data, rows, cols)` | 2D fields; `cmap` e.g. `'viridis'` |
+| `surface(values, w, h, elev?, azim?)` / `wireframe(values, w, h, elev?, azim?)` / `trisurf(xs, ys, zs, elev?, azim?)` | 3D plots (WebGPU only) |
+| `contour(values, w, h, levels?, cmap?)` / `tricontour(xs, ys, zs)` / `stem(xs, ys)` / `quiver(xs, ys, us, vs)` / `errorbar(xs, ys, err, color?)` / `hexbin(xs, ys)` / `boxplot(groups)` / `violin(groups, w?, box?, color?)` / `stackplot(xs, ys[])` / `fill(xs, ys, color?)` / `tripcolor(xs, ys, zs)` / `triplot(xs, ys)` / `streamplot(us, vs, w, h)` / `brokenBarh(segs)` | more plot types |
+| `specgram(s, fs?)` / `spectrum(s, fs?)` / `psd(s, fs?)` / `csd(x, y, fs?)` / `xcorr(x, y)` / `cohere(x, y, fs?)` | signal-processing plots (FFT in C++) |
+| `xlim(l, h)` `ylim(l, h)` `xscale(n)` `yscale(n)` `title(t)` `xlabel(t)` `ylabel(t)` `grid(on?)` `suptitle(t)` | axes styling |
+| `axhline(y, c?, w?)` `axvline(x, c?, w?)` `axhspan(y1, y2, c?)` `axvspan(x1, x2, c?)` `hlines(ys, x0, x1, c?, w?)` `vlines(xs, y0, y1, c?, w?)` | reference geometry |
+| `legend(loc?)` `colorbar()` `text(x, y, s, coords?)` | mpl decoration |
+| `enableInteraction(on?)` | left-drag pan + scroll zoom (mpl Navigation) |
+| `toSvg()` | vector/SVG export of the same op stream |
 | `setData(handle, xs, ys)` | in-place update of the series behind a plot handle — the realtime/oscilloscope fast path; call `renderIfStale()` per frame |
 | `subplot(nrows, ncols, index)` | mpl-style 1-based subplot; selects it as the current axes |
 | `axes(i)` | select an existing axes by index |
