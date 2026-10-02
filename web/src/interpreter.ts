@@ -21,6 +21,7 @@ import SURFACE_WGSL from './shaders/DrawSurface.wgsl?raw';
 import GRID3D_WGSL from './shaders/DrawGrid3D.wgsl?raw';
 import KDE_WGSL from './shaders/KdeEval2D.wgsl?raw';
 import PCM_WGSL from './shaders/PcmTess.wgsl?raw';
+import KDE1_WGSL from './shaders/KdeEval1D.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -545,6 +546,26 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'main' } });
     }
 
+    private kde1Pipe?: GPUComputePipeline;
+    private kde1Bgl?: GPUBindGroupLayout;
+
+    private ensureKde1() {
+        if (this.kde1Pipe) return;
+        this.kde1Bgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: KDE1_WGSL });
+        this.kde1Pipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.kde1Bgl] }),
+            compute: { module: mod, entryPoint: 'main' } });
+    }
+
     private pcmPipe?: GPUComputePipeline;
     private pcmBgl?: GPUBindGroupLayout;
 
@@ -748,8 +769,42 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
 
     private execCompute(r: OpReader, enc: GPUCommandEncoder,
                         op: number, p: DataView<ArrayBuffer>) {
-        // TODO: HistBins / ViolinKde — CPU fallbacks cover them today;
-        // emitters don't exist yet on the C++ side either.
+        // HistBins: CPU covers it (GPU binning loses to threads).
+        if (op === Op.ViolinKde) {
+            // PViolinKde {inBuf, n, outBuf, ne, lo, step, bw, mailbox}
+            this.ensureKde1();
+            const ne = p.getUint32(12, true);
+            const bytes = ne * 4;
+            if (!p.getUint32(4, true) || !bytes) return;
+            const pc = new DataView(new ArrayBuffer(32));
+            pc.setUint32(0, p.getUint32(4, true), true);   // ns
+            pc.setUint32(4, ne, true);                     // ne
+            pc.setFloat32(8,  p.getFloat32(16, true), true); // lo
+            pc.setFloat32(12, p.getFloat32(20, true), true); // step
+            pc.setFloat32(16, p.getFloat32(24, true), true); // bw
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.kde1Pipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.kde1Bgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 48 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(8, true)) } },
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(ne / 256));
+            cpass.end();
+            const staging = this.device.createBuffer({
+                size: bytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(
+                this.bufRef(p.getUint32(8, true)), 0, staging, 0, bytes);
+            this.pendingBulk.push({ buf: staging,
+                slot: p.getUint32(28, true), bytes });
+            return;
+        }
         if (op === Op.PcmTess) {
             // PPcmTess {xBuf,yBuf,tBuf,lutBuf,posBuf,colBuf,
             //           nCols,nRows,gouraud,flags}

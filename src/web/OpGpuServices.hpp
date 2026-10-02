@@ -138,6 +138,12 @@ public:
     void writeBuffer(render::GpuBuf buf, uint64_t offset,
                      std::span<const std::byte> data) override;
     void destroyBuffer(render::GpuBuf buf) override;
+    /// Same eventual-delivery trick as OpKdeEvalRenderer: first call
+    /// emits the compute + mailbox and returns nullopt (CPU covers);
+    /// identical later calls serve the delivered grid.
+    std::optional<std::vector<float>> kde1d(
+        std::span<const float> data, float lo, float step, float bw,
+        uint32_t n) override;
     bool pcmTessellate(std::span<const float> x,
                        std::span<const float> y,
                        std::span<const float> t,
@@ -173,6 +179,11 @@ private:
     std::unordered_map<uint32_t, uint32_t> slotBuf_;
     struct BulkMail { std::vector<uint8_t> bytes; bool ready = false; };
     std::unordered_map<uint32_t, BulkMail> bulkMail_;
+    struct Kde1dReq {
+        size_t n; float lo, step, bw; uint32_t ne; float fp;
+        uint32_t slot; std::vector<float> cached;
+    };
+    std::vector<Kde1dReq> kdeReqs_;
     std::unordered_map<uint32_t, render::primitives::MinMax2D>
         reduceResults_;
 };

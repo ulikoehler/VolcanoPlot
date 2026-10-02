@@ -172,7 +172,8 @@ test('toSvg() exports vector markup', async ({ page }) => {
 
 for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'contour', 'hist2d', 'kde', 'box', 'stem',
-                    'quiver', 'subplot', 'pcm']) {
+                    'quiver', 'subplot', 'pcm', 'violin', 'stackplot',
+                    'fill', 'spy', 'tripcolor', 'streamplot']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));
@@ -198,8 +199,8 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
         });
         console.log(kind.toUpperCase(), JSON.stringify(stats), JSON.stringify(errors));
         expect(stats.nonWhite).toBeGreaterThan(1000);
-        // contour/quiver default to black line color — chroma n/a
-        if (kind !== 'contour' && kind !== 'quiver')
+        // contour/quiver/streamplot default to black — chroma n/a
+        if (!['contour', 'quiver', 'streamplot'].includes(kind))
             expect(stats.chroma).toBeGreaterThan(200);
     });
 }

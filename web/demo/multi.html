@@ -87,6 +87,54 @@ window.vpDone = (async () => {
         vp.subplot(2, 1, 2);
         for (let i = 0; i < N; i++) ys[i] = Math.cos(i*0.08);
         vp.line(xs, ys, '#0060e0');
+    } else if (which === 'violin') {
+        const g = [];
+        for (let k = 0; k < 3; k++) {
+            const n = 2000, v = new Float32Array(n);   // ≥200k evals → GPU KDE
+            for (let i = 0; i < n; i++)
+                v[i] = 3 + k * 2 + Math.sin(i * 0.7 + k) * Math.exp(-((i - n / 2) ** 2) / 4000);
+            g.push(v);
+        }
+        vp.violin(g, 0.5, true, '#209040');
+    } else if (which === 'stackplot') {
+        const N = 40, xs = new Float32Array(N);
+        const l1 = new Float32Array(N), l2 = new Float32Array(N),
+              l3 = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            xs[i] = i; l1[i] = 2 + Math.sin(i * 0.3);
+            l2[i] = 1.5 + Math.cos(i * 0.2); l3[i] = 1 + Math.sin(i * 0.5);
+        }
+        vp.stackplot(xs, [l1, l2, l3]);
+    } else if (which === 'fill') {
+        const N = 50, xs = new Float32Array(N), ys = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const t = i / (N - 1) * 6.28;
+            xs[i] = Math.cos(t) * (1 + 0.3 * Math.sin(3 * t));
+            ys[i] = Math.sin(t) * (1 + 0.3 * Math.sin(3 * t));
+        }
+        vp.fill(xs, ys, '#e00000');
+    } else if (which === 'spy') {
+        const n = 32, d = new Float32Array(n * n);
+        for (let i = 0; i < n; i++) { d[i * n + i] = 1;
+            if (i + 4 < n) d[i * n + i + 4] = 1;
+            if (i % 7 === 0) d[i * n + (n - 1 - i)] = 1; }
+        vp.spy(d, n, n);
+    } else if (which === 'tripcolor') {
+        const N = 60, xs = new Float32Array(N), ys = new Float32Array(N),
+              zs = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const a = i * 0.7, r = 0.3 + 0.65 * (i % 8) / 8;
+            xs[i] = Math.cos(a) * r; ys[i] = Math.sin(a) * r;
+            zs[i] = Math.sin(xs[i] * 9) + Math.cos(ys[i] * 9);
+        }
+        vp.tripcolor(xs, ys, zs);
+    } else if (which === 'streamplot') {
+        const n = 24, u = new Float32Array(n * n), v = new Float32Array(n * n);
+        for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+            const x = i / n * 6.28, y = j / n * 6.28;
+            u[j * n + i] = Math.sin(y); v[j * n + i] = Math.cos(x);
+        }
+        vp.streamplot(u, v, n, n);
     }
     const px = await vp.capture();
     window.vpPixels = px;

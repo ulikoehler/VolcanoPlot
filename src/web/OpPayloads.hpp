@@ -113,6 +113,10 @@ struct PKdeEval2D  { uint32_t inBuf, n, outBuf, gridW, gridH;
 /// DrawTrisData in the same stream. flags: bit0 cmap.bad, bit1 skipNaN.
 struct PPcmTess    { uint32_t xBuf, yBuf, tBuf, lutBuf, posBuf, colBuf;
                      uint32_t nCols, nRows, gouraud, flags; };
+/// 1-D Gaussian KDE: samples → `ne` densities at lo + i*step.
+/// Result read back via bulk mailbox (slot → ne f32).
+struct PViolinKde  { uint32_t inBuf, n, outBuf, ne;
+                     float lo, step, bw; uint32_t mailbox; };
 #pragma pack(pop)
 
 } // namespace volcano::web

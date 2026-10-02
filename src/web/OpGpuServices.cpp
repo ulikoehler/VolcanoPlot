@@ -141,6 +141,36 @@ void OpGpuServices::writeBuffer(render::GpuBuf buf, uint64_t offset,
                                 std::span<const std::byte> data) {
     writeBufferRaw(uint32_t(buf), offset, data.data(), data.size());
 }
+std::optional<std::vector<float>>
+OpGpuServices::kde1d(std::span<const float> data, float lo, float step,
+                     float bw, uint32_t ne) {
+    if (data.empty() || !ne) return std::nullopt;
+    const float fp = data.front() + data[data.size() / 2] + data.back();
+    for (auto& q : kdeReqs_) {
+        if (q.n != data.size() || q.lo != lo || q.step != step ||
+            q.bw != bw || q.ne != ne || q.fp != fp) continue;
+        if (!q.cached.empty()) return q.cached;
+        if (mailboxReady(q.slot)) {
+            auto bytes = mailboxTake(q.slot);
+            q.cached.resize(bytes.size() / 4);
+            std::memcpy(q.cached.data(), bytes.data(),
+                        q.cached.size() * 4);
+            return q.cached;
+        }
+        return std::nullopt;  // readback in flight
+    }
+    Kde1dReq req{data.size(), lo, step, bw, ne, fp, allocMailbox(), {}};
+    uint32_t in = createBufferRaw(data.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(in, 0, data.data(), data.size_bytes());
+    uint32_t out = createBufferRaw(size_t(ne) * 4 + 16, 2 | 16);
+    PViolinKde p{in, uint32_t(data.size()), out, ne, lo, step, bw,
+                 req.slot};
+    stream_.emit(Op::ViolinKde, p);
+    kdeReqs_.push_back(std::move(req));
+    if (kdeReqs_.size() > 16) kdeReqs_.erase(kdeReqs_.begin());
+    return std::nullopt;
+}
+
 bool OpGpuServices::pcmTessellate(std::span<const float> x,
                                   std::span<const float> y,
                                   std::span<const float> t,

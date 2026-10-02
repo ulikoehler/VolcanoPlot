@@ -33,6 +33,12 @@
 #include <volcano/plot/plots/ContourPlot.hpp>
 #include <volcano/plot/plots/PcolormeshPlot.hpp>
 #include <volcano/plot/plots/KDEPlot.hpp>
+#include <volcano/plot/plots/ViolinPlot.hpp>
+#include <volcano/plot/plots/StackPlot.hpp>
+#include <volcano/plot/plots/FillPlot.hpp>
+#include <volcano/plot/plots/SpyPlot.hpp>
+#include <volcano/plot/plots/TripcolorPlot.hpp>
+#include <volcano/plot/plots/StreamPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
 
 using namespace volcano;
@@ -383,6 +389,68 @@ uintptr_t kde(uint32_t axesIdx, em::val xs, em::val ys,
                                   plot::Colormap::byName(cmapName));
 }
 
+/// Violin plot: `groups` is a JS array of Float32Arrays (one per violin).
+uintptr_t violin(uint32_t axesIdx, em::val groups, double width,
+                 bool showBox, const std::string& color) {
+    std::vector<std::vector<float>> gs;
+    const size_t n = groups["length"].as<size_t>();
+    gs.reserve(n);
+    for (size_t i = 0; i < n; ++i) gs.push_back(f32vec(groups[i]));
+    plot::ViolinConfig cfg;
+    if (width > 0) cfg.width = float(width);
+    cfg.showBox = showBox;
+    if (auto c = plot::Color::parse(color)) {
+        cfg.bodyColor = *c; cfg.edgeColor = *c;
+    }
+    return addPlot<plot::ViolinPlot>(axesIdx, std::move(gs),
+                                     std::move(cfg));
+}
+
+/// Stacked area: `ys` is a JS array of Float32Arrays (one per layer).
+uintptr_t stackplot(uint32_t axesIdx, em::val xs, em::val ys) {
+    std::vector<std::vector<float>> layers;
+    const size_t n = ys["length"].as<size_t>();
+    layers.reserve(n);
+    for (size_t i = 0; i < n; ++i) layers.push_back(f32vec(ys[i]));
+    return addPlot<plot::StackPlot>(axesIdx, f32vec(xs),
+                                    std::move(layers));
+}
+
+/// mpl fill(): filled polygon from x/y arrays.
+uintptr_t fill(uint32_t axesIdx, em::val xs, em::val ys,
+               const std::string& color) {
+    auto s = seriesFrom(xs, ys);
+    if (auto c = plot::Color::parse(color)) s.color = *c;
+    return addPlot<plot::FillPlot>(axesIdx, std::move(s));
+}
+
+/// mpl spy(): sparsity pattern of a row-major matrix.
+uintptr_t spy(uint32_t axesIdx, em::val data, uint32_t nrows,
+              uint32_t ncols) {
+    return addPlot<plot::SpyPlot>(axesIdx, f32vec(data), nrows, ncols,
+                                  plot::SpyConfig{});
+}
+
+/// mpl tripcolor: Delaunay triangulation of x/y colored by z.
+uintptr_t tripcolor(uint32_t axesIdx, em::val xs, em::val ys,
+                    em::val zs) {
+    return addPlot<plot::TripcolorPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                        f32vec(zs),
+                                        plot::TripcolorConfig{});
+}
+
+/// mpl streamplot: vector field over a regular grid (row-major u/v).
+uintptr_t streamplot(uint32_t axesIdx, em::val us, em::val vs,
+                     uint32_t w, uint32_t h) {
+    plot::Grid2D gu, gv;
+    gu.values = f32vec(us); gv.values = f32vec(vs);
+    gu.width = gv.width = w; gu.height = gv.height = h;
+    gu.xRange = gv.xRange = {0, float(w)};
+    gu.yRange = gv.yRange = {0, float(h)};
+    return addPlot<plot::StreamPlot>(axesIdx, std::move(gu),
+                                     std::move(gv), plot::StreamConfig{});
+}
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -447,6 +515,12 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_subplot", &subplot);
     em::function("_vp_setInteractive", &setInteractive);
     em::function("_vp_dispatch", &dispatchEvent);
+    em::function("_vp_violin", &violin);
+    em::function("_vp_stackplot", &stackplot);
+    em::function("_vp_fill", &fill);
+    em::function("_vp_spy", &spy);
+    em::function("_vp_tripcolor", &tripcolor);
+    em::function("_vp_streamplot", &streamplot);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

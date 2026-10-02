@@ -62,6 +62,18 @@ interface VolcanoModule {
                    nRows: number): number;
     _vp_kde(axes: number, xs: Float32Array, ys: Float32Array,
             cmap: string): number;
+    _vp_violin(axes: number, groups: Float32Array[], width: number,
+               showBox: boolean, color: string): number;
+    _vp_stackplot(axes: number, xs: Float32Array,
+                  ys: Float32Array[]): number;
+    _vp_fill(axes: number, xs: Float32Array, ys: Float32Array,
+             color: string): number;
+    _vp_spy(axes: number, data: Float32Array, nrows: number,
+            ncols: number): number;
+    _vp_tripcolor(axes: number, xs: Float32Array, ys: Float32Array,
+                  zs: Float32Array): number;
+    _vp_streamplot(axes: number, us: Float32Array, vs: Float32Array,
+                   w: number, h: number): number;
     _vp_subplot(nrows: number, ncols: number, index: number): number;
     _vp_setInteractive(on: boolean): void;
     _vp_dispatch(type: number, x: number, y: number,
@@ -399,6 +411,59 @@ export class VolcanoCanvas {
         const v = this.stage(values);
         try { return this.mod._vp_contour(this.cur, v, w, h, levels, cmap); }
         finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** mpl violinplot — one Float32Array per group. */
+    violin(groups: ArrayLike<number>[], width = 0.5,
+           showBox = false, color = ''): number {
+        const staged = groups.map(g => this.stage(g));
+        try { return this.mod._vp_violin(this.cur, staged, width,
+                                       showBox, color); }
+        finally { for (const v of staged)
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** mpl stackplot — stacked area; one layer per element of `ys`. */
+    stackplot(xs: ArrayLike<number>, ys: ArrayLike<number>[]): number {
+        const a = this.stage(xs);
+        const staged = ys.map(g => this.stage(g));
+        try { return this.mod._vp_stackplot(this.cur, a, staged); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  for (const v of staged)
+                      this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** mpl fill — filled polygon. */
+    fill(xs: ArrayLike<number>, ys: ArrayLike<number>,
+         color = ''): number {
+        const a = this.stage(xs), b = this.stage(ys);
+        try { return this.mod._vp_fill(this.cur, a, b, color); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
+    }
+
+    /** mpl spy — sparsity pattern of a row-major matrix. */
+    spy(data: ArrayLike<number>, nrows: number, ncols: number): number {
+        const v = this.stage(data);
+        try { return this.mod._vp_spy(this.cur, v, nrows, ncols); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** mpl tripcolor — Delaunay triangles colored by z. */
+    tripcolor(xs: ArrayLike<number>, ys: ArrayLike<number>,
+              zs: ArrayLike<number>): number {
+        const s = [xs, ys, zs].map(a => this.stage(a));
+        try { return this.mod._vp_tripcolor(this.cur, s[0], s[1], s[2]); }
+        finally { for (const v of s) this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** mpl streamplot — row-major w×h vector field. */
+    streamplot(us: ArrayLike<number>, vs: ArrayLike<number>,
+               w: number, h: number): number {
+        const a = this.stage(us), b = this.stage(vs);
+        try { return this.mod._vp_streamplot(this.cur, a, b, w, h); }
+        finally { this.mod._vp_free(a.byteOffset);
+                  this.mod._vp_free(b.byteOffset); }
     }
 
     pcolormesh(xs: ArrayLike<number>, ys: ArrayLike<number>,
