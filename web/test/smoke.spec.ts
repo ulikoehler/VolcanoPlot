@@ -197,7 +197,7 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'fill', 'spy', 'tripcolor', 'streamplot', 'matshow',
                     'pcolorfast', 'brokenbarh', 'tricontour', 'triplot',
                     'specgram', 'spectrum', 'psd', 'csd', 'xcorr',
-                    'cohere', 'wireframe', 'trisurf']) {
+                    'cohere', 'wireframe', 'trisurf', 'annotate']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));

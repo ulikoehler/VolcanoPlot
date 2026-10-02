@@ -553,6 +553,68 @@ uintptr_t trisurf(uint32_t axesIdx, em::val xs, em::val ys, em::val zs,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+// ── reference lines / spans / annotations ───────────────────────────
+plot::Color colorOr(em::val v, plot::Color def) {
+    if (v.typeOf().as<std::string>() == "string")
+        if (auto c = plot::Color::parse(v.as<std::string>())) return *c;
+    return def;
+}
+void axhline(uint32_t a, double y, em::val color, double width) {
+    targetAxes(a)->axhline(float(y), colorOr(color, plot::Color::black()),
+                           float(width));
+    S().figure.markStale();
+}
+void axvline(uint32_t a, double x, em::val color, double width) {
+    targetAxes(a)->axvline(float(x), colorOr(color, plot::Color::black()),
+                           float(width));
+    S().figure.markStale();
+}
+void axhspan(uint32_t a, double y1, double y2, em::val color) {
+    targetAxes(a)->axhspan(float(y1), float(y2),
+        colorOr(color, plot::Color::fromRgba8(200, 200, 200, 128)));
+    S().figure.markStale();
+}
+void axvspan(uint32_t a, double x1, double x2, em::val color) {
+    targetAxes(a)->axvspan(float(x1), float(x2),
+        colorOr(color, plot::Color::fromRgba8(200, 200, 200, 128)));
+    S().figure.markStale();
+}
+void hlines(uint32_t a, em::val ys, double xMin, double xMax,
+            em::val color, double width) {
+    targetAxes(a)->hlines(f32vec(ys), float(xMin), float(xMax),
+                          colorOr(color, plot::Color::black()),
+                          float(width));
+    S().figure.markStale();
+}
+void vlines(uint32_t a, em::val xs, double yMin, double yMax,
+            em::val color, double width) {
+    targetAxes(a)->vlines(f32vec(xs), float(yMin), float(yMax),
+                          colorOr(color, plot::Color::black()),
+                          float(width));
+    S().figure.markStale();
+}
+/// mpl ax.legend(loc) — enables the legend box.
+void legend(uint32_t a, const std::string& loc) {
+    auto& l = targetAxes(a)->legend();
+    if (!loc.empty()) l.location = loc;
+    S().figure.markStale();
+}
+/// mpl fig.colorbar() — enables the per-axes colorbar strip.
+void colorbar(uint32_t a) {
+    targetAxes(a)->style().colorbar.visible = true;
+    S().figure.markStale();
+}
+/// mpl ax.text — coords: 0=data, 1=axes-frac, 2=figure-frac.
+void axesText(uint32_t a, double x, double y, const std::string& txt,
+          uint32_t coords) {
+    static constexpr plot::CoordSystem cs[] = {
+        plot::CoordSystem::Data, plot::CoordSystem::Axes,
+        plot::CoordSystem::Figure, plot::CoordSystem::Display};
+    targetAxes(a)->text(float(x), float(y), txt,
+                        cs[std::min(coords, 3u)]);
+    S().figure.markStale();
+}
+
 // ── axes/figure styling ─────────────────────────────────────────────
 void setXlim(uint32_t a, double lo, double hi) {
     targetAxes(a)->setXlim(float(lo), float(hi)); S().figure.markStale();
@@ -673,6 +735,15 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_cohere", &cohere);
     em::function("_vp_wireframe", &wireframe);
     em::function("_vp_trisurf", &trisurf);
+    em::function("_vp_axhline", &axhline);
+    em::function("_vp_axvline", &axvline);
+    em::function("_vp_axhspan", &axhspan);
+    em::function("_vp_axvspan", &axvspan);
+    em::function("_vp_hlines", &hlines);
+    em::function("_vp_vlines", &vlines);
+    em::function("_vp_legend", &legend);
+    em::function("_vp_colorbar", &colorbar);
+    em::function("_vp_text", &axesText);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

@@ -107,6 +107,18 @@ interface VolcanoModule {
                   elev: number, azim: number): number;
     _vp_trisurf(a: number, xs: Float32Array, ys: Float32Array,
                 zs: Float32Array, elev: number, azim: number): number;
+    _vp_axhline(a: number, y: number, color: string, width: number): void;
+    _vp_axvline(a: number, x: number, color: string, width: number): void;
+    _vp_axhspan(a: number, y1: number, y2: number, color: string): void;
+    _vp_axvspan(a: number, x1: number, x2: number, color: string): void;
+    _vp_hlines(a: number, ys: Float32Array, xMin: number, xMax: number,
+               color: string, width: number): void;
+    _vp_vlines(a: number, xs: Float32Array, yMin: number, yMax: number,
+               color: string, width: number): void;
+    _vp_legend(a: number, loc: string): void;
+    _vp_colorbar(a: number): void;
+    _vp_text(a: number, x: number, y: number, txt: string,
+             coords: number): void;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -332,6 +344,42 @@ export class VolcanoCanvas {
         const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
         try { return this.mod._vp_trisurf(this.cur, x, y, z, elev, azim); }
         finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+
+    // ── mpl reference lines / spans / annotations ───────────────────
+    axhline(y: number, color = '#000', width = 1) {
+        this.mod._vp_axhline(this.cur, y, color, width);
+    }
+    axvline(x: number, color = '#000', width = 1) {
+        this.mod._vp_axvline(this.cur, x, color, width);
+    }
+    axhspan(y1: number, y2: number, color = '#c8c8c880') {
+        this.mod._vp_axhspan(this.cur, y1, y2, color);
+    }
+    axvspan(x1: number, x2: number, color = '#c8c8c880') {
+        this.mod._vp_axvspan(this.cur, x1, x2, color);
+    }
+    hlines(ys: ArrayLike<number>, xMin: number, xMax: number,
+           color = '#000', width = 1) {
+        const v = this.stage(ys);
+        try { this.mod._vp_hlines(this.cur, v, xMin, xMax, color, width); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+    vlines(xs: ArrayLike<number>, yMin: number, yMax: number,
+           color = '#000', width = 1) {
+        const v = this.stage(xs);
+        try { this.mod._vp_vlines(this.cur, v, yMin, yMax, color, width); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+    /** mpl ax.legend — loc like "upper right", "best", "lower left". */
+    legend(loc = 'best') { this.mod._vp_legend(this.cur, loc); }
+    /** mpl fig.colorbar — adds the colorbar strip to the axes. */
+    colorbar() { this.mod._vp_colorbar(this.cur); }
+    /** mpl ax.text — coords: 'data' | 'axes' | 'figure'. */
+    text(x: number, y: number, txt: string,
+         coords: 'data'|'axes'|'figure' = 'data') {
+        this.mod._vp_text(this.cur, x, y, txt,
+            coords === 'data' ? 0 : coords === 'axes' ? 1 : 2);
     }
 
     /** mpl-style interaction: left-drag pans, scroll zooms about the
