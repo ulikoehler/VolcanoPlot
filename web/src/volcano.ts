@@ -26,6 +26,13 @@ interface VolcanoModule {
                 ys: Float32Array): void;
     _vp_function(axes: number, body: string, xMin: number,
                  xMax: number, color: string): number;
+    _vp_bar(axes: number, heights: Float32Array, labels: string[],
+            color: string): number;
+    _vp_hist(axes: number, samples: Float32Array, bins: number,
+             color: string): number;
+    _vp_pie(axes: number, values: Float32Array, labels: string[]): number;
+    _vp_heatmap(axes: number, values: Float32Array, w: number,
+                h: number, cmap: string): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -118,6 +125,33 @@ export class VolcanoCanvas {
      * statements assigning `y` from `x` (e.g. "sin(10.0*x)"). */
     func(body: string, xMin = 0, xMax = 1, color = ''): number {
         return this.mod._vp_function(0, body, xMin, xMax, color);
+    }
+
+    bar(heights: ArrayLike<number>, labels: string[] = [],
+        color = ''): number {
+        const v = this.stage(heights);
+        try { return this.mod._vp_bar(0, v, labels, color); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    hist(samples: ArrayLike<number>, bins = 10, color = ''): number {
+        const v = this.stage(samples);
+        try { return this.mod._vp_hist(0, v, bins, color); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    pie(values: ArrayLike<number>, labels: string[] = []): number {
+        const v = this.stage(values);
+        try { return this.mod._vp_pie(0, v, labels); }
+        finally { this.mod._vp_free(v.byteOffset); }
+    }
+
+    /** Row-major scalar grid rendered through a colormap. */
+    heatmap(values: ArrayLike<number>, w: number, h: number,
+            cmap = 'viridis'): number {
+        const v = this.stage(values);
+        try { return this.mod._vp_heatmap(0, v, w, h, cmap); }
+        finally { this.mod._vp_free(v.byteOffset); }
     }
 
     /** In-place update for a handle from line()/scatter() — the

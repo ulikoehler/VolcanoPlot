@@ -138,36 +138,56 @@ public:
 
     void upload(const PieData& data) override {
         verts_.clear(); cols_.clear();
-        const float kTwoPi = 6.28318530718f;
         float total = 0;
-        for (float v : data.values) total += std::fabs(v);
+        for (float v : data.values) total += v;
         if (total <= 0) return;
-        float a0 = 0.0f;
-        const float r1 = data.donut ? std::max(data.innerRadius, 0.f)
-                                    : 0.f;
-        for (size_t i = 0; i < data.values.size(); ++i) {
-            float frac = std::fabs(data.values[i]) / total;
-            float a1 = a0 + frac * kTwoPi;
-            Color c = i < data.colors.size() ? data.colors[i] : Color{};
-            int segs = std::max(2, int(frac * 128.0f));
-            for (int k = 0; k < segs; ++k) {
-                float t0 = a0 + (a1 - a0) * (float(k) / segs);
-                float t1 = a0 + (a1 - a0) * (float(k + 1) / segs);
-                Point2D p0{std::cos(t0), std::sin(t0)};
-                Point2D p1{std::cos(t1), std::sin(t1)};
-                if (r1 <= 0) {
-                    Point2D tri[3] = {{0, 0}, p0, p1};
-                    for (auto v : tri) { verts_.push_back(v);
-                                         cols_.push_back(c); }
-                } else {
-                    Point2D i0{r1 * p0.x, r1 * p0.y};
-                    Point2D i1{r1 * p1.x, r1 * p1.y};
-                    Point2D quad[6] = {i0, p0, p1, i0, p1, i1};
-                    for (auto v : quad) { verts_.push_back(v);
-                                          cols_.push_back(c); }
-                }
+        center_ = data.center;
+
+        // Mirror PieRendererVk::upload: mpl pie() semantics —
+        // normalize, startAngle, counterclock, explode, prop cycle.
+        const float denom = data.normalize ? total : 1.0f;
+        const float dir = data.counterclock ? 1.0f : -1.0f;
+        constexpr int kSeg = 32;
+        constexpr float PI2 = 6.28318530718f;
+        const size_t n = data.values.size();
+        std::vector<float> sliceStart(n), sliceEnd(n);
+        float theta1 = data.startAngle / 360.0f;
+        for (size_t i = 0; i < n; ++i) {
+            sliceStart[i] = theta1;
+            theta1 += dir * (data.values[i] / denom);
+            sliceEnd[i] = theta1;
+        }
+        auto explodeAt = [&](size_t i) {
+            if (data.explode.empty()) return 0.0f;
+            if (data.explode.size() == 1) return data.explode[0];
+            return i < data.explode.size() ? data.explode[i] : 0.0f;
+        };
+        for (size_t idx = 0; idx < n; ++idx) {
+            float sa0 = PI2 * sliceStart[idx];
+            float sa1 = PI2 * sliceEnd[idx];
+            float r0 = data.innerRadius * data.radius;
+            float r1 = data.radius;
+            float mid = (sa0 + sa1) * 0.5f;
+            float expl = explodeAt(idx);
+            Point2D off{center_.x + expl * std::cos(mid),
+                        center_.y + expl * std::sin(mid)};
+            Color c = idx < data.colors.size() ? data.colors[idx]
+                                               : ColorCycle::at(idx);
+            for (int k = 0; k < kSeg; ++k) {
+                float ta0 = sa0 + (sa1 - sa0) * k / kSeg;
+                float ta1 = sa0 + (sa1 - sa0) * (k + 1) / kSeg;
+                Point2D i0{off.x + r0 * std::cos(ta0),
+                           off.y + r0 * std::sin(ta0)};
+                Point2D i1{off.x + r0 * std::cos(ta1),
+                           off.y + r0 * std::sin(ta1)};
+                Point2D o0{off.x + r1 * std::cos(ta0),
+                           off.y + r1 * std::sin(ta0)};
+                Point2D o1{off.x + r1 * std::cos(ta1),
+                           off.y + r1 * std::sin(ta1)};
+                Point2D quad[6] = {i0, i1, o0, i1, o1, o0};
+                for (auto v : quad) { verts_.push_back(v);
+                                      cols_.push_back(c); }
             }
-            a0 = a1;
         }
         count_ = uint32_t(verts_.size());
         if (posBuf_) s_->releaseBuffer(posBuf_);
@@ -197,6 +217,7 @@ public:
         ops(cmd).emit(Op::DrawPie, d);
     }
 private:
+    Point2D center_{};
     OpGpuServices* s_;
     uint32_t posBuf_ = 0, colBuf_ = 0, count_ = 0;
     std::vector<Point2D> verts_;

@@ -16,7 +16,7 @@ let port = 0;
 
 test.beforeAll(async () => {
     server = createServer((req, res) => {
-        const p = join(ROOT, decodeURIComponent(req.url ?? '/'));
+        const p = join(ROOT, decodeURIComponent((req.url ?? '/').split('?')[0]));
         try {
             const body = readFileSync(p);
             res.writeHead(200, {
@@ -120,3 +120,33 @@ test('func() evaluates a GLSL body via WGSL compute', async ({ page }) => {
     console.log('FUNC', JSON.stringify(stats), JSON.stringify(errors));
     expect(stats.red).toBeGreaterThan(500);   // sin(10x) curve pixels
 });
+
+for (const kind of ['bar', 'hist', 'pie', 'heat']) {
+    test(`renders ${kind} plot type`, async ({ page }) => {
+        const errors: string[] = [];
+        page.on('pageerror', e => errors.push(String(e)));
+        page.on('console', m => { const t = m.text();
+            if (!/404|favicon/.test(t)) errors.push('CON: ' + t.slice(0, 300)); });
+        await page.goto(`http://localhost:${port}/demo/multi.html?p=${kind}`);
+        await page.waitForFunction(
+            () => (window as any).vpResult !== undefined ||
+                  (window as any).vpError !== undefined,
+            { timeout: 30_000 });
+        const res = await page.evaluate(() => (window as any).vpError);
+        expect(res, String(res)).toBeUndefined();
+        const stats = await page.evaluate(() => {
+            const px = (window as any).vpPixels;
+            let nonWhite = 0, chroma = 0;
+            for (let i = 0; i < px.length; i += 4) {
+                if (px[i]<245||px[i+1]<245||px[i+2]<245) nonWhite++;
+                const mx = Math.max(px[i],px[i+1],px[i+2]),
+                          mn = Math.min(px[i],px[i+1],px[i+2]);
+                if (mx - mn > 40) chroma++;
+            }
+            return { nonWhite, chroma };
+        });
+        console.log(kind.toUpperCase(), JSON.stringify(stats), JSON.stringify(errors));
+        expect(stats.nonWhite).toBeGreaterThan(1000);
+        expect(stats.chroma).toBeGreaterThan(200);
+    });
+}

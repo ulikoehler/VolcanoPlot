@@ -14,6 +14,11 @@
 #include <volcano/plot/plots/LinePlot.hpp>
 #include <volcano/plot/plots/ScatterPlot.hpp>
 #include <volcano/plot/plots/FunctionPlot.hpp>
+#include <volcano/plot/plots/BarPlot.hpp>
+#include <volcano/plot/plots/HistPlot.hpp>
+#include <volcano/plot/plots/PiePlot.hpp>
+#include <volcano/plot/plots/HeatmapPlot.hpp>
+#include <volcano/plot/Colormap.hpp>
 
 using namespace volcano;
 namespace em = emscripten;
@@ -126,6 +131,80 @@ uintptr_t func(uint32_t axesIdx, const std::string& body,
     return reinterpret_cast<uintptr_t>(raw);
 }
 
+std::vector<float> f32vec(em::val arr) {
+    size_t n; const float* p = f32Span(arr, n);
+    return {p, p + n};
+}
+/// JS array of strings → std::vector<std::string>.
+std::vector<std::string> strvec(em::val arr) {
+    std::vector<std::string> v;
+    const size_t n = arr["length"].as<size_t>();
+    v.reserve(n);
+    for (size_t i = 0; i < n; ++i) v.push_back(arr[i].as<std::string>());
+    return v;
+}
+
+uintptr_t bar(uint32_t axesIdx, em::val heights, em::val labels,
+              em::val color) {
+    plot::BarData d;
+    d.heights = f32vec(heights);
+    d.labels = strvec(labels);
+    if (color.typeOf().as<std::string>() == "string") {
+        if (auto c = plot::Color::parse(color.as<std::string>()))
+            d.colors.push_back(*c);
+    }
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<plot::BarPlot>(std::move(d));
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+uintptr_t hist(uint32_t axesIdx, em::val samples, int bins,
+               em::val color) {
+    plot::HistConfig cfg;
+    cfg.bins = plot::HistBinMethod::Fixed;
+    cfg.binCount = bins > 0 ? bins : 10;
+    if (color.typeOf().as<std::string>() == "string") {
+        if (auto c = plot::Color::parse(color.as<std::string>()))
+            cfg.color = *c;
+    }
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<plot::HistPlot>(f32vec(samples), cfg);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+uintptr_t pie(uint32_t axesIdx, em::val values, em::val labels) {
+    plot::PieData d;
+    d.values = f32vec(values);
+    d.labels = strvec(labels);
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<plot::PiePlot>(std::move(d));
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
+uintptr_t heatmap(uint32_t axesIdx, em::val values, uint32_t w,
+                  uint32_t h, const std::string& cmapName) {
+    plot::Grid2D g;
+    g.values = f32vec(values);
+    g.width = w; g.height = h;
+    g.xRange = {0, float(w)}; g.yRange = {0, float(h)};
+    const plot::Colormap& cm = plot::Colormap::byName(cmapName);
+    auto* ax = targetAxes(axesIdx);
+    auto plot = std::make_shared<plot::HeatmapPlot>(std::move(g), cm);
+    auto* raw = plot.get();
+    ax->addPlot(std::move(plot));
+    S().figure.markStale();
+    return reinterpret_cast<uintptr_t>(raw);
+}
+
 /// In-place data update for a plot handle returned by line()/scatter()
 /// (the oscilloscope/ring-buffer path — no plot reallocation).
 void setData(uintptr_t handle, em::val xs, em::val ys) {
@@ -170,5 +249,9 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_mailbox", &mailbox);
     em::function("_vp_setData", &setData);
     em::function("_vp_function", &func);
+    em::function("_vp_bar", &bar);
+    em::function("_vp_hist", &hist);
+    em::function("_vp_pie", &pie);
+    em::function("_vp_heatmap", &heatmap);
 }
 #endif // __EMSCRIPTEN__

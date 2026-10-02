@@ -149,6 +149,16 @@ const SAMP = (b: number): GPUBindGroupLayoutEntry => ({
     binding: b, visibility: GPUShaderStage.FRAGMENT,
     sampler: { type: 'filtering' },
 });
+/// r32float grids aren't float-filterable without an optional feature —
+/// bind as unfilterable + non-filtering sampler.
+const TU = (b: number): GPUBindGroupLayoutEntry => ({
+    binding: b, visibility: GPUShaderStage.FRAGMENT,
+    texture: { sampleType: 'unfilterable-float' },
+});
+const SAMP_NF = (b: number): GPUBindGroupLayoutEntry => ({
+    binding: b, visibility: GPUShaderStage.FRAGMENT,
+    sampler: { type: 'non-filtering' },
+});
 
 // Buffer kind bits (OpGpuServices.cpp)
 const K_VERTEX = 1, K_STORAGE = 2, K_INDEX = 4, K_UNIFORM = 8;
@@ -264,7 +274,7 @@ export class Interpreter {
                     bindings: [ud, S(1), S(2)] });
         mk('image', { src: IMAGE_WGSL, transform: true,
                       topology: 'triangle-list',
-                      bindings: [ud, T(1), T(2), SAMP(3)] });
+                      bindings: [ud, TU(1), T(2), SAMP_NF(3)] });
         mk('instanced', { src: INSTANCED_WGSL, topology: 'triangle-list',
                           bindings: [ub, S(1), S(2)] });
         mk('text', { src: TEXT_WGSL, topology: 'triangle-list',
@@ -892,8 +902,9 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const uboBytes = new Uint8Array<ArrayBuffer>(
                 p.buffer, p.byteOffset + 16, XFORM_BYTES).slice();
             // extra2 = canvasWH for the MODE_PIE shader
-            new DataView(uboBytes.buffer).setFloat32(120, canvasWH[0], true);
-            new DataView(uboBytes.buffer).setFloat32(124, canvasWH[1], true);
+            // TransformUBO extra2 (vec4f) starts at byte 112.
+            new DataView(uboBytes.buffer).setFloat32(112, canvasWH[0], true);
+            new DataView(uboBytes.buffer).setFloat32(116, canvasWH[1], true);
             const off = this.uboWrite(uboBytes);
             pass.setPipeline(this.pipelines.get('pie')!);
             pass.setBindGroup(0, this.bindGroup('pie', [

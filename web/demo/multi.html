@@ -1,0 +1,37 @@
+<!doctype html>
+<html><body>
+<canvas id="c" width="640" height="480" style="width:640px;height:480px"></canvas>
+<script type="module">
+import { createCanvas } from '/dist/bundle.mjs';
+import VolcanoPlot from '/dist/volcanoplot.js';
+
+window.vpDone = (async () => {
+    const vp = await createCanvas(document.getElementById('c'), VolcanoPlot);
+    window.vp = vp;
+    vp.device.addEventListener('uncapturederror',
+        e => console.log('GPUERR:', e.error?.message ?? e));
+    const which = new URLSearchParams(location.search).get('p') || 'bar';
+    if (which === 'bar')
+        vp.bar([3, 7, 2, 5], ['a', 'b', 'c', 'd'], '#2a7');
+    else if (which === 'hist') {
+        const s = new Float32Array(2000);
+        for (let i = 0; i < s.length; i++) s[i] = Math.sin(i * 0.7) + Math.sin(i * 1.3) * 0.5;
+        vp.hist(s, 20, '#e00000');
+    } else if (which === 'pie')
+        vp.pie([40, 30, 20, 10], ['w', 'x', 'y', 'z']);
+    else if (which === 'heat') {
+        const g = new Float32Array(64 * 48);
+        for (let i = 0; i < g.length; i++) {
+            const x = i % 64, y = (i / 64) | 0;
+            g[i] = Math.sin(x * 0.2) * Math.cos(y * 0.15);
+        }
+        vp.heatmap(g, 64, 48, 'viridis');
+    }
+    const px = await vp.capture();
+    window.vpPixels = px;
+    return 'rendered ' + which;
+})();
+window.vpDone.then(v => { window.vpResult = v; },
+                   e => { window.vpError = String(e.stack || e); });
+</script>
+</body></html>
