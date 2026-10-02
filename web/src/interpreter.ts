@@ -239,7 +239,11 @@ export class Interpreter {
                 (s.depth || depthMode) ? {
                     format: 'depth32float',
                     depthWriteEnabled: s.depth === true && depthMode,
-                    depthCompare: s.depth && depthMode ? 'less' : 'always',
+                    // 'less-equal': first frames can contain a repeated
+                    // draw group (atlas-init repaint), so a surface may be
+                    // drawn twice at identical depth — 'less' would reject
+                    // the second draw and expose ops painted in between.
+                    depthCompare: s.depth && depthMode ? 'less-equal' : 'always',
                 } : undefined;
             into.set(key, this.device.createRenderPipeline({
                 layout: this.device.createPipelineLayout({
