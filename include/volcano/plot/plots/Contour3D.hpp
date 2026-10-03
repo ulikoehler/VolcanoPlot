@@ -29,6 +29,10 @@ struct Contour3DConfig {
     float zLevel = 0.0f;
     /// Whether to use offset mode (zLevel is relative to zmin).
     bool zOffset = true;
+    /// mpl offset=None semantics: draw each contour at its own z —
+    /// lines at `level`, filled bands at the band midpoint.
+    /// Overrides zLevel/zOffset when true.
+    bool levelsAsZ = false;
     /// Label for legend.
     std::string label;
 };

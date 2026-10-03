@@ -7,6 +7,7 @@
 #include "volcano/plot/Triangulation.hpp"
 #include "volcano/plot/Colormap.hpp"
 #include "volcano/render/primitives/LineSegmentRenderer.hpp"
+#include <map>
 #include "volcano/render/primitives/FillRenderer.hpp"
 #include <vector>
 #include <string>
@@ -29,6 +30,10 @@ struct TricontourConfig {
     float zLevel = 0.0f;
     /// Whether to use offset mode (zLevel is relative to zmin).
     bool zOffset = true;
+    /// mpl offset=None semantics: draw each contour at its own z —
+    /// lines at `level`, filled bands at the band midpoint.
+    /// Overrides zLevel/zOffset when true.
+    bool levelsAsZ = false;
     /// Label for legend.
     std::string label;
 };
@@ -71,6 +76,13 @@ private:
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
     std::vector<Point2D> segments_;
+    /// Contour level per segment pair (segments_[2i], segments_[2i+1])
+    /// — used to color lines per level like mpl contour.
+    std::vector<float> segLevels_;
+    /// Lazily-created renderer per level when a colormap is set.
+    std::map<float, std::pair<
+        std::unique_ptr<render::primitives::LineSegmentRenderer>,
+        std::vector<Point2D>>> byLevel_;
     bool prepared_ = false;
 
     void computeLevels();

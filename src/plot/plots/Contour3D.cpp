@@ -172,9 +172,11 @@ void Contour3D::marchingSquares() {
                                             x0, y0, x1, y1, vBL, vBR, vTR, vTL);
                     Point2D p1 = interpEdge(pairs[code].e1, level,
                                             x0, y0, x1, y1, vBL, vBR, vTR, vTL);
-                    // Project to 3D at zLevel.
-                    segments_.push_back(project3D(vp, p0.x, p0.y, zLevel));
-                    segments_.push_back(project3D(vp, p1.x, p1.y, zLevel));
+                    // Project to 3D at zLevel (or at the contour
+                    // level itself — mpl offset=None semantics).
+                    const float z = config_.levelsAsZ ? level : zLevel;
+                    segments_.push_back(project3D(vp, p0.x, p0.y, z));
+                    segments_.push_back(project3D(vp, p1.x, p1.y, z));
                     segLevels_.push_back(level);
                 }
             }
@@ -314,10 +316,11 @@ void Contourf3D::marchingSquaresFilled() {
                                                  static_cast<uint8_t>(255 * t),
                                                  static_cast<uint8_t>(255 * t));
 
+                const float bz = config_.levelsAsZ ? mid : zLevel;
                 for (size_t k = 1; k + 1 < poly.size(); ++k) {
-                    positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, zLevel));
-                    positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, zLevel));
-                    positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, zLevel));
+                    positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, bz));
+                    positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, bz));
+                    positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, bz));
                     for (int c = 0; c < 3; ++c) colors_.push_back(color);
                 }
             }

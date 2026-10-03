@@ -122,6 +122,7 @@ void TricontourPlot::computeLevels() {
 
 void TricontourPlot::extractContours() {
     segments_.clear();
+    segLevels_.clear();
     if (triangles_.empty() || x_.empty()) return;
 
     float vmin = valueRangeMin(z_);
@@ -152,8 +153,10 @@ void TricontourPlot::extractContours() {
             if (e20) { c1 = interpCross(p2, v2, p0, v0, level); ++found; }
 
             if (found == 2) {
-                segments_.push_back(project3D(vp, c0.x, c0.y, zLevel));
-                segments_.push_back(project3D(vp, c1.x, c1.y, zLevel));
+                const float z = config_.levelsAsZ ? level : zLevel;
+                segments_.push_back(project3D(vp, c0.x, c0.y, z));
+                segments_.push_back(project3D(vp, c1.x, c1.y, z));
+                segLevels_.push_back(level);
             }
         }
     }
@@ -162,10 +165,34 @@ void TricontourPlot::extractContours() {
 void TricontourPlot::prepare(render::Renderer& r) {
     computeLevels();
     extractContours();
-    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
-    if (!segments_.empty()) {
-        renderer_->upload(std::span{segments_}, config_.lineColor,
-                         config_.lineWidth);
+    if (config_.cmap) {
+        // mpl colors each contour line by its level — one upload per
+        // level (levels are few; segments aren't level-contiguous).
+        byLevel_.clear();
+        const float lMin = config_.levels.front(),
+                    lMax = config_.levels.back();
+        const float lRange = std::max(1e-9f, lMax - lMin);
+        for (size_t i = 0; i + 1 < segments_.size(); i += 2) {
+            const float level = segLevels_[i / 2];
+            auto& [rend, segs] = byLevel_[level];
+            segs.push_back(segments_[i]);
+            segs.push_back(segments_[i + 1]);
+            (void)rend;
+        }
+        for (auto& [level, pr] : byLevel_) {
+            if (!pr.first)
+                pr.first = r.gpu().createLineSegmentRenderer();
+            const float t = std::clamp(
+                (level - lMin) / lRange, 0.0f, 1.0f);
+            pr.first->upload(std::span{pr.second},
+                             config_.cmap->sample(t), config_.lineWidth);
+        }
+    } else {
+        if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
+        if (!segments_.empty()) {
+            renderer_->upload(std::span{segments_}, config_.lineColor,
+                             config_.lineWidth);
+        }
     }
     prepared_ = true;
 }
@@ -178,7 +205,14 @@ void TricontourPlot::draw(render::Cmd& cmd, render::Renderer& r,
     t.view.y = {-1.0f, 1.0f};
     t.view.z = {0, 1};
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
-    renderer_->draw(cmd, vrect, t, static_cast<uint32_t>(segments_.size()));
+    if (config_.cmap) {
+        for (auto& [level, pr] : byLevel_)
+            pr.first->draw(cmd, vrect, t,
+                           static_cast<uint32_t>(pr.second.size()));
+    } else {
+        renderer_->draw(cmd, vrect, t,
+                        static_cast<uint32_t>(segments_.size()));
+    }
 }
 
 void TricontourPlot::contributeToAutoscale(Viewport& v) const {
@@ -273,10 +307,11 @@ void TricontourfPlot::extractContoursFilled() {
                                              static_cast<uint8_t>(255 * t),
                                              static_cast<uint8_t>(255 * t));
 
+            const float bz = config_.levelsAsZ ? mid : zLevel;
             for (size_t k = 1; k + 1 < poly.size(); ++k) {
-                positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, zLevel));
-                positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, zLevel));
-                positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, zLevel));
+                positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, bz));
+                positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, bz));
+                positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, bz));
                 for (int c = 0; c < 3; ++c) colors_.push_back(color);
             }
         }
