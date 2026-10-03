@@ -682,3 +682,30 @@ Notable divergences from the plan text: single session-long OpStream reset at
 render start (repaints append to the same frame — `finish()` must not consume
 records); buffer-kind bitmask extended with bit4 COPY_SRC for readback
 sources; mailbox is two channels (4-float + arbitrary bytes), not one.
+
+## GPU offload round 2 (envelope → splatting)
+
+Implemented behind the opt-in `setOffload({key: 'cpu'|'gpu'|'auto'})`
+policy, each with the CPU path retained as the fallback:
+
+| Item | Op | Parity vs CPU |
+|---|---|---|
+| Windowed min/max envelope (line decimation) | 52 `EnvelopeCols` | mailbox, column-exact |
+| Surface vertex-pulling (z-grid only) | 27 pull variant | identical |
+| Marching triangles (tricontour/tricontourf) | 53 `TriContourTess` | bit-identical |
+| Quiver arrowhead expansion | 58 `QuiverTess` | bit-identical |
+| fill_between band tessellation | 57 `FillBetweenTess` | bit-identical |
+| RK4 streamline tracing | 56 `Streamlines` | bit-identical |
+| Painter's-order 3D triangle sort | 54 `DepthSort` | coverage/chroma identical |
+| Density splatting for scatter | 55 `ScatterSplat` | opt-in, semantics differ |
+
+Also fixed in passing: `DrawTrisGpu` inherited the axes-rect viewport
+left set by the preceding line draw, which scaled and shifted every
+draw after a soup draw in the same pass.
+
+**Open item:** density splatting's density grid and packed buffer are
+computed correctly on the device (verified by readback: 141 572
+non-zero cells, counts up to 8), but the final buffer→r32float-texture
+blit does not yet carry the density into the image path — the render
+currently shows the colormap's low end across the whole axes rect.
+Needs debugging of the `copyBufferToTexture` step.

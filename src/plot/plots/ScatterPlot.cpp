@@ -79,6 +79,11 @@ std::optional<Range> ScatterPlot::valueRange() const {
 }
 
 void ScatterPlot::prepare(render::Renderer& r) {
+    // Density splatting ('splatting' offload): the marker path stays the
+    // default because splatting turns overdraw into density.
+    splat_ = r.gpu().supportsScatterSplat() &&
+             render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().splatting);
     if (prepared_) {
         // In-place update via memcpy (reallocs only on growth) — direct
         // series() writes stay correct, no dirty flag to bypass.
@@ -105,6 +110,46 @@ void ScatterPlot::prepare(render::Renderer& r) {
 void ScatterPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
+    // Datashader-style density splatting: points accumulate into a
+    // per-pixel density grid on the device and the grid is drawn through
+    // the colormap — no marker geometry at all.
+    if (splat_ && !transform && pathEffects.empty() &&
+        !series_.markerPath && series_.markerTex.empty() &&
+        !axes.xscale().clipsDomain() && !axes.yscale().clipsDomain() &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().kind == ScaleKind::Linear &&
+        axes.yscale().kind == ScaleKind::Linear) {
+        const uint32_t W = uint32_t(std::max(1.0f, std::ceil(float(rect.width))));
+        const uint32_t H = uint32_t(std::max(1.0f, std::ceil(float(rect.height))));
+        const auto& vp = axes.viewport();
+        const float kx = vp.x.span() > 0.0f
+            ? float(rect.width) / vp.x.span() : 0.0f;
+        const float ky = vp.y.span() > 0.0f
+            ? float(rect.height) / vp.y.span() : 0.0f;
+        if (kx != 0.0f && ky != 0.0f && !series_.points.empty()) {
+            splatXY_.clear();
+            splatXY_.reserve(series_.points.size() * 2);
+            for (const auto& p : series_.points) {
+                splatXY_.push_back(p.x);
+                splatXY_.push_back(p.y);
+            }
+            render::GpuTex dens = 0, cmapTex = 0;
+            const Colormap& cm = cmap_ ? *cmap_ : colormaps::viridis();
+            if (r.gpu().scatterSplat(splatXY_, W, H,
+                                     -vp.x.min * kx, kx,
+                                     float(H) + vp.y.min * ky, -ky,
+                                     splatRadius_, splatMaxDensity_, cm,
+                                     dens, cmapTex)) {
+                const float params[8] = {0.0f, 0.0f, 1.0f, 0.0f,
+                                         splatMaxDensity_, 0.0f, 0.0f,
+                                         float(W)};
+                const Transform2D ident = axes.transform();
+                if (r.gpu().drawImageTex(cmd, rect, &ident, dens, cmapTex,
+                                         params)) return;
+            }
+            splat_ = false;   // fall back to markers for good
+        }
+    }
     // mpl clip_on=False → clip to the whole canvas, not the axes rect.
     auto eff = clipRect(rect, r.gpu().extent());
     Rect2D vrect{eff.x, eff.y, eff.width, eff.height};

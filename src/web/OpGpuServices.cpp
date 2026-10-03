@@ -438,6 +438,58 @@ bool OpGpuServices::triContourTessellate(
     return true;
 }
 
+bool OpGpuServices::scatterSplat(
+    std::span<const float> xy, uint32_t w, uint32_t h,
+    float bx, float ax, float by, float ay, float radius, float maxDensity,
+    const plot::Colormap& cmap, render::GpuTex& densTexOut,
+    render::GpuTex& cmapTexOut) {
+    const uint32_t n = uint32_t(xy.size() / 2);
+    if (!n || !w || !h) return false;
+    // Row padding: copyBufferToTexture wants 256-byte rows.
+    const uint32_t rowStride = ((w * 4 + 255u) / 256u) * 256u / 4u;
+
+    const uint32_t xyBuf = createBufferRaw(xy.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(xyBuf, 0, xy.data(), xy.size_bytes());
+    const uint32_t densBuf = createBufferRaw(size_t(w) * h * 4 + 16, 2 | 16);
+    const uint32_t packBuf = createBufferRaw(
+        size_t(rowStride) * h * 4 + 16, 2 | 16);
+
+    const uint32_t densTex = createTextureRaw(w, h, 2);   // r32float
+    const uint32_t cmapTex = createTextureRaw(256, 1, 1); // rgba8 LUT
+    std::vector<uint8_t> lut(256 * 4);
+    for (uint32_t i = 0; i < 256; ++i) {
+        auto c = cmap.sample(i / 255.0f);
+        lut[i * 4 + 0] = uint8_t(c.r * 255.0f);
+        lut[i * 4 + 1] = uint8_t(c.g * 255.0f);
+        lut[i * 4 + 2] = uint8_t(c.b * 255.0f);
+        lut[i * 4 + 3] = uint8_t(c.a * 255.0f);
+    }
+    writeTextureRaw(cmapTex, 0, 0, 256, 1, lut.data(), lut.size());
+
+    PScatterSplat p{};
+    p.xyBuf = xyBuf; p.densBuf = densBuf; p.packBuf = packBuf; p.n = n;
+    p.W = w; p.H = h; p.rowStride = rowStride; p.tex = densTex;
+    p.bx = bx; p.ax = ax; p.by = by; p.ay = ay;
+    p.radius = radius; p.maxDensity = maxDensity;
+    stream_.emit(Op::ScatterSplat, p);
+    densTexOut = render::GpuTex(densTex);
+    cmapTexOut = render::GpuTex(cmapTex);
+    return true;
+}
+
+bool OpGpuServices::drawImageTex(render::Cmd& cmd, plot::Rect2D rect,
+                                 const void* t, render::GpuTex grid,
+                                 render::GpuTex cmap,
+                                 const float params[8]) {
+    const auto& xf = *static_cast<const plot::Transform2D*>(t);
+    PDrawImage p{toF(rect), makeTransformUBO(xf, rect, {}),
+                 uint32_t(grid), uint32_t(cmap),
+                 {params[0], params[1], params[2], params[3],
+                  params[4], params[5], params[6], params[7]}};
+    ops(cmd).emit(Op::DrawImage, p);
+    return true;
+}
+
 bool OpGpuServices::streamlines(
     std::span<const float> gridU, std::span<const float> gridV,
     uint32_t w, uint32_t h, float xMin, float xSpan, float yMin,

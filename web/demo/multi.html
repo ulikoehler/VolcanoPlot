@@ -132,6 +132,16 @@ window.vpDone = (async () => {
             ys[i] = Math.sin(t) * (1 + 0.3 * Math.sin(3 * t));
         }
         vp.fill(xs, ys, '#e00000');
+    } else if (which === 'scatter') {
+        // Dense cloud — overdraw matters, which is exactly the case
+        // density splatting targets.
+        const N = 6000, xs = new Float32Array(N), ys = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const a = rnd() * 6.28318, r = Math.sqrt(rnd());
+            xs[i] = Math.cos(a) * r * 1.5 + (rnd() - 0.5) * 0.3;
+            ys[i] = Math.sin(a) * r * 1.5 + (rnd() - 0.5) * 0.3;
+        }
+        vp.scatter(xs, ys);
     } else if (which === 'fillbetween') {
         // Two crossing curves so the interpolated run boundaries (the
         // f1 == f2 crossings) are exercised.

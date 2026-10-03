@@ -100,6 +100,15 @@ public:
     /// Colormap for array_ (mpl cmap=; default viridis).
     const Colormap* cmap_ = &colormaps::viridis();
 
+    // Density splatting ('splatting' offload): points accumulate into a
+    // per-pixel density grid on the device; the grid is drawn through
+    // the colormap. Opt-in — overdraw becomes density, so the picture
+    // differs from the marker path by design.
+    bool splat_ = false;
+    float splatRadius_ = 1.5f;
+    float splatMaxDensity_ = 32.0f;
+    std::vector<float> splatXY_;
+
     [[nodiscard]] std::shared_ptr<Normalize> norm() const override {
         return norm_;
     }

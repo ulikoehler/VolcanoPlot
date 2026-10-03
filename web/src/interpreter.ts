@@ -33,6 +33,7 @@ import QUIVER_WGSL from './shaders/QuiverTess.wgsl?raw';
 import FILLBETWEEN_WGSL from './shaders/FillBetweenTess.wgsl?raw';
 import STREAMLINES_WGSL from './shaders/Streamlines.wgsl?raw';
 import DEPTHSORT_WGSL from './shaders/DepthSort.wgsl?raw';
+import SPLAT_WGSL from './shaders/ScatterSplat.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -760,6 +761,29 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
+    private splatBgl?: GPUBindGroupLayout;
+    private splatPipes = new Map<string, GPUComputePipeline>();
+
+    private ensureSplat(entry: string) {
+        if (this.splatPipes.has(entry)) return;
+        if (!this.splatBgl) this.splatBgl = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+            ]});
+        const mod = this.device.createShaderModule({ code: SPLAT_WGSL });
+        this.splatPipes.set(entry, this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.splatBgl] }),
+            compute: { module: mod, entryPoint: entry } }));
+    }
+
     private dsBgl?: GPUBindGroupLayout;
     private dsPipes = new Map<string, GPUComputePipeline>();
 
@@ -1445,6 +1469,65 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                 ]}));
             cpass.dispatchWorkgroups(Math.ceil(nTris * nLv / 64));
             cpass.end();
+            return;
+        }
+        if (op === Op.ScatterSplat) {
+            // PScatterSplat {xyBuf, densBuf, packBuf, n, W, H, rowStride,
+            //   tex, bx, ax, by, ay, radius, maxDensity}
+            const n = p.getUint32(12, true);
+            const W = p.getUint32(16, true);
+            const H = p.getUint32(20, true);
+            const rowStride = p.getUint32(24, true);
+            const tex = p.getUint32(28, true);
+            if (!n || !W || !H || !rowStride) return;
+            this.ensureSplat('splat');
+            this.ensureSplat('pack');
+            const xyBuf = p.getUint32(0, true);
+            const densBuf = p.getUint32(4, true);
+            const packBuf = p.getUint32(8, true);
+            // Density grid starts empty — the splat pass accumulates.
+            this.device.queue.writeBuffer(this.bufRef(densBuf), 0,
+                new Uint32Array(W * H));
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, n, true);
+            pc.setUint32(4, W, true);
+            pc.setUint32(8, H, true);
+            pc.setUint32(12, rowStride, true);
+            pc.setFloat32(16, p.getFloat32(32, true), true);  // radius
+            pc.setFloat32(20, p.getFloat32(36, true), true);  // maxDensity
+            pc.setFloat32(24, NaN, true);                     // empty cell
+            pc.setFloat32(28, p.getFloat32(40, true), true);  // bx
+            pc.setFloat32(32, p.getFloat32(44, true), true);  // ax
+            pc.setFloat32(36, p.getFloat32(48, true), true);  // by
+            pc.setFloat32(40, p.getFloat32(52, true), true);  // ay
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const bind = (entry: string, count: number) => {
+                const cpass = enc.beginComputePass();
+                cpass.setPipeline(this.splatPipes.get(entry)!);
+                cpass.setBindGroup(0, this.device.createBindGroup({
+                    layout: this.splatBgl!, entries: [
+                        { binding: 0, resource: { buffer: this.uniformRing,
+                                                  offset: off, size: 48 } },
+                        { binding: 1, resource: { buffer:
+                            this.bufRef(xyBuf) } },
+                        { binding: 2, resource: { buffer:
+                            this.bufRef(densBuf) } },
+                        { binding: 3, resource: { buffer:
+                            this.bufRef(packBuf) } },
+                    ]}));
+                cpass.dispatchWorkgroups(Math.ceil(count / 64));
+                cpass.end();
+            };
+            bind('splat', n);
+            bind('pack', W * H);
+            // Blit the padded density into the r32float texture the image
+            // draw samples through the colormap.
+            const e2 = this.textures.get(tex);
+            if (e2) enc.copyBufferToTexture(
+                { buffer: this.bufRef(packBuf),
+                  bytesPerRow: rowStride * 4, rowsPerImage: H },
+                { texture: e2.tex },
+                { width: W, height: H, depthOrArrayLayers: 1 });
             return;
         }
         if (op === Op.DepthSort) {

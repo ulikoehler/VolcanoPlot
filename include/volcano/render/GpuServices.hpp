@@ -13,6 +13,7 @@
 // scratch state only — the objects themselves persist).
 #pragma once
 
+#include <volcano/plot/Colormap.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
 
@@ -277,6 +278,34 @@ public:
         return false;
     }
     [[nodiscard]] virtual bool supportsStreamlines() const noexcept {
+        return false;
+    }
+
+    /// Datashader-style density splatting: splat `xy` (data space) into a
+    /// w×h density grid, resolve it through `cmap` and hand back the two
+    /// textures for drawImageTex. Opt-in — it replaces overdraw with
+    /// density, so the picture differs from the marker path by design.
+    virtual bool scatterSplat(std::span<const float> xy,
+                              uint32_t w, uint32_t h,
+                              float bx, float ax, float by, float ay,
+                              float radius, float maxDensity,
+                              const plot::Colormap& cmap,
+                              GpuTex& densTexOut, GpuTex& cmapTexOut) {
+        (void)xy; (void)w; (void)h; (void)bx; (void)ax; (void)by; (void)ay;
+        (void)radius; (void)maxDensity; (void)cmap;
+        (void)densTexOut; (void)cmapTexOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsScatterSplat() const noexcept {
+        return false;
+    }
+    /// Draw a device-produced texture through the colormap image path.
+    /// `t` is accepted for symmetry with the other primitives; the image
+    /// shader places the quad from `rect` alone.
+    virtual bool drawImageTex(Cmd& cmd, plot::Rect2D rect,
+                              const void* t, GpuTex grid,
+                              GpuTex cmap, const float params[8]) {
+        (void)cmd; (void)rect; (void)t; (void)grid; (void)cmap; (void)params;
         return false;
     }
 

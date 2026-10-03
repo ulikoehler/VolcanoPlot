@@ -182,6 +182,19 @@ public:
         std::span<const float> dashes, uint32_t mode,
         render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
 
+    [[nodiscard]] bool supportsScatterSplat() const noexcept override {
+        return true;
+    }
+    bool scatterSplat(std::span<const float> xy, uint32_t w, uint32_t h,
+                      float bx, float ax, float by, float ay,
+                      float radius, float maxDensity,
+                      const plot::Colormap& cmap,
+                      render::GpuTex& densTexOut,
+                      render::GpuTex& cmapTexOut) override;
+    bool drawImageTex(render::Cmd& cmd, plot::Rect2D rect, const void* t,
+                      render::GpuTex grid, render::GpuTex cmap,
+                      const float params[8]) override;
+
     [[nodiscard]] bool supportsStreamlines() const noexcept override {
         return true;
     }

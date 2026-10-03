@@ -244,6 +244,13 @@ struct PStreamlines { uint32_t uBuf, vBuf, seedBuf, outPts, outCnt;
 struct PDepthSort { uint32_t posBuf, idxBuf, keyBuf;
                     uint32_t nTris, nPad;
                     float vp[16]; };
+/// Datashader-style density splatting: `xyBuf` holds the (x, y) pairs,
+/// `densBuf` the u32 atomic grid, `packBuf` the row-padded f32 copy that
+/// the interpreter blits into `tex` (r32float, W×H) for the colormap
+/// image draw. The affine maps data space to grid cells.
+struct PScatterSplat { uint32_t xyBuf, densBuf, packBuf, n;
+                       uint32_t W, H, rowStride, tex;
+                       float bx, ax, by, ay, radius, maxDensity; };
 #pragma pack(pop)
 
 } // namespace volcano::web

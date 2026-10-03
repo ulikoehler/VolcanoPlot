@@ -54,6 +54,7 @@ const INIT = (mode: string) => {
     (window as any).__fb = 0;
     (window as any).__sl = 0;
     (window as any).__ds = 0;
+    (window as any).__splat = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -72,6 +73,7 @@ const INIT = (mode: string) => {
                                fillbetween: (window as any).__wantMode,
                                streamlines: (window as any).__wantMode,
                                depthsort: (window as any).__wantMode,
+                               splatting: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -89,6 +91,7 @@ const INIT = (mode: string) => {
                 if (a[2] === 57) (window as any).__fb++;
                 if (a[2] === 56) (window as any).__sl++;
                 if (a[2] === 54) (window as any).__ds++;
+                if (a[2] === 55) (window as any).__splat++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -135,7 +138,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  quiver: (window as any).__quiver,
                  fb: (window as any).__fb,
                  sl: (window as any).__sl,
-                 ds: (window as any).__ds };
+                 ds: (window as any).__ds,
+                 splat: (window as any).__splat };
     }, frames);
 }
 
@@ -299,6 +303,28 @@ test('GPU depth sort matches the CPU painter order', async ({ page }) => {
            Math.max(1, cpu.nonWhite)).toBeLessThan(0.01);
     expect(Math.abs(gpu.chroma - cpu.chroma) /
            Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});
+
+test('GPU density splatting replaces marker overdraw', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'scatter', 'cpu', 1);
+    const gpu = await captureWith(page, 'scatter', 'gpu', 2);
+    console.log(`SPLAT cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    // Density rendering runs on the device only in the gpu run.
+    expect(gpu.splat).toBeGreaterThan(0);
+    expect(cpu.splat).toBe(0);
+    // Semantics differ by design (overdraw → density), so this checks
+    // that the density cloud covers the same data footprint rather than
+    // matching pixels; empty cells are transparent, so the density image
+    // paints at most a few times the marker ink.
+    expect(gpu.nonWhite).toBeGreaterThan(0.2 * cpu.nonWhite);
+    expect(gpu.nonWhite).toBeLessThan(3 * cpu.nonWhite);
 });
 
 test('GPU dash expansion matches the CPU stroker', async ({ page }) => {
