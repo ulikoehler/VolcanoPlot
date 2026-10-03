@@ -361,6 +361,82 @@ bool OpGpuServices::contourTessellate(
     return true;
 }
 
+bool OpGpuServices::triContourTessellate(
+    std::span<const float> xyz,
+    std::span<const uint32_t> tris,
+    std::span<const float> levels,
+    std::span<const plot::Color> colors,
+    float bx, float ax, float by, float ay, float lineWidth,
+    std::span<const float> dashes, uint32_t mode,
+    render::GpuBuf& soupOut, render::GpuBuf& countOut) {
+    const uint32_t nTris = uint32_t(tris.size() / 3);
+    const uint32_t nLv = mode == 1 && levels.size() > 0
+        ? uint32_t(levels.size() - 1) : uint32_t(levels.size());
+    if (!nTris || !nLv || xyz.size() < 9) return false;
+
+    // Upper bound: mode 0 → one stroked segment per (tri, level) ×6
+    // verts ×dashMul; mode 1 → S–H clip caps a band polygon at 5 verts
+    // → 3 triangles = 9 verts per (tri, band).
+    uint32_t dashMul = 1;
+    if (mode == 0) {
+        for (size_t i = 0; i < nLv; ++i) {
+            const float on = i * 2 + 1 < dashes.size() ? dashes[i * 2] : 0.f;
+            const float off = i * 2 + 1 < dashes.size() ? dashes[i * 2 + 1]
+                                                        : 0.f;
+            if (on <= 0.0f) continue;
+            const float period = std::max(on + off, 0.5f);
+            const float diag = std::sqrt(ax * ax + ay * ay) * 2.0f;
+            dashMul = std::max(dashMul,
+                               uint32_t(std::ceil(diag / period)) + 1u);
+        }
+        dashMul = std::min(dashMul, 64u);
+    }
+    const uint64_t per = mode == 1 ? 9 : 6 * dashMul;
+    const uint64_t maxVerts = uint64_t(nTris) * nLv * per;
+    constexpr uint64_t kSoupBudget = 256ull << 20;
+    if (!maxVerts || maxVerts * 24 > kSoupBudget) return false;
+
+    auto stage = [&](const void* d, size_t bytes) {
+        uint32_t handle = createBufferRaw(bytes + 16, 1 | 2 | 16);
+        writeBufferRaw(handle, 0, d, bytes);
+        return handle;
+    };
+    const uint32_t xyzBuf = stage(xyz.data(), xyz.size_bytes());
+    const uint32_t trisBuf = stage(tris.data(), tris.size_bytes());
+    const uint32_t levelsBuf = stage(levels.data(), levels.size_bytes());
+    std::vector<float> rgba(colors.size() * 4);
+    for (size_t i = 0; i < colors.size(); ++i) {
+        rgba[i * 4 + 0] = colors[i].r;
+        rgba[i * 4 + 1] = colors[i].g;
+        rgba[i * 4 + 2] = colors[i].b;
+        rgba[i * 4 + 3] = colors[i].a;
+    }
+    const uint32_t colBuf = stage(rgba.data(), rgba.size() * 4);
+    std::vector<float> dashPairs(nLv * 2, 0.0f);
+    for (size_t i = 0; i < nLv && i * 2 + 1 < dashes.size(); ++i) {
+        dashPairs[i * 2] = dashes[i * 2];
+        dashPairs[i * 2 + 1] = dashes[i * 2 + 1];
+    }
+    const uint32_t dashBuf = stage(dashPairs.data(), dashPairs.size() * 4);
+    const uint32_t soup = createBufferRaw(maxVerts * 24 + 16, 2 | 16);
+    const uint32_t counter = createBufferRaw(16, 2 | 16 | 32);
+    const uint32_t seed[4] = {0u, 1u, 0u, 0u};
+    writeBufferRaw(counter, 0, seed, sizeof(seed));
+
+    PTriContourTess p{};
+    p.xyzBuf = xyzBuf; p.trisBuf = trisBuf;
+    p.levelsBuf = levelsBuf; p.colBuf = colBuf;
+    p.outBuf = soup; p.counterBuf = counter; p.dashBuf = dashBuf;
+    p.nTris = nTris; p.nLevels = nLv;
+    p.bx = bx; p.ax = ax; p.by = by; p.ay = ay;
+    p.hwidth = lineWidth * 0.5f;
+    p.mode = mode; p.maxVerts = uint32_t(maxVerts); p.dashMul = dashMul;
+    stream_.emit(Op::TriContourTess, p);
+    soupOut = render::GpuBuf(soup);
+    countOut = render::GpuBuf(counter);
+    return true;
+}
+
 std::optional<std::vector<uint32_t>>
 OpGpuServices::hexBins(std::span<const float> x, std::span<const float> y,
                        uint32_t nx, uint32_t ny, float xMin, float yMin,

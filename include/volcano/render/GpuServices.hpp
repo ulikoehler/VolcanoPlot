@@ -191,6 +191,31 @@ public:
         return false;
     }
 
+    /// Scattered-data contour tessellation (marching triangles over a
+    /// triangulation) — same eventual contract as contourTessellate.
+    /// `xyz` packs (x, y, z) per point; `tris` packs 3 point indices
+    /// per triangle. `mode` 0 = isolines stroked like contourTessellate
+    /// (colors/dashes per level); mode 1 = filled bands clipped to
+    /// [level_i, level_{i+1}] (colors per band, dashes unused).
+    /// Output soup is the same {pos_px, rgba} layout, drawn via
+    /// SpineRenderer::drawTrianglesGpuIndirect.
+    virtual bool triContourTessellate(
+        std::span<const float> xyz,
+        std::span<const uint32_t> tris,
+        std::span<const float> levels,
+        std::span<const plot::Color> colors,
+        float bx, float ax, float by, float ay, float lineWidth,
+        std::span<const float> dashes, uint32_t mode,
+        GpuBuf& soupOut, GpuBuf& countOut) {
+        (void)xyz; (void)tris; (void)levels; (void)colors;
+        (void)bx; (void)ax; (void)by; (void)ay; (void)lineWidth;
+        (void)dashes; (void)mode; (void)soupOut; (void)countOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsTriContourTessellate() const noexcept {
+        return false;
+    }
+
     /// Batched real-input FFT for the spectrum family: `numSegs` windows
     /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
     /// `n`-sample window `win`, transformed. Returns `numSegs * n`

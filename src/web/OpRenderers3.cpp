@@ -5,6 +5,7 @@
 #include "OpCmd.hpp"
 #include "OpPayloads.hpp"
 #include "OpFactory.hpp"
+#include <algorithm>
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/PointRenderer.hpp>
 #include <volcano/render/primitives/LineRenderer.hpp>
@@ -107,6 +108,26 @@ public:
     explicit OpSurfaceRenderer(OpGpuServices& s) : s_(&s) {}
     void upload(const Grid2D& grid) override {
         if (grid.width < 2 || grid.height < 2) { indexCount_ = 0; return; }
+        // Vertex-pull offload: upload the flat z grid only — the VS
+        // derives positions/topology from vertex_index (no CPU vertex
+        // or index expansion, ~7× less upload bandwidth).
+        if (render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().surfacemesh)) {
+            pullGrid_ = true;
+            gridW_ = grid.width; gridH_ = grid.height;
+            if (vertBuf_) s_->releaseBuffer(vertBuf_);
+            if (idxBuf_) { s_->releaseBuffer(idxBuf_); idxBuf_ = 0; }
+            vertBuf_ = s_->createBufferRaw(grid.values.size() * 4 + 16,
+                                         1|2);
+            s_->writeBufferRaw(vertBuf_, 0, grid.values.data(),
+                               grid.values.size() * 4);
+            indexCount_ = 0;
+            valueMin_ = grid.valueRange.min;
+            valueMax_ = grid.valueRange.max;
+            xRange_ = grid.xRange; yRange_ = grid.yRange;
+            return;
+        }
+        pullGrid_ = false;
         std::vector<Point3D> verts(grid.width * grid.height);
         const float xMin = grid.xRange.min, xMax = grid.xRange.max;
         const float yMin = grid.yRange.min, yMax = grid.yRange.max;
@@ -139,7 +160,7 @@ public:
     }
     void draw(Cmd& cmd, Rect2D rect, const Camera3D& camera, bool shade,
               float lightAzdeg, float lightAltdeg) const override {
-        if (!indexCount_) return;
+        if (!pullGrid_ && !indexCount_) return;
         PDrawSurface p{};
         p.clip = clipF(rect);
         const auto vp = camera.viewProjection();
@@ -156,12 +177,17 @@ public:
         p.light[3] = shade ? 1.0f : 0.0f;
         p.valueMin = valueMin_; p.valueMax = valueMax_;
         p.vertBuf = vertBuf_; p.idxBuf = idxBuf_;
-        p.indexCount = indexCount_;
+        p.indexCount = pullGrid_
+            ? (gridW_ - 1) * (gridH_ - 1) * 6 : indexCount_;
+        p.gridW = pullGrid_ ? gridW_ : 0;
+        p.gridH = pullGrid_ ? gridH_ : 0;
         ops(cmd).emit(Op::DrawSurface, p);
     }
 private:
     OpGpuServices* s_;
     uint32_t vertBuf_ = 0, idxBuf_ = 0, indexCount_ = 0;
+    uint32_t gridW_ = 0, gridH_ = 0;
+    bool pullGrid_ = false;
     float valueMin_ = 0, valueMax_ = 1;
     Range xRange_{0, 1}, yRange_{0, 1};
 };
@@ -271,13 +297,73 @@ public:
         return {Mesh{GpuBuf(outBuf), 0,
                      uint32_t(px.size() - 1) * 6 * dashMul}};
     }
-    bool envelopeColumns(GpuBuf, uint32_t, float, float, int, int,
-                         std::vector<float>&,
-                         std::vector<float>&) override { return false; }
+    /// Eventual-delivery envelope: the first call for a parameter set
+    /// seeds the key buffer, emits EnvelopeCols + a bulk mailbox, and
+    /// returns false (the caller takes its CPU path for that frame).
+    /// Identical later calls serve the delivered key columns, decoded
+    /// back to floats — one frame of latency, then all-GPU.
+    bool envelopeColumns(GpuBuf points, uint32_t count,
+                         float ax, float kx, int cx0, int cx1,
+                         std::vector<float>& mn,
+                         std::vector<float>& mx) override {
+        if (!points || count < 2 || cx1 < cx0 ||
+            !render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().envelope))
+            return false;
+        const uint32_t W = uint32_t(cx1 - cx0 + 1);
+
+        auto sameReq = [&] {
+            return env_.buf == uint32_t(points) && env_.count == count &&
+                   env_.ax == ax && env_.kx == kx &&
+                   env_.cx0 == cx0 && env_.cx1 == cx1;
+        };
+        if (sameReq() && env_.slot && s_->mailboxReady(env_.slot)) {
+            auto bytes = s_->mailboxTake(env_.slot);
+            if (bytes.size() < size_t(W) * 8) return false;
+            const auto* keys =
+                reinterpret_cast<const uint32_t*>(bytes.data());
+            mn.resize(W);
+            mx.resize(W);
+            bool any = false;
+            for (uint32_t i = 0; i < W; ++i) {
+                mn[i] = unord(keys[i]);
+                mx[i] = unord(keys[W + i]);
+                any = any || keys[i] != 0xFF800000u;
+            }
+            return any;
+        }
+        if (sameReq() && env_.slot) return false;  // still in flight
+
+        // Fresh request: ordered-int identities seeded per column.
+        std::vector<uint32_t> seed(size_t(W) * 2);
+        std::fill(seed.begin(), seed.begin() + W, 0xFF800000u);
+        std::fill(seed.begin() + W, seed.end(), 0x007FFFFFu);
+        uint32_t outBuf =
+            s_->createBufferRaw(seed.size() * 4 + 16, 2 | 16);
+        s_->writeBufferRaw(outBuf, 0, seed.data(), seed.size() * 4);
+        env_ = EnvReq{uint32_t(points), count, ax, kx, cx0, cx1,
+                      s_->allocMailbox()};
+        s_->curStream()->emit(Op::EnvelopeCols,
+            PEnvelopeCols{uint32_t(points), count, outBuf, ax, kx,
+                          cx0, cx1, W, env_.slot});
+        return false;
+    }
     bool supportsDashes() const noexcept override { return true; }
     void resetScratch() override {}
     bool inited() const noexcept override { return true; }
 private:
+    static float unord(uint32_t u) {
+        float f;
+        uint32_t b = (u & 0x80000000u) ? (u & 0x7fffffffu) : ~u;
+        std::memcpy(&f, &b, 4);
+        return f;
+    }
+    struct EnvReq {
+        uint32_t buf = 0, count = 0;
+        float ax = 0, kx = 0;
+        int cx0 = 0, cx1 = 0;
+        uint32_t slot = 0;
+    } env_;
     OpGpuServices* s_;
 };
 

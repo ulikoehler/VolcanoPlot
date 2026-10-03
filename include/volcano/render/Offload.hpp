@@ -47,6 +47,20 @@ struct OffloadConfig {
     OffloadMode fft = OffloadMode::Auto;
     /// Column envelope reduction over very large point sets.
     OffloadMode envelope = OffloadMode::Auto;
+    /// Surface mesh topology pulled in the vertex shader (no CPU
+    /// index/vertex expansion for `plot_surface`/`surf`).
+    OffloadMode surfacemesh = OffloadMode::Auto;
+    /// Quiver/barb arrowhead expansion in the vertex shader.
+    OffloadMode arrows = OffloadMode::Auto;
+    /// fill_between crossing-point insertion + soup emission.
+    OffloadMode fillbetween = OffloadMode::Auto;
+    /// Streamline RK4 integration for streamplot.
+    OffloadMode streamlines = OffloadMode::Auto;
+    /// Painter's-order depth sort for 3-D triangle soup (bitonic).
+    OffloadMode depthsort = OffloadMode::Auto;
+    /// Density splatting for huge scatter sets (datashader-style —
+    /// changes semantics: density replaces overdraw).
+    OffloadMode splatting = OffloadMode::Cpu;
 
     /// Process-wide config, initialised from VOLCANO_GPU_OFFLOAD /
     /// VOLCANO_GPU_HIST on first use.

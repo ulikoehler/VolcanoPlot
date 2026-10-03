@@ -7,7 +7,7 @@ struct SurfUBO {
     gridRange : vec4f,     // xy = xRange min/max, zw = yRange min/max
     light : vec4f,         // xyz = light dir, w = shade flag
     valueRange : vec2f,    // min, max of z values
-    pad : vec2f,
+    gridDim : vec2u,       // vertex-pull grid dims (0 = indexed mesh)
 };
 
 @group(0) @binding(0) var<uniform> U : SurfUBO;
@@ -22,10 +22,30 @@ struct VOut {
 };
 
 @vertex fn vs(@builtin(vertex_index) vi : u32) -> VOut {
+#ifdef PULL_GRID
+    // Vertex-pull grid: verts[] is a flat f32 z array; cell topology
+    // comes from vertex_index. Per cell the indexed mesh walks
+    // {a, c, b, b, c, d} — corner offsets in (i,j):
+    //   a=(0,0) c=(0,1) b=(1,0)  b=(1,0) c=(0,1) d=(1,1)
+    let gw = U.gridDim.x;
+    let cell = vi / 6u;
+    let corner = array<vec2u, 6>(
+        vec2u(0, 0), vec2u(0, 1), vec2u(1, 0),
+        vec2u(1, 0), vec2u(0, 1), vec2u(1, 1))[vi % 6u];
+    let ci = vec2u(cell % (gw - 1u), cell / (gw - 1u)) + corner;
+    let x = U.gridRange.x +
+            f32(ci.x) / f32(gw - 1u) *
+            (U.gridRange.y - U.gridRange.x);
+    let y = U.gridRange.z +
+            f32(ci.y) / f32(U.gridDim.y - 1u) *
+            (U.gridRange.w - U.gridRange.z);
+    let p = vec3f(x, y, bitcast<f32>(verts[ci.y * gw + ci.x]));
+#else
     let idx = indices[vi];
     let p = vec3f(bitcast<f32>(verts[idx * 3u]),
                   bitcast<f32>(verts[idx * 3u + 1u]),
                   bitcast<f32>(verts[idx * 3u + 2u]));
+#endif
     let nx = (p.x - U.gridRange.x) /
              max(U.gridRange.y - U.gridRange.x, 1e-30);
     let ny = (p.y - U.gridRange.z) /

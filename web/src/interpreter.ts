@@ -27,6 +27,8 @@ import BINS2D_WGSL from './shaders/HistBins2D.wgsl?raw';
 import HEXBINS_WGSL from './shaders/HexBins.wgsl?raw';
 import CONTOUR_WGSL from './shaders/ContourTess.wgsl?raw';
 import FFT_WGSL from './shaders/FftSegments.wgsl?raw';
+import ENVELOPE_WGSL from './shaders/EnvelopeCols.wgsl?raw';
+import TRICONTOUR_WGSL from './shaders/TriContourTess.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -54,6 +56,9 @@ export enum Op {
     TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
     KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
     HistBins2D = 48, HexBins = 49, ContourTess = 50, FftSegments = 51,
+    EnvelopeCols = 52, TriContourTess = 53, DepthSort = 54,
+    ScatterSplat = 55, Streamlines = 56, FillBetweenTess = 57,
+    QuiverTess = 58,
 }
 
 export interface FrameHeader {
@@ -332,6 +337,11 @@ export class Interpreter {
         mk('surface', { src: SURFACE_WGSL, topology: 'triangle-list',
                         depth: true, blend: false,
                         bindings: [ub, S(1), S(2)] });
+        // Vertex-pull grid (surfacemesh offload): no index buffer.
+        mk('surface.pull', { src: SURFACE_WGSL, topology: 'triangle-list',
+                             depth: true, blend: false,
+                             defines: ['PULL_GRID'],
+                             bindings: [ub, S(1)] });
         mk('grid3d', { src: GRID3D_WGSL, topology: 'triangle-list',
                        bindings: [ub] });
         // GPU-projected 3D primitives (projection3d offload). Painter's
@@ -644,6 +654,30 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             layout: this.device.createPipelineLayout({
                 bindGroupLayouts: [this.pcmBgl] }),
             compute: { module: mod, entryPoint: 'main' } });
+    }
+
+    private triContPipe?: GPUComputePipeline;
+    private triContBgl?: GPUBindGroupLayout;
+
+    private ensureTriContour() {
+        if (this.triContPipe) return;
+        this.triContBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 4, 5].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            ...[6, 7].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'storage' as
+                             GPUBufferBindingType } })),
+        ]});
+        const mod = this.device.createShaderModule({ code: TRICONTOUR_WGSL });
+        this.triContPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.triContBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
     }
 
     // ── binning (hist / hist2d / hexbin) ─────────────────────────────
@@ -1251,6 +1285,65 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                               p.getUint32(36, true));
             return;
         }
+        if (op === Op.EnvelopeCols) {
+            // PEnvelopeCols {xyBuf, n, outBuf, ax, kx, cx0, cx1,
+            //                nCols, mailbox}
+            const n = p.getUint32(4, true);
+            const W = p.getUint32(28, true);
+            if (!n || !W) return;
+            const pc = new DataView(new ArrayBuffer(32));
+            pc.setFloat32(0, p.getFloat32(12, true), true);  // ax
+            pc.setFloat32(4, p.getFloat32(16, true), true);  // kx
+            pc.setInt32(8, p.getInt32(20, true), true);      // cx0
+            pc.setInt32(12, p.getInt32(24, true), true);     // cx1
+            pc.setUint32(16, n, true);                       // n
+            pc.setUint32(20, W, true);                       // nCols —
+            // point count drives the loop bound, column count the
+            // mn/mx region split.
+            const outBuf = p.getUint32(8, true);
+            this.dispatchBins(enc, op, ENVELOPE_WGSL,
+                              new Uint32Array(pc.buffer),
+                              p.getUint32(0, true), outBuf, n, W * 2,
+                              p.getUint32(36, true));
+            return;
+        }
+        if (op === Op.TriContourTess) {
+            // PTriContourTess {xyzBuf, trisBuf, levelsBuf, colBuf,
+            //   outBuf, counterBuf, dashBuf, nTris, nLevels,
+            //   bx,ax,by,ay, hwidth, mode, maxVerts, dashMul}
+            const nTris = p.getUint32(28, true);
+            const nLv = p.getUint32(32, true);
+            if (!nTris || !nLv) return;
+            this.ensureTriContour();
+            const pc = new DataView(new ArrayBuffer(64));
+            pc.setUint32(0, nTris, true);
+            pc.setUint32(4, nLv, true);
+            pc.setUint32(8, p.getUint32(56, true), true);   // mode
+            pc.setFloat32(16, p.getFloat32(36, true), true); // bx
+            pc.setFloat32(20, p.getFloat32(40, true), true); // ax
+            pc.setFloat32(24, p.getFloat32(44, true), true); // by
+            pc.setFloat32(28, p.getFloat32(48, true), true); // ay
+            pc.setFloat32(32, p.getFloat32(52, true), true); // hwidth
+            pc.setUint32(48, p.getUint32(60, true), true);   // maxVerts
+            pc.setUint32(52, p.getUint32(64, true), true);   // dashMul
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.triContPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.triContBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 64 } },
+                    // Shader order is xyz, tris, levels, colors,
+                    // dashes, soup, args; the payload stores
+                    // out/counter/dash at offsets 16/20/24.
+                    ...[0, 4, 8, 12, 24, 16, 20].map((off2, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(off2, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(nTris * nLv / 64));
+            cpass.end();
+            return;
+        }
         if (op !== Op.TessLines) return;
         this.ensureTess();
         // PTessLines {inBuf,inBase,outBuf,outBase,n,nSeg,hwidth,
@@ -1556,17 +1649,29 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const cnt = p.getUint32(136, true);
             if (!cnt) break;
             this.scissor(pass, p); this.viewport(pass, p, 0);
-            const off = this.uboWrite(new Uint8Array(
-                p.buffer, p.byteOffset + 16, 128));
-            pass.setPipeline(this.activePipes.get('surface')!);
-            pass.setBindGroup(0, this.bindGroup('surface', [
+            const ubo = new Uint8Array(
+                p.buffer, p.byteOffset + 16, 128).slice();
+            // gridW/gridH (@140/144) → SurfUBO gridDim (bytes 96..104);
+            // non-zero marks the vertex-pull grid mode.
+            new DataView(ubo.buffer).setUint32(104, p.getUint32(140, true),
+                                               true);
+            new DataView(ubo.buffer).setUint32(108,
+                                               p.getUint32(144, true),
+                                               true);
+            const off = this.uboWrite(ubo);
+            const pull = p.getUint32(140, true) !== 0;
+            const key = pull ? 'surface.pull' : 'surface';
+            pass.setPipeline(this.activePipes.get(key)!);
+            const surfEntries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformRing,
                                           offset: off, size: 128 } },
                 { binding: 1, resource: { buffer:
                     this.bufRef(p.getUint32(128, true)) } },
-                { binding: 2, resource: { buffer:
-                    this.bufRef(p.getUint32(132, true)) } },
-            ]));
+            ];
+            if (!pull)
+                surfEntries.push({ binding: 2, resource: { buffer:
+                    this.bufRef(p.getUint32(132, true)) } });
+            pass.setBindGroup(0, this.bindGroup(key, surfEntries));
             pass.draw(cnt);
             break;
         }

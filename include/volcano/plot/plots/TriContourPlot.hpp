@@ -58,6 +58,10 @@ private:
     std::vector<Point2D> segments_;
     std::vector<float> segLevels_;
     bool prepared_ = false;
+    bool gpuTess_ = false;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
+    std::vector<float> xyzPacked_;
+    std::vector<uint32_t> trisPacked_;
 
     void computeLevels();
     void marchingTriangles();
@@ -100,6 +104,10 @@ private:
     std::vector<Point2D> positions_;
     std::vector<Color> colors_;
     bool prepared_ = false;
+    bool gpuTess_ = false;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
+    std::vector<float> xyzPacked_;
+    std::vector<uint32_t> trisPacked_;
 
     void computeLevels();
     void marchingTrianglesFilled();

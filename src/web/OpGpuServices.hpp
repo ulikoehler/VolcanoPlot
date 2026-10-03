@@ -168,6 +168,20 @@ public:
     [[nodiscard]] bool supportsContourTessellate() const noexcept override {
         return true;
     }
+    /// Scattered-data variant (op 53) — isoline stroking and filled
+    /// band clipping share one compute op.
+    [[nodiscard]] bool supportsTriContourTessellate() const noexcept override {
+        return true;
+    }
+    bool triContourTessellate(
+        std::span<const float> xyz,
+        std::span<const uint32_t> tris,
+        std::span<const float> levels,
+        std::span<const plot::Color> colors,
+        float bx, float ax, float by, float ay, float lineWidth,
+        std::span<const float> dashes, uint32_t mode,
+        render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
+
     bool contourTessellate(
         std::span<const float> grid, uint32_t w, uint32_t h,
         std::span<const float> levels,

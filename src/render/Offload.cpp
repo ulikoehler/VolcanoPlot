@@ -23,6 +23,12 @@ constexpr std::array kEntries{
     Entry{"instancing", &OffloadConfig::instancing},
     Entry{"fft", &OffloadConfig::fft},
     Entry{"envelope", &OffloadConfig::envelope},
+    Entry{"surfacemesh", &OffloadConfig::surfacemesh},
+    Entry{"arrows", &OffloadConfig::arrows},
+    Entry{"fillbetween", &OffloadConfig::fillbetween},
+    Entry{"streamlines", &OffloadConfig::streamlines},
+    Entry{"depthsort", &OffloadConfig::depthsort},
+    Entry{"splatting", &OffloadConfig::splatting},
 };
 
 /// Parse "auto" | "gpu" | "cpu" | "on" | "off" | "1" | "0".

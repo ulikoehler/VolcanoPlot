@@ -91,7 +91,13 @@ struct PDrawImage   { Rect2Df viewRect; TransformUBO ubo;
 struct PDrawSurface { Rect2Df clip; float vp[16]; float gridRange[4];
                       float light[4]; float valueMin, valueMax;
                       float pad[2];
-                      uint32_t vertBuf, idxBuf, indexCount; };
+                      uint32_t vertBuf, idxBuf, indexCount;
+                      /// Vertex-pull grid mode (`surfacemesh` offload):
+                      /// idxBuf==0 → vertBuf is a flat f32 z array of
+                      /// gridW*gridH; the VS derives positions and cell
+                      /// topology from vertex_index. 0 = CPU-tessellated
+                      /// indexed mesh.
+                      uint32_t gridW, gridH; };
 /// The full 44-float push block from Grid3DRendererVk::draw.
 struct PDrawGrid3D { Rect2Df clip; float pc[44]; };
 
@@ -184,6 +190,29 @@ struct PFftSegments { uint32_t sigBuf, winBuf, outBuf;
 struct PHexBins    { uint32_t xyBuf, n, outBuf;
                      float xMin, yMin, sx, sy;
                      uint32_t nx, ny, mailbox; };
+/// Per-pixel-column min/max envelope over a vec2f point buffer (port of
+/// GpuLineRendererVk::envelopeColumns' GLSL). One invocation per
+/// segment (i-1, i) accumulates ordered-int min/max keys per column —
+/// works on unsorted x. outBuf = u32[2*nCols]: [0..n) mn keys seeded
+/// 0xFF800000, [n..2n) mx keys seeded 0x007FFFFF. Read back via bulk
+/// mailbox (slot → nCols*2 u32); the C++ side unords to floats.
+struct PEnvelopeCols { uint32_t xyBuf, n, outBuf;
+                       float ax, kx;
+                       int32_t cx0, cx1;
+                       uint32_t nCols, mailbox; };
+/// Scattered-data contour tessellation (marching triangles). One
+/// invocation per (triangle, level|band). xyzBuf packs (x, y, z) f32
+/// triples per point; trisBuf packs 3 u32 indices per triangle.
+/// mode 0 = isolines (stroke each crossing segment like ContourTess,
+/// colors/dashes per level); mode 1 = filled bands (Sutherland–Hodgman
+/// clip of each triangle to [level_i, level_{i+1}], band color).
+/// Output = {vec2 pos_px, vec4 rgba} soup + indirect args — same draw
+/// path as ContourTess.
+struct PTriContourTess { uint32_t xyzBuf, trisBuf, levelsBuf, colBuf,
+                         outBuf, counterBuf, dashBuf;
+                         uint32_t nTris, nLevels;
+                         float bx, ax, by, ay;
+                         float hwidth; uint32_t mode, maxVerts, dashMul; };
 #pragma pack(pop)
 
 } // namespace volcano::web

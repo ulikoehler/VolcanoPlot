@@ -49,6 +49,7 @@ const INIT = (mode: string) => {
     (window as any).__fft = 0;
     (window as any).__p3d = 0;
     (window as any).__inst = 0;
+    (window as any).__tricont = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -75,6 +76,7 @@ const INIT = (mode: string) => {
             interp.execCompute = (...a: any[]) => {
                 if (a[2] === 50) (window as any).__contours++;
                 if (a[2] === 51) (window as any).__fft++;
+                if (a[2] === 53) (window as any).__tricont++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -116,7 +118,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  contours: (window as any).__contours,
                  fft: (window as any).__fft,
                  p3d: (window as any).__p3d,
-                 inst: (window as any).__inst };
+                 inst: (window as any).__inst,
+                 tricont: (window as any).__tricont };
     }, frames);
 }
 
@@ -167,6 +170,32 @@ for (const kind of ['contour']) {
         // Same contour geometry → the same ink.
         expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
                Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+    });
+}
+
+for (const kind of ['tricontour', 'tricontourf']) {
+    test(`GPU marching triangles match the CPU path for ${kind}`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 1);
+        const gpu = await captureWith(page, kind, 'gpu', 2);
+        console.log(`${kind.toUpperCase()} cpu=${JSON.stringify(cpu)} ` +
+                    `gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        expect(gpu.tricont).toBeGreaterThan(0);
+        expect(cpu.tricont).toBe(0);
+        // The same crossings → the same ink (a few pixels of raster
+        // boundary noise where a stroked edge lands half-covered).
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+        if (kind === 'tricontourf')
+            expect(Math.abs(gpu.chroma - cpu.chroma) /
+                   Math.max(1, cpu.chroma)).toBeLessThan(0.05);
     });
 }
 

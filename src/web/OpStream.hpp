@@ -57,6 +57,13 @@ enum class Op : uint16_t {
     HexBins          = 49,
     ContourTess      = 50,
     FftSegments      = 51,
+    EnvelopeCols     = 52,
+    TriContourTess   = 53,
+    DepthSort        = 54,
+    ScatterSplat     = 55,
+    Streamlines      = 56,
+    FillBetweenTess  = 57,
+    QuiverTess       = 58,
 };
 
 /// Reference to bulk data. kind 0 = ARENA (off = byte offset into the

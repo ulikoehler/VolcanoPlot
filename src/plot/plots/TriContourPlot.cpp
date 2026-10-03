@@ -1,5 +1,6 @@
 // volcano/plot/plots/TriContourPlot.cpp — tricontour and tricontourf
 #include "volcano/plot/plots/TriContourPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -142,7 +143,13 @@ void TriContourPlot::prepare(render::Renderer& r) {
     }
 
     computeLevels();
-    marchingTriangles();
+    // GPU marching-triangles offload: draw() marches + strokes on the
+    // device when the transform is affine; the CPU march stays lazily
+    // available for the fallback.
+    gpuTess_ = r.gpu().supportsTriContourTessellate() &&
+               render::OffloadConfig::allowGpu(
+                   render::OffloadConfig::global().contours);
+    if (!gpuTess_) marchingTriangles();
 
     if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
@@ -154,7 +161,70 @@ void TriContourPlot::prepare(render::Renderer& r) {
 
 void TriContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
-    if (!prepared_ || segments_.empty()) return;
+    if (!prepared_) return;
+    // GPU path: affine-only (linear scales, rectilinear projection).
+    if (gpuTess_ &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().kind == ScaleKind::Linear &&
+        axes.yscale().kind == ScaleKind::Linear &&
+        !tris_.empty() && !levels_.empty()) {
+        const auto& vp = axes.viewport();
+        const float kx = vp.x.span() > 0.0f
+            ? float(rect.width) / vp.x.span() : 0.0f;
+        const float ky = vp.y.span() > 0.0f
+            ? float(rect.height) / vp.y.span() : 0.0f;
+        if (kx != 0.0f && ky != 0.0f) {
+            const float ax = kx;
+            const float bx = float(rect.x) - vp.x.min * kx;
+            const float ay = -ky;
+            const float by = float(rect.y) + float(rect.height) +
+                             vp.y.min * ky;
+            if (xyzPacked_.empty()) {
+                xyzPacked_.resize(x_.size() * 3);
+                for (size_t i = 0; i < x_.size(); ++i) {
+                    xyzPacked_[i * 3] = x_[i];
+                    xyzPacked_[i * 3 + 1] = y_[i];
+                    xyzPacked_[i * 3 + 2] = z_[i];
+                }
+                trisPacked_.reserve(tris_.size() * 3);
+                for (const auto& t : tris_) {
+                    trisPacked_.push_back(t.a);
+                    trisPacked_.push_back(t.b);
+                    trisPacked_.push_back(t.c);
+                }
+            }
+            // Per-level colors (mpl: cmap, else lineColor) + dashes on
+            // negative levels — same contract as the CPU path.
+            float lMin = levels_.front(), lMax = levels_.back();
+            float lRange = std::max(1e-9f, lMax - lMin);
+            std::vector<Color> colors(levels_.size());
+            for (size_t i = 0; i < levels_.size(); ++i) {
+                colors[i] = config_.lineColor;
+                if (config_.cmap)
+                    colors[i] = config_.cmap->sample(std::clamp(
+                        (levels_[i] - lMin) / lRange, 0.0f, 1.0f));
+            }
+            std::vector<float> dashes(levels_.size() * 2, 0.0f);
+            const auto dash = dashPattern(LineStyle::Dashed,
+                                          config_.lineWidth);
+            for (size_t i = 0; i < levels_.size(); ++i) {
+                if (levels_[i] >= 0.0f || dash.size() < 2) continue;
+                dashes[i * 2] = dash[0];
+                dashes[i * 2 + 1] = dash[1];
+            }
+            if (r.gpu().triContourTessellate(
+                    xyzPacked_, trisPacked_, levels_, colors,
+                    bx, ax, by, ay, config_.lineWidth, dashes, 0,
+                    gpuSoup_, gpuCount_)) {
+                r.gpu().spine().drawTrianglesGpuIndirect(
+                    cmd, clipRectVk(rect, r.gpu().extent()),
+                    r.gpu().extent(), gpuSoup_, 0, gpuCount_);
+                return;
+            }
+        }
+    }
+    if (segments_.empty()) marchingTriangles();
+    if (segments_.empty()) return;
     // mpl colors each contour level from the colormap (default:
     // image.cmap = viridis) and renders negative levels dashed.
     auto toPx = [&](const Point2D& p) {
@@ -356,7 +426,10 @@ void TriContourfPlot::prepare(render::Renderer& r) {
     }
 
     computeLevels();
-    marchingTrianglesFilled();
+    gpuTess_ = r.gpu().supportsTriContourTessellate() &&
+               render::OffloadConfig::allowGpu(
+                   render::OffloadConfig::global().contours);
+    if (!gpuTess_) marchingTrianglesFilled();
 
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
@@ -367,7 +440,63 @@ void TriContourfPlot::prepare(render::Renderer& r) {
 
 void TriContourfPlot::draw(render::Cmd& cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
-    if (!prepared_ || positions_.empty()) return;
+    if (!prepared_) return;
+    if (gpuTess_ &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().kind == ScaleKind::Linear &&
+        axes.yscale().kind == ScaleKind::Linear &&
+        !tris_.empty() && levels_.size() >= 2) {
+        const auto& vp = axes.viewport();
+        const float kx = vp.x.span() > 0.0f
+            ? float(rect.width) / vp.x.span() : 0.0f;
+        const float ky = vp.y.span() > 0.0f
+            ? float(rect.height) / vp.y.span() : 0.0f;
+        if (kx != 0.0f && ky != 0.0f) {
+            if (xyzPacked_.empty()) {
+                xyzPacked_.resize(x_.size() * 3);
+                for (size_t i = 0; i < x_.size(); ++i) {
+                    xyzPacked_[i * 3] = x_[i];
+                    xyzPacked_[i * 3 + 1] = y_[i];
+                    xyzPacked_[i * 3 + 2] = z_[i];
+                }
+                trisPacked_.reserve(tris_.size() * 3);
+                for (const auto& t : tris_) {
+                    trisPacked_.push_back(t.a);
+                    trisPacked_.push_back(t.b);
+                    trisPacked_.push_back(t.c);
+                }
+            }
+            // Band colors sampled at band midpoints (mirrors
+            // marchingTrianglesFilled); the shader gets one color per
+            // band, nLevels - 1 bands.
+            const Colormap& cmap = config_.cmap ? *config_.cmap
+                                                : defaultColormap();
+            const float vmin = levels_.front();
+            const float vspan = std::max(1e-9f, levels_.back() - vmin);
+            std::vector<Color> colors(levels_.size() - 1);
+            for (size_t i = 0; i + 1 < levels_.size(); ++i) {
+                const float mid = (levels_[i] + levels_[i + 1]) * 0.5f;
+                colors[i] = cmap.sample((mid - vmin) / vspan);
+            }
+            if (r.gpu().triContourTessellate(
+                    xyzPacked_, trisPacked_, levels_, colors,
+                    float(rect.x) - vp.x.min * kx, kx,
+                    float(rect.y) + float(rect.height) + vp.y.min * ky,
+                    -ky, 0.0f, {}, 1, gpuSoup_, gpuCount_)) {
+                r.gpu().spine().drawTrianglesGpuIndirect(
+                    cmd, clipRectVk(rect, r.gpu().extent()),
+                    r.gpu().extent(), gpuSoup_, 0, gpuCount_);
+                return;
+            }
+        }
+    }
+    if (positions_.empty()) {
+        marchingTrianglesFilled();
+        if (!positions_.empty())
+            fillRenderer_->upload(std::span{positions_},
+                                  std::span{colors_});
+    }
+    if (positions_.empty()) return;
     Transform2D t = axes.transform();
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     fillRenderer_->draw(cmd, vrect, t);
