@@ -115,19 +115,66 @@ void PcolorfastPlot::buildGeometry() {
     }
 }
 
+bool PcolorfastPlot::buildGeometryGpu(render::Renderer& r) {
+    const uint64_t nVerts = uint64_t(nCols_) * nRows_ * 6;
+    if (nCols_ == 0 || nRows_ == 0 || nVerts > (1ull << 31)) return false;
+
+    const Colormap& cmap = config_.cmap ? *config_.cmap : defaultColormap();
+    float vspan = valueRange_.span();
+    if (vspan <= 0.0f) vspan = 1.0f;
+
+    // Per-cell normalized t on the CPU — one evaluation per value, so
+    // arbitrary polymorphic norms stay supported (same as pcolormesh).
+    std::vector<float> tvals(C_.size());
+    for (size_t i = 0; i < C_.size(); ++i) {
+        float v = C_[i];
+        tvals[i] = std::isnan(v) ? std::numeric_limits<float>::quiet_NaN()
+                   : config_.norm ? (*config_.norm)(v)
+                                  : (v - valueRange_.min) / vspan;
+    }
+
+    // 259-entry LUT: [0..255] regular, 256 under, 257 over, 258 bad.
+    std::vector<Color> lut(259);
+    for (int i = 0; i < 256; ++i)
+        lut[i] = cmap.sample(float(i) / 255.0f);
+    lut[256] = cmap.under.value_or(cmap.sample(0.0f));
+    lut[257] = cmap.over.value_or(cmap.sample(1.0f));
+    lut[258] = cmap.bad.value_or(Color::transparent());
+
+    const uint32_t flags =
+        (cmap.bad ? 1u : 0u) | (config_.skipNaN ? 2u : 0u);
+    render::GpuBuf posTok = 0, colTok = 0;
+    if (!r.gpu().pcmTessellate(x_, y_, tvals, lut, nCols_, nRows_,
+                               /*gouraud=*/false, flags, posTok, colTok))
+        return false;
+    fillRenderer_->adoptBuffers(posTok, colTok, uint32_t(nVerts));
+    return true;
+}
+
 void PcolorfastPlot::prepare(render::Renderer& r) {
     computeValueRange();
-    buildGeometry();
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-    if (!fillPositions_.empty()) {
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+    // The device tessellation emits the same 6-vert-per-cell soup the
+    // CPU loop builds. Same policy as pcolormesh: opt-in for small
+    // grids, automatic at ≥16384 cells.
+    const uint64_t cells = uint64_t(nCols_) * nRows_;
+    bool gpu = config_.gpuTessellate > 0 ||
+               (config_.gpuTessellate < 0 && cells >= 16384);
+    if (gpu) gpu = buildGeometryGpu(r);
+    if (!gpu) {
+        buildGeometry();
+        if (!fillPositions_.empty()) {
+            fillRenderer_->upload(std::span{fillPositions_},
+                                  std::span{fillColors_});
+        }
     }
     prepared_ = true;
 }
 
 void PcolorfastPlot::draw(render::Cmd& cmd, render::Renderer& r,
                           const Axes& axes, Rect2D rect) {
-    if (!prepared_ || fillPositions_.empty()) return;
+    if (!prepared_) return;
+    if (!fillRenderer_ || fillRenderer_->pointCount() == 0) return;
     Transform2D t = axes.transform();
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
     fillRenderer_->draw(cmd, vrect, t);

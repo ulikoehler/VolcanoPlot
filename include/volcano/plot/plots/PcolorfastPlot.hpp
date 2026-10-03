@@ -23,6 +23,10 @@ struct PcolorfastConfig {
     std::shared_ptr<Normalize> norm;
     /// If true, cells with NaN values are skipped (transparent).
     bool skipNaN = true;
+    /// GPU quad tessellation (op 46 / Vulkan pcmTessellate):
+    /// -1 = auto (device path for large grids, ≥16384 cells),
+    /// 0 = force CPU, 1 = force GPU.
+    int gpuTessellate = -1;
     std::string label;
 };
 
@@ -72,6 +76,10 @@ private:
 
     void computeValueRange();
     void buildGeometry();
+    /// GPU variant: per-cell tessellation + colormap LUT on the device
+    /// (op 46). Returns false when the backend has no GPU path — the
+    /// caller then runs buildGeometry() as before.
+    bool buildGeometryGpu(render::Renderer& r);
 };
 
 } // namespace volcano::plot
