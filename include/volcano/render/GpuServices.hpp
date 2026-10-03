@@ -372,6 +372,31 @@ public:
         return std::nullopt;
     }
 
+    /// tripcolor expansion on the device: one invocation per triangle
+    /// maps `tvals` (already normalized on the CPU — polymorphic norms
+    /// stay host-side) through the 259-entry `lut`, applies the
+    /// data→pixel affine, and emits the same {vec2 px, vec4 rgba}
+    /// indirect soup as triContourTessellate. `xy` packs (x, y) per
+    /// point, `tris` 3 point indices per triangle. mode: 0 = flat face
+    /// color (tvals is per-face), 1 = flat (average of vertex values),
+    /// 2 = gouraud. Fully transparent triangles are skipped exactly
+    /// like the CPU path.
+    virtual bool tripcolorTess(std::span<const float> xy,
+                               std::span<const uint32_t> tris,
+                               std::span<const float> tvals,
+                               std::span<const plot::Color> lut,
+                               uint32_t mode,
+                               float bx, float ax, float by, float ay,
+                               GpuBuf& soupOut, GpuBuf& countOut) {
+        (void)xy; (void)tris; (void)tvals; (void)lut; (void)mode;
+        (void)bx; (void)ax; (void)by; (void)ay;
+        (void)soupOut; (void)countOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsTripcolorTess() const noexcept {
+        return false;
+    }
+
     /// Pcolormesh quad tessellation compute: cell coords (x,y edges) +
     /// normalized scalar field `t` colormapped via `lut` → adopted
     /// per-vertex position/color buffers (6 verts/cell flat, 12 for

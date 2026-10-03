@@ -1,5 +1,6 @@
 // volcano/plot/plots/TripcolorPlot.cpp — pseudocolor on triangular grids
 #include "volcano/plot/plots/TripcolorPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -142,20 +143,89 @@ void TripcolorPlot::prepare(render::Renderer& r) {
     }
 
     computeValueRange();
-    buildGeometry();
 
-    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-    if (!positions_.empty()) {
-        fillRenderer_->upload(std::span{positions_}, std::span{colors_});
+    // GPU expansion: stage normalized values + the 259-entry colormap
+    // LUT once; the device emits the per-triangle soup at draw time.
+    gpuTess_ = render::OffloadConfig::allowGpu(
+                   render::OffloadConfig::global().tripcolor) &&
+               r.gpu().supportsTripcolorTess() && !tris_.empty();
+    if (gpuTess_) {
+        const Colormap& cmap = config_.cmap ? *config_.cmap
+                                            : defaultColormap();
+        float vspan = valueRange_.span();
+        if (vspan <= 0.0f) vspan = 1.0f;
+        const auto& vals = useFacevalues_ ? facevalues_ : z_;
+        gpuT_.resize(vals.size());
+        for (size_t i = 0; i < vals.size(); ++i) {
+            float v = vals[i];
+            gpuT_[i] = std::isnan(v)
+                ? std::numeric_limits<float>::quiet_NaN()
+                : config_.norm ? (*config_.norm)(v)
+                               : (v - valueRange_.min) / vspan;
+        }
+        gpuLut_.resize(259);
+        for (int i = 0; i < 256; ++i)
+            gpuLut_[i] = cmap.sample(float(i) / 255.0f);
+        gpuLut_[256] = cmap.under.value_or(cmap.sample(0.0f));
+        gpuLut_[257] = cmap.over.value_or(cmap.sample(1.0f));
+        gpuLut_[258] = cmap.bad.value_or(Color::transparent());
+        gpuXy_.resize(x_.size() * 2);
+        for (size_t i = 0; i < x_.size(); ++i) {
+            gpuXy_[i * 2] = x_[i];
+            gpuXy_[i * 2 + 1] = y_[i];
+        }
+    } else {
+        buildGeometry();
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        if (!positions_.empty()) {
+            fillRenderer_->upload(std::span{positions_},
+                                  std::span{colors_});
+        }
     }
     prepared_ = true;
 }
 
 void TripcolorPlot::draw(render::Cmd& cmd, render::Renderer& r,
                          const Axes& axes, Rect2D rect) {
-    if (!prepared_ || positions_.empty()) return;
-    Transform2D t = axes.transform();
+    if (!prepared_) return;
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    if (gpuTess_) {
+        if (axes.projection().kind == ProjectionKind::Rectilinear &&
+            axes.xscale().kind == ScaleKind::Linear &&
+            axes.yscale().kind == ScaleKind::Linear) {
+            const auto& vp = axes.viewport();
+            const float kx = vp.x.span() > 0.0f
+                ? float(rect.width) / vp.x.span() : 0.0f;
+            const float ky = vp.y.span() > 0.0f
+                ? float(rect.height) / vp.y.span() : 0.0f;
+            const uint32_t mode =
+                useFacevalues_ ? 0u
+                : config_.shading == TriShading::Flat ? 1u : 2u;
+            if (kx != 0.0f && ky != 0.0f &&
+                r.gpu().tripcolorTess(
+                    gpuXy_, std::span<const uint32_t>(
+                        reinterpret_cast<const uint32_t*>(tris_.data()),
+                        tris_.size() * 3),
+                    gpuT_, gpuLut_, mode,
+                    float(rect.x) - vp.x.min * kx, kx,
+                    float(rect.y) + float(rect.height) +
+                        vp.y.min * ky, -ky,
+                    gpuSoup_, gpuCount_)) {
+                r.gpu().spine().drawTrianglesGpuIndirect(
+                    cmd, vrect, r.gpu().extent(), gpuSoup_, 0, gpuCount_);
+                return;
+            }
+        }
+        // Declined mid-draw: fall back to the CPU mesh.
+        gpuTess_ = false;
+        buildGeometry();
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        if (!positions_.empty())
+            fillRenderer_->upload(std::span{positions_},
+                                  std::span{colors_});
+    }
+    if (positions_.empty()) return;
+    Transform2D t = axes.transform();
     fillRenderer_->draw(cmd, vrect, t);
 }
 

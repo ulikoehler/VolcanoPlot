@@ -721,3 +721,28 @@ Both mailbox ops use the same eventual-delivery contract as the
 binning/FFT paths: the first call emits compute + mailbox and the CPU
 covers that frame; identical inputs serve the cached device result
 afterward (maxLag/normed/invNorm are folded into the fingerprint).
+
+## GPU offload round 4 (pcolorfast → tripcolor)
+
+| Item | Op | Parity vs CPU |
+|---|---|---|
+| pcolorfast quad expansion | reuses 46 `PcmTess` | bit-identical (184290 px) |
+| tripcolor per-triangle colormap expansion | 61 `TripcolorTess` | bit-identical (115625 px) |
+
+`pcolorfast` adopts the `PcmTess` device path via
+`PcolorfastConfig::gpuTessellate` (`-1` auto ≥ 16384 cells, `0` CPU,
+`1` force GPU). The auto threshold exists because routing every small
+native pcolorfast through Vulkan's `pcmTessellate` exposed an
+intermittent device-lifetime fault; small grids stay on the CPU
+unless explicitly forced.
+
+`TripcolorTess` (op 61) emits one invocation per triangle: reads the
+packed xy buffer, the `Triangle{a,b,c}` index triples, the normalized
+value buffer (face values in `facevalues` mode, vertex values
+otherwise) and the 259-entry LUT (256 colors + under/over/bad). Mode
+0 colors the whole triangle by the face value; mode 1 averages the
+three vertex values into a single flat color; mode 2 writes Gouraud
+per-vertex colors. Fully transparent results are skipped, surviving
+triangles append 3 verts each through an atomic counter, and the
+soup is consumed by `drawTrianglesGpuIndirect` — no CPU readback.
+New policy key: `tripcolor`.

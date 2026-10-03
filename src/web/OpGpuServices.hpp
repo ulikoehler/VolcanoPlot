@@ -173,6 +173,19 @@ public:
     /// Bitonic value sort: same eventual-delivery contract.
     std::optional<std::vector<float>> sortFloats(
         std::span<const float> data) override;
+    /// tripcolor expansion (op 61) — emits the indirect soup, nothing
+    /// crosses back to the CPU.
+    [[nodiscard]] bool supportsTripcolorTess() const noexcept override {
+        return true;
+    }
+    bool tripcolorTess(std::span<const float> xy,
+                       std::span<const uint32_t> tris,
+                       std::span<const float> tvals,
+                       std::span<const plot::Color> lut,
+                       uint32_t mode,
+                       float bx, float ax, float by, float ay,
+                       render::GpuBuf& soupOut,
+                       render::GpuBuf& countOut) override;
     [[nodiscard]] bool supportsContourTessellate() const noexcept override {
         return true;
     }

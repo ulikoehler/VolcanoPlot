@@ -65,6 +65,8 @@ struct OffloadConfig {
     OffloadMode xcorr = OffloadMode::Auto;
     /// Value sort for ecdf (bitonic on the device).
     OffloadMode ecdf = OffloadMode::Auto;
+    /// tripcolor per-triangle colormap expansion.
+    OffloadMode tripcolor = OffloadMode::Auto;
 
     /// Process-wide config, initialised from VOLCANO_GPU_OFFLOAD /
     /// VOLCANO_GPU_HIST on first use.

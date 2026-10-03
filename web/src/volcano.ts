@@ -167,7 +167,7 @@ export type OffloadMode = 'auto' | 'gpu' | 'cpu';
 export type OffloadKey = 'stroking' | 'dashes' | 'contours' | 'binning'
     | 'projection3d' | 'instancing' | 'fft' | 'envelope'
     | 'surfacemesh' | 'arrows' | 'fillbetween' | 'streamlines'
-    | 'depthsort' | 'splatting' | 'xcorr' | 'ecdf';
+    | 'depthsort' | 'splatting' | 'xcorr' | 'ecdf' | 'tripcolor';
 
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
 

@@ -76,6 +76,13 @@ private:
     std::vector<Point2D> positions_;
     std::vector<Color> colors_;
     bool prepared_ = false;
+    // GPU expansion (op 61): normalized values + 259-entry LUT staged
+    // once; the device emits the per-triangle soup per draw.
+    bool gpuTess_ = false;
+    std::vector<float> gpuT_;
+    std::vector<Color> gpuLut_;
+    std::vector<float> gpuXy_;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
 
     void computeValueRange();
     void buildGeometry();

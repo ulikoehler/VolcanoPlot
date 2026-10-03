@@ -332,6 +332,41 @@ OpGpuServices::sortFloats(std::span<const float> data) {
     return std::nullopt;
 }
 
+bool OpGpuServices::tripcolorTess(
+    std::span<const float> xy, std::span<const uint32_t> tris,
+    std::span<const float> tvals, std::span<const plot::Color> lut,
+    uint32_t mode, float bx, float ax, float by, float ay,
+    render::GpuBuf& soupOut, render::GpuBuf& countOut) {
+    const uint32_t nTris = uint32_t(tris.size() / 3);
+    const uint32_t nVals = uint32_t(tvals.size());
+    if (!nTris || !nVals || lut.size() < 259) return false;
+    const uint64_t maxVerts = uint64_t(nTris) * 3;
+    if (maxVerts * 24 > (256ull << 20)) return false;
+
+    auto stage = [&](const void* d, size_t bytes) {
+        uint32_t h = createBufferRaw(bytes + 16, 1 | 2);
+        writeBufferRaw(h, 0, d, bytes);
+        return h;
+    };
+    const uint32_t soup = createBufferRaw(maxVerts * 24 + 16, 2 | 16);
+    const uint32_t counter = createBufferRaw(16, 2 | 16 | 32);
+    const uint32_t seed[4] = {0u, 1u, 0u, 0u};
+    writeBufferRaw(counter, 0, seed, sizeof(seed));
+
+    PTripcolorTess p{};
+    p.xyBuf = stage(xy.data(), xy.size_bytes());
+    p.trisBuf = stage(tris.data(), tris.size_bytes());
+    p.zBuf = stage(tvals.data(), tvals.size_bytes());
+    p.lutBuf = stage(lut.data(), lut.size_bytes());
+    p.outBuf = soup; p.counterBuf = counter;
+    p.nTris = nTris; p.mode = mode; p.maxVerts = uint32_t(maxVerts);
+    p.bx = bx; p.ax = ax; p.by = by; p.ay = ay;
+    stream_.emit(Op::TripcolorTess, p);
+    soupOut = render::GpuBuf(soup);
+    countOut = render::GpuBuf(counter);
+    return true;
+}
+
 bool OpGpuServices::contourTessellate(
     std::span<const float> grid, uint32_t w, uint32_t h,
     std::span<const float> levels, std::span<const plot::Color> colors,

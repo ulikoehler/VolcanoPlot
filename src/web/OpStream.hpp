@@ -66,6 +66,7 @@ enum class Op : uint16_t {
     QuiverTess       = 58,
     XCorr            = 59,
     SortFloats       = 60,
+    TripcolorTess    = 61,
 };
 
 /// Reference to bulk data. kind 0 = ARENA (off = byte offset into the

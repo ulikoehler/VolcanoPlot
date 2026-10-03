@@ -36,6 +36,7 @@ import DEPTHSORT_WGSL from './shaders/DepthSort.wgsl?raw';
 import SPLAT_WGSL from './shaders/ScatterSplat.wgsl?raw';
 import XCORR_WGSL from './shaders/XCorr.wgsl?raw';
 import SORTF_WGSL from './shaders/SortFloats.wgsl?raw';
+import TRIPCOLOR_WGSL from './shaders/TripcolorTess.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -66,6 +67,7 @@ export enum Op {
     EnvelopeCols = 52, TriContourTess = 53, DepthSort = 54,
     ScatterSplat = 55, Streamlines = 56, FillBetweenTess = 57,
     QuiverTess = 58, XCorr = 59, SortFloats = 60,
+    TripcolorTess = 61,
 }
 
 export interface FrameHeader {
@@ -802,6 +804,30 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.sfPipe = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
                 bindGroupLayouts: [this.sfBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    // ── tripcolor expansion (op 61) ─────────────────────────────────
+    private tcBgl?: GPUBindGroupLayout;
+    private tcPipe?: GPUComputePipeline;
+
+    private ensureTripcolor() {
+        if (this.tcPipe) return;
+        this.tcBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 4].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            ...[5, 6].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'storage' as GPUBufferBindingType } })),
+        ]});
+        const mod = this.device.createShaderModule({ code: TRIPCOLOR_WGSL });
+        this.tcPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.tcBgl] }),
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
@@ -1737,6 +1763,35 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             enc.copyBufferToBuffer(this.bufRef(buf), 0, staging, 0, bytes);
             this.pendingBulk.push({ buf: staging,
                 slot: p.getUint32(12, true), bytes });
+            return;
+        }
+        if (op === Op.TripcolorTess) {
+            // PTripcolorTess {xyBuf, trisBuf, zBuf, lutBuf, outBuf,
+            //   counterBuf, nTris, mode, maxVerts, pad, bx,ax,by,ay}
+            const nTris = p.getUint32(24, true);
+            if (!nTris) return;
+            this.ensureTripcolor();
+            const pc = new DataView(new ArrayBuffer(32));
+            pc.setUint32(0, nTris, true);
+            pc.setUint32(4, p.getUint32(28, true), true);   // mode
+            pc.setUint32(8, p.getUint32(32, true), true);   // maxVerts
+            pc.setFloat32(16, p.getFloat32(40, true), true); // bx
+            pc.setFloat32(20, p.getFloat32(44, true), true); // ax
+            pc.setFloat32(24, p.getFloat32(48, true), true); // by
+            pc.setFloat32(28, p.getFloat32(52, true), true); // ay
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.tcPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.tcBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 32 } },
+                    ...[0, 4, 8, 12, 16, 20].map((off2, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(off2, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(nTris / 64));
+            cpass.end();
             return;
         }
         if (op === Op.FillBetweenTess) {

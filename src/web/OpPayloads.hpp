@@ -262,6 +262,16 @@ struct PXCorr       { uint32_t xBuf, yBuf, outBuf;
 /// side seeds padding with +inf). The interpreter runs every (k, j)
 /// stage, then reads back the first nReal floats via bulk mailbox.
 struct PSortFloats  { uint32_t buf, nReal, nPad, mailbox; };
+/// tripcolor expansion: one invocation per triangle computes the
+/// per-vertex (or per-face) colormap LUT color, applies the data→pixel
+/// affine, and emits {vec2 px, vec4 rgba} soup verts. mode: 0 = flat
+/// face color (zBuf = per-face), 1 = flat (avg of z per vertex),
+/// 2 = gouraud (per-vertex). Fully transparent tris are skipped like
+/// the CPU path.
+struct PTripcolorTess { uint32_t xyBuf, trisBuf, zBuf, lutBuf,
+                        outBuf, counterBuf;
+                        uint32_t nTris, mode, maxVerts, pad;
+                        float bx, ax, by, ay; };
 #pragma pack(pop)
 
 } // namespace volcano::web

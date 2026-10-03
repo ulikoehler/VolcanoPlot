@@ -57,6 +57,7 @@ const INIT = (mode: string) => {
     (window as any).__splat = 0;
     (window as any).__xc = 0;
     (window as any).__sf = 0;
+    (window as any).__tpc = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -78,6 +79,7 @@ const INIT = (mode: string) => {
                                splatting: (window as any).__wantMode,
                                xcorr: (window as any).__wantMode,
                                ecdf: (window as any).__wantMode,
+                               tripcolor: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -98,6 +100,7 @@ const INIT = (mode: string) => {
                 if (a[2] === 55) (window as any).__splat++;
                 if (a[2] === 59) (window as any).__xc++;
                 if (a[2] === 60) (window as any).__sf++;
+                if (a[2] === 61) (window as any).__tpc++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -147,7 +150,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  ds: (window as any).__ds,
                  splat: (window as any).__splat,
                  xc: (window as any).__xc,
-                 sf: (window as any).__sf };
+                 sf: (window as any).__sf,
+                 tpc: (window as any).__tpc };
     }, frames);
 }
 
@@ -494,3 +498,24 @@ for (const kind of ['psd', 'csd', 'cohere', 'spectrum', 'specgram']) {
         expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.0);
     });
 }
+
+test('GPU tripcolor expansion matches the CPU mesh', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'tripcolor', 'cpu', 1);
+    const gpu = await captureWith(page, 'tripcolor', 'gpu', 2);
+    console.log(`TRIPCOLOR cpu=${JSON.stringify(cpu)} ` +
+                `gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.tpc).toBeGreaterThan(0);
+    expect(cpu.tpc).toBe(0);
+    // The same triangulation + LUT → the same colored mesh.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});
