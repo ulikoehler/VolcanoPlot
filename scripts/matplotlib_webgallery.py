@@ -591,6 +591,54 @@ def _(out):
     save(fig, out, "barlabel")
 
 
+@gen("tricontourf")
+def _(out):
+    fig, ax = fig_ax()
+    xs, ys, zs = tri_data()
+    ax.tricontourf(xs, ys, zs, cmap='viridis')
+    save(fig, out, "tricontourf")
+
+
+@gen("tricontour3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    x, y, z = _cloud()
+    ax.tricontour(x, y, z)
+    save(fig, out, "tricontour3d")
+
+
+@gen("tricontourf3d")
+def _(out):
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    x, y, z = _cloud()
+    ax.tricontourf(x, y, z, cmap='viridis')
+    save(fig, out, "tricontourf3d")
+
+
+@gen("navcube")
+def _(out):
+    # no mpl equivalent for the orientation triad — render the helix
+    fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
+    ax = _ax3d(fig)
+    ax.plot(*_helix())
+    save(fig, out, "navcube")
+
+
+@gen("quiverkey")
+def _(out):
+    fig, ax = fig_ax()
+    xs, ys, us, vs = [], [], [], []
+    for ix in range(8):
+        for iy in range(8):
+            x, y = ix - 3.5, iy - 3.5
+            xs.append(x); ys.append(y); us.append(-y); vs.append(x)
+    q = ax.quiver(xs, ys, us, vs)
+    ax.quiverkey(q, 0.9, 0.95, 4, '4 u', coordinates='axes')
+    save(fig, out, "quiverkey")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out_dir")

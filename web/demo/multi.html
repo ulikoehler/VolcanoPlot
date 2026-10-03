@@ -153,8 +153,8 @@ window.vpDone = (async () => {
     } else if (which === 'brokenbarh') {
         vp.brokenBarh([10, 40, 15, 10,   180, 30, 15, 10,
                        50, 110, 5, 10,   122, 25, 5, 10]);
-    } else if (which === 'tricontour' || which === 'triplot' ||
-               which === 'trisurf') {
+    } else if (which === 'tricontour' || which === 'tricontourf' ||
+               which === 'triplot' || which === 'trisurf') {
         const N = 80, xs = new Float32Array(N), ys = new Float32Array(N),
               zs = new Float32Array(N);
         for (let i = 0; i < N; i++) {
@@ -163,6 +163,7 @@ window.vpDone = (async () => {
             zs[i] = Math.sin(xs[i] * 8) + Math.cos(ys[i] * 8);
         }
         if (which === 'tricontour') vp.tricontour(xs, ys, zs);
+        else if (which === 'tricontourf') vp.tricontourf(xs, ys, zs);
         else if (which === 'triplot') vp.triplot(xs, ys);
         else vp.trisurf(xs, ys, zs);
     } else if (which === 'specgram' || which === 'spectrum' ||
@@ -206,8 +207,27 @@ window.vpDone = (async () => {
             xs[i] = Math.cos(t); ys[i] = Math.sin(t); zs[i] = t / 12.56;
         }
         vp.plot3d(xs, ys, zs);
+    } else if (which === 'navcube') {
+        const n = 200, xs = new Float32Array(n), ys = new Float32Array(n),
+              zs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const t = i / n * 12.56;
+            xs[i] = Math.cos(t); ys[i] = Math.sin(t); zs[i] = t / 12.56;
+        }
+        vp.plot3d(xs, ys, zs);
+        vp.navcube(30, -60, 'ur', 'cube');
+    } else if (which === 'quiverkey') {
+        const xs = [], ys = [], us = [], vs = [];
+        for (let ix = 0; ix < 8; ix++)
+            for (let iy = 0; iy < 8; iy++) {
+                const x = ix - 3.5, y = iy - 3.5;
+                xs.push(x); ys.push(y); us.push(-y); vs.push(x);
+            }
+        const qh = vp.quiver(xs, ys, us, vs);
+        vp.quiverkey(0.9, 0.95, 4, qh, '4 u');
     } else if (which === 'scatter3d' || which === 'quiver3d' ||
-               which === 'errorbar3d') {
+               which === 'errorbar3d' || which === 'tricontour3d' ||
+               which === 'tricontourf3d') {
         const n = 60, xs = new Float32Array(n), ys = new Float32Array(n),
               zs = new Float32Array(n);
         for (let i = 0; i < n; i++) {
@@ -216,6 +236,8 @@ window.vpDone = (async () => {
             zs[i] = (i % 10) / 10;
         }
         if (which === 'scatter3d') vp.scatter3d(xs, ys, zs);
+        else if (which === 'tricontour3d') vp.tricontour3d(xs, ys, zs);
+        else if (which === 'tricontourf3d') vp.tricontourf3d(xs, ys, zs);
         else if (which === 'quiver3d') {
             const us = new Float32Array(n), vs = new Float32Array(n),
                   ws = new Float32Array(n);

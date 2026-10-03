@@ -150,6 +150,16 @@ interface VolcanoModule {
                    elev: number, azim: number): number;
     _vp_barLabel(a: number, xs: Float32Array, heights: Float32Array,
                  baseline: number): number;
+    _vp_tricontourf(a: number, xs: Float32Array, ys: Float32Array,
+                    zs: Float32Array): number;
+    _vp_tricontour3d(a: number, xs: Float32Array, ys: Float32Array,
+                     zs: Float32Array, elev: number, azim: number): number;
+    _vp_tricontourf3d(a: number, xs: Float32Array, ys: Float32Array,
+                      zs: Float32Array, elev: number, azim: number): number;
+    _vp_navcube(a: number, elev: number, azim: number,
+                corner: number, mode: number): number;
+    _vp_quiverkey(a: number, x: number, y: number, u: number,
+                  quiverHandle: number, label: string): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
@@ -498,6 +508,43 @@ export class VolcanoCanvas {
         const x = this.stage(xs), h = this.stage(heights);
         try { return this.mod._vp_barLabel(this.cur, x, h, baseline); }
         finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(h.byteOffset); }
+    }
+    /** mpl tricontourf — filled contours on scattered (x,y,z). */
+    tricontourf(xs: ArrayLike<number>, ys: ArrayLike<number>,
+                zs: ArrayLike<number>): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_tricontourf(this.cur, x, y, z); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** mpl Axes3D.tricontour — isolines on scattered 3D data. */
+    tricontour3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+                 zs: ArrayLike<number>, elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_tricontour3d(this.cur, x, y, z, elev, azim); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** mpl Axes3D.tricontourf — filled contours on scattered 3D data. */
+    tricontourf3d(xs: ArrayLike<number>, ys: ArrayLike<number>,
+                  zs: ArrayLike<number>, elev = 30, azim = -60): number {
+        const x = this.stage(xs), y = this.stage(ys), z = this.stage(zs);
+        try { return this.mod._vp_tricontourf3d(this.cur, x, y, z, elev, azim); }
+        finally { this.mod._vp_free(x.byteOffset); this.mod._vp_free(y.byteOffset); this.mod._vp_free(z.byteOffset); }
+    }
+    /** Orientation indicator (Blender/Paraview axis triad) overlaid
+     * in a corner of the 3D axes. corner: 'ul'|'ur'|'ll'|'lr',
+     * mode: 'triad'|'cube'. */
+    navcube(elev = 30, azim = -60, corner = 'ul',
+            mode = 'triad'): number {
+        const c = { ul: 0, ur: 1, ll: 2, lr: 3 }[corner] ?? 0;
+        return this.mod._vp_navcube(this.cur, elev, azim, c,
+                                    mode === 'cube' ? 1 : 0);
+    }
+    /** mpl quiverkey — reference arrow + label for a quiver plot.
+     * `quiverHandle` is the value returned by `quiver()` (0 = unscaled). */
+    quiverkey(x: number, y: number, u: number, quiverHandle = 0,
+              label = ''): number {
+        return this.mod._vp_quiverkey(this.cur, x, y, u,
+                                      quiverHandle, label);
     }
 
     // ── mpl reference lines / spans / annotations ───────────────────

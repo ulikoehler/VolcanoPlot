@@ -16,6 +16,8 @@ const KINDS = process.argv[3]?.split(',') ?? [
     'plot3d', 'scatter3d', 'bar3d', 'quiver3d', 'errorbar3d',
     'contour3d', 'contourf3d', 'voxels', 'text3d', 'barbs',
     'groupedbar', 'figimage', 'chirp', 'mexicanhat', 'barlabel',
+    'tricontourf', 'tricontour3d', 'tricontourf3d', 'navcube',
+    'quiverkey',
 ];
 
 const MIME = {

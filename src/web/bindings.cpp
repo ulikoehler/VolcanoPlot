@@ -43,6 +43,9 @@
 #include <volcano/plot/plots/PcolorfastPlot.hpp>
 #include <volcano/plot/plots/BrokenBarHPlot.hpp>
 #include <volcano/plot/plots/TriContourPlot.hpp>
+#include <volcano/plot/plots/TricontourPlot.hpp>
+#include <volcano/plot/plots/NavCubePlot.hpp>
+#include <volcano/plot/plots/QuiverKeyPlot.hpp>
 #include <volcano/plot/plots/TriplotPlot.hpp>
 #include <volcano/plot/plots/SpecgramPlot.hpp>
 #include <volcano/plot/plots/SpectrumPlot.hpp>
@@ -528,6 +531,15 @@ uintptr_t tricontour(uint32_t axesIdx, em::val xs, em::val ys, em::val zs) {
                                          f32vec(zs));
 }
 
+/// mpl tricontourf — filled variant; defaults to viridis like contourf.
+uintptr_t tricontourf(uint32_t axesIdx, em::val xs, em::val ys,
+                      em::val zs) {
+    plot::TriContourConfig cfg;
+    cfg.cmap = &plot::Colormap::byName("viridis");
+    return addPlot<plot::TriContourfPlot>(axesIdx, f32vec(xs), f32vec(ys),
+                                          f32vec(zs), std::move(cfg));
+}
+
 uintptr_t triplot(uint32_t axesIdx, em::val xs, em::val ys) {
     return addPlot<plot::TriplotPlot>(axesIdx, f32vec(xs), f32vec(ys));
 }
@@ -798,13 +810,14 @@ uintptr_t contour3d(uint32_t axesIdx, em::val values, uint32_t w,
         S().figure.markStale();
         return reinterpret_cast<uintptr_t>(raw);
     };
-    if (filled) {
-        // mpl contourf defaults to image.cmap (viridis).
-        plot::Contour3DConfig cfg;
-        cfg.cmap = &plot::Colormap::byName("viridis");
+    // mpl 3D contour/contourf (offset=None) draw each band/line at its
+    // own level z and color by the cmap.
+    plot::Contour3DConfig cfg;
+    cfg.cmap = &plot::Colormap::byName("viridis");
+    cfg.levelsAsZ = true;
+    if (filled)
         return mk(plot::Contourf3D(std::move(g), std::move(cfg)));
-    }
-    return mk(plot::Contour3D(std::move(g)));
+    return mk(plot::Contour3D(std::move(g), std::move(cfg)));
 }
 
 /// mpl Axes3D.voxels — binary occupancy grid.
@@ -883,6 +896,55 @@ uintptr_t barLabel(uint32_t axesIdx, em::val xs, em::val heights,
                    double baseline) {
     return addPlot<plot::BarLabelPlot>(axesIdx, f32vec(xs),
                                        f32vec(heights), float(baseline));
+}
+
+/// mpl Axes3D.tricontour — contour lines on scattered 3D data.
+uintptr_t tricontour3d(uint32_t axesIdx, em::val xs, em::val ys,
+                       em::val zs, double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    plot::TricontourConfig cfg;
+    cfg.cmap = &plot::Colormap::byName("viridis");
+    cfg.levelsAsZ = true;
+    return add3D<plot::TricontourPlot>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, z),
+        std::move(x), std::move(y), std::move(z), std::move(cfg));
+}
+
+/// mpl Axes3D.tricontourf — filled contours on scattered 3D data.
+uintptr_t tricontourf3d(uint32_t axesIdx, em::val xs, em::val ys,
+                        em::val zs, double elevDeg, double azimDeg) {
+    auto x = f32vec(xs), y = f32vec(ys), z = f32vec(zs);
+    plot::TricontourConfig cfg;
+    cfg.cmap = &plot::Colormap::byName("viridis");
+    cfg.levelsAsZ = true;
+    return add3D<plot::TricontourfPlot>(axesIdx, elevDeg, azimDeg,
+        min3(x, y, z), max3(x, y, z),
+        std::move(x), std::move(y), std::move(z), std::move(cfg));
+}
+
+/// Orientation indicator overlay (Blender/Paraview-style axis triad).
+/// corner: 0=UL 1=UR 2=LL 3=LR; mode: 0=triad 1=cube.
+uintptr_t navcube(uint32_t axesIdx, double elevDeg, double azimDeg,
+                  uint32_t corner, uint32_t mode) {
+    plot::NavCubeConfig cfg;
+    cfg.camera = plot::Camera3D::viewInit(float(elevDeg), float(azimDeg));
+    cfg.corner = plot::NavCubeCorner(corner & 3);
+    cfg.mode = mode ? plot::NavCubeMode::Cube : plot::NavCubeMode::Triad;
+    return addPlot<plot::NavCubePlot>(axesIdx, std::move(cfg));
+}
+
+/// mpl quiverkey — reference arrow + label for a quiver plot.
+/// `quiverHandle` is the uintptr_t returned by quiver() (0 = unscaled).
+uintptr_t quiverkey(uint32_t axesIdx, double x, double y, double u,
+                    uintptr_t quiverHandle, const std::string& label) {
+    const plot::QuiverPlot* ref = nullptr;
+    if (quiverHandle)
+        ref = dynamic_cast<const plot::QuiverPlot*>(
+            reinterpret_cast<const plot::IPlot*>(quiverHandle));
+    plot::QuiverKeyPlot::Config cfg;
+    cfg.label = label;
+    return addPlot<plot::QuiverKeyPlot>(axesIdx, float(x), float(y),
+                                        float(u), ref, std::move(cfg));
 }
 
 // ── reference lines / spans / annotations ───────────────────────────
@@ -1058,6 +1120,7 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_pcolorfast", &pcolorfast);
     em::function("_vp_brokenBarh", &brokenBarh);
     em::function("_vp_tricontour", &tricontour);
+    em::function("_vp_tricontourf", &tricontourf);
     em::function("_vp_triplot", &triplot);
     em::function("_vp_specgram", &specgram);
     em::function("_vp_spectrum", &spectrum);
@@ -1090,6 +1153,10 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_chirp", &chirp);
     em::function("_vp_mexicanHat", &mexicanHat);
     em::function("_vp_barLabel", &barLabel);
+    em::function("_vp_tricontour3d", &tricontour3d);
+    em::function("_vp_tricontourf3d", &tricontourf3d);
+    em::function("_vp_navcube", &navcube);
+    em::function("_vp_quiverkey", &quiverkey);
     em::function("_vp_mailboxDest",
         +[](uint32_t slot, uint32_t bytes) -> uintptr_t {
             return S().backend.opGpu().mailboxDest(slot, bytes);

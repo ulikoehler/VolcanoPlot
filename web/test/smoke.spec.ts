@@ -201,7 +201,9 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
                     'plot3d', 'scatter3d', 'bar3d', 'quiver3d',
                     'errorbar3d', 'contour3d', 'contourf3d', 'voxels',
                     'text3d', 'barbs', 'groupedbar', 'figimage',
-                    'chirp', 'mexicanhat', 'barlabel']) {
+                    'chirp', 'mexicanhat', 'barlabel', 'tricontourf',
+                    'tricontour3d', 'tricontourf3d', 'navcube',
+                    'quiverkey']) {
     test(`renders ${kind} plot type`, async ({ page }) => {
         const errors: string[] = [];
         page.on('pageerror', e => errors.push(String(e)));
@@ -235,8 +237,8 @@ for (const kind of ['bar', 'hist', 'pie', 'heat', 'surface',
         // black or monochrome — chroma n/a
         if (!['contour', 'quiver', 'streamplot', 'tricontour', 'triplot',
               'wireframe', 'contour3d', 'quiver3d', 'text3d', 'barbs',
-              'barlabel', 'chirp', 'plot3d', 'errorbar3d',
-              'groupedbar'].includes(kind))
+              'barlabel', 'chirp', 'plot3d', 'errorbar3d', 'quiverkey',
+              'tricontour3d', 'groupedbar'].includes(kind))
             expect(stats.chroma).toBeGreaterThan(200);
     });
 }
