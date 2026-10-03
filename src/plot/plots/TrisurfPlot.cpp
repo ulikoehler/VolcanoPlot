@@ -110,13 +110,9 @@ void TrisurfPlot::projectSurface() {
         tris.push_back({p0, p1, p2, avgDepth, color});
     }
 
-    // Sort back-to-front (painter's algorithm).
-    std::sort(tris.begin(), tris.end(),
-              [](const ProjectedTri& a, const ProjectedTri& b) {
-                  return a.depth > b.depth;
-              });
-
-    // Build fill triangles.
+    // Painter's order is applied at upload time: the device sorts by
+    // clip depth (op 54) under the `depthsort` offload, the CPU does the
+    // same mean-depth sort otherwise — see FillRenderer::upload3DSorted.
     for (const auto& tri : tris) {
         fillPositions_.push_back(tri.v0);
         fillPositions_.push_back(tri.v1);
@@ -148,8 +144,8 @@ void TrisurfPlot::prepare(render::Renderer& r) {
 
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_->upload3D(std::span{fillPositions_},
-                                std::span{fillColors_}, vp_);
+        fillRenderer_->upload3DSorted(std::span{fillPositions_},
+                                      std::span{fillColors_}, vp_);
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {

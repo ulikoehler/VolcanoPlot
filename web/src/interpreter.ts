@@ -32,6 +32,7 @@ import TRICONTOUR_WGSL from './shaders/TriContourTess.wgsl?raw';
 import QUIVER_WGSL from './shaders/QuiverTess.wgsl?raw';
 import FILLBETWEEN_WGSL from './shaders/FillBetweenTess.wgsl?raw';
 import STREAMLINES_WGSL from './shaders/Streamlines.wgsl?raw';
+import DEPTHSORT_WGSL from './shaders/DepthSort.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -357,6 +358,14 @@ export class Interpreter {
                          defines: ['MODE_TRIS', 'HAS_COL'],
                          topology: 'triangle-list',
                          bindings: [ub, S(1), S(2)] });
+        // Depth-sorted variants: draw through the DepthSort index buffer.
+        mk('tris3d.i', { src: DRAW3D_WGSL, defines: ['MODE_TRIS', 'IDX'],
+                         topology: 'triangle-list',
+                         bindings: [ub, S(1), S(4)] });
+        mk('tris3d.ci', { src: DRAW3D_WGSL,
+                          defines: ['MODE_TRIS', 'HAS_COL', 'IDX'],
+                          topology: 'triangle-list',
+                          bindings: [ub, S(1), S(2), S(4)] });
         mk('points3d.c.s', { src: DRAW3D_WGSL, markers: true,
                              defines: ['MODE_POINTS', 'HAS_COL',
                                        'HAS_SIZE'],
@@ -749,6 +758,29 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             layout: this.device.createPipelineLayout({
                 bindGroupLayouts: [this.slBgl] }),
             compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    private dsBgl?: GPUBindGroupLayout;
+    private dsPipes = new Map<string, GPUComputePipeline>();
+
+    private ensureDepthSort(entry: string) {
+        if (this.dsPipes.has(entry)) return;
+        if (!this.dsBgl) this.dsBgl = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+            ]});
+        const mod = this.device.createShaderModule({ code: DEPTHSORT_WGSL });
+        this.dsPipes.set(entry, this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.dsBgl] }),
+            compute: { module: mod, entryPoint: entry } }));
     }
 
     // ── binning (hist / hist2d / hexbin) ─────────────────────────────
@@ -1415,6 +1447,47 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             cpass.end();
             return;
         }
+        if (op === Op.DepthSort) {
+            // PDepthSort {posBuf, idxBuf, keyBuf, nTris, nPad, vp[16]}
+            const nTris = p.getUint32(12, true);
+            const nPad = p.getUint32(16, true);
+            if (!nTris || !nPad) return;
+            this.ensureDepthSort('keygen');
+            this.ensureDepthSort('bitonic');
+            const posBuf = p.getUint32(0, true);
+            const idxBuf = p.getUint32(4, true);
+            const keyBuf = p.getUint32(8, true);
+            const pc = new DataView(new ArrayBuffer(80));
+            const run = (entry: string, k: number, j: number) => {
+                pc.setUint32(0, nTris, true);
+                pc.setUint32(4, nPad, true);
+                pc.setUint32(8, k, true);
+                pc.setUint32(12, j, true);
+                for (let i = 0; i < 16; i++)
+                    pc.setFloat32(16 + i * 4, p.getFloat32(20 + i * 4, true),
+                                  true);
+                const off = this.uboWrite(new Uint8Array(pc.buffer));
+                const cpass = enc.beginComputePass();
+                cpass.setPipeline(this.dsPipes.get(entry)!);
+                cpass.setBindGroup(0, this.device.createBindGroup({
+                    layout: this.dsBgl!, entries: [
+                        { binding: 0, resource: { buffer: this.uniformRing,
+                                                  offset: off, size: 80 } },
+                        { binding: 1, resource: { buffer:
+                            this.bufRef(posBuf) } },
+                        { binding: 2, resource: { buffer:
+                            this.bufRef(idxBuf) } },
+                        { binding: 3, resource: { buffer:
+                            this.bufRef(keyBuf) } },
+                    ]}));
+                cpass.dispatchWorkgroups(Math.ceil(nPad / 64));
+                cpass.end();
+            };
+            run('keygen', 0, 0);
+            for (let k = 2; k <= nPad; k <<= 1)
+                for (let j = k >> 1; j > 0; j >>= 1) run('bitonic', k, j);
+            return;
+        }
         if (op === Op.Streamlines) {
             // PStreamlines {uBuf, vBuf, seedBuf, outPts, outCnt, w, h,
             //   maxPoints, flags, nSeeds, xMin, xSpan, yMin, ySpan,
@@ -1906,7 +1979,10 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                     this.bufRef(posBuf) } }];
             if (op === Op.DrawSegs3D) key = 'segs3d';
             else if (op === Op.DrawTris3D) {
-                key = colBuf ? 'tris3d.c' : 'tris3d';
+                // auxBuf carries the DepthSort index buffer when present.
+                const sorted = auxBuf !== 0;
+                key = sorted ? (colBuf ? 'tris3d.ci' : 'tris3d.i')
+                             : (colBuf ? 'tris3d.c' : 'tris3d');
             } else {
                 key = 'points3d' + (flags & 1 ? '.c' : '') +
                                  (flags & 2 ? '.s' : '');
@@ -1915,6 +1991,9 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             if (op === Op.DrawTris3D && colBuf)
                 entries.push({ binding: 2, resource: { buffer:
                     this.bufRef(colBuf) } });
+            if (op === Op.DrawTris3D && auxBuf)
+                entries.push({ binding: 4, resource: { buffer:
+                    this.bufRef(auxBuf) } });
             if (op === Op.DrawPoints3D) {
                 if (flags & 1)
                     entries.push({ binding: 2, resource: { buffer:

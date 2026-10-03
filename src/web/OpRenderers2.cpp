@@ -92,6 +92,31 @@ public:
         s_->writeBufferRaw(posBuf_, 0, boxes.data(), boxes.size_bytes());
         return true;
     }
+    /// Device painter's-order sort (op 54): upload the unsorted soup,
+    /// emit the bitonic sort, and draw through the sorted index buffer.
+    bool upload3DSortedDevice(std::span<const Point3D> positions,
+                              std::span<const Color> colors,
+                              const std::array<float, 16>& vp) override {
+        if (positions.size() < 3 || positions.size() % 3) return false;
+        const uint32_t nTris = uint32_t(positions.size() / 3);
+        // Pad to a power of two — the padding keys sort last and are
+        // never drawn.
+        uint32_t nPad = 1;
+        while (nPad < nTris) nPad <<= 1;
+        if (nPad > (1u << 21)) return false;   // keep the passes bounded
+        if (!upload3DDevice(positions, colors, vp)) return false;
+        if (idxBuf_) s_->releaseBuffer(idxBuf_);
+        if (keyBuf_) s_->releaseBuffer(keyBuf_);
+        idxBuf_ = s_->createBufferRaw(size_t(nPad) * 3 * 4 + 16, 2 | 16);
+        keyBuf_ = s_->createBufferRaw(size_t(nPad) * 4 + 16, 2 | 16);
+        PDepthSort p{};
+        p.posBuf = posBuf_; p.idxBuf = idxBuf_; p.keyBuf = keyBuf_;
+        p.nTris = nTris; p.nPad = nPad;
+        std::copy(vp.begin(), vp.end(), p.vp);
+        s_->curStream()->emit(Op::DepthSort, p);
+        return true;
+    }
+
     void adoptBuffers(GpuBuf positions, GpuBuf colors,
                       uint32_t count) override {
         is3D_ = false; boxMode_ = false;
@@ -114,6 +139,8 @@ public:
             p.clip = clipF(rect); p.view = clipF(rect);
             std::copy(std::begin(vp_), std::end(vp_), p.vp);
             p.posBuf = posBuf_; p.colBuf = colBuf_; p.count = count_;
+            // A device-sorted draw consumes the index buffer (auxBuf).
+            p.auxBuf = idxBuf_;
             ops(cmd).emit(Op::DrawTris3D, p);
             return;
         }
@@ -127,6 +154,7 @@ public:
 private:
     OpGpuServices* s_;
     uint32_t posBuf_ = 0, colBuf_ = 0, count_ = 0;
+    uint32_t idxBuf_ = 0, keyBuf_ = 0;   // DepthSort output / scratch
     bool is3D_ = false, boxMode_ = false;
     float vp_[16] = {};
 };

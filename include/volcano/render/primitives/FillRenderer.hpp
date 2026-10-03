@@ -9,8 +9,10 @@
 #include <volcano/render/Cmd.hpp>
 #include <volcano/render/Offload.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <numeric>
 #include <span>
 #include <vector>
 
@@ -67,6 +69,43 @@ public:
         return uploadBoxes3DDevice(boxes, vp);
     }
 
+    /// Painter's-order 3D triangles: the caller supplies *unsorted*
+    /// geometry and the backend picks the ordering — a device depth sort
+    /// (op 54, index buffer consumed by the 3D draw) when the
+    /// `depthsort` offload switch allows and the backend implements it,
+    /// a CPU sort by per-triangle mean clip depth otherwise (the rule
+    /// the 3D plots use). Returns true when the geometry was consumed.
+    bool upload3DSorted(std::span<const plot::Point3D> positions,
+                        std::span<const plot::Color> colors,
+                        const std::array<float, 16>& vp) {
+        if (OffloadConfig::allowGpu(OffloadConfig::global().depthsort) &&
+            upload3DSortedDevice(positions, colors, vp)) return true;
+        const size_t nTris = positions.size() / 3;
+        if (nTris == 0) return false;
+        std::vector<uint32_t> order(nTris);
+        std::iota(order.begin(), order.end(), 0u);
+        std::vector<float> depth(nTris);
+        for (size_t t = 0; t < nTris; ++t)
+            depth[t] = (plot::projectDepth3D(vp, positions[t * 3]) +
+                        plot::projectDepth3D(vp, positions[t * 3 + 1]) +
+                        plot::projectDepth3D(vp, positions[t * 3 + 2])) / 3.0f;
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            return depth[a] > depth[b];   // back-to-front
+        });
+        sortedPos_.clear();
+        sortedCol_.clear();
+        sortedPos_.reserve(positions.size());
+        sortedCol_.reserve(colors.size());
+        for (uint32_t t : order)
+            for (uint32_t k = 0; k < 3; ++k) {
+                sortedPos_.push_back(positions[t * 3 + k]);
+                if (colors.size() == positions.size())
+                    sortedCol_.push_back(colors[t * 3 + k]);
+            }
+        upload3D(sortedPos_, sortedCol_, vp);
+        return true;
+    }
+
     /// Adopt buffers produced by another service (e.g. the pcolormesh
     /// tessellator). The resources are owned by GpuServices; the tokens
     /// stay valid for the services' lifetime.
@@ -91,9 +130,18 @@ protected:
                                      const std::array<float, 16>&) {
         return false;
     }
+    /// Backend hook for upload3DSorted (device depth sort). Implementations
+    /// must leave the renderer ready to draw the sorted order.
+    virtual bool upload3DSortedDevice(std::span<const plot::Point3D>,
+                                      std::span<const plot::Color>,
+                                      const std::array<float, 16>&) {
+        return false;
+    }
 
 private:
     std::vector<plot::Point2D> cpuPos_;
+    std::vector<plot::Point3D> sortedPos_;
+    std::vector<plot::Color> sortedCol_;
 };
 
 } // namespace volcano::render::primitives

@@ -53,6 +53,7 @@ const INIT = (mode: string) => {
     (window as any).__quiver = 0;
     (window as any).__fb = 0;
     (window as any).__sl = 0;
+    (window as any).__ds = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -70,6 +71,7 @@ const INIT = (mode: string) => {
                                arrows: (window as any).__wantMode,
                                fillbetween: (window as any).__wantMode,
                                streamlines: (window as any).__wantMode,
+                               depthsort: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -86,6 +88,7 @@ const INIT = (mode: string) => {
                 if (a[2] === 58) (window as any).__quiver++;
                 if (a[2] === 57) (window as any).__fb++;
                 if (a[2] === 56) (window as any).__sl++;
+                if (a[2] === 54) (window as any).__ds++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -131,7 +134,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  tricont: (window as any).__tricont,
                  quiver: (window as any).__quiver,
                  fb: (window as any).__fb,
-                 sl: (window as any).__sl };
+                 sl: (window as any).__sl,
+                 ds: (window as any).__ds };
     }, frames);
 }
 
@@ -274,6 +278,27 @@ test('GPU streamline tracing matches the CPU integrator', async ({ page }) => {
     // pixel where a trace lands on a raster boundary is expected.
     expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
            Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+});
+
+test('GPU depth sort matches the CPU painter order', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'trisurf', 'cpu', 1);
+    const gpu = await captureWith(page, 'trisurf', 'gpu', 2);
+    console.log(`DEPTHSORT cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.ds).toBeGreaterThan(0);
+    expect(cpu.ds).toBe(0);
+    // Same back-to-front order → the same pixels; the bitonic network
+    // and std::sort can only differ on exact depth ties.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.01);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.02);
 });
 
 test('GPU dash expansion matches the CPU stroker', async ({ page }) => {

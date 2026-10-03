@@ -44,6 +44,19 @@ struct BoxInst { o : vec3f, s : vec3f, c : vec4f };
 #ifdef HAS_SIZE
 @group(0) @binding(3) var<storage, read> sizes : array<f32>;
 #endif
+// Painter's-order index buffer produced by the DepthSort compute op:
+// vertex_index walks the sorted triangle order instead of the buffer.
+#ifdef IDX
+@group(0) @binding(4) var<storage, read> indices : array<u32>;
+#endif
+
+fn vidx(vi : u32) -> u32 {
+#ifdef IDX
+    return indices[vi];
+#else
+    return vi;
+#endif
+}
 
 fn glslMod(x : f32, y : f32) -> f32 { return x - y * floor(x / y); }
 
@@ -157,9 +170,10 @@ const CORNERS : array<vec2f, 6> = array<vec2f, 6>(
 #else
 @vertex fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
     var o : VSOut;
-    o.p = proj(pos3(vi));
+    let v = vidx(vi);
+    o.p = proj(pos3(v));
 #ifdef HAS_COL
-    o.color = cols[vi];
+    o.color = cols[v];
 #else
     o.color = U.color;
 #endif

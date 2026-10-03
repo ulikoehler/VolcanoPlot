@@ -237,6 +237,13 @@ struct PStreamlines { uint32_t uBuf, vBuf, seedBuf, outPts, outCnt;
                       uint32_t w, h, maxPoints, flags, nSeeds;
                       float xMin, xSpan, yMin, ySpan, stepSize;
                       uint32_t slot; };
+/// Painter's-order 3D triangle sort: `posBuf` holds the packed vec3
+/// vertices, `idxBuf` the 3-per-triangle index list (seeded to the
+/// identity by the key pass), `keyBuf` one f32 per triangle. `vp` is the
+/// row-major view-projection the keys are derived from.
+struct PDepthSort { uint32_t posBuf, idxBuf, keyBuf;
+                    uint32_t nTris, nPad;
+                    float vp[16]; };
 #pragma pack(pop)
 
 } // namespace volcano::web
