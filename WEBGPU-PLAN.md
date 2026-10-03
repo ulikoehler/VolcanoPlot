@@ -669,10 +669,14 @@ regenerable via `scripts/generate_webgallery.py`.**
 | Device-lost handling, adapter retention | done |
 | npm packaging + README | done |
 | Comparison gallery (web/gallery: 48 mpl-vs-WebGPU side-by-side PNGs via `scripts/generate_webgallery.py`; deterministic LCG data shared between JS demo and mpl script) | done |
-| HistBins GPU | skipped deliberately — GPU binning is slower than 8-thread CPU even natively (measured); opt-in upstream |
+| Unified opt-in GPU offload (`setOffload({key: cpu|gpu|auto})`, `OffloadKey`: stroking, dashes, contours, binning, projection3d, instancing, fft, envelope) | done |
+| GPU binning: hist2d (op 48), hexbin (op 49) + `HistBins` (45) — atomic counters, mailbox readback | done (opt-in; native CPU stays default-fast) |
+| GPU contour extraction: marching squares compute (op 50) + GPU stroking/dashes feeding `DrawLineSegs` | done |
+| GPU batched FFT (op 51): psd/csd/cohere/spectrum/specgram | done |
+| GPU 3D projection (ops 29–31): raw `Point3D` streams projected in the VS, constant-z painter's order | done |
+| GPU instanced 3D boxes (op 32): 48 B `Box3DInstance` records, unit-cube expansion, real depth test — bar3d/voxels | done |
 | Text as vector outlines in SVG export | open — glyphs are atlas-rasterized upstream |
 | Canvas2D fallback for 3D ops | open — surface/grid3D degrade to nothing |
-| Remaining unbound plot types (eventplot, imshow, table, NavCube, ...) | open — thin wrappers, same pattern |
 
 Notable divergences from the plan text: single session-long OpStream reset at
 render start (repaints append to the same frame — `finish()` must not consume
