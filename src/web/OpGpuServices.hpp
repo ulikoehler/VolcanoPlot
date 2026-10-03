@@ -158,6 +158,13 @@ public:
     /// Contour tessellation: emits the marching-squares + stroking
     /// compute. The mesh never comes back to the CPU — the soup and its
     /// indirect vertex count are handed straight to the draw.
+    /// Batched FFT: same eventual-delivery contract as binning — the
+    /// first call emits the transform + mailbox and returns nullopt so
+    /// the caller's CPU FFT covers that frame; later calls with
+    /// unchanged input serve the delivered spectra.
+    std::optional<std::vector<float>> fftSegments(
+        std::span<const float> signal, std::span<const float> win,
+        uint32_t n, uint32_t step, uint32_t numSegs) override;
     [[nodiscard]] bool supportsContourTessellate() const noexcept override {
         return true;
     }

@@ -26,6 +26,7 @@ import BINS_WGSL from './shaders/HistBins.wgsl?raw';
 import BINS2D_WGSL from './shaders/HistBins2D.wgsl?raw';
 import HEXBINS_WGSL from './shaders/HexBins.wgsl?raw';
 import CONTOUR_WGSL from './shaders/ContourTess.wgsl?raw';
+import FFT_WGSL from './shaders/FftSegments.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -48,7 +49,7 @@ export enum Op {
 
     TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
     KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
-    HistBins2D = 48, HexBins = 49, ContourTess = 50,
+    HistBins2D = 48, HexBins = 49, ContourTess = 50, FftSegments = 51,
 }
 
 export interface FrameHeader {
@@ -653,6 +654,28 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.pendingBulk.push({ buf: staging, slot, bytes });
     }
 
+    // ── batched FFT (spectrum family) ────────────────────────────────
+    private fftBgl?: GPUBindGroupLayout;
+    private fftPipe?: GPUComputePipeline;
+
+    private ensureFft() {
+        if (this.fftPipe) return;
+        this.fftBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2].map((binding): GPUBindGroupLayoutEntry =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' } })),
+            { binding: 3, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: FFT_WGSL });
+        this.fftPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.fftBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
     // ── contour tessellation (marching squares + stroke expansion) ──
     private contourBgl?: GPUBindGroupLayout;
     private contourPipe?: GPUComputePipeline;
@@ -1082,6 +1105,43 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             const cells = (w - 1) * (h - 1) * nLevels;
             pass.dispatchWorkgroups(Math.ceil(cells / 64));
             pass.end();
+            return;
+        }
+        if (op === Op.FftSegments) {
+            // PFftSegments {sigBuf, winBuf, outBuf, n, step, numSegs,
+            //               sigLen, mailbox}
+            const n = p.getUint32(12, true);
+            const numSegs = p.getUint32(20, true);
+            // Workgroup storage holds n complex floats per buffer.
+            if (n < 2 || n > 1024 || !numSegs) return;
+            this.ensureFft();
+            const pcv = new Uint32Array(4);
+            pcv[0] = n; pcv[1] = p.getUint32(16, true);
+            pcv[2] = numSegs; pcv[3] = p.getUint32(24, true);
+            const off = this.uboWrite(pcv);
+            const pass = enc.beginComputePass();
+            pass.setPipeline(this.fftPipe!);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.fftBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 16 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(4, true)) } },
+                    { binding: 3, resource: { buffer:
+                        this.bufRef(p.getUint32(8, true)) } },
+                ]}));
+            pass.dispatchWorkgroups(numSegs);
+            pass.end();
+            const bytes = numSegs * n * 2 * 4;
+            const staging = this.device.createBuffer({
+                size: bytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(
+                this.bufRef(p.getUint32(8, true)), 0, staging, 0, bytes);
+            this.pendingBulk.push({ buf: staging,
+                slot: p.getUint32(28, true), bytes });
             return;
         }
         if (op === Op.HistBins) {

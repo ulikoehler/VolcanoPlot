@@ -69,7 +69,8 @@ private:
     std::vector<Point2D> linePoints_;
     bool prepared_ = false;
 
-    void computePsd();
+    /// `r` (optional) enables the GPU batched-FFT path.
+    void computePsd(render::Renderer* r = nullptr);
     void applyWindow(std::vector<std::complex<float>>& data,
                      float& windowPower) const;
     static void fft(std::vector<std::complex<float>>& data);

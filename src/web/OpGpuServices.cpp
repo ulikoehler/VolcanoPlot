@@ -243,6 +243,36 @@ OpGpuServices::histBin2D(std::span<const float> x, std::span<const float> y,
     return std::nullopt;
 }
 
+std::optional<std::vector<float>>
+OpGpuServices::fftSegments(std::span<const float> signal,
+                           std::span<const float> win,
+                           uint32_t n, uint32_t step, uint32_t numSegs) {
+    // Workgroup storage caps the transform at 2048 complex points
+    // (2 × n f32 = 16 KB, the spec-guaranteed workgroup limit).
+    if (signal.empty() || win.size() < n || n < 2 || n > 2048 ||
+        !numSegs) return std::nullopt;
+    const size_t outCount = size_t(numSegs) * n * 2;
+    const uint64_t fp = fpFloats(signal.first(std::min<size_t>(
+        signal.size(), size_t(numSegs) * step + n)));
+    auto st = binState(3, fp, uint32_t(outCount));
+    if (st.cached) {
+        std::vector<float> out(st.cached->size());
+        std::memcpy(out.data(), st.cached->data(), out.size() * 4);
+        return out;
+    }
+    if (!st.isNew) return std::nullopt;   // readback in flight
+
+    uint32_t sig = createBufferRaw(signal.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(sig, 0, signal.data(), signal.size_bytes());
+    uint32_t winBuf = createBufferRaw(win.size() * 4 + 16, 1 | 2);
+    writeBufferRaw(winBuf, 0, win.data(), win.size() * 4);
+    uint32_t out = createBufferRaw(outCount * 4 + 16, 2 | 16);
+    stream_.emit(Op::FftSegments,
+                 PFftSegments{sig, winBuf, out, n, step, numSegs,
+                              uint32_t(signal.size()), st.slot});
+    return std::nullopt;
+}
+
 bool OpGpuServices::contourTessellate(
     std::span<const float> grid, uint32_t w, uint32_t h,
     std::span<const float> levels, std::span<const plot::Color> colors,

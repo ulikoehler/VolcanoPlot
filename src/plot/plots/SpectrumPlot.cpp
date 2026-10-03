@@ -1,5 +1,6 @@
 // volcano/plot/plots/SpectrumPlot.cpp — magnitude/phase/angle spectrum implementation
 #include "volcano/plot/plots/SpectrumPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -63,37 +64,45 @@ void SpectrumPlot::fft(std::vector<std::complex<float>>& data) {
     }
 }
 
+/// The analysis window, sampled at `n` points. Indices past the signal
+/// are zero, so zero padding contributes nothing.
+std::vector<float> SpectrumPlot::windowArray(uint32_t n) const {
+    uint32_t sigLen = static_cast<uint32_t>(signal_.size());
+    std::vector<float> w(n, 0.0f);
+    for (uint32_t i = 0; i < n && i < sigLen; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(sigLen - 1);
+        switch (config_.window) {
+            case SpectrumConfig::Rectangular:
+                w[i] = 1.0f;
+                break;
+            case SpectrumConfig::Hann:
+                w[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * t));
+                break;
+            case SpectrumConfig::Hamming:
+                w[i] = 0.54f - 0.46f * std::cos(2.0f * static_cast<float>(M_PI) * t);
+                break;
+            case SpectrumConfig::Blackman:
+                w[i] = 0.42f - 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * t)
+                    + 0.08f * std::cos(4.0f * static_cast<float>(M_PI) * t);
+                break;
+        }
+    }
+    return w;
+}
+
 void SpectrumPlot::applyWindow(std::vector<std::complex<float>>& data) const {
     uint32_t n = static_cast<uint32_t>(data.size());
     uint32_t sigLen = static_cast<uint32_t>(signal_.size());
+    const auto w = windowArray(n);
 
     // Copy signal into complex array and apply window.
     for (uint32_t i = 0; i < n; ++i) {
         float sample = (i < sigLen) ? signal_[i] : 0.0f;
-        float w = 1.0f;
-        if (i < sigLen) {
-            float t = static_cast<float>(i) / static_cast<float>(sigLen - 1);
-            switch (config_.window) {
-                case SpectrumConfig::Rectangular:
-                    w = 1.0f;
-                    break;
-                case SpectrumConfig::Hann:
-                    w = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * t));
-                    break;
-                case SpectrumConfig::Hamming:
-                    w = 0.54f - 0.46f * std::cos(2.0f * static_cast<float>(M_PI) * t);
-                    break;
-                case SpectrumConfig::Blackman:
-                    w = 0.42f - 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * t)
-                        + 0.08f * std::cos(4.0f * static_cast<float>(M_PI) * t);
-                    break;
-            }
-        }
-        data[i] = std::complex<float>(sample * w, 0.0f);
+        data[i] = std::complex<float>(sample * w[i], 0.0f);
     }
 }
 
-void SpectrumPlot::computeSpectrum() {
+void SpectrumPlot::computeSpectrum(render::Renderer* r) {
     freqs_.clear();
     values_.clear();
 
@@ -104,9 +113,24 @@ void SpectrumPlot::computeSpectrum() {
     if (n < 2) n = 2;
 
     std::vector<std::complex<float>> data(n);
-    applyWindow(data);
-
-    fft(data);
+    // The window is an O(n) host pass; the transform itself can run on
+    // the device when the `fft` offload switch allows it.
+    const std::vector<float> win = windowArray(n);
+    bool haveGpu = false;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().fft)) {
+        if (auto spec = r->gpu().fftSegments(signal_, win, n, 0, 1);
+            spec && spec->size() == size_t(n) * 2) {
+            for (uint32_t i = 0; i < n; ++i)
+                data[i] = std::complex<float>((*spec)[i * 2],
+                                              (*spec)[i * 2 + 1]);
+            haveGpu = true;
+        }
+    }
+    if (!haveGpu) {
+        applyWindow(data);
+        fft(data);
+    }
 
     // One-sided spectrum: frequencies [0, sampleRate/2).
     uint32_t halfN = n / 2;
@@ -157,7 +181,7 @@ void SpectrumPlot::computeSpectrum() {
 }
 
 void SpectrumPlot::prepare(render::Renderer& r) {
-    computeSpectrum();
+    computeSpectrum(&r);
 
     // Build line points.
     linePoints_.clear();

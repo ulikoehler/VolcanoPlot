@@ -70,7 +70,8 @@ private:
     std::vector<Point2D> linePoints_;
     bool prepared_ = false;
 
-    void computeCsd();
+    /// `r` (optional) enables the GPU batched-FFT path.
+    void computeCsd(render::Renderer* r = nullptr);
     static void applyWindow(std::vector<std::complex<float>>& data,
                             const std::vector<float>& signal,
                             CsdConfig::Window window,

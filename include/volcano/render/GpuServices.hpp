@@ -191,6 +191,19 @@ public:
         return false;
     }
 
+    /// Batched real-input FFT for the spectrum family: `numSegs` windows
+    /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
+    /// `n`-sample window `win`, transformed. Returns `numSegs * n`
+    /// complex values interleaved (re, im), or nullopt when the backend
+    /// has no GPU path / the result is not ready yet (the caller keeps
+    /// its CPU transform for that frame).
+    virtual std::optional<std::vector<float>> fftSegments(
+        std::span<const float> signal, std::span<const float> win,
+        uint32_t n, uint32_t step, uint32_t numSegs) {
+        (void)signal; (void)win; (void)n; (void)step; (void)numSegs;
+        return std::nullopt;
+    }
+
     /// True when this backend implements contourTessellate (checked
     /// before the plot skips its CPU marching squares).
     [[nodiscard]] virtual bool supportsContourTessellate() const noexcept {

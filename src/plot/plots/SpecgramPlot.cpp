@@ -1,5 +1,6 @@
 // volcano/plot/plots/SpecgramPlot.cpp — spectrogram implementation
 #include "volcano/plot/plots/SpecgramPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -65,7 +66,7 @@ void SpecgramPlot::fft(std::vector<std::complex<float>>& data) {
     }
 }
 
-void SpecgramPlot::computeSpecgram() {
+void SpecgramPlot::computeSpecgram(render::Renderer* r) {
     data_.clear();
     nrows_ = 0;
     ncols_ = 0;
@@ -106,8 +107,34 @@ void SpecgramPlot::computeSpecgram() {
 
     data_.resize(nrows_ * ncols_);
 
+    // Every time window is one segment; the device transforms them all
+    // in a single dispatch (`fft` offload switch). The dB conversion
+    // below stays on the host.
+    std::vector<float> gpuSpecs;
+    bool haveGpu = false;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().fft)) {
+        if (auto spec = r->gpu().fftSegments(signal_, win, nfft, hop,
+                                             ncols_);
+            spec && spec->size() == size_t(ncols_) * nfft * 2) {
+            gpuSpecs = std::move(*spec);
+            haveGpu = true;
+        }
+    }
+
     for (uint32_t col = 0; col < ncols_; ++col) {
         uint32_t start = col * hop;
+
+        if (haveGpu) {
+            const float* c = gpuSpecs.data() + size_t(col) * nfft * 2;
+            for (uint32_t k = 0; k < nrows_; ++k) {
+                float mag = std::sqrt(c[k * 2] * c[k * 2] +
+                                      c[k * 2 + 1] * c[k * 2 + 1]) /
+                            static_cast<float>(nrows_);
+                data_[k * ncols_ + col] = 10.0f * std::log10(mag + 1e-30f);
+            }
+            continue;
+        }
 
         std::vector<std::complex<float>> frame(nfft);
         for (uint32_t i = 0; i < nfft; ++i)
@@ -192,7 +219,7 @@ void SpecgramPlot::buildGeometry() {
 }
 
 void SpecgramPlot::prepare(render::Renderer& r) {
-    computeSpecgram();
+    computeSpecgram(&r);
     buildGeometry();
 
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();

@@ -1,5 +1,6 @@
 // volcano/plot/plots/PsdPlot.cpp — power spectral density implementation
 #include "volcano/plot/plots/PsdPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -91,7 +92,7 @@ void PsdPlot::applyWindow(std::vector<std::complex<float>>& data,
     }
 }
 
-void PsdPlot::computePsd() {
+void PsdPlot::computePsd(render::Renderer* r) {
     freqs_.clear();
     values_.clear();
 
@@ -130,7 +131,28 @@ void PsdPlot::computePsd() {
     const uint32_t halfN = n / 2;
     std::vector<float> pxx(halfN + 1, 0.0f);
     std::vector<std::complex<float>> data(n);
+    // Batched FFT on the device (`fft` offload switch): every segment is
+    // transformed in one dispatch, freeing the CPU. The per-bin
+    // accumulation below is unchanged. The spectra arrive one frame
+    // later, so the first frame runs the CPU transform.
+    std::vector<float> gpuSpecs;
+    bool haveGpu = false;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().fft)) {
+        if (auto spec = r->gpu().fftSegments(signal_, win, n, step,
+                                             numSegs);
+            spec && spec->size() == size_t(numSegs) * n * 2) {
+            gpuSpecs = std::move(*spec);
+            haveGpu = true;
+        }
+    }
     for (uint32_t s = 0; s < numSegs; ++s) {
+        if (haveGpu) {
+            const float* c = gpuSpecs.data() + size_t(s) * n * 2;
+            for (uint32_t k = 0; k <= halfN; ++k)
+                pxx[k] += c[k * 2] * c[k * 2] + c[k * 2 + 1] * c[k * 2 + 1];
+            continue;
+        }
         uint32_t off = s * step;
         for (uint32_t i = 0; i < n; ++i) {
             float smp = (off + i < len) ? signal_[off + i] : 0.0f;
@@ -153,7 +175,7 @@ void PsdPlot::computePsd() {
 }
 
 void PsdPlot::prepare(render::Renderer& r) {
-    computePsd();
+    computePsd(&r);
 
     linePoints_.clear();
     for (size_t i = 0; i < freqs_.size(); ++i)

@@ -146,6 +146,14 @@ struct PContourTess { uint32_t gridBuf, levelsBuf, colBuf, outBuf;
                       /// Max dashes a single segment may emit — sizes
                       /// the soup when any level is dashed.
                       uint32_t dashMul, pad1; };
+/// Batched real-input FFT: `numSegs` windows of `n` samples (hop
+/// `step`) from `sigBuf`, multiplied by the `n`-sample `winBuf`, then
+/// transformed. Output is `numSegs * n` complex values interleaved
+/// (re, im) — read back via bulk mailbox (slot → numSegs*n*2 f32).
+/// The per-plot spectral math (power, cross spectra, unwrapping) stays
+/// on the CPU, so every spectrum family member shares one primitive.
+struct PFftSegments { uint32_t sigBuf, winBuf, outBuf;
+                      uint32_t n, step, numSegs, sigLen, mailbox; };
 /// mpl hexbin (pointy-top) lattice counts: two interleaved lattices
 /// A (nx+1)x(ny+1) at (i*sx, j*sy) and B nx*ny offset by (+.5sx,+.5sy).
 /// Result read back via bulk mailbox

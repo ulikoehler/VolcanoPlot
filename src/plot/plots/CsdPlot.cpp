@@ -1,5 +1,6 @@
 // volcano/plot/plots/CsdPlot.cpp — cross-spectral density implementation
 #include "volcano/plot/plots/CsdPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -95,7 +96,7 @@ void CsdPlot::applyWindow(std::vector<std::complex<float>>& data,
     }
 }
 
-void CsdPlot::computeCsd() {
+void CsdPlot::computeCsd(render::Renderer* r) {
     freqs_.clear();
     values_.clear();
 
@@ -132,7 +133,33 @@ void CsdPlot::computeCsd() {
     const uint32_t halfN = n / 2;
     std::vector<std::complex<float>> pxy(halfN + 1);
     std::vector<std::complex<float>> dataX(n), dataY(n);
+    // Batched FFTs on the device (`fft` offload switch) — both signals in
+    // one dispatch each. The cross-spectrum accumulation stays here.
+    std::vector<float> gpuX, gpuY;
+    bool haveGpu = false;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().fft)) {
+        auto sx = r->gpu().fftSegments(signalX_, win, n, step, numSegs);
+        auto sy = r->gpu().fftSegments(signalY_, win, n, step, numSegs);
+        if (sx && sy && sx->size() == size_t(numSegs) * n * 2 &&
+            sy->size() == size_t(numSegs) * n * 2) {
+            gpuX = std::move(*sx);
+            gpuY = std::move(*sy);
+            haveGpu = true;
+        }
+    }
     for (uint32_t s = 0; s < numSegs; ++s) {
+        if (haveGpu) {
+            const float* x = gpuX.data() + size_t(s) * n * 2;
+            const float* y = gpuY.data() + size_t(s) * n * 2;
+            for (uint32_t k = 0; k <= halfN; ++k) {
+                // X * conj(Y)
+                pxy[k] += std::complex<float>(
+                    x[k * 2] * y[k * 2] + x[k * 2 + 1] * y[k * 2 + 1],
+                    x[k * 2 + 1] * y[k * 2] - x[k * 2] * y[k * 2 + 1]);
+            }
+            continue;
+        }
         uint32_t off = s * step;
         for (uint32_t i = 0; i < n; ++i) {
             dataX[i] = std::complex<float>(
@@ -157,7 +184,7 @@ void CsdPlot::computeCsd() {
 }
 
 void CsdPlot::prepare(render::Renderer& r) {
-    computeCsd();
+    computeCsd(&r);
 
     linePoints_.clear();
     for (size_t i = 0; i < freqs_.size(); ++i)

@@ -74,7 +74,8 @@ private:
     std::vector<Point2D> linePoints_;
     bool prepared_ = false;
 
-    void computeCoherence();
+    /// `r` (optional) enables the GPU batched-FFT path.
+    void computeCoherence(render::Renderer* r = nullptr);
     static void applyWindow(std::vector<std::complex<float>>& data,
                             const std::vector<float>& signal,
                             CohereConfig::Window window,

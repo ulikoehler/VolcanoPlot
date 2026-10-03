@@ -84,8 +84,11 @@ private:
     std::vector<Point2D> linePoints_;
     bool prepared_ = false;
 
-    void computeSpectrum();
+    /// `r` (optional) enables the GPU batched-FFT path.
+    void computeSpectrum(render::Renderer* r = nullptr);
     void applyWindow(std::vector<std::complex<float>>& data) const;
+    /// Analysis window sampled at `n` points (0 past the signal).
+    [[nodiscard]] std::vector<float> windowArray(uint32_t n) const;
     static void fft(std::vector<std::complex<float>>& data);
 };
 

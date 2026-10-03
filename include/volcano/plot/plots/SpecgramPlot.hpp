@@ -83,7 +83,8 @@ private:
     std::vector<Color> fillColors_;
     bool prepared_ = false;
 
-    void computeSpecgram();
+    /// `r` (optional) enables the GPU batched-FFT path.
+    void computeSpecgram(render::Renderer* r = nullptr);
     void buildGeometry();
     static void fft(std::vector<std::complex<float>>& data);
 };

@@ -52,6 +52,7 @@ enum class Op : uint16_t {
     HistBins2D       = 48,
     HexBins          = 49,
     ContourTess      = 50,
+    FftSegments      = 51,
 };
 
 /// Reference to bulk data. kind 0 = ARENA (off = byte offset into the

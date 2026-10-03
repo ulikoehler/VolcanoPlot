@@ -46,6 +46,7 @@ test.afterAll(() => server.close());
 const INIT = (mode: string) => {
     (window as any).__bins = 0;
     (window as any).__contours = 0;
+    (window as any).__fft = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -57,7 +58,8 @@ const INIT = (mode: string) => {
             if ((window as any).__wantMode)
                 v.setOffload({ binning: (window as any).__wantMode,
                                contours: (window as any).__wantMode,
-                               dashes: (window as any).__wantMode });
+                               dashes: (window as any).__wantMode,
+                               fft: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
             interp.dispatchBins = (...a: any[]) => {
@@ -68,6 +70,7 @@ const INIT = (mode: string) => {
             const oe = interp.execCompute.bind(interp);
             interp.execCompute = (...a: any[]) => {
                 if (a[2] === 50) (window as any).__contours++;
+                if (a[2] === 51) (window as any).__fft++;
                 return oe(...a);
             };
         },
@@ -99,7 +102,8 @@ async function captureWith(page: any, kind: string, mode: string,
         }
         return { nonWhite, chroma, mean: sum / (px.length / 4 * 3),
                  dispatched: (window as any).__bins,
-                 contours: (window as any).__contours };
+                 contours: (window as any).__contours,
+                 fft: (window as any).__fft };
     }, frames);
 }
 
@@ -171,3 +175,27 @@ test('GPU dash expansion matches the CPU stroker', async ({ page }) => {
     expect(Math.abs(gpu.chroma - cpu.chroma) /
            Math.max(1, cpu.chroma)).toBeLessThan(0.02);
 });
+
+for (const kind of ['psd', 'csd', 'cohere', 'spectrum', 'specgram']) {
+    test(`GPU batched FFT matches the CPU transform (${kind})`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 2);
+        const gpu = await captureWith(page, kind, 'gpu', 4);
+        console.log(`${kind.toUpperCase()} cpu=${JSON.stringify(cpu)} ` +
+                    `gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        // The transform ran on the device only for the gpu run.
+        expect(gpu.fft).toBeGreaterThan(0);
+        expect(cpu.fft).toBe(0);
+        // Same spectrum → the same curve/image.
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+        expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.0);
+    });
+}
