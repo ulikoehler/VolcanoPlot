@@ -1,5 +1,6 @@
 // volcano/plot/plots/StreamPlot.cpp — streamplot implementation
 #include "volcano/plot/plots/StreamPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -144,6 +145,34 @@ bool StreamPlot::tooCloseToExisting(float x, float y, float minDist) const {
     return false;
 }
 
+/// Candidate seed positions in mpl's scan order — the GPU traces these
+/// in parallel; the CPU replays the ordered accept/reject over them.
+void StreamPlot::buildSeeds() {
+    seeds_.clear();
+    const auto& g = gridU_;
+    uint32_t seedNx = std::max(2u, static_cast<uint32_t>(
+        (g.width - 1) * config_.density));
+    uint32_t seedNy = std::max(2u, static_cast<uint32_t>(
+        (g.height - 1) * config_.density));
+    seeds_.reserve(size_t(seedNx) * seedNy * 2);
+    for (uint32_t sj = 0; sj < seedNy; ++sj)
+        for (uint32_t si = 0; si < seedNx; ++si) {
+            seeds_.push_back(g.xRange.min +
+                             (si + 0.5f) * g.xRange.span() / seedNx);
+            seeds_.push_back(g.yRange.min +
+                             (sj + 0.5f) * g.yRange.span() / seedNy);
+        }
+}
+
+/// Append one accepted line to the concatenated store.
+void StreamPlot::appendLine(const std::vector<Point2D>& line) {
+    if (line.size() < 2) return;
+    const uint32_t startIdx = static_cast<uint32_t>(streamlinePoints_.size());
+    for (const auto& p : line) streamlinePoints_.push_back(p);
+    streamlineStarts_.push_back(startIdx);
+    streamlineLengths_.push_back(static_cast<uint32_t>(line.size()));
+}
+
 void StreamPlot::generateStreamlines() {
     streamlinePoints_.clear();
     streamlineStarts_.clear();
@@ -155,63 +184,113 @@ void StreamPlot::generateStreamlines() {
     float cellSize = std::min(dx, dy);
     float minDist = cellSize / std::max(0.1f, config_.density);
 
-    uint32_t seedNx = std::max(2u, static_cast<uint32_t>((g.width - 1) * config_.density));
-    uint32_t seedNy = std::max(2u, static_cast<uint32_t>((g.height - 1) * config_.density));
+    if (seeds_.empty()) buildSeeds();
 
-    for (uint32_t sj = 0; sj < seedNy; ++sj) {
-        for (uint32_t si = 0; si < seedNx; ++si) {
-            float x = g.xRange.min + (si + 0.5f) * g.xRange.span() / seedNx;
-            float y = g.yRange.min + (sj + 0.5f) * g.yRange.span() / seedNy;
+    for (size_t s = 0; s + 1 < seeds_.size(); s += 2) {
+        float x = seeds_[s], y = seeds_[s + 1];
 
-            if (tooCloseToExisting(x, y, minDist)) continue;
+        if (tooCloseToExisting(x, y, minDist)) continue;
 
-            auto [u, v] = sampleField(x, y);
-            if (std::sqrt(u * u + v * v) < 1e-10f) continue;
+        auto [u, v] = sampleField(x, y);
+        if (std::sqrt(u * u + v * v) < 1e-10f) continue;
 
-            // Trace forward and backward.
-            std::vector<Point2D> forward;
-            integrateStreamline(x, y, +1, forward);
-            std::vector<Point2D> backward;
-            integrateStreamline(x, y, -1, backward);
+        // Trace forward and backward.
+        std::vector<Point2D> forward;
+        integrateStreamline(x, y, +1, forward);
+        std::vector<Point2D> backward;
+        integrateStreamline(x, y, -1, backward);
 
-            // Combine: backward (reversed, skip start) + forward.
-            std::vector<Point2D> line;
-            for (int k = static_cast<int>(backward.size()) - 1; k >= 1; --k)
-                line.push_back(backward[k]);
-            for (const auto& p : forward)
-                line.push_back(p);
+        // Combine: backward (reversed, skip start) + forward.
+        std::vector<Point2D> line;
+        for (int k = static_cast<int>(backward.size()) - 1; k >= 1; --k)
+            line.push_back(backward[k]);
+        for (const auto& p : forward)
+            line.push_back(p);
 
-            if (line.size() < 2) continue;
-
-            uint32_t startIdx = static_cast<uint32_t>(streamlinePoints_.size());
-            for (const auto& p : line)
-                streamlinePoints_.push_back(p);
-            streamlineStarts_.push_back(startIdx);
-            streamlineLengths_.push_back(static_cast<uint32_t>(line.size()));
-        }
+        appendLine(line);
     }
 }
 
-void StreamPlot::prepare(render::Renderer& r) {
-    generateStreamlines();
+/// Poll the device traces and, once delivered, rebuild the streamline
+/// set from them. The accept/reject order is unchanged, so the result
+/// matches the CPU path.
+bool StreamPlot::adoptGpuTraces(render::Renderer& r) {
+    if (!gpuTrace_ || gpuTraced_) return false;
+    const auto& g = gridU_;
+    std::vector<float> pts;
+    std::vector<uint32_t> cnt;
+    if (!r.gpu().streamlines(g.values, gridV_.values, g.width, g.height,
+                             g.xRange.min, g.xRange.span(),
+                             g.yRange.min, g.yRange.span(), seeds_,
+                             config_.stepSize, config_.maxPoints,
+                             config_.brokenStreamlines, pts, cnt))
+        return false;
 
-    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
+    const size_t nSeeds = seeds_.size() / 2;
+    if (cnt.size() < nSeeds * 2) return false;
+    const size_t slotPts = size_t(config_.maxPoints);
+    if (pts.size() < nSeeds * 2 * slotPts * 2) return false;
 
-    // Convert streamlines to line segments (pairs for eLineList).
+    const float dx = g.xRange.span() / (g.width - 1);
+    const float dy = g.yRange.span() / (g.height - 1);
+    const float minDist = std::min(dx, dy) / std::max(0.1f, config_.density);
+
+    streamlinePoints_.clear();
+    streamlineStarts_.clear();
+    streamlineLengths_.clear();
+
+    for (size_t s = 0; s < nSeeds; ++s) {
+        const float x = seeds_[s * 2], y = seeds_[s * 2 + 1];
+        if (tooCloseToExisting(x, y, minDist)) continue;
+        auto [u, v] = sampleField(x, y);
+        if (std::sqrt(u * u + v * v) < 1e-10f) continue;
+
+        const uint32_t nBack = std::min(cnt[s * 2], config_.maxPoints);
+        const uint32_t nFwd = std::min(cnt[s * 2 + 1], config_.maxPoints);
+        const float* back = pts.data() + (s * 2 * slotPts) * 2;
+        const float* fwd = back + slotPts * 2;
+
+        std::vector<Point2D> line;
+        line.reserve(size_t(nBack) + nFwd);
+        for (int k = static_cast<int>(nBack) - 1; k >= 1; --k)
+            line.push_back({back[k * 2], back[k * 2 + 1]});
+        for (uint32_t k = 0; k < nFwd; ++k)
+            line.push_back({fwd[k * 2], fwd[k * 2 + 1]});
+        appendLine(line);
+    }
+
+    gpuTraced_ = true;
+    return true;
+}
+
+/// Convert the streamline set to line segments (pairs for eLineList)
+/// and upload them.
+void StreamPlot::uploadSegments(render::Renderer& r) {
     std::vector<Point2D> segments;
     for (uint32_t s = 0; s < streamlineStarts_.size(); ++s) {
-        uint32_t start = streamlineStarts_[s];
-        uint32_t len = streamlineLengths_[s];
+        const uint32_t start = streamlineStarts_[s];
+        const uint32_t len = streamlineLengths_[s];
         for (uint32_t k = 0; k + 1 < len; ++k) {
             segments.push_back(streamlinePoints_[start + k]);
             segments.push_back(streamlinePoints_[start + k + 1]);
         }
     }
-
     if (!segments.empty()) {
         lineRenderer_->upload(std::span{segments}, config_.color,
-                             config_.lineWidth);
+                              config_.lineWidth);
     }
+}
+
+void StreamPlot::prepare(render::Renderer& r) {
+    buildSeeds();
+    gpuTrace_ = r.gpu().supportsStreamlines() &&
+                render::OffloadConfig::allowGpu(
+                    render::OffloadConfig::global().streamlines);
+    generateStreamlines();
+    if (gpuTrace_) adoptGpuTraces(r);   // no-op until the trace lands
+
+    if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
+    uploadSegments(r);
 
     if (config_.arrows) {
         if (!arrowRenderer_) arrowRenderer_ = r.gpu().createFillRenderer();
@@ -222,7 +301,11 @@ void StreamPlot::prepare(render::Renderer& r) {
 
 void StreamPlot::draw(render::Cmd& cmd, render::Renderer& r,
                       const Axes& axes, Rect2D rect) {
-    if (!prepared_ || streamlineStarts_.empty()) return;
+    if (!prepared_) return;
+    // Swap in the device traces once the mailbox delivers them (the CPU
+    // lines drawn until then are identical, so nothing flickers).
+    if (gpuTrace_ && !gpuTraced_ && adoptGpuTraces(r)) uploadSegments(r);
+    if (streamlineStarts_.empty()) return;
 
     Transform2D t = axes.transform();
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());

@@ -86,6 +86,17 @@ private:
     std::unique_ptr<render::primitives::FillRenderer> arrowRenderer_;
     bool prepared_ = false;
 
+    // GPU streamline tracing ('streamlines' offload): the RK4 traces run
+    // on the device while the order-dependent seed accept/reject loop
+    // (mpl seeds against already-accepted lines) replays on the CPU.
+    std::vector<float> seeds_;          // candidate seeds, (x, y) pairs
+    bool gpuTrace_ = false;
+    bool gpuTraced_ = false;
+    void buildSeeds();
+    void appendLine(const std::vector<Point2D>& line);
+    bool adoptGpuTraces(render::Renderer& r);
+    void uploadSegments(render::Renderer& r);
+
     /// Sample the vector field at (x, y) via bilinear interpolation.
     /// Returns (u, v). Returns (0, 0) if outside the grid.
     std::pair<float, float> sampleField(float x, float y) const;

@@ -253,6 +253,33 @@ public:
         return false;
     }
 
+    /// GPU RK4 streamline tracing for StreamPlot. `gridU`/`gridV` are
+    /// row-major w×h fields, `seeds` (x, y) pairs. The trace is
+    /// asynchronous: returns false while the request is in flight and
+    /// true with the delivered data — `outPts` = nSeeds × 2 × maxPoints
+    /// (x, y) pairs (backward run first, then forward), `outCnt` = the
+    /// two per-seed lengths. The order-dependent seed accept/reject
+    /// loop stays on the CPU (mpl seeds against accepted lines only).
+    virtual bool streamlines(std::span<const float> gridU,
+                             std::span<const float> gridV,
+                             uint32_t w, uint32_t h,
+                             float xMin, float xSpan,
+                             float yMin, float ySpan,
+                             std::span<const float> seeds,
+                             float stepSize, uint32_t maxPoints,
+                             bool brokenStreamlines,
+                             std::vector<float>& outPts,
+                             std::vector<uint32_t>& outCnt) {
+        (void)gridU; (void)gridV; (void)w; (void)h; (void)xMin;
+        (void)xSpan; (void)yMin; (void)ySpan; (void)seeds; (void)stepSize;
+        (void)maxPoints; (void)brokenStreamlines;
+        (void)outPts; (void)outCnt;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsStreamlines() const noexcept {
+        return false;
+    }
+
     /// Batched real-input FFT for the spectrum family: `numSegs` windows
     /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
     /// `n`-sample window `win`, transformed. Returns `numSegs * n`

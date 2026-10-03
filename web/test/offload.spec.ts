@@ -52,6 +52,7 @@ const INIT = (mode: string) => {
     (window as any).__tricont = 0;
     (window as any).__quiver = 0;
     (window as any).__fb = 0;
+    (window as any).__sl = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -68,6 +69,7 @@ const INIT = (mode: string) => {
                                instancing: (window as any).__wantMode,
                                arrows: (window as any).__wantMode,
                                fillbetween: (window as any).__wantMode,
+                               streamlines: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -83,6 +85,7 @@ const INIT = (mode: string) => {
                 if (a[2] === 53) (window as any).__tricont++;
                 if (a[2] === 58) (window as any).__quiver++;
                 if (a[2] === 57) (window as any).__fb++;
+                if (a[2] === 56) (window as any).__sl++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -127,7 +130,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  inst: (window as any).__inst,
                  tricont: (window as any).__tricont,
                  quiver: (window as any).__quiver,
-                 fb: (window as any).__fb };
+                 fb: (window as any).__fb,
+                 sl: (window as any).__sl };
     }, frames);
 }
 
@@ -249,6 +253,27 @@ test('GPU fill_between band tessellation matches the CPU mesh',
            Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
     expect(Math.abs(gpu.chroma - cpu.chroma) /
            Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});
+
+test('GPU streamline tracing matches the CPU integrator', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    // The trace arrives through the mailbox a frame later, so the GPU
+    // run needs a few re-renders before the device lines are drawn.
+    const cpu = await captureWith(page, 'streamplot', 'cpu', 1);
+    const gpu = await captureWith(page, 'streamplot', 'gpu', 5);
+    console.log(`STREAM cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.sl).toBeGreaterThan(0);
+    expect(cpu.sl).toBe(0);
+    // Same RK4 traces and same seed order → the same ink; a stray
+    // pixel where a trace lands on a raster boundary is expected.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
 });
 
 test('GPU dash expansion matches the CPU stroker', async ({ page }) => {

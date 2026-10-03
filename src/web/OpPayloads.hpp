@@ -230,6 +230,13 @@ struct PFillBetweenTess { uint32_t xBuf, y1Buf, y2Buf, maskBuf;
                           uint32_t n, flags, maxVerts;
                           float bx, ax, by, ay;
                           float r, g, b, a; };
+/// GPU RK4 streamline tracing: one invocation per candidate seed.
+/// outPts holds 2 × maxPoints (x, y) pairs per seed — the backward run
+/// first, then the forward one; outCnt the two per-seed lengths.
+struct PStreamlines { uint32_t uBuf, vBuf, seedBuf, outPts, outCnt;
+                      uint32_t w, h, maxPoints, flags, nSeeds;
+                      float xMin, xSpan, yMin, ySpan, stepSize;
+                      uint32_t slot; };
 #pragma pack(pop)
 
 } // namespace volcano::web

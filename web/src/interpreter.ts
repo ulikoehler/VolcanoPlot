@@ -31,6 +31,7 @@ import ENVELOPE_WGSL from './shaders/EnvelopeCols.wgsl?raw';
 import TRICONTOUR_WGSL from './shaders/TriContourTess.wgsl?raw';
 import QUIVER_WGSL from './shaders/QuiverTess.wgsl?raw';
 import FILLBETWEEN_WGSL from './shaders/FillBetweenTess.wgsl?raw';
+import STREAMLINES_WGSL from './shaders/Streamlines.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -727,6 +728,29 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
+    private slPipe?: GPUComputePipeline;
+    private slBgl?: GPUBindGroupLayout;
+
+    private ensureStreamlines() {
+        if (this.slPipe) return;
+        this.slBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            ...[4, 5].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'storage' as GPUBufferBindingType } })),
+        ]});
+        const mod = this.device.createShaderModule({ code: STREAMLINES_WGSL });
+        this.slPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.slBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
     // ── binning (hist / hist2d / hexbin) ─────────────────────────────
     private binsBgl?: GPUBindGroupLayout;
     private binsPipes = new Map<number, GPUComputePipeline>();
@@ -1389,6 +1413,56 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                 ]}));
             cpass.dispatchWorkgroups(Math.ceil(nTris * nLv / 64));
             cpass.end();
+            return;
+        }
+        if (op === Op.Streamlines) {
+            // PStreamlines {uBuf, vBuf, seedBuf, outPts, outCnt, w, h,
+            //   maxPoints, flags, nSeeds, xMin, xSpan, yMin, ySpan,
+            //   stepSize, slot}
+            const w = p.getUint32(20, true);
+            const h = p.getUint32(24, true);
+            const maxPoints = p.getUint32(28, true);
+            const nSeeds = p.getUint32(36, true);
+            const slot = p.getUint32(60, true);
+            if (!nSeeds || !w || !h || !maxPoints) return;
+            this.ensureStreamlines();
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, w, true);
+            pc.setUint32(4, h, true);
+            pc.setUint32(8, maxPoints, true);
+            pc.setUint32(12, p.getUint32(32, true), true);   // flags
+            pc.setFloat32(16, p.getFloat32(40, true), true);  // xMin
+            pc.setFloat32(20, p.getFloat32(44, true), true);  // xSpan
+            pc.setFloat32(24, p.getFloat32(48, true), true);  // yMin
+            pc.setFloat32(28, p.getFloat32(52, true), true);  // ySpan
+            pc.setFloat32(32, p.getFloat32(56, true), true);  // stepSize
+            pc.setUint32(36, nSeeds, true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.slPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.slBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 48 } },
+                    ...[0, 4, 8, 12, 16].map((off2, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(off2, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(nSeeds / 64));
+            cpass.end();
+            // Deliver counts then points as one blob — the host replays
+            // the ordered seed accept/reject over the traces.
+            const cntBytes = nSeeds * 2 * 4;
+            const ptBytes = nSeeds * 2 * maxPoints * 2 * 4;
+            const staging = this.device.createBuffer({
+                size: cntBytes + ptBytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(this.bufRef(p.getUint32(16, true)), 0,
+                                   staging, 0, cntBytes);
+            enc.copyBufferToBuffer(this.bufRef(p.getUint32(12, true)), 0,
+                                   staging, cntBytes, ptBytes);
+            this.pendingBulk.push({ buf: staging, slot,
+                                    bytes: cntBytes + ptBytes });
             return;
         }
         if (op === Op.FillBetweenTess) {

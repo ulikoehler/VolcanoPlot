@@ -1,6 +1,7 @@
 // src/web/OpGpuServices.cpp — GpuServices over an OpStream
 #include "OpGpuServices.hpp"
 #include <cmath>
+#include <cstring>
 #include "OpFactory.hpp"
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/PointRenderer.hpp>
@@ -435,6 +436,60 @@ bool OpGpuServices::triContourTessellate(
     soupOut = render::GpuBuf(soup);
     countOut = render::GpuBuf(counter);
     return true;
+}
+
+bool OpGpuServices::streamlines(
+    std::span<const float> gridU, std::span<const float> gridV,
+    uint32_t w, uint32_t h, float xMin, float xSpan, float yMin,
+    float ySpan, std::span<const float> seeds, float stepSize,
+    uint32_t maxPoints, bool brokenStreamlines,
+    std::vector<float>& outPts, std::vector<uint32_t>& outCnt) {
+    const uint32_t nSeeds = uint32_t(seeds.size() / 2);
+    if (nSeeds == 0 || w < 2 || h < 2 || !maxPoints ||
+        gridU.size() < size_t(w) * h || gridV.size() < size_t(w) * h)
+        return false;
+
+    auto sameReq = [&] {
+        return sl_.nSeeds == nSeeds && sl_.w == w && sl_.h == h &&
+               sl_.maxPoints == maxPoints &&
+               sl_.broken == brokenStreamlines &&
+               sl_.stepSize == stepSize && sl_.xMin == xMin &&
+               sl_.xSpan == xSpan && sl_.yMin == yMin && sl_.ySpan == ySpan &&
+               sl_.seedFp == fpFloats(seeds);
+    };
+    if (sameReq() && sl_.slot && mailboxReady(sl_.slot)) {
+        auto bytes = mailboxTake(sl_.slot);
+        const size_t cntBytes = size_t(nSeeds) * 2 * sizeof(uint32_t);
+        const size_t ptBytes =
+            size_t(nSeeds) * 2 * maxPoints * 2 * sizeof(float);
+        if (bytes.size() < cntBytes + ptBytes) return false;
+        outCnt.resize(size_t(nSeeds) * 2);
+        std::memcpy(outCnt.data(), bytes.data(), cntBytes);
+        outPts.resize(size_t(nSeeds) * 2 * maxPoints * 2);
+        std::memcpy(outPts.data(), bytes.data() + cntBytes, ptBytes);
+        return true;
+    }
+    if (sameReq() && sl_.slot) return false;   // still in flight
+
+    const uint32_t uBuf = createBufferRaw(gridU.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(uBuf, 0, gridU.data(), gridU.size_bytes());
+    const uint32_t vBuf = createBufferRaw(gridV.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(vBuf, 0, gridV.data(), gridV.size_bytes());
+    const uint32_t seedBuf = createBufferRaw(seeds.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(seedBuf, 0, seeds.data(), seeds.size_bytes());
+    const uint32_t pts = createBufferRaw(
+        size_t(nSeeds) * 2 * maxPoints * 2 * sizeof(float) + 16, 2 | 16);
+    const uint32_t cnt = createBufferRaw(size_t(nSeeds) * 2 * 4 + 16,
+                                         2 | 16);
+    sl_ = StreamReq{nSeeds, w, h, maxPoints, brokenStreamlines, stepSize,
+                    xMin, xSpan, yMin, ySpan, fpFloats(seeds),
+                    allocMailbox()};
+    stream_.emit(Op::Streamlines,
+                 PStreamlines{uBuf, vBuf, seedBuf, pts, cnt, w, h,
+                              maxPoints, brokenStreamlines ? 1u : 0u,
+                              nSeeds, xMin, xSpan, yMin, ySpan, stepSize,
+                              sl_.slot});
+    return false;
 }
 
 bool OpGpuServices::fillBetweenTess(

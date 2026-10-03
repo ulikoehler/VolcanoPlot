@@ -182,6 +182,19 @@ public:
         std::span<const float> dashes, uint32_t mode,
         render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
 
+    [[nodiscard]] bool supportsStreamlines() const noexcept override {
+        return true;
+    }
+    bool streamlines(std::span<const float> gridU,
+                     std::span<const float> gridV,
+                     uint32_t w, uint32_t h,
+                     float xMin, float xSpan, float yMin, float ySpan,
+                     std::span<const float> seeds,
+                     float stepSize, uint32_t maxPoints,
+                     bool brokenStreamlines,
+                     std::vector<float>& outPts,
+                     std::vector<uint32_t>& outCnt) override;
+
     [[nodiscard]] bool supportsFillBetweenTess() const noexcept override {
         return true;
     }
@@ -268,6 +281,16 @@ private:
         std::vector<uint32_t> cached;
     };
     std::vector<BinReq> binReqs_;
+    /// In-flight streamline trace: the identity is the seed fingerprint
+    /// plus the field/step parameters, so a re-render with unchanged
+    /// input reuses the delivered traces.
+    struct StreamReq {
+        uint32_t nSeeds = 0, w = 0, h = 0, maxPoints = 0;
+        bool broken = false;
+        float stepSize = 0, xMin = 0, xSpan = 0, yMin = 0, ySpan = 0;
+        uint64_t seedFp = 0;
+        uint32_t slot = 0;
+    } sl_;
     /// State of one binning request.
     struct BinState {
         const std::vector<uint32_t>* cached = nullptr;  ///< delivered
