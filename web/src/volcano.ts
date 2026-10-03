@@ -17,7 +17,7 @@ interface VolcanoModule {
     _vp_render(): boolean;
     _vp_renderIfStale(): boolean;
     _vp_line(axes: number, xs: Float32Array, ys: Float32Array,
-             color: string): number;
+             color: string, width: number, style: string): number;
     _vp_scatter(axes: number, xs: Float32Array, ys: Float32Array,
                 color: string): number;
     _vp_alloc(nbytes: number): number;
@@ -672,9 +672,10 @@ export class VolcanoCanvas {
     suptitle(t: string) { this.mod._vp_suptitle(t); }
 
     line(xs: ArrayLike<number>, ys: ArrayLike<number>,
-         color = ''): number {
+         color = '', width = 0, style = ''): number {
         const vx = this.stage(xs), vy = this.stage(ys);
-        try { return this.mod._vp_line(this.cur, vx, vy, color); }
+        try { return this.mod._vp_line(this.cur, vx, vy, color,
+                                       width, style); }
         finally {
             this.mod._vp_free(vx.byteOffset);
             this.mod._vp_free(vy.byteOffset);

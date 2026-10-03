@@ -836,6 +836,11 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
     private tessPipe: GPUComputePipeline | null = null;
     private tessBgl: GPUBindGroupLayout | null = null;
 
+    /** Zero-filled storage buffer bound where a shader declares a
+     * storage binding the current draw never reads (the dash buffers on
+     * a solid stroke). */
+    private dummyStorage?: GPUBuffer;
+
     private ensureTess() {
         if (this.tessPipe) return;
         this.tessBgl = this.device.createBindGroupLayout({ entries: [
@@ -845,7 +850,19 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
               buffer: { type: 'read-only-storage' } },
             { binding: 2, visibility: GPUShaderStage.COMPUTE,
               buffer: { type: 'storage' } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 4, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
         ]});
+        // A solid stroke never reads the dash buffers, but the layout
+        // declares them — bind a zeroed dummy instead of leaving the
+        // entry undefined (WebGPU rejects undefined members).
+        this.dummyStorage = this.device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        this.device.queue.writeBuffer(this.dummyStorage, 0,
+            new Uint8Array(256));
         const mod = this.device.createShaderModule({
             code: TRANSFORM_WGSL + '\n' + TESS_WGSL });
         this.tessPipe = this.device.createComputePipeline({
@@ -1135,7 +1152,9 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.ensureTess();
         // PTessLines {inBuf,inBase,outBuf,outBase,n,nSeg,hwidth,
         //             join u8, cap u8, miterLimit, r,g,b,a}
-        const pc = new DataView(new ArrayBuffer(48));
+        // PTessLines is packed: dash fields follow the colour at 50/54/
+        // 58/62 and the offset at 66.
+        const pc = new DataView(new ArrayBuffer(80));
         pc.setUint32(0,  p.getUint32(16, true), true);   // n
         pc.setUint32(4,  p.getUint32(20, true), true);   // nSeg
         pc.setFloat32(8, p.getFloat32(24, true), true);  // hwidth
@@ -1148,20 +1167,38 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         pc.setFloat32(36, p.getFloat32(38, true), true); // g
         pc.setFloat32(40, p.getFloat32(42, true), true); // b
         pc.setFloat32(44, p.getFloat32(46, true), true); // a
+        pc.setUint32(48, p.getUint32(62, true), true);   // dashMul
+        pc.setUint32(52, p.getUint32(58, true), true);   // dashCount
+        // lenBase/dashBase are *array offsets* inside their buffers —
+        // each buffer carries exactly this stroke's data, so both are 0.
+        // (The buffer handles live in the payload, not the uniform.)
+        pc.setUint32(56, 0, true);                       // lenBase
+        pc.setUint32(60, 0, true);                       // dashBase
+        pc.setFloat32(64, p.getFloat32(66, true), true); // dashOffset
         const off = this.uboWrite(new Uint8Array(pc.buffer));
         const n = p.getUint32(16, true), nSeg = p.getUint32(20, true);
         if (!n || !nSeg) return;
         const pass = enc.beginComputePass();
         pass.setPipeline(this.tessPipe!);
+        const entries: GPUBindGroupEntry[] = [
+            { binding: 0, resource: { buffer: this.uniformRing,
+                                      offset: off, size: 80 } },
+            { binding: 1, resource: { buffer:
+                this.bufRef(p.getUint32(0, true)) } },
+            { binding: 2, resource: { buffer:
+                this.bufRef(p.getUint32(8, true)) } },
+        ];
+        // Dash bindings are optional: a solid stroke never touches them,
+        // but the layout always declares them, so bind a dummy when the
+        // stroke carries no pattern.
+        const lenH = p.getUint32(50, true), dashH = p.getUint32(54, true);
+        const dummy = this.dummyStorage!;
+        entries.push({ binding: 3, resource: { buffer: lenH
+            ? this.bufRef(lenH) : dummy } });
+        entries.push({ binding: 4, resource: { buffer: dashH
+            ? this.bufRef(dashH) : dummy } });
         pass.setBindGroup(0, this.device.createBindGroup({
-            layout: this.tessBgl!, entries: [
-                { binding: 0, resource: { buffer: this.uniformRing,
-                                          offset: off, size: 48 } },
-                { binding: 1, resource: { buffer:
-                    this.bufRef(p.getUint32(0, true)) } },
-                { binding: 2, resource: { buffer:
-                    this.bufRef(p.getUint32(8, true)) } },
-            ]}));
+            layout: this.tessBgl!, entries }));
         pass.dispatchWorkgroups(Math.ceil((n + nSeg) / 256));
         pass.end();
     }

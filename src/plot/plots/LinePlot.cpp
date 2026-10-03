@@ -1,5 +1,6 @@
 // volcano/plot/plots/LinePlot.cpp
 #include "volcano/plot/plots/LinePlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
@@ -149,14 +150,21 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         series_.lineStyle == LineStyle::None ||
         axes.style().sketchScale > 0.0f)
         return;
-    // Dashed/sketch lines stay on the CPU stroker — the GPU path only
-    // handles solid strokes.
+    // Sketch lines stay on the CPU stroker (they jitter per vertex).
+    // Dashes now ride the GPU path too: the pattern is expanded on the
+    // device from per-point cumulative arc lengths, so a dashed line no
+    // longer costs a host-side stroke expansion every frame. The
+    // `dashes` offload switch pins them back to the CPU when wanted.
     StrokeParams sp;
     sp.width = series_.lineWidth;
     sp.dashes = series_.dashes.empty()
                     ? dashPattern(series_.lineStyle, series_.lineWidth)
                     : series_.dashes;
-    if (!sp.dashes.empty()) return;
+    if (!sp.dashes.empty() &&
+        (render::OffloadConfig::forceCpu(
+             render::OffloadConfig::global().dashes) ||
+         !r.gpu().gpuLine().supportsDashes())) return;
+    sp.dashOffset = series_.dashOffset;
     sp.join = series_.joinStyle;
     sp.cap = series_.capStyle;
     auto& gpu = r.gpu().gpuLine();

@@ -186,11 +186,15 @@ plot::Series2D seriesFrom(em::val xs, em::val ys) {
 }
 
 uintptr_t line(uint32_t axesIdx, em::val xs, em::val ys,
-               em::val color) {
+               em::val color, double width, const std::string& style) {
     auto s = seriesFrom(xs, ys);
     if (color.typeOf().as<std::string>() == "string") {
         if (auto c = plot::Color::parse(color.as<std::string>()))
             s.color = *c;
+    }
+    if (width > 0.0) s.lineWidth = float(width);
+    if (!style.empty()) {
+        if (auto ls = plot::lineStyleFromString(style)) s.lineStyle = *ls;
     }
     auto* ax = targetAxes(axesIdx);
     auto plot = std::make_shared<plot::LinePlot>(std::move(s));
@@ -1075,7 +1079,11 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_resize", &resize);
     em::function("_vp_render", &renderNow);
     em::function("_vp_renderIfStale", &renderIfStale);
-    em::function("_vp_line", &line);
+    em::function("_vp_line",
+        +[](uint32_t axesIdx, em::val xs, em::val ys, em::val color,
+            double width, const std::string& style) {
+            return line(axesIdx, xs, ys, color, width, style);
+        });
     em::function("_vp_scatter", &scatter);
     em::function("_vp_alloc", &alloc);
     em::function("_vp_free", &free_);

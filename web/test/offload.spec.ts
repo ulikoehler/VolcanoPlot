@@ -56,7 +56,8 @@ const INIT = (mode: string) => {
             // Apply the policy before the demo renders anything.
             if ((window as any).__wantMode)
                 v.setOffload({ binning: (window as any).__wantMode,
-                               contours: (window as any).__wantMode });
+                               contours: (window as any).__wantMode,
+                               dashes: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
             interp.dispatchBins = (...a: any[]) => {
@@ -151,3 +152,22 @@ for (const kind of ['contour']) {
                Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
     });
 }
+
+test('GPU dash expansion matches the CPU stroker', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'dashed', 'cpu', 1);
+    const gpu = await captureWith(page, 'dashed', 'gpu', 2);
+    console.log(`DASHED cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    // Same dash pattern → the same ink, within a pixel or two where a
+    // dash run lands on a cell boundary.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});

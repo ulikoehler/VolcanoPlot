@@ -47,6 +47,13 @@ public:
                                                std::vector<float>& mn,
                                                std::vector<float>& mx) = 0;
 
+    /// True when tessellate() honours `StrokeParams::dashes`. The
+    /// Vulkan backend strokes solid polylines only, so dashed strokes
+    /// must stay on the CPU stroker there.
+    [[nodiscard]] virtual bool supportsDashes() const noexcept {
+        return false;
+    }
+
     virtual void resetScratch() = 0;
     [[nodiscard]] virtual bool inited() const noexcept = 0;
 };

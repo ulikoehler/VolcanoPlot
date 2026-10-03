@@ -99,7 +99,13 @@ struct PDrawGrid3D { Rect2Df clip; float pc[44]; };
 struct PTessLines  { uint32_t inBuf, inBase, outBuf, outBase;
                      uint32_t n, nSeg; float hwidth;
                      uint8_t join, cap; float miterLimit;
-                     float r,g,b,a; };
+                     float r,g,b,a;
+                     /// Dashes: per-point cumulative arc length (0 when
+                     /// the stroke is solid), the pattern, and how many
+                     /// dash slots a segment reserved. `dashMul` 1 keeps
+                     /// the solid layout (6 verts/segment, joins after).
+                     uint32_t lenBuf, dashBuf, dashCount, dashMul;
+                     float dashOffset, pad0, pad1, pad2; };
 struct PEvalFunc   { uint32_t outBuf; double xMin, xMax;
                      uint32_t count; uint16_t funcId; uint8_t pad[6]; };
 struct PFuncDef    { uint16_t funcId; uint8_t lang; BufSrc body; };

@@ -1,6 +1,7 @@
 // src/web/OpRenderers3.cpp — op-recording impls, part 3
 // (heatmap, surface, instanced, gpuline, reduce, eval, kde, grid3d, text)
 #include "OpGpuServices.hpp"
+#include <volcano/render/Offload.hpp>
 #include "OpCmd.hpp"
 #include "OpPayloads.hpp"
 #include "OpFactory.hpp"
@@ -209,25 +210,71 @@ public:
                                Color color) override {
         if (px.size() < 2) return {};
         auto& os = ops(cmd);
+        const uint32_t nSeg = uint32_t(px.size() - 1);
         uint32_t inBuf = s_->createBufferRaw(px.size_bytes() + 16, 1|2);
         s_->writeBufferRaw(inBuf, 0, px.data(), px.size_bytes());
-        // Worst-case tess output: 6 verts/segment (join may add).
-        uint64_t outBytes = uint64_t(px.size()) * 6 * 32 + 64;
+
+        // Dashes: the pattern runs continuously along the polyline, so
+        // the shader needs each point's cumulative arc length. Computing
+        // it here is a cheap O(n) scalar pass — the expensive part (the
+        // per-segment stroking) is what moves to the device.
+        uint32_t lenBuf = 0, dashBuf = 0, dashCount = 0, dashMul = 1;
+        float dashOffset = sp.dashOffset;
+        if (!sp.dashes.empty() &&
+            render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().dashes)) {
+            std::vector<float> cum(px.size(), 0.0f);
+            float maxSeg = 0.0f;
+            for (size_t i = 1; i < px.size(); ++i) {
+                const float dx = px[i].x - px[i - 1].x;
+                const float dy = px[i].y - px[i - 1].y;
+                const float len = std::hypot(dx, dy);
+                // Non-finite points break the run; restart the phase.
+                cum[i] = std::isfinite(len) ? cum[i - 1] + len
+                                            : cum[i - 1];
+                if (std::isfinite(len)) maxSeg = std::max(maxSeg, len);
+            }
+            float period = 0.0f;
+            for (float d : sp.dashes) period += std::max(d, 0.0f);
+            if (period > 0.0f && maxSeg > 0.0f) {
+                dashMul = std::min<uint32_t>(
+                    uint32_t(std::ceil(maxSeg / period)) + 1u, 64u);
+                lenBuf = s_->createBufferRaw(cum.size() * 4 + 16, 1|2);
+                s_->writeBufferRaw(lenBuf, 0, cum.data(),
+                                   cum.size() * 4);
+                dashBuf = s_->createBufferRaw(
+                    sp.dashes.size() * 4 + 16, 1|2);
+                s_->writeBufferRaw(dashBuf, 0, sp.dashes.data(),
+                                   sp.dashes.size() * 4);
+                dashCount = uint32_t(sp.dashes.size());
+            }
+        }
+
+        // Worst-case tess output: 6 verts/segment (join may add), times
+        // the dash slots when dashing. Joins are not stroked on the
+        // dashed path but the slots stay allocated for layout parity.
+        uint64_t outBytes = uint64_t(px.size()) * 6 * 32 * dashMul + 64;
         uint32_t outBuf = s_->createBufferRaw(outBytes, 1|2);
         PTessLines p{inBuf, 0, outBuf, 0,
-                     uint32_t(px.size()), uint32_t(px.size() - 1),
+                     uint32_t(px.size()), nSeg,
                      sp.width * 0.5f,
                      uint8_t(sp.join), uint8_t(sp.cap), sp.miterLimit,
                      color.r, color.g, color.b, color.a};
+        p.lenBuf = lenBuf;
+        p.dashBuf = dashBuf;
+        p.dashCount = dashCount;
+        p.dashMul = dashMul;
+        p.dashOffset = dashOffset;
         os.emit(Op::TessLines, p);
         // The interpreter fills in the real vertex count after
         // dispatch; v1 assumes the 6-verts/segment upper bound.
         return {Mesh{GpuBuf(outBuf), 0,
-                     uint32_t(px.size() - 1) * 6}};
+                     uint32_t(px.size() - 1) * 6 * dashMul}};
     }
     bool envelopeColumns(GpuBuf, uint32_t, float, float, int, int,
                          std::vector<float>&,
                          std::vector<float>&) override { return false; }
+    bool supportsDashes() const noexcept override { return true; }
     void resetScratch() override {}
     bool inited() const noexcept override { return true; }
 private:

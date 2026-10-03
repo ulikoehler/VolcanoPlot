@@ -13,11 +13,18 @@ struct TessPC {
     n : u32, nSeg : u32, hwidth : f32, join : u32,
     cap : u32, miterLimit : f32, inBase : u32, outBase : u32,
     color : vec4f,
+    // Dashes (dashMul == 1 → solid stroke, unchanged layout).
+    dashMul : u32, dashCount : u32, lenBase : u32, dashBase : u32,
+    dashOffset : f32, pad0 : f32, pad1 : f32, pad2 : f32,
 };
 
 @group(0) @binding(0) var<uniform> pc : TessPC;
 @group(0) @binding(1) var<storage, read> pts : array<vec2f>;
 @group(0) @binding(2) var<storage, read_write> vout : array<f32>;
+/// Per-point cumulative arc length (only read when dashed).
+@group(0) @binding(3) var<storage, read> cum : array<f32>;
+/// Dash pattern (on, off, on, off, …) in pixels.
+@group(0) @binding(4) var<storage, read> dashPat : array<f32>;
 
 const SEGV : u32 = 6u;
 const JOINV : u32 = 24u;
@@ -38,6 +45,66 @@ fn emitVert(idx : u32, p : vec2f) {
 }
 fn emitTri(idx : u32, a : vec2f, b : vec2f, c : vec2f) {
     emitVert(idx, a); emitVert(idx + 1u, b); emitVert(idx + 2u, c);
+}
+fn emitQuad(idx : u32, a : vec2f, b : vec2f, n : vec2f) {
+    emitTri(idx, a - n, a + n, b + n);
+    emitTri(idx + 3u, a - n, b + n, b - n);
+}
+
+/// Pattern period (sum of the dash lengths).
+fn dashPeriod() -> f32 {
+    var p = 0.0;
+    for (var i = 0u; i < pc.dashCount; i = i + 1u) {
+        p = p + dashPat[pc.dashBase + i];
+    }
+    return p;
+}
+
+/// Walk one segment in cumulative-arc-length space, emitting a quad per
+/// visible dash. Mirrors plot::dashSplit: the pattern is continuous
+/// along the polyline (the phase comes from the cumulative length), and
+/// dash runs get butt/projecting/round ends like the CPU stroker.
+fn emitDashedSeg(i : u32, a : vec2f, b : vec2f, len : f32,
+                 d : vec2f, n : vec2f, slot : u32) {
+    let period = dashPeriod();
+    if (period <= 0.0) { return; }
+    let s0 = cum[pc.lenBase + i];
+    let s1 = cum[pc.lenBase + i + 1u];
+    if (s1 <= s0) { return; }
+
+    // Extend a dash by half the width at each end for the projecting
+    // cap; round caps keep the same footprint (the arc is negligible at
+    // dash scale), butt caps take the interval as-is.
+    var grow = 0.0;
+    if (pc.cap == 2u) { grow = pc.hwidth; }
+
+    // First phase boundary at or before s0.
+    var k = floor((s0 + pc.dashOffset) / period);
+    var slotCur = slot;
+    loop {
+        let base = k * period - pc.dashOffset;
+        if (base > s1) { break; }
+        // Dash `on` runs occupy [base, base + on0] within the pattern.
+        var acc = base;
+        for (var j = 0u; j < pc.dashCount; j = j + 1u) {
+            let dl = dashPat[pc.dashBase + j];
+            if (acc > s1) { break; }
+            if ((j & 1u) == 0u) {
+                let lo = max(acc - grow, s0);
+                let hi = min(acc + dl + grow, s1);
+                if (hi > lo) {
+                    if (slotCur + 6u > slot + 6u * pc.dashMul) { return; }
+                    let t0 = (lo - s0) / len;
+                    let t1 = (hi - s0) / len;
+                    emitQuad(slotCur, a + d * (t0 * len),
+                             a + d * (t1 * len), n);
+                    slotCur = slotCur + 6u;
+                }
+            }
+            acc = acc + dl;
+        }
+        k = k + 1.0;
+    }
 }
 fn zeroSlot(idx : u32, count : u32) {
     for (var k = 0u; k < count; k = k + 1u) {
@@ -77,16 +144,23 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
     if (e < pc.nSeg) {
         // segment quad pts[i] -> pts[i+1]
         let i = e;
-        let slot = i * SEGV;
+        let slot = i * SEGV * pc.dashMul;
         let a = pts[pc.inBase + i];
         let b = pts[pc.inBase + i + 1u];
         let d = b - a;
         let len = length(d);
         if (len < 1e-6 || !finitePt(i) || !finitePt(i + 1u)) {
-            zeroSlot(slot, SEGV);
+            zeroSlot(slot, SEGV * pc.dashMul);
             return;
         }
         let n = perp2(d / len) * pc.hwidth;
+        if (pc.dashMul > 1u && pc.dashCount > 0u) {
+            // Dashed: joins are not stroked (mpl does not join dashes),
+            // so leave the join slots alone and dash this segment.
+            zeroSlot(slot, SEGV * pc.dashMul);
+            emitDashedSeg(i, a, b, len, d / len, n, slot);
+            return;
+        }
         emitTri(slot,      a - n, a + n, b + n);
         emitTri(slot + 3u, a - n, b + n, b - n);
         return;
@@ -94,7 +168,8 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
 
     // per-point join or cap slot
     let i = e - pc.nSeg;
-    let slot = pc.nSeg * SEGV + i * JOINV;
+    if (pc.dashMul > 1u && pc.dashCount > 0u) { return; }  // no joins
+    let slot = pc.nSeg * SEGV * pc.dashMul + i * JOINV;
     let prevOk = i > 0u && finitePt(i - 1u) && finitePt(i);
     let nextOk = i + 1u < pc.n && finitePt(i + 1u) && finitePt(i);
     let p = pts[pc.inBase + i];
