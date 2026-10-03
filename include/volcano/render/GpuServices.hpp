@@ -14,6 +14,8 @@
 #pragma once
 
 #include <volcano/plot/Colormap.hpp>
+#include <volcano/plot/Mlab.hpp>
+#include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
 
@@ -299,6 +301,22 @@ public:
     [[nodiscard]] virtual bool supportsScatterSplat() const noexcept {
         return false;
     }
+    /// GPU even-odd scanline polygon fill (`polyfill` offload switch):
+    /// rasterizes pixel-space `rings` into a coverage texture and hands
+    /// it back for drawImageTex in rgba mode. Returns false when
+    /// unavailable or the polygon is too small to be worth a dispatch —
+    /// the caller then ear-clips on the CPU.
+    virtual bool polyFillMask(
+        std::span<const std::vector<plot::Point2D>> rings,
+        plot::Color face, plot::Extent2D res,
+        GpuTex& maskOut, plot::Rect2D& rectOut) {
+        (void)rings; (void)face; (void)res; (void)maskOut; (void)rectOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsPolyFill() const noexcept {
+        return false;
+    }
+
     /// Draw a device-produced texture through the colormap image path.
     /// `t` is accepted for symmetry with the other primitives; the image
     /// shader places the quad from `rect` alone.
@@ -311,14 +329,18 @@ public:
 
     /// Batched real-input FFT for the spectrum family: `numSegs` windows
     /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
-    /// `n`-sample window `win`, transformed. Returns `numSegs * n`
-    /// complex values interleaved (re, im), or nullopt when the backend
-    /// has no GPU path / the result is not ready yet (the caller keeps
-    /// its CPU transform for that frame).
+    /// `n`-sample window `win`, transformed. `detrend` runs as a per-
+    /// segment map kernel on the device before the window (mpl
+    /// `detrend_mean` / `detrend_linear`). Returns `numSegs * n` complex
+    /// values interleaved (re, im), or nullopt when the backend has no
+    /// GPU path / the result is not ready yet (the caller keeps its CPU
+    /// transform for that frame).
     virtual std::optional<std::vector<float>> fftSegments(
         std::span<const float> signal, std::span<const float> win,
-        uint32_t n, uint32_t step, uint32_t numSegs) {
+        uint32_t n, uint32_t step, uint32_t numSegs,
+        plot::mlab::Detrend detrend = plot::mlab::Detrend::None) {
         (void)signal; (void)win; (void)n; (void)step; (void)numSegs;
+        (void)detrend;
         return std::nullopt;
     }
 
@@ -393,6 +415,24 @@ public:
         (void)soupOut; (void)countOut;
         return false;
     }
+    /// GPU wind-barb expansion: builds the shaft + flag/barb segments in
+    /// pixel space on the device and returns the segment buffer plus its
+    /// vertex count. Returns false when unavailable — the plot then runs
+    /// the identical CPU expansion.
+    [[nodiscard]] virtual bool barbsTess(
+        std::span<const float> x, std::span<const float> y,
+        std::span<const float> u, std::span<const float> v,
+        const plot::Transform2D& t, plot::Rect2D rect,
+        float length, bool flip,
+        GpuBuf& segsOut, uint32_t& vertexCount) {
+        (void)x; (void)y; (void)u; (void)v; (void)t; (void)rect;
+        (void)length; (void)flip; (void)segsOut; (void)vertexCount;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsBarbsTess() const noexcept {
+        return false;
+    }
+
     [[nodiscard]] virtual bool supportsTripcolorTess() const noexcept {
         return false;
     }

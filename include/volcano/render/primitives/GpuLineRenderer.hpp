@@ -5,6 +5,7 @@
 #pragma once
 
 #include <volcano/plot/Stroke.hpp>
+#include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
 
@@ -35,6 +36,28 @@ public:
                                          std::span<const plot::Point2D> px,
                                          const plot::StrokeParams& sp,
                                          plot::Color color) = 0;
+
+    /// Stroke a polyline that already lives in a device buffer (e.g. the
+    /// output of transformPoints) — no host upload. Returns {} when the
+    /// backend has no device-buffer entry point.
+    virtual std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
+                                               uint32_t count,
+                                               const plot::StrokeParams& sp,
+                                               plot::Color color) {
+        (void)cmd; (void)points; (void)count; (void)sp; (void)color;
+        return {};
+    }
+
+    /// Map data-space points to pixel space on the device: applies the
+    /// closed-form axis scales + projection and masks out-of-domain
+    /// points to NaN. Returns false when unavailable (caller keeps the
+    /// CPU transform); the result is a device buffer, not a readback.
+    [[nodiscard]] virtual bool transformPoints(
+        Cmd& cmd, GpuBuf points, uint32_t count,
+        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out) {
+        (void)cmd; (void)points; (void)count; (void)t; (void)rect; (void)out;
+        return false;
+    }
 
     /// Column-wise min/max envelope over a point buffer (compute).
     /// Returns false when unavailable — callers fall back to CPU.

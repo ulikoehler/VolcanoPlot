@@ -648,10 +648,10 @@ binary-size reduction, WebCodecs video export, wasm64, subgroups.
 
 ## 14. Implementation status (as built)
 
-**Verified in real Chrome + SwiftShader: 43/43 browser tests (incl.
-DrawTrisData viewport/orientation regression specs), 8/8 vitest,
-1616/1616 native tests. 33-case matplotlib comparison gallery
-regenerable via `scripts/generate_webgallery.py`.**
+**Verified in real Chrome on an Intel iGPU: 105/105 browser tests
+(41 GPU-offload parity specs + smoke + viewport/orientation
+regressions), 8/8 vitest, 1616/1616 native tests. 33-case matplotlib
+comparison gallery regenerable via `scripts/generate_webgallery.py`.**
 
 | Component | Status |
 |---|---|
@@ -746,3 +746,60 @@ per-vertex colors. Fully transparent results are skipped, surviving
 triangles append 3 verts each through an atomic counter, and the
 soup is consumed by `drawTrianglesGpuIndirect` — no CPU readback.
 New policy key: `tripcolor`.
+
+## GPU offload round 5 (stats → xform → barbs → polyfill → detrend)
+
+| Item | Op | Parity vs CPU |
+|---|---|---|
+| Order statistics (FD bins, box/violin quartiles, hist2d ranges) | reuses 60 `SortFloats` | bit-identical |
+| Device data→pixel transform + log/logit domain masking | 62 `TransformPoints` | exact — GPU ink ⊆ CPU envelope |
+| Wind-barb feather expansion | 63 `BarbsTess` | bit-identical (7950 px) |
+| Even-odd scanline polygon fill → mask texture | 64 `PolyFillMask` | coverage/chroma match (98k px) |
+| mlab detrend fused into the FFT kernel (none/mean/linear) | 51 `FftSegments` detrend field | matches CPU |
+
+New policy keys: `stats`, `xform`, `barbs`, `polyfill`, `detrend`.
+
+**`stats`** shares the existing `SortFloats` bitonic op + mailbox —
+`HistPlot` (auto/FD binning), `BoxPlot`, `ViolinPlot` and `Hist2DPlot`
+call `sortFloats` instead of `std::sort`/`nth_element` when the key
+permits; the first frame computes on CPU while the sort is in flight.
+
+**`xform`** (`TransformPoints.wgsl`) evaluates the closed-form scales
+and the log/logit domain mask on the resident point buffer, writes a
+pixel-space `vec2` buffer (NaN holes split the polyline exactly like
+the CPU's `maskPointsForScales`), and feeds `tessellateDevice` — the
+host never touches the points. Gate: default draw style, >huge
+points, rectilinear projection, both scales `shaderSupported()`, no
+custom mpl transform. Note the CPU reference *decimates* large lines
+into a per-column min/max envelope, so the GPU stroke is strictly
+more faithful — the test asserts the subset property, not equal
+coverage.
+
+**`barbs`** (`BarbsTess.wgsl`) mirrors `buildBarbs`: a host prefix
+pass computes each barb's segment count (a pure function of speed),
+the shader writes shaft/flag/full/half segments to device memory, and
+`drawSegmentsGpu` replays them through `DrawLineSegs` with the
+configured color/width.
+
+**`polyfill`** (`PolyFillMask.wgsl`, two passes: `edges` computes
+per-pixel crossing deltas, `scan` accumulates even-odd parity into an
+RGBA mask) then composites through the existing `drawImageTex` path.
+`SpineRenderer::fillRings` is the seam — `FillPlot`'s non-x-monotonic
+polygons and `Collections` large-polygon fills use it; small/monotonic
+fills keep the CPU ear-clip fan.
+
+**`detrend`** extends `PFftSegments` with a mode field (0/1/2 = mpl
+none/mean/linear). `FftSegments.wgsl` reduces Σx and Σi·x per segment,
+subtracts the trend, then windows — all five spectral plots share
+`mlab::prepareSegments` as the host fallback when `fft=gpu` but
+`detrend=cpu`. Large transforms (n > 1024, e.g. `spectrum` at
+2048–64K) use the new global-memory path in the same shader:
+`segprep` (serial per-segment detrend+window+bit-reverse) followed by
+one disjoint-pair `bfly` pass per stage — the earlier 1024 cap only
+applied to the workgroup kernel (2×n f32 + 2×256 f32 = 10 KB vs the
+16 KB workgroup-storage guarantee).
+
+Two structural notes: `SpineRenderer::fillRings` moved to a
+web-compiled TU so `OpSpineRenderer` can fall back to the same ear
+clip; old op-stream payloads are tolerated on replay (`PTessLines`
+<80 B → solid defaults, `PFftSegments` <36 B → no detrend).

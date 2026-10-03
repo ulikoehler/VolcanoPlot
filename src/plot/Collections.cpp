@@ -397,16 +397,31 @@ void Collection::drawSubpaths(render::Cmd& cmd, render::Renderer& r,
     auto& spine = r.gpu().spine();
     // Fill (ear-clipped per closed subpath).
     if (face.a > 0.0f) {
-        std::vector<Point2D> tris;
-        for (const auto& sp : subs) {
-            if (!sp.closed || sp.points.size() < 3) continue;
-            auto t = earClip(sp.points);
-            tris.insert(tris.end(), t.begin(), t.end());
+        // Single large ring: hand it to the backend's fill (the GPU
+        // scanline path when `polyfill` is enabled — no O(n²) ear-clip).
+        // Multi-ring collections keep the per-ring ear-clip, whose
+        // overdraw differs from a parity fill.
+        size_t closedRings = 0;
+        for (const auto& sp : subs)
+            if (sp.closed && sp.points.size() >= 3) ++closedRings;
+        if (closedRings == 1 && clipRing.empty()) {
+            std::vector<std::vector<Point2D>> rings;
+            for (const auto& sp : subs)
+                if (sp.closed && sp.points.size() >= 3)
+                    rings.push_back(sp.points);
+            spine.fillRings(cmd, clip, res, rings, face);
+        } else {
+            std::vector<Point2D> tris;
+            for (const auto& sp : subs) {
+                if (!sp.closed || sp.points.size() < 3) continue;
+                auto t = earClip(sp.points);
+                tris.insert(tris.end(), t.begin(), t.end());
+            }
+            if (!clipRing.empty())
+                tris = clipTrianglesToPolygon(tris, clipRing);
+            if (!tris.empty())
+                spine.drawTriangles(cmd, clip, res, tris, face);
         }
-        if (!clipRing.empty())
-            tris = clipTrianglesToPolygon(tris, clipRing);
-        if (!tris.empty())
-            spine.drawTriangles(cmd, clip, res, tris, face);
     }
     // Hatch lines clipped to the region (mpl draws hatch regardless of
     // face alpha — the pattern color comes from hatch.color/edge).

@@ -1,5 +1,6 @@
 // volcano/plot/plots/SpectrumPlot.cpp — magnitude/phase/angle spectrum implementation
 #include "volcano/plot/plots/SpectrumPlot.hpp"
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -95,11 +96,16 @@ void SpectrumPlot::applyWindow(std::vector<std::complex<float>>& data) const {
     uint32_t sigLen = static_cast<uint32_t>(signal_.size());
     const auto w = windowArray(n);
 
+    // Trend removal over the real samples (mpl `detrend`), then the
+    // window — the zero padding past the signal stays zero.
+    std::vector<float> seg(n, 0.0f);
+    for (uint32_t i = 0; i < sigLen && i < n; ++i) seg[i] = signal_[i];
+    mlab::detrendInPlace(std::span<float>(seg.data(), std::min(sigLen, n)),
+                         config_.detrend);
+
     // Copy signal into complex array and apply window.
-    for (uint32_t i = 0; i < n; ++i) {
-        float sample = (i < sigLen) ? signal_[i] : 0.0f;
-        data[i] = std::complex<float>(sample * w[i], 0.0f);
-    }
+    for (uint32_t i = 0; i < n; ++i)
+        data[i] = std::complex<float>(seg[i] * w[i], 0.0f);
 }
 
 void SpectrumPlot::computeSpectrum(render::Renderer* r) {
@@ -117,9 +123,25 @@ void SpectrumPlot::computeSpectrum(render::Renderer* r) {
     // the device when the `fft` offload switch allows it.
     const std::vector<float> win = windowArray(n);
     bool haveGpu = false;
+    std::vector<float> hostSegs, unitWin;
+    std::span<const float> sig = signal_;
+    std::span<const float> winArg = win;
+    mlab::Detrend devDetrend = config_.detrend;
     if (r && render::OffloadConfig::allowGpu(
                  render::OffloadConfig::global().fft)) {
-        if (auto spec = r->gpu().fftSegments(signal_, win, n, 0, 1);
+        // One full-length segment; the trend is removed by the FFT
+        // kernel on the device, or here when the device will not.
+        if (devDetrend != mlab::Detrend::None &&
+            !render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().detrend)) {
+            hostSegs = mlab::prepareSegments(signal_, win, n, 0, 1,
+                                             devDetrend);
+            unitWin.assign(n, 1.0f);
+            sig = hostSegs; winArg = unitWin;
+            devDetrend = mlab::Detrend::None;
+        }
+        if (auto spec = r->gpu().fftSegments(sig, winArg, n, 0, 1,
+                                             devDetrend);
             spec && spec->size() == size_t(n) * 2) {
             for (uint32_t i = 0; i < n; ++i)
                 data[i] = std::complex<float>((*spec)[i * 2],

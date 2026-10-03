@@ -1,6 +1,7 @@
 // volcano/plot/plots/SpectrumPlot.hpp — magnitude/phase/angle spectrum
 // (matplotlib `magnitude_spectrum`, `phase_spectrum`, `angle_spectrum`)
 #pragma once
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/render/primitives/LineRenderer.hpp"
@@ -25,6 +26,8 @@ enum class SpectrumScale {
 
 /// Spectrum plot configuration.
 struct SpectrumConfig {
+    /// Trend removal over the input (mpl `detrend`, default 'mean').
+    mlab::Detrend detrend = mlab::Detrend::Mean;
     /// Type of spectrum to compute.
     SpectrumType type = SpectrumType::Magnitude;
     /// Y-axis scale (only applies to Magnitude type).

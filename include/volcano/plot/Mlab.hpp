@@ -30,6 +30,19 @@ enum class Detrend { None, Mean, Linear };
 [[nodiscard]] std::vector<float> detrendMean(std::span<const float> x);
 /// mpl detrend_linear(y) — subtract the least-squares line.
 [[nodiscard]] std::vector<float> detrendLinear(std::span<const float> y);
+
+/// Detrend `seg` in place (mpl detrend_mean / detrend_linear over the
+/// segment's own samples). Detrend::None is a no-op.
+void detrendInPlace(std::span<float> seg, Detrend key);
+
+/// Build the per-segment matrix a batched FFT consumes when the device
+/// will not apply the trend itself: `numSegs` rows of `n` samples (hop
+/// `step`, zero-padded past the end), each detrended and multiplied by
+/// `win`. Feed it back with step = n and a unit window.
+[[nodiscard]] std::vector<float>
+prepareSegments(std::span<const float> sig, std::span<const float> win,
+                uint32_t n, uint32_t step, uint32_t numSegs,
+                Detrend key);
 /// mpl detrend(x, key).
 [[nodiscard]] std::vector<float> detrend(std::span<const float> x,
                                          Detrend key);

@@ -1,5 +1,6 @@
 // volcano/render/primitives/SpineRenderer.cpp — Vulkan impl (SpineRendererVk)
 #include "volcano/render/primitives/SpineRenderer.hpp"
+#include "volcano/plot/Path.hpp"
 #include "../VkFactory.hpp"
 #include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>

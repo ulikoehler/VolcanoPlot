@@ -269,7 +269,10 @@ uintptr_t bar(uint32_t axesIdx, em::val heights, em::val labels,
 uintptr_t hist(uint32_t axesIdx, em::val samples, int bins,
                em::val color) {
     plot::HistConfig cfg;
-    cfg.bins = plot::HistBinMethod::Fixed;
+    // bins <= 0 follows mpl's default 'auto' (max(Sturges, FD)); the FD
+    // half needs the IQR, so it engages the order-statistics offload.
+    cfg.bins = bins > 0 ? plot::HistBinMethod::Fixed
+                      : plot::HistBinMethod::Auto;
     cfg.binCount = bins > 0 ? bins : 10;
     if (color.typeOf().as<std::string>() == "string") {
         if (auto c = plot::Color::parse(color.as<std::string>()))

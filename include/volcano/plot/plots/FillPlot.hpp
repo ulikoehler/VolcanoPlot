@@ -29,6 +29,9 @@ private:
     Series2D series_;
     std::unique_ptr<render::primitives::FillRenderer> renderer_;
     bool prepared_ = false;
+    /// x-monotonic sequence: the curve/closure strip is exact, so the
+    /// GPU even-odd fill is not needed (and would change nothing).
+    bool monotonic_ = true;
 };
 
 } // namespace volcano::plot

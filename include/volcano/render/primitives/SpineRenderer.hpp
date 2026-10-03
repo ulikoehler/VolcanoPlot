@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace volcano::render::primitives {
 
@@ -73,6 +74,16 @@ public:
                                plot::Extent2D resolution,
                                std::span<const plot::Point2D> triVerts,
                                plot::Color color) = 0;
+
+    /// Fill closed pixel-space rings with the even-odd rule (mpl's path
+    /// fill rule — holes and nested rings resolve by crossing parity).
+    /// Backends with a GPU scanline fill override this; the default
+    /// ear-clips each ring and draws the soup, which is identical for
+    /// opaque fills and the reference for the GPU path.
+    virtual void fillRings(Cmd& cmd, plot::Rect2D clip,
+                           plot::Extent2D resolution,
+                           std::span<const std::vector<plot::Point2D>> rings,
+                           plot::Color face);
 
     /// Like drawTriangles, but each vertex carries its own color
     /// (per-vertex interpolation — Gouraud-style fills, color meshes).

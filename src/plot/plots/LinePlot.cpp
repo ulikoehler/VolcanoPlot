@@ -222,6 +222,28 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         gpuMeshSeq_ = r.frameSeq();
         return;
     }
+    // Device-side data→pixel mapping (`xform` offload switch): the data
+    // points are already resident, so the closed-form scales and the
+    // log/logit domain masking run in one compute pass and the stroker
+    // consumes the result directly — the host never touches the points.
+    // Custom mpl transforms, sketch/steps styles and non-rectilinear
+    // projections stay on the CPU pass.
+    if (!transform && series_.drawStyle == DrawStyle::Default &&
+        series_.points.size() > huge &&
+        renderer_->pointCount() == series_.points.size() &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().shaderSupported() && axes.yscale().shaderSupported()) {
+        render::GpuBuf pxBuf = 0;
+        if (gpu.transformPoints(cmd, renderer_->pointBuffer(),
+                                renderer_->pointCount(), axes.transform(),
+                                rect, pxBuf)) {
+            gpuMeshes_ = gpu.tessellateDevice(cmd, pxBuf,
+                                              renderer_->pointCount(), sp,
+                                              series_.resolvedColor());
+            gpuMeshSeq_ = r.frameSeq();
+            return;
+        }
+    }
 noDecimate:
     auto px = pixelPoints(series_, axes, rect, transform.get());
     // Same envelope trick post-transform for the general case (custom

@@ -67,6 +67,17 @@ struct OffloadConfig {
     OffloadMode ecdf = OffloadMode::Auto;
     /// tripcolor per-triangle colormap expansion.
     OffloadMode tripcolor = OffloadMode::Auto;
+    /// Order statistics (sort + quartiles) for hist/boxplot/violin/hist2d.
+    OffloadMode stats = OffloadMode::Auto;
+    /// Device-side data→pixel mapping (scales + domain masking) for
+    /// polyline drawing.
+    OffloadMode xform = OffloadMode::Auto;
+    /// Wind-barb feather expansion.
+    OffloadMode barbs = OffloadMode::Auto;
+    /// Even-odd scanline polygon fill for large rings.
+    OffloadMode polyfill = OffloadMode::Auto;
+    /// Per-segment detrend map kernel feeding the batched FFT.
+    OffloadMode detrend = OffloadMode::Auto;
 
     /// Process-wide config, initialised from VOLCANO_GPU_OFFLOAD /
     /// VOLCANO_GPU_HIST on first use.

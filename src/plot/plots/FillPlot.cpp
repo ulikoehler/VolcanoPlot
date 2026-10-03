@@ -1,5 +1,6 @@
 // volcano/plot/plots/FillPlot.cpp
 #include "volcano/plot/plots/FillPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -14,24 +15,26 @@ namespace {
 /// baseline (y=0), which correctly handles concave shapes like damped
 /// sine waves without the artifacts a triangle fan would produce.
 /// For non-curve polygons, falls back to a triangle fan from the centroid.
+/// Whether the point sequence is x-monotonic — the common case for
+/// fill(x, y), where the curve/closure strip is exact. A non-monotonic
+/// ring has no such strip and falls back to a centroid fan (or, on the
+/// GPU fill path, the even-odd scanline rule).
+bool isXMonotonic(const std::vector<Point2D>& pts) {
+    if (pts.size() < 2) return true;
+    bool xIncreasing = pts[1].x >= pts[0].x;
+    for (size_t i = 1; i < pts.size(); ++i)
+        if (xIncreasing ? pts[i].x < pts[i-1].x : pts[i].x > pts[i-1].x)
+            return false;
+    return true;
+}
+
 void buildFillTriangles(const std::vector<Point2D>& pts,
                         std::vector<Point2D>& outPos,
                         std::vector<Color>& outColor,
                         Color color) {
     if (pts.size() < 3) return;
 
-    // Check if the points form an x-monotonic curve (suitable for
-    // baseline fill). This is the common case for fill(x, y).
-    bool isCurve = true;
-    bool xIncreasing = pts[1].x >= pts[0].x;
-    for (size_t i = 1; i < pts.size(); ++i) {
-        if (xIncreasing ? pts[i].x < pts[i-1].x : pts[i].x > pts[i-1].x) {
-            isCurve = false;
-            break;
-        }
-    }
-
-    if (isCurve) {
+    if (isXMonotonic(pts)) {
         // Build triangles between the curve and the closure line
         // (from first to last point). This matches matplotlib's fill()
         // which fills the polygon formed by the points, closed last→first.
@@ -92,6 +95,7 @@ void FillPlot::prepare(render::Renderer& r) {
     // Build fill triangles from the polygon points.
     std::vector<Point2D> positions;
     std::vector<Color> colors;
+    monotonic_ = isXMonotonic(series_.points);
     buildFillTriangles(series_.points, positions, colors, series_.color);
 
     renderer_->upload(std::span{positions.data(), positions.size()},
@@ -104,6 +108,28 @@ void FillPlot::draw(render::Cmd& cmd, render::Renderer& r,
     if (!prepared_) return;
     Transform2D t = axes.transform();
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+
+    // Large non-monotonic polygons (`polyfill` offload switch): the
+    // backend rasterizes the ring with the even-odd scanline rule —
+    // exact for concave outlines, where the CPU centroid fan is only an
+    // approximation. Small rings and x-monotonic curve fills keep the
+    // uploaded strip/fan geometry, so the CPU output is unchanged.
+    if (!monotonic_ && series_.points.size() > 512 &&
+        render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().polyfill) &&
+        r.gpu().supportsPolyFill()) {
+        std::vector<Point2D> ring;
+        ring.reserve(series_.points.size());
+        for (const auto& p : series_.points) {
+            Point2D f = axes.dataToFraction(p);
+            ring.push_back({float(rect.x) + f.x * float(rect.width),
+                            float(rect.y) + (1.0f - f.y) * float(rect.height)});
+        }
+        r.gpu().spine().fillRings(cmd, vrect, r.gpu().extent(),
+                                  std::span<const std::vector<Point2D>>{&ring, 1},
+                                  series_.color);
+        return;
+    }
     renderer_->draw(cmd, vrect, t);
 }
 

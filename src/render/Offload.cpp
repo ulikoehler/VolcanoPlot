@@ -32,6 +32,11 @@ constexpr std::array kEntries{
     Entry{"xcorr", &OffloadConfig::xcorr},
     Entry{"ecdf", &OffloadConfig::ecdf},
     Entry{"tripcolor", &OffloadConfig::tripcolor},
+    Entry{"stats", &OffloadConfig::stats},
+    Entry{"xform", &OffloadConfig::xform},
+    Entry{"barbs", &OffloadConfig::barbs},
+    Entry{"polyfill", &OffloadConfig::polyfill},
+    Entry{"detrend", &OffloadConfig::detrend},
 };
 
 /// Parse "auto" | "gpu" | "cpu" | "on" | "off" | "1" | "0".

@@ -83,7 +83,8 @@ private:
 
     /// Compute statistics (median, quartiles) for one group.
     struct Stats { float q1, median, q3, min, max; };
-    Stats computeStats(const std::vector<float>& data) const;
+    Stats computeStats(const std::vector<float>& data,
+                       render::Renderer* r = nullptr) const;
 };
 
 } // namespace volcano::plot

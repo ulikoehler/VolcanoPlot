@@ -42,6 +42,20 @@ public:
                       const plot::Transform2D& transform,
                       uint32_t vertexCount) const = 0;
 
+    /// Draw a device-resident segment list (e.g. the output of the GPU
+    /// barb expansion) — no host upload. Returns false when the backend
+    /// has no device-buffer entry point; the caller then falls back.
+    [[nodiscard]] virtual bool drawSegmentsGpu(Cmd& cmd, plot::Rect2D rect,
+                                               const plot::Transform2D& t,
+                                               GpuBuf points,
+                                               uint32_t vertexCount,
+                                               plot::Color color,
+                                               float width) const {
+        (void)cmd; (void)rect; (void)t; (void)points; (void)vertexCount;
+        (void)color; (void)width;
+        return false;
+    }
+
     [[nodiscard]] virtual GpuBuf pointBuffer() const noexcept = 0;
     [[nodiscard]] virtual uint32_t pointCount() const noexcept = 0;
 

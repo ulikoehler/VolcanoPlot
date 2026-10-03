@@ -130,6 +130,53 @@ window.vpDone = (async () => {
             l2[i] = 1.5 + Math.cos(i * 0.2); l3[i] = 1 + Math.sin(i * 0.5);
         }
         vp.stackplot(xs, [l1, l2, l3]);
+    } else if (which === 'histauto') {
+        // bins=0 → mpl 'auto' (FD/Sturges) — exercises the device sort.
+        const n = 20000, s = new Float32Array(n);
+        for (let i = 0; i < n; i++)
+            s[i] = Math.sin(i * 0.37) + 0.4 * (rnd() - 0.5);
+        vp.hist(s, 0, '#e00000');
+    } else if (which === 'bigline') {
+        // >8192 points, x-monotonic — on linear scales the envelope
+        // path takes precedence over the device transform, so this
+        // stays on the CPU-side decimation for both modes.
+        const n = 20000, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) { xs[i] = i / n;
+            ys[i] = Math.sin(i * 0.07); }
+        vp.line(xs, ys, '#c02020');
+    } else if (which === 'zagline') {
+        // >8192 points, NON-monotonic x, linear scales — the envelope
+        // path can't take it (unsorted x), so the device transform
+        // (xform) picks it up in gpu mode.
+        const n = 20000, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) { xs[i] = Math.sin(i * 0.013);
+            ys[i] = Math.cos(i * 0.007) * 0.5; }
+        vp.line(xs, ys, '#c02020');
+    } else if (which === 'logline') {
+        // >8192 points on a log y-axis with out-of-domain runs — the
+        // device transform must mask them into NaN gaps just like the
+        // CPU pass does.
+        const n = 20000, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = i / n;
+            ys[i] = Math.exp(Math.sin(i * 0.011) * 2) *
+                    (1 + Math.sin(i * 0.0037));
+            if ((i % 3000) < 300) ys[i] = -ys[i];     // out-of-domain runs
+        }
+        vp.yscale('log');
+        vp.line(xs, ys, '#c02020');
+    } else if (which === 'fillbig') {
+        // >512-point non-monotonic simple polygon (a 13-point star
+        // outline, centroid inside the kernel so the CPU fan is exact).
+        const spikes = 13, per = 50, n = spikes * per;
+        const xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            const t = i / n * 2 * Math.PI;
+            const r = 1 + 0.45 * Math.abs(Math.sin(t * spikes / 2));
+            xs[i] = Math.cos(t) * r;
+            ys[i] = Math.sin(t) * r;
+        }
+        vp.fill(xs, ys, '#e00000');
     } else if (which === 'fill') {
         const N = 50, xs = new Float32Array(N), ys = new Float32Array(N);
         for (let i = 0; i < N; i++) {

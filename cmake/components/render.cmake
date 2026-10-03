@@ -17,6 +17,7 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/primitives/HeatmapRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SurfaceRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/SpineRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/SpineRendererBase.cpp
     ${VOLCANO_ROOT}/src/render/primitives/InstancedPathRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/GpuLineRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/ReduceRenderer.cpp

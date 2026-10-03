@@ -43,6 +43,39 @@ class OpSpineRenderer final : public render::primitives::SpineRenderer {
 public:
     explicit OpSpineRenderer(OpGpuServices& s) : s_(&s) {}
 
+    /// GPU even-odd scanline fill (`polyfill` offload switch): the rings
+    /// rasterize into a coverage texture that the image path composites
+    /// in rgba mode — no ear-clip, no triangle soup. Falls back to the
+    /// ear-clip default for small rings or when the backend declines.
+    void fillRings(Cmd& cmd, Rect2D clip, Extent2D res,
+                   std::span<const std::vector<Point2D>> rings,
+                   Color face) override {
+        if (render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().polyfill) &&
+            s_->supportsPolyFill()) {
+            GpuTex mask = 0;
+            Rect2D maskRect{};
+            if (s_->polyFillMask(rings, face, res, mask, maskRect)) {
+                // rgba mode: the coverage texture already holds the fill
+                // colour, so the colormap binding goes unused.
+                const float params[8] = {1.0f, 0.0f, 0.0f, 0.0f,
+                                         1.0f, 0.0f, 0.0f, 0.0f};
+                const Transform2D ident{};
+                if (s_->drawImageTex(cmd, maskRect, &ident, mask, mask,
+                                     params)) return;
+            }
+        }
+        // Same fallback the base class uses (ear-clip + triangles);
+        // inlined here because the base impl lives in the Vulkan TU
+        // that the web target does not link.
+        std::vector<plot::Point2D> tris;
+        for (const auto& ring : rings) {
+            auto t = plot::earClip(ring);
+            tris.insert(tris.end(), t.begin(), t.end());
+        }
+        if (!tris.empty()) drawTriangles(cmd, clip, res, tris, face);
+    }
+
     void drawRect(Cmd& cmd, Rect2D clip, Extent2D res,
                   Rect2D rect, Color color, float lineWidth) override {
         (void)res;
@@ -267,6 +300,20 @@ public:
                      color_.r, color_.g, color_.b, color_.a, width_};
         ops(cmd).emit(Op::DrawLineSegs, p);
     }
+    /// Same draw, but the segments already live on the device (the GPU
+    /// barb expansion writes them there).
+    bool drawSegmentsGpu(Cmd& cmd, Rect2D rect, const Transform2D& t,
+                         GpuBuf points, uint32_t vertexCount,
+                         Color color, float width) const override {
+        if (!points || vertexCount < 2) return false;
+        PDrawLines p{clipF(rect), clipF(rect),
+                     makeTransformUBO(t, rect, color),
+                     uint32_t(points), vertexCount,
+                     color.r, color.g, color.b, color.a, width};
+        ops(cmd).emit(Op::DrawLineSegs, p);
+        return true;
+    }
+
     GpuBuf pointBuffer() const noexcept override { return buf_; }
     uint32_t pointCount() const noexcept override { return count_; }
 private:

@@ -95,15 +95,27 @@ void HistPlot::computeBins(render::Renderer* r) {
                              cfg_.bins == HistBinMethod::Auto;
         std::vector<float> sorted;
         if (needIqr) {
-            sorted = all;  // for IQR use merged samples
-            // fdBins reads only the Q1/Q3 order statistics — two
-            // nth_element passes (O(n) expected) beat a full sort.
-            size_t m = sorted.size();
-            if (m >= 2) {
-                auto q1 = sorted.begin() + ptrdiff_t(m / 4);
-                auto q3 = sorted.begin() + ptrdiff_t((3 * m) / 4);
-                std::nth_element(sorted.begin(), q1, sorted.end());
-                std::nth_element(q1 + 1, q3, sorted.end());
+            // Order statistics on the device (`stats` offload switch):
+            // the bitonic sort (op 60) mailboxes the sorted buffer back
+            // one frame later, so the nth_element path covers the first
+            // frame and identical data serves the cached device result.
+            if (r && render::OffloadConfig::allowGpu(
+                         render::OffloadConfig::global().stats)) {
+                if (auto g = r->gpu().sortFloats(all);
+                    g && g->size() == all.size())
+                    sorted = std::move(*g);
+            }
+            if (sorted.size() != all.size()) {
+                sorted = all;  // for IQR use merged samples
+                // fdBins reads only the Q1/Q3 order statistics — two
+                // nth_element passes (O(n) expected) beat a full sort.
+                size_t m = sorted.size();
+                if (m >= 2) {
+                    auto q1 = sorted.begin() + ptrdiff_t(m / 4);
+                    auto q3 = sorted.begin() + ptrdiff_t((3 * m) / 4);
+                    std::nth_element(sorted.begin(), q1, sorted.end());
+                    std::nth_element(q1 + 1, q3, sorted.end());
+                }
             }
         }
         int nBins;

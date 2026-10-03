@@ -153,7 +153,8 @@ private:
     bool prepared_ = false;
 
     /// Compute statistics for a single group.
-    Stats computeStats(const std::vector<float>& data) const;
+    Stats computeStats(const std::vector<float>& data,
+                       render::Renderer* r = nullptr) const;
 
     /// Build all geometry from computed stats.
     void buildGeometry();

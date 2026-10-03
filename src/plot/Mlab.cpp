@@ -266,6 +266,44 @@ std::vector<float> detrendLinear(std::span<const float> y) {
     return out;
 }
 
+void detrendInPlace(std::span<float> seg, Detrend key) {
+    const size_t n = seg.size();
+    if (key == Detrend::None || n == 0) return;
+    if (key == Detrend::Mean) {
+        double m = std::accumulate(seg.begin(), seg.end(), 0.0) / double(n);
+        for (auto& v : seg) v -= float(m);
+        return;
+    }
+    if (n < 2) return;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (size_t i = 0; i < n; ++i) {
+        sx += double(i); sy += seg[i];
+        sxx += double(i) * double(i); sxy += double(i) * seg[i];
+    }
+    double det = double(n) * sxx - sx * sx;
+    double a = det != 0 ? (double(n) * sxy - sx * sy) / det : 0.0;
+    double b = (sy - a * sx) / double(n);
+    for (size_t i = 0; i < n; ++i)
+        seg[i] -= float(a * double(i) + b);
+}
+
+std::vector<float> prepareSegments(std::span<const float> sig,
+                                   std::span<const float> win,
+                                   uint32_t n, uint32_t step,
+                                   uint32_t numSegs, Detrend key) {
+    std::vector<float> out(size_t(numSegs) * n, 0.0f);
+    for (uint32_t s = 0; s < numSegs; ++s) {
+        float* row = out.data() + size_t(s) * n;
+        const uint32_t off = s * step;
+        for (uint32_t i = 0; i < n; ++i)
+            row[i] = (off + i < sig.size()) ? sig[off + i] : 0.0f;
+        detrendInPlace(std::span<float>(row, n), key);
+        for (uint32_t i = 0; i < n; ++i)
+            row[i] *= i < win.size() ? win[i] : 0.0f;
+    }
+    return out;
+}
+
 std::vector<float> detrend(std::span<const float> x, Detrend key) {
     switch (key) {
     case Detrend::Mean: return detrendMean(x);

@@ -182,7 +182,9 @@ struct PContourTess { uint32_t gridBuf, levelsBuf, colBuf, outBuf;
 /// The per-plot spectral math (power, cross spectra, unwrapping) stays
 /// on the CPU, so every spectrum family member shares one primitive.
 struct PFftSegments { uint32_t sigBuf, winBuf, outBuf;
-                      uint32_t n, step, numSegs, sigLen, mailbox; };
+                      uint32_t n, step, numSegs, sigLen, mailbox;
+                      /// plot::Detrend applied per segment on device.
+                      uint32_t detrend; };
 /// mpl hexbin (pointy-top) lattice counts: two interleaved lattices
 /// A (nx+1)x(ny+1) at (i*sx, j*sy) and B nx*ny offset by (+.5sx,+.5sy).
 /// Result read back via bulk mailbox
@@ -272,6 +274,31 @@ struct PTripcolorTess { uint32_t xyBuf, trisBuf, zBuf, lutBuf,
                         outBuf, counterBuf;
                         uint32_t nTris, mode, maxVerts, pad;
                         float bx, ax, by, ay; };
+/// Device-side data→pixel mapping for polylines: one invocation per
+/// point applies the closed-form axis scales + projection, masks
+/// out-of-domain (log/logit) and non-finite points to NaN, and writes
+/// the pixel-space vec2 the stroker consumes. `flags` bit0 marks a
+/// rectilinear projection (the only one this op handles).
+struct PTransformPoints { uint32_t dataBuf, outBuf;
+                          uint32_t n, flags;
+                          TransformUBO ubo; };
+/// Wind-barb feather expansion: one invocation per barb builds the shaft
+/// plus its flags/full/half barbs in pixel space and writes the segment
+/// endpoints. `offBuf` carries the per-barb output vertex offsets the
+/// CPU prefix pass computed (the count is deterministic in the speed),
+/// so no atomics or readback are involved.
+struct PBarbsTess { uint32_t xBuf, yBuf, uBuf, vBuf, offBuf, outBuf;
+                    uint32_t n, flags, totalVerts;
+                    float length;
+                    TransformUBO ubo; };
+/// GPU even-odd scanline polygon fill: `ringPts` holds the rings packed
+/// as vec2 in mask-local pixels, `ringOffs` the nRings+1 offsets into
+/// it. `deltaBuf` takes one u32 per pixel (crossing parity deltas) and
+/// `maskBuf` the row-padded rgba8 coverage the interpreter blits into
+/// `tex` (rgba8unorm) for the image draw in rgba mode.
+struct PPolyFillMask { uint32_t ringPts, ringOffs, deltaBuf, maskBuf, tex;
+                       uint32_t nPts, nRings, W, H, rowStride;
+                       float r, g, b, a; };
 #pragma pack(pop)
 
 } // namespace volcano::web

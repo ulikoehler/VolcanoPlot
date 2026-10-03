@@ -77,10 +77,19 @@ void Hist2DPlot::computeBins(render::Renderer* r) {
         return;
     }
 
-    // Sort copies for quantile computation.
-    std::vector<float> sx = x_, sy = y_;
-    std::sort(sx.begin(), sx.end());
-    std::sort(sy.begin(), sy.end());
+    // Sort copies for quantile computation. The `stats` offload sorts
+    // on the device (op 60, mailboxed back one frame later); the CPU
+    // sort covers the first frame and any decline.
+    std::vector<float> sx, sy;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().stats)) {
+        if (auto g = r->gpu().sortFloats(x_)) sx = std::move(*g);
+        if (auto g = r->gpu().sortFloats(y_)) sy = std::move(*g);
+    }
+    if (sx.size() != x_.size()) { sx = x_;
+        std::sort(sx.begin(), sx.end()); }
+    if (sy.size() != y_.size()) { sy = y_;
+        std::sort(sy.begin(), sy.end()); }
 
     // Determine data ranges.
     float xMin, xMax, yMin, yMax;

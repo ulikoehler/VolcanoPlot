@@ -2,6 +2,7 @@
 #include "volcano/plot/plots/BoxPlot.hpp"
 #include "volcano/plot/Path.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -60,12 +61,25 @@ float BoxPlot::percentile(const std::vector<float>& sorted, float p) {
     return sorted[lo] * (1.0f - frac) + sorted[hi] * frac;
 }
 
-BoxPlot::Stats BoxPlot::computeStats(const std::vector<float>& data) const {
+BoxPlot::Stats BoxPlot::computeStats(const std::vector<float>& data,
+                                     render::Renderer* r) const {
     Stats s{};
     if (data.empty()) return s;
 
-    std::vector<float> sorted = data;
-    std::sort(sorted.begin(), sorted.end());
+    // The `stats` offload sorts on the device (op 60, mailboxed back
+    // one frame later); the CPU sort covers the first frame. The
+    // bootstrap resample loop below stays on the CPU — it generates a
+    // fresh buffer per iteration, so there is nothing to cache.
+    std::vector<float> sorted;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().stats)) {
+        if (auto g = r->gpu().sortFloats(data); g && g->size() == data.size())
+            sorted = std::move(*g);
+    }
+    if (sorted.size() != data.size()) {
+        sorted = data;
+        std::sort(sorted.begin(), sorted.end());
+    }
 
     s.min = sorted.front();
     s.max = sorted.back();
@@ -283,7 +297,7 @@ void BoxPlot::prepare(render::Renderer& r) {
         stats_.clear();
         stats_.reserve(groups_.size());
         for (const auto& g : groups_)
-            stats_.push_back(computeStats(g));
+            stats_.push_back(computeStats(g, &r));
     }
 
     // Build geometry.

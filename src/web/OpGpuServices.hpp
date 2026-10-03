@@ -164,7 +164,8 @@ public:
     /// unchanged input serve the delivered spectra.
     std::optional<std::vector<float>> fftSegments(
         std::span<const float> signal, std::span<const float> win,
-        uint32_t n, uint32_t step, uint32_t numSegs) override;
+        uint32_t n, uint32_t step, uint32_t numSegs,
+        plot::mlab::Detrend detrend) override;
     /// Same eventual-delivery contract: first call emits the lag
     /// correlation + mailbox, later identical calls serve the result.
     std::optional<std::vector<float>> xcorr(
@@ -175,6 +176,16 @@ public:
         std::span<const float> data) override;
     /// tripcolor expansion (op 61) — emits the indirect soup, nothing
     /// crosses back to the CPU.
+    [[nodiscard]] bool supportsBarbsTess() const noexcept override {
+        return true;
+    }
+    [[nodiscard]] bool barbsTess(
+        std::span<const float> x, std::span<const float> y,
+        std::span<const float> u, std::span<const float> v,
+        const plot::Transform2D& t, plot::Rect2D rect,
+        float length, bool flip,
+        render::GpuBuf& segsOut, uint32_t& vertexCount) override;
+
     [[nodiscard]] bool supportsTripcolorTess() const noexcept override {
         return true;
     }
@@ -212,6 +223,14 @@ public:
                       const plot::Colormap& cmap,
                       render::GpuTex& densTexOut,
                       render::GpuTex& cmapTexOut) override;
+    [[nodiscard]] bool supportsPolyFill() const noexcept override {
+        return true;
+    }
+    bool polyFillMask(std::span<const std::vector<plot::Point2D>> rings,
+                      plot::Color face, plot::Extent2D res,
+                      render::GpuTex& maskOut,
+                      plot::Rect2D& rectOut) override;
+
     bool drawImageTex(render::Cmd& cmd, plot::Rect2D rect, const void* t,
                       render::GpuTex grid, render::GpuTex cmap,
                       const float params[8]) override;

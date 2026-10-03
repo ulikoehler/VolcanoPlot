@@ -27,6 +27,7 @@ set(VOLCANO_WEB_SOURCES
     ${VOLCANO_ROOT}/src/render/VectorRenderer.cpp
     ${VOLCANO_ROOT}/src/render/Renderer.cpp   # web-safe once vk:: is gone
     ${VOLCANO_ROOT}/src/render/Offload.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/SpineRendererBase.cpp
 )
 
 add_executable(volcanoplot_web ${VOLCANO_WEB_SOURCES})

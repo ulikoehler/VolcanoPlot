@@ -1,5 +1,6 @@
 // volcano/plot/plots/PsdPlot.cpp — power spectral density implementation
 #include "volcano/plot/plots/PsdPlot.hpp"
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -135,17 +136,36 @@ void PsdPlot::computePsd(render::Renderer* r) {
     // transformed in one dispatch, freeing the CPU. The per-bin
     // accumulation below is unchanged. The spectra arrive one frame
     // later, so the first frame runs the CPU transform.
-    std::vector<float> gpuSpecs;
+    // The per-segment trend (mpl `detrend`, default 'mean') is applied
+    // by the FFT kernel on the device (`detrend` offload switch). When
+    // the device will not do it, the host builds the detrended +
+    // windowed segment matrix and hands that over instead — same input
+    // to the transform either way.
+    std::vector<float> gpuSpecs, hostSegs, unitWin;
+    std::span<const float> sig = signal_;
+    std::span<const float> winArg = win;
+    uint32_t stepArg = step;
+    mlab::Detrend devDetrend = config_.detrend;
     bool haveGpu = false;
     if (r && render::OffloadConfig::allowGpu(
                  render::OffloadConfig::global().fft)) {
-        if (auto spec = r->gpu().fftSegments(signal_, win, n, step,
-                                             numSegs);
+        if (devDetrend != mlab::Detrend::None &&
+            !render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().detrend)) {
+            hostSegs = mlab::prepareSegments(signal_, win, n, step,
+                                             numSegs, devDetrend);
+            unitWin.assign(n, 1.0f);
+            sig = hostSegs; winArg = unitWin; stepArg = n;
+            devDetrend = mlab::Detrend::None;
+        }
+        if (auto spec = r->gpu().fftSegments(sig, winArg, n, stepArg,
+                                             numSegs, devDetrend);
             spec && spec->size() == size_t(numSegs) * n * 2) {
             gpuSpecs = std::move(*spec);
             haveGpu = true;
         }
     }
+    std::vector<float> seg(n);
     for (uint32_t s = 0; s < numSegs; ++s) {
         if (haveGpu) {
             const float* c = gpuSpecs.data() + size_t(s) * n * 2;
@@ -154,10 +174,11 @@ void PsdPlot::computePsd(render::Renderer* r) {
             continue;
         }
         uint32_t off = s * step;
-        for (uint32_t i = 0; i < n; ++i) {
-            float smp = (off + i < len) ? signal_[off + i] : 0.0f;
-            data[i] = std::complex<float>(smp * win[i], 0.0f);
-        }
+        for (uint32_t i = 0; i < n; ++i)
+            seg[i] = (off + i < len) ? signal_[off + i] : 0.0f;
+        mlab::detrendInPlace(seg, config_.detrend);
+        for (uint32_t i = 0; i < n; ++i)
+            data[i] = std::complex<float>(seg[i] * win[i], 0.0f);
         fft(data);
         for (uint32_t k = 0; k <= halfN; ++k)
             pxx[k] += std::norm(data[k]);

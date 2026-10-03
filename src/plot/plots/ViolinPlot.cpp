@@ -1,6 +1,7 @@
 // volcano/plot/plots/ViolinPlot.cpp — violin plot implementation
 #include "volcano/plot/plots/ViolinPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <cmath>
@@ -76,9 +77,20 @@ ViolinPlot::computeKde(const std::vector<float>& data,
     return {yEval, density};
 }
 
-ViolinPlot::Stats ViolinPlot::computeStats(const std::vector<float>& data) const {
-    std::vector<float> sorted = data;
-    std::sort(sorted.begin(), sorted.end());
+ViolinPlot::Stats ViolinPlot::computeStats(const std::vector<float>& data,
+                                           render::Renderer* r) const {
+    // The `stats` offload sorts on the device (op 60, mailboxed back
+    // one frame later); the CPU sort covers the first frame.
+    std::vector<float> sorted;
+    if (r && render::OffloadConfig::allowGpu(
+                 render::OffloadConfig::global().stats)) {
+        if (auto g = r->gpu().sortFloats(data); g && g->size() == data.size())
+            sorted = std::move(*g);
+    }
+    if (sorted.size() != data.size()) {
+        sorted = data;
+        std::sort(sorted.begin(), sorted.end());
+    }
     auto pct = [&](float p) -> float {
         if (sorted.empty()) return 0.0f;
         float idx = p / 100.0f * (sorted.size() - 1);
@@ -160,7 +172,7 @@ void ViolinPlot::buildGeometry(render::Renderer* r) {
         //   showextrema=True: vertical whisker bar (min→max) + horizontal caps
         //   showmean=True:    horizontal line at the mean
         //   showbox=False:    no IQR box (off by default)
-        auto st = computeStats(groups_[g]);
+        auto st = computeStats(groups_[g], r);
         float mean = 0.0f;
         for (float v : groups_[g]) mean += v;
         mean /= static_cast<float>(groups_[g].size());

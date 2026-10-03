@@ -297,6 +297,50 @@ public:
         return {Mesh{GpuBuf(outBuf), 0,
                      uint32_t(px.size() - 1) * 6 * dashMul}};
     }
+    /// Device-side data→pixel mapping (op 62): allocates the pixel-space
+    /// vec2 buffer and emits one invocation per point. The buffer feeds
+    /// tessellateDevice directly, so no host pass over the data happens.
+    bool transformPoints(Cmd& cmd, GpuBuf points, uint32_t count,
+                         const plot::Transform2D& t, Rect2D rect,
+                         GpuBuf& out) override {
+        if (!points || count < 2) return false;
+        if (!render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().xform))
+            return false;
+        // Only the rectilinear projection is handled — polar/geo need the
+        // joint (x,y) mapping the CPU path does.
+        if (t.projection.kind != ProjectionKind::Rectilinear) return false;
+        auto ubo = makeTransformUBO(t, rect, {});
+        const uint32_t outBuf = s_->createBufferRaw(
+            size_t(count) * 8 + 16, 1 | 2);
+        ops(cmd).emit(Op::TransformPoints,
+                      PTransformPoints{uint32_t(points), outBuf, count,
+                                       1u, ubo});
+        out = GpuBuf(outBuf);
+        return true;
+    }
+
+    /// Stroke an already-device-resident pixel-space polyline. Identical
+    /// to tessellate() minus the host upload; the dashed path needs the
+    /// CPU cumulative arc lengths, so it stays on the upload path.
+    std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
+                                       uint32_t count,
+                                       const StrokeParams& sp,
+                                       Color color) override {
+        if (!points || count < 2 || !sp.dashes.empty()) return {};
+        auto& os = ops(cmd);
+        uint64_t outBytes = uint64_t(count) * 6 * 32 + 64;
+        uint32_t outBuf = s_->createBufferRaw(outBytes, 1 | 2);
+        PTessLines p{uint32_t(points), 0, outBuf, 0, count, count - 1,
+                     sp.width * 0.5f,
+                     uint8_t(sp.join), uint8_t(sp.cap), sp.miterLimit,
+                     color.r, color.g, color.b, color.a};
+        p.dashMul = 1;               // solid layout: 6 verts/segment
+        p.dashOffset = sp.dashOffset;
+        os.emit(Op::TessLines, p);
+        return {Mesh{GpuBuf(outBuf), 0, (count - 1) * 6}};
+    }
+
     /// Eventual-delivery envelope: the first call for a parameter set
     /// seeds the key buffer, emits EnvelopeCols + a bulk mailbox, and
     /// returns false (the caller takes its CPU path for that frame).

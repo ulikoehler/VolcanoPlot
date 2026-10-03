@@ -58,6 +58,9 @@ const INIT = (mode: string) => {
     (window as any).__xc = 0;
     (window as any).__sf = 0;
     (window as any).__tpc = 0;
+    (window as any).__xf = 0;
+    (window as any).__barbs = 0;
+    (window as any).__pf = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -80,6 +83,11 @@ const INIT = (mode: string) => {
                                xcorr: (window as any).__wantMode,
                                ecdf: (window as any).__wantMode,
                                tripcolor: (window as any).__wantMode,
+                               stats: (window as any).__wantMode,
+                               xform: (window as any).__wantMode,
+                               barbs: (window as any).__wantMode,
+                               polyfill: (window as any).__wantMode,
+                               detrend: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -101,6 +109,9 @@ const INIT = (mode: string) => {
                 if (a[2] === 59) (window as any).__xc++;
                 if (a[2] === 60) (window as any).__sf++;
                 if (a[2] === 61) (window as any).__tpc++;
+                if (a[2] === 62) (window as any).__xf++;
+                if (a[2] === 63) (window as any).__barbs++;
+                if (a[2] === 64) (window as any).__pf++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -151,7 +162,10 @@ async function captureWith(page: any, kind: string, mode: string,
                  splat: (window as any).__splat,
                  xc: (window as any).__xc,
                  sf: (window as any).__sf,
-                 tpc: (window as any).__tpc };
+                 tpc: (window as any).__tpc,
+                 xf: (window as any).__xf,
+                 barbs: (window as any).__barbs,
+                 pf: (window as any).__pf };
     }, frames);
 }
 
@@ -518,4 +532,139 @@ test('GPU tripcolor expansion matches the CPU mesh', async ({ page }) => {
            Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
     expect(Math.abs(gpu.chroma - cpu.chroma) /
            Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});
+
+for (const kind of ['histauto', 'box', 'violin', 'hist2d']) {
+    test(`GPU order statistics match the CPU sort (${kind})`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 2);
+        const gpu = await captureWith(page, kind, 'gpu', 5);
+        console.log(`STATS-${kind.toUpperCase()} cpu=` +
+                    `${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        // The bitonic sort (op 60) ran only under the gpu policy.
+        expect(gpu.sf).toBeGreaterThan(0);
+        expect(cpu.sf).toBe(0);
+        // Same quartiles/ranges → same rendered statistics.
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.03);
+        expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.5);
+    });
+}
+
+test('GPU device transform matches the CPU mask+map (logline)',
+     async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    // Both captures in one page: the CPU reference decimates the masked
+    // polyline into a per-column min/max envelope (>huge points), which
+    // over-fills dense columns; the device transform strokes all 20000
+    // raw segments — strictly more faithful, so its ink must be a
+    // *subset* of the CPU envelope rather than an equal coverage.
+    await page.addInitScript(INIT, 'cpu');
+    await page.goto(
+        `http://localhost:${port}/demo/multi.html?p=logline`);
+    await page.waitForFunction(
+        () => (window as any).vpResult !== undefined ||
+              (window as any).vpError !== undefined, { timeout: 30_000 });
+    const r = await page.evaluate(async () => {
+        const vp = (window as any).vp;
+        const inkOf = (px: any) => {
+            const m = new Uint8Array(px.length / 4);
+            for (let i = 0; i < m.length; i++)
+                if (px[i*4] < 245 || px[i*4+1] < 245 || px[i*4+2] < 245)
+                    m[i] = 1;
+            return m;
+        };
+        let cpuPx = await vp.capture();
+        await vp.capture();                      // settle
+        const cpuInk = inkOf(cpuPx);
+        const cpuXf = (window as any).__xf;
+        vp.setOffload({ xform: 'gpu' });
+        let gpuPx = await vp.capture();
+        gpuPx = await vp.capture();
+        const gpuInk = inkOf(gpuPx);
+        // CPU ink dilated by 2px (AA/stroke jitter tolerance).
+        const W = 640, H = 480;
+        const dil = new Uint8Array(W * H);
+        for (let y = 0; y < H; y++)
+            for (let x = 0; x < W; x++) {
+                if (!cpuInk[y * W + x]) continue;
+                for (let dy = -2; dy <= 2; dy++)
+                    for (let dx = -2; dx <= 2; dx++) {
+                        const yy = y + dy, xx = x + dx;
+                        if (yy >= 0 && yy < H && xx >= 0 && xx < W)
+                            dil[yy * W + xx] = 1;
+                    }
+            }
+        let cpuN = 0, gpuN = 0, outside = 0;
+        for (let i = 0; i < W * H; i++) {
+            if (cpuInk[i]) cpuN++;
+            if (gpuInk[i]) { gpuN++; if (!dil[i]) outside++; }
+        }
+        return { cpuN, gpuN, outside, cpuXf,
+                 gpuXf: (window as any).__xf };
+    });
+    console.log(`LOGLINE ${JSON.stringify(r)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    // The data→pixel map (with log-domain masking) ran on the device.
+    expect(r.gpuXf).toBeGreaterThan(0);
+    expect(r.cpuXf).toBe(0);
+    // Every GPU ink pixel lies inside the (dilated) CPU envelope —
+    // the transform+mask map is exact.
+    expect(r.outside).toBeLessThan(Math.max(50, r.gpuN * 0.005));
+    // And the true polyline still covers most of the envelope.
+    expect(r.gpuN).toBeGreaterThan(r.cpuN * 0.55);
+});
+
+test('GPU barb expansion matches the CPU feathers', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'barbs', 'cpu', 1);
+    const gpu = await captureWith(page, 'barbs', 'gpu', 2);
+    console.log(`BARBS cpu=${JSON.stringify(cpu)} ` +
+                `gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.barbs).toBeGreaterThan(0);
+    expect(cpu.barbs).toBe(0);
+    // Same segment endpoints on both paths → identical strokes.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.03);
+    expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.5);
+});
+
+test('GPU scanline polygon fill matches the CPU fan (fillbig)',
+     async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'fillbig', 'cpu', 1);
+    const gpu = await captureWith(page, 'fillbig', 'gpu', 2);
+    console.log(`FILLBIG cpu=${JSON.stringify(cpu)} ` +
+                `gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.pf).toBeGreaterThan(0);
+    expect(cpu.pf).toBe(0);
+    // Even-odd scanline vs the centroid fan — same coverage for a
+    // star-shaped ring, modulo edge-pixel rasterization rules.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+    expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(2.0);
 });

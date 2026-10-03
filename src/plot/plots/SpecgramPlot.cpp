@@ -1,5 +1,6 @@
 // volcano/plot/plots/SpecgramPlot.cpp — spectrogram implementation
 #include "volcano/plot/plots/SpecgramPlot.hpp"
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -110,12 +111,27 @@ void SpecgramPlot::computeSpecgram(render::Renderer* r) {
     // Every time window is one segment; the device transforms them all
     // in a single dispatch (`fft` offload switch). The dB conversion
     // below stays on the host.
-    std::vector<float> gpuSpecs;
+    std::vector<float> gpuSpecs, hostSegs, unitWin;
+    std::span<const float> sig = signal_;
+    std::span<const float> winArg = win;
+    uint32_t stepArg = hop;
+    mlab::Detrend devDetrend = config_.detrend;
     bool haveGpu = false;
     if (r && render::OffloadConfig::allowGpu(
                  render::OffloadConfig::global().fft)) {
-        if (auto spec = r->gpu().fftSegments(signal_, win, nfft, hop,
-                                             ncols_);
+        // Trend removal runs in the FFT kernel when the device will do
+        // it; otherwise the host pre-detrends the whole segment matrix.
+        if (devDetrend != mlab::Detrend::None &&
+            !render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().detrend)) {
+            hostSegs = mlab::prepareSegments(signal_, win, nfft, hop,
+                                             ncols_, devDetrend);
+            unitWin.assign(nfft, 1.0f);
+            sig = hostSegs; winArg = unitWin; stepArg = nfft;
+            devDetrend = mlab::Detrend::None;
+        }
+        if (auto spec = r->gpu().fftSegments(sig, winArg, nfft, stepArg,
+                                             ncols_, devDetrend);
             spec && spec->size() == size_t(ncols_) * nfft * 2) {
             gpuSpecs = std::move(*spec);
             haveGpu = true;
@@ -137,8 +153,11 @@ void SpecgramPlot::computeSpecgram(render::Renderer* r) {
         }
 
         std::vector<std::complex<float>> frame(nfft);
+        std::vector<float> seg(nfft);
+        for (uint32_t i = 0; i < nfft; ++i) seg[i] = signal_[start + i];
+        mlab::detrendInPlace(seg, config_.detrend);
         for (uint32_t i = 0; i < nfft; ++i)
-            frame[i] = std::complex<float>(signal_[start + i] * win[i], 0.0f);
+            frame[i] = std::complex<float>(seg[i] * win[i], 0.0f);
 
         fft(frame);
 

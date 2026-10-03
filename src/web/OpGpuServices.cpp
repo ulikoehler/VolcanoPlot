@@ -248,14 +248,20 @@ OpGpuServices::histBin2D(std::span<const float> x, std::span<const float> y,
 std::optional<std::vector<float>>
 OpGpuServices::fftSegments(std::span<const float> signal,
                            std::span<const float> win,
-                           uint32_t n, uint32_t step, uint32_t numSegs) {
-    // Workgroup storage caps the transform at 2048 complex points
-    // (2 × n f32 = 16 KB, the spec-guaranteed workgroup limit).
-    if (signal.empty() || win.size() < n || n < 2 || n > 2048 ||
+                           uint32_t n, uint32_t step, uint32_t numSegs,
+                           plot::mlab::Detrend detrend) {
+    // The interpreter picks the workgroup kernel for n <= 1024
+    // (2 × n f32 + 2 × 256 f32 detrend = 10 KB, under the
+    // spec-guaranteed 16 KB workgroup limit) and the global-memory
+    // multi-pass kernel above that; 64K points is the sanity bound.
+    if (signal.empty() || win.size() < n || n < 2 || n > 65536 ||
         !numSegs) return std::nullopt;
     const size_t outCount = size_t(numSegs) * n * 2;
+    // The detrend mode changes the result for the same samples, so it
+    // has to be part of the request fingerprint.
     const uint64_t fp = fpFloats(signal.first(std::min<size_t>(
-        signal.size(), size_t(numSegs) * step + n)));
+        signal.size(), size_t(numSegs) * step + n))) ^
+        (uint64_t(detrend) * 0x9E3779B97F4A7C15ull);
     auto st = binState(3, fp, uint32_t(outCount));
     if (st.cached) {
         std::vector<float> out(st.cached->size());
@@ -271,7 +277,8 @@ OpGpuServices::fftSegments(std::span<const float> signal,
     uint32_t out = createBufferRaw(outCount * 4 + 16, 2 | 16);
     stream_.emit(Op::FftSegments,
                  PFftSegments{sig, winBuf, out, n, step, numSegs,
-                              uint32_t(signal.size()), st.slot});
+                              uint32_t(signal.size()), st.slot,
+                              uint32_t(detrend)});
     return std::nullopt;
 }
 
@@ -330,6 +337,70 @@ OpGpuServices::sortFloats(std::span<const float> data) {
     writeBufferRaw(buf, 0, padded.data(), size_t(nPad) * 4);
     stream_.emit(Op::SortFloats, PSortFloats{buf, n, nPad, st.slot});
     return std::nullopt;
+}
+
+bool OpGpuServices::barbsTess(
+    std::span<const float> x, std::span<const float> y,
+    std::span<const float> u, std::span<const float> v,
+    const plot::Transform2D& t, plot::Rect2D rect,
+    float length, bool flip,
+    render::GpuBuf& segsOut, uint32_t& vertexCount) {
+    const size_t n = x.size();
+    if (n < 1 || y.size() != n || u.size() != n || v.size() != n) return false;
+    if (t.projection.kind != plot::ProjectionKind::Rectilinear) return false;
+    // Barbs on a custom transform or a non-closed-form scale stay on the
+    // CPU path (the shader only implements the closed-form scales).
+    if (t.scaleX.kind == plot::ScaleKind::Function ||
+        t.scaleX.kind == plot::ScaleKind::FunctionLog ||
+        t.scaleY.kind == plot::ScaleKind::Function ||
+        t.scaleY.kind == plot::ScaleKind::FunctionLog)
+        return false;
+
+    // Per-barb segment count is a pure function of the speed, so the
+    // prefix pass is integer arithmetic only — no geometry, no trig.
+    // The shader reproduces the same decomposition exactly.
+    std::vector<uint32_t> offs(n + 1, 0);
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t segs = 0;
+        const float speed = std::sqrt(u[i] * u[i] + v[i] * v[i]);
+        if (speed >= 0.01f) {
+            const int speedInt = int(std::round(speed / 5.0f)) * 5;
+            const int nFlags = speedInt / 50;
+            const int rem = speedInt % 50;
+            const int nFull = rem / 10;
+            const int nHalf = (rem % 10) / 5;
+            segs = uint32_t(1 + 2 * nFlags + nFull + (nHalf > 0 ? 1 : 0));
+        }
+        offs[i + 1] = offs[i] + segs;
+    }
+    const uint32_t totalSegs = offs[n];
+    if (!totalSegs) return false;
+    vertexCount = totalSegs * 2;
+
+    auto stage = [&](const float* d, size_t count) {
+        uint32_t h = createBufferRaw(count * 4 + 16, 1 | 2);
+        writeBufferRaw(h, 0, d, count * 4);
+        return h;
+    };
+    const uint32_t outBuf = createBufferRaw(size_t(vertexCount) * 8 + 16, 2 | 16);
+    const uint32_t offBuf = createBufferRaw(offs.size() * 4 + 16, 1 | 2);
+    writeBufferRaw(offBuf, 0, offs.data(), offs.size() * 4);
+
+    PBarbsTess p{};
+    p.xBuf = stage(x.data(), n);
+    p.yBuf = stage(y.data(), n);
+    p.uBuf = stage(u.data(), n);
+    p.vBuf = stage(v.data(), n);
+    p.offBuf = offBuf;
+    p.outBuf = outBuf;
+    p.n = uint32_t(n);
+    p.flags = flip ? 1u : 0u;
+    p.totalVerts = vertexCount;
+    p.length = length;
+    p.ubo = makeTransformUBO(t, rect, {});
+    stream_.emit(Op::BarbsTess, p);
+    segsOut = render::GpuBuf(outBuf);
+    return true;
 }
 
 bool OpGpuServices::tripcolorTess(
@@ -567,6 +638,82 @@ bool OpGpuServices::scatterSplat(
     stream_.emit(Op::ScatterSplat, p);
     densTexOut = render::GpuTex(densTex);
     cmapTexOut = render::GpuTex(cmapTex);
+    return true;
+}
+
+bool OpGpuServices::polyFillMask(
+    std::span<const std::vector<plot::Point2D>> rings, plot::Color face,
+    plot::Extent2D res, render::GpuTex& maskOut, plot::Rect2D& rectOut) {
+    size_t nPts = 0;
+    size_t nVerts = 0;
+    for (const auto& r : rings) {
+        if (r.size() < 3) continue;
+        nPts += r.size();
+        nVerts += r.size();
+    }
+    // Below the threshold the ear-clip is cheaper than a dispatch pair.
+    if (nVerts <= 512 || !nPts) return false;
+
+    float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
+    for (const auto& r : rings) {
+        if (r.size() < 3) continue;
+        for (const auto& p : r) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
+            mnx = std::min(mnx, p.x); mxx = std::max(mxx, p.x);
+            mny = std::min(mny, p.y); mxy = std::max(mxy, p.y);
+        }
+    }
+    const int x0 = std::max(int(std::floor(mnx)) - 1, 0);
+    const int y0 = std::max(int(std::floor(mny)) - 1, 0);
+    const int x1 = std::min(int(std::ceil(mxx)) + 1, int(res.width));
+    const int y1 = std::min(int(std::ceil(mxy)) + 1, int(res.height));
+    const int W = x1 - x0, H = y1 - y0;
+    if (W <= 0 || H <= 0) return false;
+    if (uint64_t(W) * uint64_t(H) > (4u << 20)) return false;   // >4M texels
+
+    // Rings in mask-local pixels; the edge pass walks each ring's
+    // closing segment, so the offsets carry nRings+1 entries.
+    std::vector<float> pts;
+    std::vector<uint32_t> offs;
+    pts.reserve(nPts * 2);
+    offs.reserve(rings.size() + 1);
+    for (const auto& r : rings) {
+        if (r.size() < 3) continue;
+        offs.push_back(uint32_t(pts.size() / 2));
+        for (const auto& p : r)
+            { pts.push_back(p.x - float(x0)); pts.push_back(p.y - float(y0)); }
+    }
+    offs.push_back(uint32_t(pts.size() / 2));
+    const uint32_t nRings = uint32_t(offs.size() - 1);
+    if (!nRings) return false;
+    const uint32_t nRealPts = uint32_t(pts.size() / 2);
+
+    // rgba8 rows must be 256-byte aligned for copyBufferToTexture.
+    const uint32_t rowStride = (uint32_t(W) * 4u + 255u) & ~255u;
+    const uint32_t tex = createTextureRaw(uint32_t(W), uint32_t(H), 1);
+
+    auto stage = [&](const void* d, size_t bytes) {
+        uint32_t h = createBufferRaw(bytes + 16, 1 | 2);
+        writeBufferRaw(h, 0, d, bytes);
+        return h;
+    };
+    const uint32_t ptsBuf = stage(pts.data(), pts.size() * 4);
+    const uint32_t offBuf = stage(offs.data(), offs.size() * 4);
+    // The scan pass writes every texel, so neither buffer needs seeding.
+    const uint32_t deltaBuf = createBufferRaw(size_t(W) * H * 4 + 16, 2 | 16);
+    const uint32_t maskBuf = createBufferRaw(
+        size_t(rowStride) * H + 16, 2 | 16);
+
+    PPolyFillMask p{};
+    p.ringPts = ptsBuf; p.ringOffs = offBuf;
+    p.deltaBuf = deltaBuf; p.maskBuf = maskBuf; p.tex = tex;
+    p.nPts = nRealPts; p.nRings = nRings;
+    p.W = uint32_t(W); p.H = uint32_t(H); p.rowStride = rowStride;
+    p.r = face.r; p.g = face.g; p.b = face.b; p.a = face.a;
+    stream_.emit(Op::PolyFillMask, p);
+    maskOut = render::GpuTex(tex);
+    rectOut = plot::Rect2D{int32_t(x0), int32_t(y0),
+                           uint32_t(W), uint32_t(H)};
     return true;
 }
 

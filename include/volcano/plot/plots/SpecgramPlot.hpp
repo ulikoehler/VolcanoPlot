@@ -1,5 +1,6 @@
 // volcano/plot/plots/SpecgramPlot.hpp — spectrogram (matplotlib `specgram`)
 #pragma once
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/plot/Colormap.hpp"
@@ -22,6 +23,8 @@ struct SpecgramConfig {
     uint32_t nfft = 256;
     /// Overlap between successive windows in samples (0 = no overlap).
     uint32_t noverlap = 128;
+    /// Per-segment trend removal (mpl `detrend`, default 'mean').
+    mlab::Detrend detrend = mlab::Detrend::Mean;
     /// Colormap for coloring (nullptr = viridis).
     const Colormap* cmap = nullptr;
     /// Explicit value range (dB) for color mapping. If invalid, computed from data.

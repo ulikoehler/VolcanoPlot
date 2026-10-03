@@ -1,6 +1,7 @@
 // volcano/plot/plots/PsdPlot.hpp — power spectral density
 // (matplotlib `psd`)
 #pragma once
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/Types.hpp"
 #include "volcano/render/primitives/LineRenderer.hpp"
@@ -20,6 +21,8 @@ struct PsdConfig {
     uint32_t noverlap = 0;
     /// Number of FFT points (0 = next power of 2 >= signal length).
     uint32_t nfft = 0;
+    /// Per-segment trend removal (mpl `detrend`, default 'mean').
+    mlab::Detrend detrend = mlab::Detrend::Mean;
     /// Line color.
     Color color = Color::fromRgba8(31, 119, 180, 255);
     /// Line width.

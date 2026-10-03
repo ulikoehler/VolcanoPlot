@@ -1,6 +1,7 @@
 // volcano/plot/plots/BarbsPlot.cpp — wind barb plot implementation
 #include "volcano/plot/plots/BarbsPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
 #include <cmath>
@@ -130,6 +131,29 @@ void BarbsPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
     if (!prepared_) return;
 
+    auto ext = r.gpu().extent();
+    Rect2D fullRect{0, 0, ext.width, ext.height};
+    // Use identity transform (pixel space) — segments are already in pixels.
+    Transform2D t;
+    t.view.x = {0.0f, static_cast<float>(ext.width)};
+    t.view.y = {static_cast<float>(ext.height), 0.0f};  // inverted Y (pixel space)
+    t.view.z = {0, 1};
+
+    // GPU expansion (`barbs` offload switch): the shaft/flag/barb
+    // segments are built on the device and drawn straight from there —
+    // the host never expands a single feather.
+    if (render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().barbs) &&
+        r.gpu().supportsBarbsTess()) {
+        render::GpuBuf segs = 0;
+        uint32_t verts = 0;
+        if (r.gpu().barbsTess(x_, y_, u_, v_, axes.transform(), rect,
+                              config_.length, config_.flip, segs, verts) &&
+            renderer_->drawSegmentsGpu(cmd, fullRect, t, segs, verts,
+                                       config_.color, config_.lineWidth))
+            return;
+    }
+
     // Build barbs in pixel space using the current viewport and rect.
     buildBarbs(axes, rect);
 
@@ -139,13 +163,6 @@ void BarbsPlot::draw(render::Cmd& cmd, render::Renderer& r,
     // depend on the viewport. This is acceptable for barbs (small data).
     renderer_->upload(std::span{segments_}, config_.color, config_.lineWidth);
 
-    auto ext = r.gpu().extent();
-    Rect2D fullRect{0, 0, ext.width, ext.height};
-    // Use identity transform (pixel space) — segments are already in pixels.
-    Transform2D t;
-    t.view.x = {0.0f, static_cast<float>(ext.width)};
-    t.view.y = {static_cast<float>(ext.height), 0.0f};  // inverted Y (pixel space)
-    t.view.z = {0, 1};
     renderer_->draw(cmd, fullRect, t, static_cast<uint32_t>(segments_.size()));
 }
 

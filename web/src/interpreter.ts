@@ -37,6 +37,9 @@ import SPLAT_WGSL from './shaders/ScatterSplat.wgsl?raw';
 import XCORR_WGSL from './shaders/XCorr.wgsl?raw';
 import SORTF_WGSL from './shaders/SortFloats.wgsl?raw';
 import TRIPCOLOR_WGSL from './shaders/TripcolorTess.wgsl?raw';
+import XFORMPTS_WGSL from './shaders/TransformPoints.wgsl?raw';
+import BARBS_WGSL from './shaders/BarbsTess.wgsl?raw';
+import POLYFILL_WGSL from './shaders/PolyFillMask.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -67,7 +70,8 @@ export enum Op {
     EnvelopeCols = 52, TriContourTess = 53, DepthSort = 54,
     ScatterSplat = 55, Streamlines = 56, FillBetweenTess = 57,
     QuiverTess = 58, XCorr = 59, SortFloats = 60,
-    TripcolorTess = 61,
+    TripcolorTess = 61, TransformPoints = 62, BarbsTess = 63,
+    PolyFillMask = 64,
 }
 
 export interface FrameHeader {
@@ -831,6 +835,76 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
+    // ── data→pixel point transform (op 62) ──────────────────────────
+    private xfBgl?: GPUBindGroupLayout;
+    private xfPipe?: GPUComputePipeline;
+
+    private ensureXform() {
+        if (this.xfPipe) return;
+        this.xfBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: XFORMPTS_WGSL });
+        this.xfPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.xfBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    // ── wind-barb expansion (op 63) ─────────────────────────────────
+    private barbsBgl?: GPUBindGroupLayout;
+    private barbsPipe?: GPUComputePipeline;
+
+    private ensureBarbs() {
+        if (this.barbsPipe) return;
+        this.barbsBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 4, 5].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            { binding: 6, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: BARBS_WGSL });
+        this.barbsPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.barbsBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    // ── even-odd scanline polygon fill (op 64) ──────────────────────
+    private pfBgl?: GPUBindGroupLayout;
+    private pfPipes = new Map<string, GPUComputePipeline>();
+
+    private ensurePolyFill(entry: string) {
+        if (this.pfPipes.has(entry)) return;
+        if (!this.pfBgl) this.pfBgl = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+            ]});
+        const mod = this.device.createShaderModule({ code: POLYFILL_WGSL });
+        this.pfPipes.set(entry, this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.pfBgl] }),
+            compute: { module: mod, entryPoint: entry } }));
+    }
+
     private splatBgl?: GPUBindGroupLayout;
     private splatPipes = new Map<string, GPUComputePipeline>();
 
@@ -931,6 +1005,8 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
     // ── batched FFT (spectrum family) ────────────────────────────────
     private fftBgl?: GPUBindGroupLayout;
     private fftPipe?: GPUComputePipeline;
+    private fftPrepPipe?: GPUComputePipeline;
+    private fftBflyPipe?: GPUComputePipeline;
 
     private ensureFft() {
         if (this.fftPipe) return;
@@ -944,10 +1020,16 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
               buffer: { type: 'storage' } },
         ]});
         const mod = this.device.createShaderModule({ code: FFT_WGSL });
+        const pl = this.device.createPipelineLayout({
+            bindGroupLayouts: [this.fftBgl] });
         this.fftPipe = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.fftBgl] }),
-            compute: { module: mod, entryPoint: 'cs' } });
+            layout: pl, compute: { module: mod, entryPoint: 'cs' } });
+        this.fftPrepPipe = this.device.createComputePipeline({
+            layout: pl, compute: { module: mod,
+                                   entryPoint: 'segprep' } });
+        this.fftBflyPipe = this.device.createComputePipeline({
+            layout: pl, compute: { module: mod,
+                                   entryPoint: 'bfly' } });
     }
 
     // ── contour tessellation (marching squares + stroke expansion) ──
@@ -1386,28 +1468,55 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             //               sigLen, mailbox}
             const n = p.getUint32(12, true);
             const numSegs = p.getUint32(20, true);
-            // Workgroup storage holds n complex floats per buffer.
-            if (n < 2 || n > 1024 || !numSegs) return;
+            if (n < 2 || (n & (n - 1)) !== 0 || !numSegs) return;
             this.ensureFft();
-            const pcv = new Uint32Array(4);
-            pcv[0] = n; pcv[1] = p.getUint32(16, true);
-            pcv[2] = numSegs; pcv[3] = p.getUint32(24, true);
-            const off = this.uboWrite(pcv);
-            const pass = enc.beginComputePass();
-            pass.setPipeline(this.fftPipe!);
-            pass.setBindGroup(0, this.device.createBindGroup({
+            const mkBg = (off: number) => this.device.createBindGroup({
                 layout: this.fftBgl!, entries: [
                     { binding: 0, resource: { buffer: this.uniformRing,
-                                              offset: off, size: 16 } },
+                                              offset: off, size: 32 } },
                     { binding: 1, resource: { buffer:
                         this.bufRef(p.getUint32(0, true)) } },
                     { binding: 2, resource: { buffer:
                         this.bufRef(p.getUint32(4, true)) } },
                     { binding: 3, resource: { buffer:
                         this.bufRef(p.getUint32(8, true)) } },
-                ]}));
-            pass.dispatchWorkgroups(numSegs);
-            pass.end();
+                ]});
+            const mkPc = (stage: number) => {
+                const pcv = new Uint32Array(8);
+                pcv[0] = n; pcv[1] = p.getUint32(16, true);
+                pcv[2] = numSegs; pcv[3] = p.getUint32(24, true);
+                // detrend mode — payloads written before the field
+                // existed stop at 32 bytes; treat as "no detrend".
+                pcv[4] = p.byteLength >= 36
+                    ? p.getUint32(32, true) : 0;
+                pcv[5] = stage;
+                return this.uboWrite(pcv);
+            };
+            if (n <= 1024) {
+                // Workgroup path: one workgroup per segment.
+                const pass = enc.beginComputePass();
+                pass.setPipeline(this.fftPipe!);
+                pass.setBindGroup(0, mkBg(mkPc(0)));
+                pass.dispatchWorkgroups(numSegs);
+                pass.end();
+            } else {
+                // Global-memory path: serial per-segment prep, then
+                // one disjoint-pair butterfly pass per FFT stage.
+                let pass = enc.beginComputePass();
+                pass.setPipeline(this.fftPrepPipe!);
+                pass.setBindGroup(0, mkBg(mkPc(0)));
+                pass.dispatchWorkgroups(Math.ceil(numSegs / 64));
+                pass.end();
+                const stages = Math.log2(n) | 0;
+                for (let s = 0; s < stages; s++) {
+                    pass = enc.beginComputePass();
+                    pass.setPipeline(this.fftBflyPipe!);
+                    pass.setBindGroup(0, mkBg(mkPc(s)));
+                    pass.dispatchWorkgroups(
+                        Math.ceil(numSegs * n / 2 / 256));
+                    pass.end();
+                }
+            }
             const bytes = numSegs * n * 2 * 4;
             const staging = this.device.createBuffer({
                 size: bytes,
@@ -1794,6 +1903,106 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             cpass.end();
             return;
         }
+        if (op === Op.TransformPoints) {
+            // PTransformPoints {dataBuf, outBuf, n, flags, ubo(128B)}
+            const n = p.getUint32(8, true);
+            if (!n) return;
+            this.ensureXform();
+            // Uniform block = the 128 B TransformUBO plus the trailing
+            // point count (padded to the 16-byte uniform stride).
+            const ub = new Uint8Array(144);
+            ub.set(new Uint8Array(p.buffer, p.byteOffset + 16, 128), 0);
+            new DataView(ub.buffer).setUint32(128, n, true);
+            const off = this.uboWrite(ub);
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.xfPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.xfBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 144 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(4, true)) } },
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(n / 64));
+            cpass.end();
+            return;
+        }
+        if (op === Op.BarbsTess) {
+            // PBarbsTess {xBuf, yBuf, uBuf, vBuf, offBuf, outBuf, n,
+            //   flags, totalVerts, length, ubo(128B)}
+            const n = p.getUint32(24, true);
+            if (!n) return;
+            this.ensureBarbs();
+            const ub = new Uint8Array(144);
+            ub.set(new Uint8Array(p.buffer, p.byteOffset + 40, 128), 0);
+            const dv = new DataView(ub.buffer);
+            dv.setUint32(128, n, true);
+            dv.setUint32(132, p.getUint32(28, true), true);   // flags
+            dv.setUint32(136, p.getUint32(32, true), true);   // totalVerts
+            dv.setFloat32(140, p.getFloat32(36, true), true); // length
+            const off = this.uboWrite(ub);
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.barbsPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.barbsBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 144 } },
+                    ...[0, 4, 8, 12, 16, 20].map((o, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(o, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(n / 64));
+            cpass.end();
+            return;
+        }
+        if (op === Op.PolyFillMask) {
+            // PPolyFillMask {ringPts, ringOffs, deltaBuf, maskBuf, tex,
+            //   nPts, nRings, W, H, rowStride, rgba}
+            const nPts = p.getUint32(20, true);
+            const W = p.getUint32(28, true);
+            const H = p.getUint32(32, true);
+            const rowStride = p.getUint32(36, true);
+            if (!nPts || !W || !H || !rowStride) return;
+            this.ensurePolyFill('edges');
+            this.ensurePolyFill('scan');
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, W, true);
+            pc.setUint32(4, H, true);
+            pc.setUint32(8, nPts, true);
+            pc.setUint32(12, p.getUint32(24, true), true);   // nRings
+            pc.setFloat32(16, p.getFloat32(40, true), true); // r
+            pc.setFloat32(20, p.getFloat32(44, true), true); // g
+            pc.setFloat32(24, p.getFloat32(48, true), true); // b
+            pc.setFloat32(28, p.getFloat32(52, true), true); // a
+            pc.setUint32(32, rowStride, true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const bind = (entry: string, count: number) => {
+                const cpass = enc.beginComputePass();
+                cpass.setPipeline(this.pfPipes.get(entry)!);
+                cpass.setBindGroup(0, this.device.createBindGroup({
+                    layout: this.pfBgl!, entries: [
+                        { binding: 0, resource: { buffer: this.uniformRing,
+                                                  offset: off, size: 48 } },
+                        ...[0, 4, 8, 12].map((o, i) =>
+                            ({ binding: i + 1, resource: { buffer:
+                                this.bufRef(p.getUint32(o, true)) } })),
+                    ]}));
+                cpass.dispatchWorkgroups(Math.ceil(count / 64));
+                cpass.end();
+            };
+            bind('edges', nPts);
+            bind('scan', H);
+            // Blit the row-padded rgba8 coverage into the image texture.
+            const e2 = this.textures.get(p.getUint32(16, true));
+            if (e2) enc.copyBufferToTexture(
+                { buffer: this.bufRef(p.getUint32(12, true)),
+                  bytesPerRow: rowStride, rowsPerImage: H },
+                { texture: e2.tex },
+                { width: W, height: H, depthOrArrayLayers: 1 });
+            return;
+        }
         if (op === Op.FillBetweenTess) {
             // PFillBetweenTess {xBuf, y1Buf, y2Buf, maskBuf, outBuf,
             //   counterBuf, n, flags, maxVerts, bx, ax, by, ay, rgba}
@@ -1876,14 +2085,18 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         pc.setFloat32(36, p.getFloat32(38, true), true); // g
         pc.setFloat32(40, p.getFloat32(42, true), true); // b
         pc.setFloat32(44, p.getFloat32(46, true), true); // a
-        pc.setUint32(48, p.getUint32(62, true), true);   // dashMul
-        pc.setUint32(52, p.getUint32(58, true), true);   // dashCount
+        // Dash fields (offsets 50–78) were added after the original
+        // 50-byte payload — replayed frames may stop at the colour.
+        const hasDash = p.byteLength >= 80;
+        pc.setUint32(48, hasDash ? p.getUint32(62, true) : 1, true); // dashMul
+        pc.setUint32(52, hasDash ? p.getUint32(58, true) : 0, true); // dashCount
         // lenBase/dashBase are *array offsets* inside their buffers —
         // each buffer carries exactly this stroke's data, so both are 0.
         // (The buffer handles live in the payload, not the uniform.)
         pc.setUint32(56, 0, true);                       // lenBase
         pc.setUint32(60, 0, true);                       // dashBase
-        pc.setFloat32(64, p.getFloat32(66, true), true); // dashOffset
+        pc.setFloat32(64, hasDash ? p.getFloat32(66, true) : 0,
+                      true);                                 // dashOffset
         const off = this.uboWrite(new Uint8Array(pc.buffer));
         const n = p.getUint32(16, true), nSeg = p.getUint32(20, true);
         if (!n || !nSeg) return;
@@ -1900,7 +2113,8 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         // Dash bindings are optional: a solid stroke never touches them,
         // but the layout always declares them, so bind a dummy when the
         // stroke carries no pattern.
-        const lenH = p.getUint32(50, true), dashH = p.getUint32(54, true);
+        const lenH = hasDash ? p.getUint32(50, true) : 0,
+              dashH = hasDash ? p.getUint32(54, true) : 0;
         const dummy = this.dummyStorage!;
         entries.push({ binding: 3, resource: { buffer: lenH
             ? this.bufRef(lenH) : dummy } });

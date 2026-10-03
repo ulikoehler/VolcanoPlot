@@ -1,5 +1,6 @@
 // volcano/plot/plots/CsdPlot.cpp — cross-spectral density implementation
 #include "volcano/plot/plots/CsdPlot.hpp"
+#include "volcano/plot/Mlab.hpp"
 #include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
@@ -133,14 +134,34 @@ void CsdPlot::computeCsd(render::Renderer* r) {
     const uint32_t halfN = n / 2;
     std::vector<std::complex<float>> pxy(halfN + 1);
     std::vector<std::complex<float>> dataX(n), dataY(n);
+    std::vector<float> segX(n), segY(n);
     // Batched FFTs on the device (`fft` offload switch) — both signals in
     // one dispatch each. The cross-spectrum accumulation stays here.
-    std::vector<float> gpuX, gpuY;
+    std::vector<float> gpuX, gpuY, hostX, hostY, unitWin;
+    std::span<const float> sigX = signalX_, sigY = signalY_;
+    std::span<const float> winArg = win;
+    uint32_t stepArg = step;
+    mlab::Detrend devDetrend = config_.detrend;
     bool haveGpu = false;
     if (r && render::OffloadConfig::allowGpu(
                  render::OffloadConfig::global().fft)) {
-        auto sx = r->gpu().fftSegments(signalX_, win, n, step, numSegs);
-        auto sy = r->gpu().fftSegments(signalY_, win, n, step, numSegs);
+        // Trend removal runs in the FFT kernel when the device will do
+        // it; otherwise the host pre-detrends both segment matrices.
+        if (devDetrend != mlab::Detrend::None &&
+            !render::OffloadConfig::allowGpu(
+                render::OffloadConfig::global().detrend)) {
+            hostX = mlab::prepareSegments(signalX_, win, n, step, numSegs,
+                                          devDetrend);
+            hostY = mlab::prepareSegments(signalY_, win, n, step, numSegs,
+                                          devDetrend);
+            unitWin.assign(n, 1.0f);
+            sigX = hostX; sigY = hostY; winArg = unitWin; stepArg = n;
+            devDetrend = mlab::Detrend::None;
+        }
+        auto sx = r->gpu().fftSegments(sigX, winArg, n, stepArg, numSegs,
+                                       devDetrend);
+        auto sy = r->gpu().fftSegments(sigY, winArg, n, stepArg, numSegs,
+                                       devDetrend);
         if (sx && sy && sx->size() == size_t(numSegs) * n * 2 &&
             sy->size() == size_t(numSegs) * n * 2) {
             gpuX = std::move(*sx);
@@ -162,10 +183,14 @@ void CsdPlot::computeCsd(render::Renderer* r) {
         }
         uint32_t off = s * step;
         for (uint32_t i = 0; i < n; ++i) {
-            dataX[i] = std::complex<float>(
-                (off + i < lenX ? signalX_[off + i] : 0.0f) * win[i], 0.0f);
-            dataY[i] = std::complex<float>(
-                (off + i < lenY ? signalY_[off + i] : 0.0f) * win[i], 0.0f);
+            segX[i] = off + i < lenX ? signalX_[off + i] : 0.0f;
+            segY[i] = off + i < lenY ? signalY_[off + i] : 0.0f;
+        }
+        mlab::detrendInPlace(segX, config_.detrend);
+        mlab::detrendInPlace(segY, config_.detrend);
+        for (uint32_t i = 0; i < n; ++i) {
+            dataX[i] = std::complex<float>(segX[i] * win[i], 0.0f);
+            dataY[i] = std::complex<float>(segY[i] * win[i], 0.0f);
         }
         fft(dataX);
         fft(dataY);
