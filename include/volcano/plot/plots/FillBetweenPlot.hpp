@@ -46,6 +46,7 @@ public:
         interpolate_ = interpolate;
         prepared_ = false;   // rebuild the triangle list
         meshBuilt_ = false;
+        mask_.clear();       // device mask follows `where`
         touch();
     }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -65,6 +66,13 @@ private:
     /// Huge inputs defer the per-segment triangle mesh — draw() emits a
     /// per-pixel-column envelope instead, or lazily builds on fallback.
     bool meshBuilt_ = false;
+
+    // GPU band tessellation ('fillbetween' offload): the device expands
+    // the masked trapezoids into the indirect soup, so the CPU mesh is
+    // only built when the device path is unavailable.
+    bool gpuTess_ = false;
+    std::vector<uint32_t> mask_;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
 };
 
 } // namespace volcano::plot

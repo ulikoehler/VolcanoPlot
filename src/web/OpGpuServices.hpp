@@ -182,6 +182,19 @@ public:
         std::span<const float> dashes, uint32_t mode,
         render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
 
+    [[nodiscard]] bool supportsFillBetweenTess() const noexcept override {
+        return true;
+    }
+    bool fillBetweenTess(std::span<const float> x,
+                         std::span<const float> y1,
+                         std::span<const float> y2,
+                         std::span<const uint32_t> mask,
+                         bool interpolate,
+                         float bx, float ax, float by, float ay,
+                         plot::Color color,
+                         render::GpuBuf& soupOut,
+                         render::GpuBuf& countOut) override;
+
     [[nodiscard]] bool supportsQuiverTess() const noexcept override {
         return true;
     }

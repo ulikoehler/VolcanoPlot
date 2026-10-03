@@ -221,6 +221,15 @@ struct PQuiverTess { uint32_t segBuf, outBuf, counterBuf;
                      uint32_t n, mode, maxVerts;
                      float hw2, hl, hal, pad;
                      float r, g, b, a; };
+/// fill_between band tessellation: x/y1/y2 are the curves, maskBuf one
+/// u32 (0/1) per point — the CPU-side `where` ∧ finite mask. flags bit0
+/// = interpolate (trim run boundaries to the f1 == f2 crossing).
+/// Output = indirect triangle soup.
+struct PFillBetweenTess { uint32_t xBuf, y1Buf, y2Buf, maskBuf;
+                          uint32_t outBuf, counterBuf;
+                          uint32_t n, flags, maxVerts;
+                          float bx, ax, by, ay;
+                          float r, g, b, a; };
 #pragma pack(pop)
 
 } // namespace volcano::web

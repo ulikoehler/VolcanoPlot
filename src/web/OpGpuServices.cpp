@@ -437,6 +437,46 @@ bool OpGpuServices::triContourTessellate(
     return true;
 }
 
+bool OpGpuServices::fillBetweenTess(
+    std::span<const float> x, std::span<const float> y1,
+    std::span<const float> y2, std::span<const uint32_t> mask,
+    bool interpolate, float bx, float ax, float by, float ay,
+    plot::Color color, render::GpuBuf& soupOut, render::GpuBuf& countOut) {
+    const size_t n = std::min({x.size(), y1.size(), y2.size()});
+    if (n < 2 || mask.size() < n) return false;
+    // One quad per segment, plus one boundary triangle per masked run
+    // edge — 9 verts per segment is a safe upper bound.
+    const uint64_t maxVerts = uint64_t(n - 1) * 9;
+    if (maxVerts * 24 > (256ull << 20)) return false;
+
+    auto stage = [&](const void* d, size_t bytes) {
+        const uint32_t handle = createBufferRaw(bytes + 16, 1 | 2 | 16);
+        writeBufferRaw(handle, 0, d, bytes);
+        return handle;
+    };
+    const uint32_t xBuf = stage(x.data(), n * sizeof(float));
+    const uint32_t y1Buf = stage(y1.data(), n * sizeof(float));
+    const uint32_t y2Buf = stage(y2.data(), n * sizeof(float));
+    const uint32_t maskBuf = stage(mask.data(), n * sizeof(uint32_t));
+    const uint32_t soup = createBufferRaw(maxVerts * 24 + 16, 2 | 16);
+    const uint32_t counter = createBufferRaw(16, 2 | 16 | 32);
+    const uint32_t seed[4] = {0u, 1u, 0u, 0u};
+    writeBufferRaw(counter, 0, seed, sizeof(seed));
+
+    PFillBetweenTess p{};
+    p.xBuf = xBuf; p.y1Buf = y1Buf; p.y2Buf = y2Buf; p.maskBuf = maskBuf;
+    p.outBuf = soup; p.counterBuf = counter;
+    p.n = uint32_t(n);
+    p.flags = interpolate ? 1u : 0u;
+    p.maxVerts = uint32_t(maxVerts);
+    p.bx = bx; p.ax = ax; p.by = by; p.ay = ay;
+    p.r = color.r; p.g = color.g; p.b = color.b; p.a = color.a;
+    stream_.emit(Op::FillBetweenTess, p);
+    soupOut = render::GpuBuf(soup);
+    countOut = render::GpuBuf(counter);
+    return true;
+}
+
 bool OpGpuServices::quiverHeads(
     std::span<const float> segsPx,
     uint32_t mode, float hw2, float hl, float hal, plot::Color color,

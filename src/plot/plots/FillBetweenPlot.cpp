@@ -1,5 +1,6 @@
 // volcano/plot/plots/FillBetweenPlot.cpp
 #include "volcano/plot/plots/FillBetweenPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 #include "../VectorEmitHelpers.hpp"
@@ -167,10 +168,14 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
         uploadedPoints_.push_back({x_[i], y2_[i]});
     }
 
+    gpuTess_ = r.gpu().supportsFillBetweenTess() &&
+               render::OffloadConfig::allowGpu(
+                   render::OffloadConfig::global().fillbetween);
+
     // Huge inputs defer the per-segment mesh (O(n) verts) — draw()
     // emits a per-pixel-column envelope quads path instead, or lazily
     // builds the mesh if that path does not apply.
-    if (x_.size() < (size_t{1} << 18)) {
+    if (!gpuTess_ && x_.size() < (size_t{1} << 18)) {
         std::vector<Point2D> positions;
         std::vector<Color> colors;
         buildFillBetweenTriangles(x_, y1_, y2_, where_, interpolate_,
@@ -237,6 +242,38 @@ void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
             r.gpu().spine().drawTriangles(
                 cmd, vrect, r.gpu().extent(), verts, color_);
             return;
+        }
+        // GPU band tessellation: the device emits the same trapezoids
+        // and boundary triangles the CPU mesh builder produces, so the
+        // per-segment mesh never crosses the boundary.
+        if (gpuTess_ && axes.projection().kind == ProjectionKind::Rectilinear &&
+            axes.xscale().kind == ScaleKind::Linear &&
+            axes.yscale().kind == ScaleKind::Linear) {
+            const auto& vp = axes.viewport();
+            const float kx = vp.x.span() > 0.0f
+                ? float(rect.width) / vp.x.span() : 0.0f;
+            const float ky = vp.y.span() > 0.0f
+                ? float(rect.height) / vp.y.span() : 0.0f;
+            if (kx != 0.0f && ky != 0.0f && x_.size() >= 2) {
+                if (mask_.empty()) {
+                    const auto m = fillMask(x_, y1_, y2_, where_);
+                    mask_.resize(m.size());
+                    for (size_t i = 0; i < m.size(); ++i)
+                        mask_[i] = m[i] ? 1u : 0u;
+                }
+                if (r.gpu().fillBetweenTess(
+                        x_, y1_, y2_, mask_, interpolate_,
+                        float(rect.x) - vp.x.min * kx, kx,
+                        float(rect.y) + float(rect.height) +
+                            vp.y.min * ky, -ky, color_,
+                        gpuSoup_, gpuCount_)) {
+                    r.gpu().spine().drawTrianglesGpuIndirect(
+                        cmd, vrect, r.gpu().extent(), gpuSoup_, 0,
+                        gpuCount_);
+                    return;
+                }
+                gpuTess_ = false;
+            }
         }
         if (!meshBuilt_) {
             std::vector<Point2D> positions;

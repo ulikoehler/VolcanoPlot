@@ -30,6 +30,7 @@ import FFT_WGSL from './shaders/FftSegments.wgsl?raw';
 import ENVELOPE_WGSL from './shaders/EnvelopeCols.wgsl?raw';
 import TRICONTOUR_WGSL from './shaders/TriContourTess.wgsl?raw';
 import QUIVER_WGSL from './shaders/QuiverTess.wgsl?raw';
+import FILLBETWEEN_WGSL from './shaders/FillBetweenTess.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -703,6 +704,29 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
+    private fbPipe?: GPUComputePipeline;
+    private fbBgl?: GPUBindGroupLayout;
+
+    private ensureFillBetween() {
+        if (this.fbPipe) return;
+        this.fbBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 4].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            ...[5, 6].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'storage' as GPUBufferBindingType } })),
+        ]});
+        const mod = this.device.createShaderModule({ code: FILLBETWEEN_WGSL });
+        this.fbPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.fbBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
     // ── binning (hist / hist2d / hexbin) ─────────────────────────────
     private binsBgl?: GPUBindGroupLayout;
     private binsPipes = new Map<number, GPUComputePipeline>();
@@ -1364,6 +1388,38 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                             this.bufRef(p.getUint32(off2, true)) } })),
                 ]}));
             cpass.dispatchWorkgroups(Math.ceil(nTris * nLv / 64));
+            cpass.end();
+            return;
+        }
+        if (op === Op.FillBetweenTess) {
+            // PFillBetweenTess {xBuf, y1Buf, y2Buf, maskBuf, outBuf,
+            //   counterBuf, n, flags, maxVerts, bx, ax, by, ay, rgba}
+            const n = p.getUint32(24, true);
+            if (n < 2) return;
+            this.ensureFillBetween();
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, n, true);
+            pc.setUint32(4, p.getUint32(28, true), true);    // flags
+            pc.setUint32(8, p.getUint32(32, true), true);    // maxVerts
+            pc.setFloat32(16, p.getFloat32(36, true), true);  // bx
+            pc.setFloat32(20, p.getFloat32(40, true), true);  // ax
+            pc.setFloat32(24, p.getFloat32(44, true), true);  // by
+            pc.setFloat32(28, p.getFloat32(48, true), true);  // ay
+            for (let i = 0; i < 4; i++)
+                pc.setFloat32(32 + i * 4, p.getFloat32(52 + i * 4, true),
+                              true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.fbPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.fbBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 48 } },
+                    ...[0, 4, 8, 12, 16, 20].map((off2, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(off2, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil((n - 1) / 64));
             cpass.end();
             return;
         }

@@ -132,6 +132,18 @@ window.vpDone = (async () => {
             ys[i] = Math.sin(t) * (1 + 0.3 * Math.sin(3 * t));
         }
         vp.fill(xs, ys, '#e00000');
+    } else if (which === 'fillbetween') {
+        // Two crossing curves so the interpolated run boundaries (the
+        // f1 == f2 crossings) are exercised.
+        const N = 120, xs = new Float32Array(N),
+              lo = new Float32Array(N), hi = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const t = i / (N - 1) * 4 * Math.PI;
+            xs[i] = t;
+            lo[i] = Math.sin(t) * 1.2;
+            hi[i] = Math.cos(t * 0.7) * 0.9 + 0.2;
+        }
+        vp.fillBetween(xs, lo, hi, '#3b7dd8');
     } else if (which === 'spy') {
         const n = 32, d = new Float32Array(n * n);
         for (let i = 0; i < n; i++) { d[i * n + i] = 1;

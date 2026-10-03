@@ -232,6 +232,27 @@ public:
         return false;
     }
 
+    /// fill_between band tessellation on the device. `mask` is the
+    /// CPU-computed `where` ∧ finite mask (one 0/1 per point); the
+    /// shader emits the same trapezoids and boundary triangles the CPU
+    /// mesh builder produces, straight into the indirect soup.
+    virtual bool fillBetweenTess(std::span<const float> x,
+                                 std::span<const float> y1,
+                                 std::span<const float> y2,
+                                 std::span<const uint32_t> mask,
+                                 bool interpolate,
+                                 float bx, float ax, float by, float ay,
+                                 plot::Color color,
+                                 GpuBuf& soupOut, GpuBuf& countOut) {
+        (void)x; (void)y1; (void)y2; (void)mask; (void)interpolate;
+        (void)bx; (void)ax; (void)by; (void)ay; (void)color;
+        (void)soupOut; (void)countOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsFillBetweenTess() const noexcept {
+        return false;
+    }
+
     /// Batched real-input FFT for the spectrum family: `numSegs` windows
     /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
     /// `n`-sample window `win`, transformed. Returns `numSegs * n`
