@@ -138,7 +138,18 @@ public:
                           GpuBuf buffer, uint64_t byteOffset,
                           uint32_t vertexCount) override {
         PDrawTrisGpu p{clipF(clip), float(res.width), float(res.height),
-                       uint32_t(buffer), byteOffset, vertexCount};
+                       uint32_t(buffer), byteOffset, vertexCount, 0};
+        ops(cmd).emit(Op::DrawTrisGpu, p);
+    }
+    /// Indirect variant: the vertex count comes from `countBuf`, which a
+    /// compute pass filled (GPU contour extraction). Nothing round-trips
+    /// through the CPU to learn how big the mesh is.
+    void drawTrianglesGpuIndirect(Cmd& cmd, Rect2D clip, Extent2D res,
+                                  GpuBuf buffer, uint64_t byteOffset,
+                                  GpuBuf countBuf) override {
+        PDrawTrisGpu p{clipF(clip), float(res.width), float(res.height),
+                       uint32_t(buffer), byteOffset, 0,
+                       uint32_t(countBuf)};
         ops(cmd).emit(Op::DrawTrisGpu, p);
     }
     void resetScratch() override {}

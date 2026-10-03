@@ -155,6 +155,19 @@ public:
         std::span<const float> x, std::span<const float> y,
         uint32_t nBinsX, uint32_t nBinsY,
         float x0, float invWX, float y0, float invWY) override;
+    /// Contour tessellation: emits the marching-squares + stroking
+    /// compute. The mesh never comes back to the CPU — the soup and its
+    /// indirect vertex count are handed straight to the draw.
+    [[nodiscard]] bool supportsContourTessellate() const noexcept override {
+        return true;
+    }
+    bool contourTessellate(
+        std::span<const float> grid, uint32_t w, uint32_t h,
+        std::span<const float> levels,
+        std::span<const plot::Color> colors,
+        float bx, float ax, float by, float ay, float lineWidth,
+        std::span<const float> dashes,
+        render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
     std::optional<std::vector<uint32_t>> hexBins(
         std::span<const float> x, std::span<const float> y,
         uint32_t nx, uint32_t ny, float xMin, float yMin,

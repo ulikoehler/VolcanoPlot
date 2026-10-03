@@ -45,6 +45,7 @@ test.afterAll(() => server.close());
 
 const INIT = (mode: string) => {
     (window as any).__bins = 0;
+    (window as any).__contours = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -54,12 +55,19 @@ const INIT = (mode: string) => {
             stored = v;
             // Apply the policy before the demo renders anything.
             if ((window as any).__wantMode)
-                v.setOffload({ binning: (window as any).__wantMode });
+                v.setOffload({ binning: (window as any).__wantMode,
+                               contours: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
             interp.dispatchBins = (...a: any[]) => {
-                if (a[1] >= 45) (window as any).__bins++;
+                if (a[1] >= 45 && a[1] <= 49) (window as any).__bins++;
                 return orig(...a);
+            };
+            // Contour extraction rides the generic compute walk.
+            const oe = interp.execCompute.bind(interp);
+            interp.execCompute = (...a: any[]) => {
+                if (a[2] === 50) (window as any).__contours++;
+                return oe(...a);
             };
         },
     });
@@ -89,7 +97,8 @@ async function captureWith(page: any, kind: string, mode: string,
             sum += px[i] + px[i+1] + px[i+2];
         }
         return { nonWhite, chroma, mean: sum / (px.length / 4 * 3),
-                 dispatched: (window as any).__bins };
+                 dispatched: (window as any).__bins,
+                 contours: (window as any).__contours };
     }, frames);
 }
 
@@ -117,5 +126,28 @@ for (const kind of ['hist2d', 'hexbin']) {
         expect(gpu.nonWhite).toBe(cpu.nonWhite);
         expect(gpu.chroma).toBe(cpu.chroma);
         expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(0.05);
+    });
+}
+
+for (const kind of ['contour']) {
+    test(`GPU contour extraction matches the CPU path for ${kind}`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 1);
+        const gpu = await captureWith(page, kind, 'gpu', 2);
+        console.log(`${kind.toUpperCase()} cpu=${JSON.stringify(cpu)} ` +
+                    `gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        // Marching squares ran on the device only in the gpu run.
+        expect(gpu.contours).toBeGreaterThan(0);
+        expect(cpu.contours).toBe(0);
+        // Same contour geometry → the same ink.
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
     });
 }

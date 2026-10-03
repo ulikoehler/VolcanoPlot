@@ -81,6 +81,20 @@ public:
                                  std::span<const plot::Point2D> triVerts,
                                  std::span<const plot::Color> colors) = 0;
 
+    /// Draw a device-resident triangle soup whose vertex count lives in
+    /// `countBuf` (an indirect draw) — the shape of a compute-produced
+    /// mesh. Backends without indirect support do nothing; callers only
+    /// take this path after the matching compute capability reported
+    /// success (GpuServices::contourTessellate).
+    virtual void drawTrianglesGpuIndirect(Cmd& cmd, plot::Rect2D clip,
+                                          plot::Extent2D res,
+                                          GpuBuf buffer,
+                                          uint64_t byteOffset,
+                                          GpuBuf countBuf) {
+        (void)cmd; (void)clip; (void)res; (void)buffer;
+        (void)byteOffset; (void)countBuf;
+    }
+
     /// Draw a GPU-generated LineVertex triangle soup produced by
     /// GpuLineRenderer (compute-stroked polylines). `byteOffset` selects
     /// the first vertex inside `buffer`.

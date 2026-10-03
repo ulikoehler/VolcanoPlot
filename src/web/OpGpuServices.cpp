@@ -1,5 +1,6 @@
 // src/web/OpGpuServices.cpp — GpuServices over an OpStream
 #include "OpGpuServices.hpp"
+#include <cmath>
 #include "OpFactory.hpp"
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/PointRenderer.hpp>
@@ -240,6 +241,94 @@ OpGpuServices::histBin2D(std::span<const float> x, std::span<const float> y,
                  PHistBins2D{in, uint32_t(n), bins, x0, invWX, y0, invWY,
                              nBinsX, nBinsY, st.slot});
     return std::nullopt;
+}
+
+bool OpGpuServices::contourTessellate(
+    std::span<const float> grid, uint32_t w, uint32_t h,
+    std::span<const float> levels, std::span<const plot::Color> colors,
+    float bx, float ax, float by, float ay, float lineWidth,
+    std::span<const float> dashes,
+    render::GpuBuf& soupOut, render::GpuBuf& countOut) {
+    if (w < 2 || h < 2 || levels.empty() ||
+        levels.size() != colors.size()) return false;
+    // Upper bound on emitted segments: every (cell, level) may cross.
+    // 6 vertices per segment, 6 floats per vertex.
+    const uint64_t maxSegs = uint64_t(w - 1) * (h - 1) * levels.size();
+
+    // A dashed level re-strokes each segment as a run of dashes, so the
+    // soup needs `dashMul` slots per segment. Segments never exceed the
+    // cell diagonal, so the longest possible dash run is bounded by
+    // that diagonal over the dash period.
+    uint32_t dashMul = 1;
+    for (size_t i = 0; i < levels.size(); ++i) {
+        const float on = i * 2 + 1 < dashes.size() ? dashes[i * 2] : 0.0f;
+        const float off = i * 2 + 1 < dashes.size() ? dashes[i * 2 + 1] : 0.0f;
+        if (on <= 0.0f) continue;
+        const float period = std::max(on + off, 0.5f);
+        const float diag = std::sqrt(ax * ax + ay * ay);
+        dashMul = std::max(dashMul,
+                           uint32_t(std::ceil(diag / period)) + 1u);
+    }
+    dashMul = std::min(dashMul, 64u);
+
+    const uint64_t maxVerts = maxSegs * 6 * dashMul;
+    // Budget guard: a soup beyond this is not worth the memory; the
+    // caller falls back to the CPU stroker.
+    constexpr uint64_t kSoupBudget = 256ull << 20;
+    if (maxVerts * 24 > kSoupBudget) return false;
+
+    auto stage = [&](const void* d, size_t bytes) {
+        uint32_t handle = createBufferRaw(bytes + 16, 1 | 2);
+        writeBufferRaw(handle, 0, d, bytes);
+        return handle;
+    };
+    const uint32_t gridBuf = stage(grid.data(), grid.size_bytes());
+    const uint32_t levelsBuf = stage(levels.data(), levels.size_bytes());
+    // Colours go across as vec4f (the shader reads array<vec4f>).
+    std::vector<float> rgba(colors.size() * 4);
+    for (size_t i = 0; i < colors.size(); ++i) {
+        rgba[i * 4 + 0] = colors[i].r;
+        rgba[i * 4 + 1] = colors[i].g;
+        rgba[i * 4 + 2] = colors[i].b;
+        rgba[i * 4 + 3] = colors[i].a;
+    }
+    const uint32_t colBuf = stage(rgba.data(), rgba.size() * 4);
+
+    // Per-level dash pattern: (on, off) pairs, on == 0 → solid.
+    std::vector<float> dashPairs(levels.size() * 2, 0.0f);
+    for (size_t i = 0; i < levels.size() && i * 2 + 1 < dashes.size(); ++i) {
+        dashPairs[i * 2] = dashes[i * 2];
+        dashPairs[i * 2 + 1] = dashes[i * 2 + 1];
+    }
+    const uint32_t dashBuf = stage(dashPairs.data(),
+                                   dashPairs.size() * 4);
+
+    const uint32_t soup = createBufferRaw(maxVerts * 24 + 16, 2 | 16);
+    // Indirect draw arguments: {vertexCount, instanceCount, 0, 0}. The
+    // compute bumps vertexCount; instanceCount must already be 1.
+    const uint32_t counter = createBufferRaw(16, 2 | 16 | 32);
+    const uint32_t seed[4] = {0u, 1u, 0u, 0u};
+    writeBufferRaw(counter, 0, seed, sizeof(seed));
+
+    PContourTess payload{};
+    payload.gridBuf = gridBuf;
+    payload.levelsBuf = levelsBuf;
+    payload.colBuf = colBuf;
+    payload.outBuf = soup;
+    payload.counterBuf = counter;
+    payload.gridW = w;
+    payload.gridH = h;
+    payload.nLevels = uint32_t(levels.size());
+    payload.bx = bx; payload.ax = ax;
+    payload.by = by; payload.ay = ay;
+    payload.hwidth = lineWidth * 0.5f;
+    payload.maxVerts = uint32_t(maxVerts);
+    payload.dashBuf = dashBuf;
+    payload.dashMul = dashMul;
+    stream_.emit(Op::ContourTess, payload);
+    soupOut = render::GpuBuf(soup);
+    countOut = render::GpuBuf(counter);
+    return true;
 }
 
 std::optional<std::vector<uint32_t>>

@@ -2,6 +2,7 @@
 #include "volcano/plot/Ticks.hpp"
 #include "volcano/plot/Collections.hpp"
 #include "volcano/plot/plots/ContourPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/plot/Stroke.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/render/VectorCanvas.hpp"
@@ -248,6 +249,22 @@ void ContourPlot::marchingSquares() {
 
 void ContourPlot::prepare(render::Renderer& r) {
     computeLevels();
+    // GPU contour extraction: the whole marching-squares + stroking
+    // pipeline runs on the device and never comes back to the CPU. It
+    // needs a backend that implements it, the policy to allow it, and
+    // no feature that depends on the CPU segment list — clabels are
+    // placed from the segments, and mpl dashes negative levels, which
+    // needs arc-length dashing along the polyline.
+    gpuTess_ = false;
+    if (r.gpu().supportsContourTessellate() &&
+        render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().contours) &&
+        !config_.clabel &&
+        grid_.width >= 2 && grid_.height >= 2) {
+        gpuTess_ = true;
+        prepared_ = true;
+        return;
+    }
     marchingSquares();
     if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
@@ -259,7 +276,12 @@ void ContourPlot::prepare(render::Renderer& r) {
 
 void ContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
-    if (!prepared_ || segments_.empty()) return;
+    if (!prepared_) return;
+    if (gpuTess_) {
+        drawGpuTess(cmd, r, axes, rect);
+        return;
+    }
+    if (segments_.empty()) return;
     // mpl colors each level from the colormap (default: image.cmap =
     // viridis) and renders negative levels dashed. Stroke per level into
     // pixel-space triangle meshes so colors/dashes differ per level.
@@ -333,6 +355,65 @@ void ContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
             spine.drawTriangles(cmd, clip, res, tris, color);
     }
     if (config_.clabel) drawClabels(cmd, r, axes, rect);
+}
+
+void ContourPlot::drawGpuTess(render::Cmd& cmd, render::Renderer& r,
+                              const Axes& axes, Rect2D rect) {
+    // The device path is affine-only: a linear scale on a rectilinear
+    // projection (log/symlog scales or a custom mpl transform would
+    // make data→pixel non-affine).
+    if (axes.projection().kind != ProjectionKind::Rectilinear ||
+        axes.xscale().kind != ScaleKind::Linear ||
+        axes.yscale().kind != ScaleKind::Linear) {
+        if (segments_.empty()) { marchingSquares(); }
+        gpuTess_ = false;
+        draw(cmd, r, axes, rect);
+        return;
+    }
+    const auto& vp = axes.viewport();
+    const float kx = (vp.x.span() > 0.0f)
+        ? float(rect.width) / vp.x.span() : 0.0f;
+    const float ky = (vp.y.span() > 0.0f)
+        ? float(rect.height) / vp.y.span() : 0.0f;
+    if (kx == 0.0f || ky == 0.0f) return;
+    const float dx = grid_.xRange.span() / float(grid_.width - 1);
+    const float dy = grid_.yRange.span() / float(grid_.height - 1);
+    // px = bx + i*ax, py = by + j*ay in grid-index space.
+    const float bx = float(rect.x) + (grid_.xRange.min - vp.x.min) * kx;
+    const float ax = dx * kx;
+    const float by = float(rect.y) + float(rect.height) -
+                     (grid_.yRange.min - vp.y.min) * ky;
+    const float ay = -dy * ky;
+
+    const float lMin = config_.levels.front();
+    const float lMax = config_.levels.back();
+    const float lRange = std::max(1e-9f, lMax - lMin);
+    std::vector<Color> colors(config_.levels.size());
+    for (size_t i = 0; i < config_.levels.size(); ++i) {
+        colors[i] = config_.lineColor;
+        if (config_.cmap) {
+            const float t = std::clamp(
+                (config_.levels[i] - lMin) / lRange, 0.0f, 1.0f);
+            colors[i] = config_.cmap->sample(t);
+        }
+    }
+    // mpl dashes negative contour levels; the device path walks each
+    // segment with the same pattern the CPU stroker uses.
+    std::vector<float> dashes(config_.levels.size() * 2, 0.0f);
+    const auto dash = dashPattern(LineStyle::Dashed, config_.lineWidth);
+    for (size_t i = 0; i < config_.levels.size(); ++i) {
+        if (config_.levels[i] >= 0.0f || dash.size() < 2) continue;
+        dashes[i * 2] = dash[0];
+        dashes[i * 2 + 1] = dash[1];
+    }
+    if (!r.gpu().contourTessellate(
+            grid_.values, grid_.width, grid_.height, config_.levels,
+            colors, bx, ax, by, ay, config_.lineWidth, dashes,
+            gpuSoup_, gpuCount_))
+        return;
+    r.gpu().spine().drawTrianglesGpuIndirect(
+        cmd, clipRectVk(rect, r.gpu().extent()), r.gpu().extent(),
+        gpuSoup_, 0, gpuCount_);
 }
 
 std::map<float, Point2D> ContourPlot::clabelAnchors() const {

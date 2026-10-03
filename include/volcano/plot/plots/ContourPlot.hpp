@@ -78,10 +78,20 @@ public:
                     Rect2D rect) override;
 
 private:
+    /// Device contour tessellation (see prepare/draw).
+    void drawGpuTess(render::Cmd& cmd, render::Renderer& r,
+                     const Axes& axes, Rect2D rect);
+
     Grid2D grid_;
     ContourConfig config_;
     std::string label_;
     std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
+    /// Device-tessellated mesh (see draw()): when set, the CPU segment
+    /// list is never built and the contour is drawn straight from the
+    /// compute output.
+    bool gpuTess_ = false;
+    render::GpuBuf gpuSoup_ = 0;
+    render::GpuBuf gpuCount_ = 0;
     std::vector<Point2D> segments_;  // computed in prepare()
     std::vector<float> segLevels_;   // level of each segment pair (size = segments_/2)
     bool prepared_ = false;
@@ -134,6 +144,7 @@ public:
                     Rect2D rect) override;
 
 private:
+
     Grid2D grid_;
     ContourConfig config_;
     std::string label_;

@@ -25,6 +25,7 @@ import KDE1_WGSL from './shaders/KdeEval1D.wgsl?raw';
 import BINS_WGSL from './shaders/HistBins.wgsl?raw';
 import BINS2D_WGSL from './shaders/HistBins2D.wgsl?raw';
 import HEXBINS_WGSL from './shaders/HexBins.wgsl?raw';
+import CONTOUR_WGSL from './shaders/ContourTess.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -47,7 +48,7 @@ export enum Op {
 
     TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
     KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
-    HistBins2D = 48, HexBins = 49,
+    HistBins2D = 48, HexBins = 49, ContourTess = 50,
 }
 
 export interface FrameHeader {
@@ -173,7 +174,7 @@ const SAMP_NF = (b: number): GPUBindGroupLayoutEntry => ({
 
 // Buffer kind bits (OpGpuServices.cpp)
 const K_VERTEX = 1, K_STORAGE = 2, K_INDEX = 4, K_UNIFORM = 8,
-      K_COPYSRC = 16;
+      K_COPYSRC = 16, K_INDIRECT = 32;
 
 interface BufEntry { buf: GPUBuffer; size: number }
 interface TexEntry { tex: GPUTexture; view: GPUTextureView }
@@ -652,6 +653,30 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.pendingBulk.push({ buf: staging, slot, bytes });
     }
 
+    // ── contour tessellation (marching squares + stroke expansion) ──
+    private contourBgl?: GPUBindGroupLayout;
+    private contourPipe?: GPUComputePipeline;
+
+    private ensureContour() {
+        if (this.contourPipe) return;
+        this.contourBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2, 3, 6].map((binding): GPUBindGroupLayoutEntry =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' } })),
+            { binding: 4, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+            { binding: 5, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: CONTOUR_WGSL });
+        this.contourPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.contourBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
     private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
                            slot: number }[] = [];
     private reducePipe?: GPUComputePipeline;
@@ -753,6 +778,7 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             if (kind & K_INDEX) usage |= GPUBufferUsage.INDEX;
             if (kind & K_UNIFORM) usage |= GPUBufferUsage.UNIFORM;
             if (kind & K_COPYSRC) usage |= GPUBufferUsage.COPY_SRC;
+            if (kind & K_INDIRECT) usage |= GPUBufferUsage.INDIRECT;
             // vertex-pulling shaders read vertex bufs as storage
             if (kind & K_VERTEX) usage |= GPUBufferUsage.STORAGE;
             // Per-frame resources are recreated each render — destroy the
@@ -995,6 +1021,50 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             cpass.end();
             enc.copyBufferToBuffer(out, 0, staging, 0, 16);
             this.pendingMaps.push({ buf: staging, out, slot });
+            return;
+        }
+        if (op === Op.ContourTess) {
+            // PContourTess {gridBuf, levelsBuf, colBuf, outBuf,
+            //               counterBuf, gridW, gridH, nLevels,
+            //               bx, ax, by, ay, hwidth, pad, maxVerts, pad}
+            const w = p.getUint32(20, true), h = p.getUint32(24, true);
+            const nLevels = p.getUint32(28, true);
+            if (w < 2 || h < 2 || !nLevels) return;
+            this.ensureContour();
+            const pc = new DataView(new ArrayBuffer(64));
+            pc.setUint32(0, w, true); pc.setUint32(4, h, true);
+            pc.setUint32(8, nLevels, true);
+            pc.setFloat32(16, p.getFloat32(32, true), true);  // bx
+            pc.setFloat32(20, p.getFloat32(36, true), true);  // ax
+            pc.setFloat32(24, p.getFloat32(40, true), true);  // by
+            pc.setFloat32(28, p.getFloat32(44, true), true);  // ay
+            pc.setFloat32(32, p.getFloat32(48, true), true);  // hwidth
+            // PContourTess: maxVerts@56, dashBuf@60, dashMul@64.
+            pc.setUint32(48, p.getUint32(56, true), true);    // maxVerts
+            pc.setUint32(60, p.getUint32(64, true), true);    // dashMul
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const pass = enc.beginComputePass();
+            pass.setPipeline(this.contourPipe!);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.contourBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 64 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(4, true)) } },
+                    { binding: 3, resource: { buffer:
+                        this.bufRef(p.getUint32(8, true)) } },
+                    { binding: 4, resource: { buffer:
+                        this.bufRef(p.getUint32(12, true)) } },
+                    { binding: 5, resource: { buffer:
+                        this.bufRef(p.getUint32(16, true)) } },
+                    { binding: 6, resource: { buffer:
+                        this.bufRef(p.getUint32(60, true)) } },
+                ]}));
+            const cells = (w - 1) * (h - 1) * nLevels;
+            pass.dispatchWorkgroups(Math.ceil(cells / 64));
+            pass.end();
             return;
         }
         if (op === Op.HistBins) {
@@ -1293,7 +1363,9 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                 { binding: 1, resource: { buffer:
                     this.bufRef(p.getUint32(24, true)) } },
             ]));
-            pass.draw(p.getUint32(36, true));
+            const countBuf = p.byteLength >= 44 ? p.getUint32(40, true) : 0;
+            if (countBuf) pass.drawIndirect(this.bufRef(countBuf), 0);
+            else pass.draw(p.getUint32(36, true));
             break;
         }
         case Op.DrawPie: {        // PDrawTrisData + rect={cx,cy,sc,sc}

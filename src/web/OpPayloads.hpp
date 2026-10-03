@@ -77,7 +77,11 @@ struct PDrawTrisData{ Rect2Df clip; TransformUBO ubo;
                       uint32_t posBuf, colBuf, vertCount;
                       float r,g,b,a; };
 struct PDrawTrisGpu { Rect2Df clip; float resW, resH;
-                      uint32_t buf; uint64_t byteOff; uint32_t count; };
+                      uint32_t buf; uint64_t byteOff; uint32_t count;
+                      /// Non-zero → the vertex count comes from this
+                      /// buffer's first u32 (indirect draw), so a
+                      /// compute pass can size the mesh on the device.
+                      uint32_t countBuf; };
 struct PDrawImage   { Rect2Df viewRect; TransformUBO ubo;
                       uint32_t gridTex, cmapTex; float params[8]; };
 
@@ -123,6 +127,19 @@ struct PViolinKde  { uint32_t inBuf, n, outBuf, ne;
 struct PHistBins2D { uint32_t xyBuf, n, binsBuf;
                      float x0, invWX, y0, invWY;
                      uint32_t nBinsX, nBinsY, mailbox; };
+/// Grid contour tessellation: marching squares + stroke expansion into
+/// a triangle soup of {vec2 pos_px, vec4 rgba} records, with an atomic
+/// vertex counter. `counterBuf` doubles as the indirect draw argument
+/// buffer ({vertexCount, 1, 0, 0} — the C++ side seeds instanceCount).
+/// Data → pixel affine: px = bx + v * ax, py = by + v * ay.
+struct PContourTess { uint32_t gridBuf, levelsBuf, colBuf, outBuf;
+                      uint32_t counterBuf, gridW, gridH, nLevels;
+                      float bx, ax, by, ay;
+                      float hwidth, pad0;
+                      uint32_t maxVerts, dashBuf;
+                      /// Max dashes a single segment may emit — sizes
+                      /// the soup when any level is dashed.
+                      uint32_t dashMul, pad1; };
 /// mpl hexbin (pointy-top) lattice counts: two interleaved lattices
 /// A (nx+1)x(ny+1) at (i*sx, j*sy) and B nx*ny offset by (+.5sx,+.5sy).
 /// Result read back via bulk mailbox

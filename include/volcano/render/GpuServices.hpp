@@ -169,6 +169,34 @@ public:
         return std::nullopt;
     }
 
+    /// Grid contour tessellation on the device: marching squares over
+    /// `grid` for every `levels[i]`, stroke-expanded into a triangle
+    /// soup of {vec2 pos_px, vec4 rgba} records plus an indirect vertex
+    /// count. Returns false when the backend has no GPU path — the
+    /// caller then runs its CPU marching-squares/stroker.
+    ///
+    /// `bx/ax/by/ay` are the data→pixel affine (px = b + v*a) for the
+    /// axes rect; `colors[i]` is the level colour; `dashes` holds
+    /// (on, off) per level — `on == 0` draws that level solid.
+    virtual bool contourTessellate(
+        std::span<const float> grid, uint32_t w, uint32_t h,
+        std::span<const float> levels,
+        std::span<const plot::Color> colors,
+        float bx, float ax, float by, float ay, float lineWidth,
+        std::span<const float> dashes,
+        GpuBuf& soupOut, GpuBuf& countOut) {
+        (void)grid; (void)w; (void)h; (void)levels; (void)colors;
+        (void)bx; (void)ax; (void)by; (void)ay; (void)lineWidth;
+        (void)dashes; (void)soupOut; (void)countOut;
+        return false;
+    }
+
+    /// True when this backend implements contourTessellate (checked
+    /// before the plot skips its CPU marching squares).
+    [[nodiscard]] virtual bool supportsContourTessellate() const noexcept {
+        return false;
+    }
+
     /// mpl hexbin (pointy-top) lattice counts: lattice A of
     /// (nx+1)*(ny+1) cells followed by lattice B of nx*ny cells.
     /// Nullopt when unavailable (see histBin2D).
