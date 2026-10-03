@@ -34,6 +34,8 @@ import FILLBETWEEN_WGSL from './shaders/FillBetweenTess.wgsl?raw';
 import STREAMLINES_WGSL from './shaders/Streamlines.wgsl?raw';
 import DEPTHSORT_WGSL from './shaders/DepthSort.wgsl?raw';
 import SPLAT_WGSL from './shaders/ScatterSplat.wgsl?raw';
+import XCORR_WGSL from './shaders/XCorr.wgsl?raw';
+import SORTF_WGSL from './shaders/SortFloats.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -63,7 +65,7 @@ export enum Op {
     HistBins2D = 48, HexBins = 49, ContourTess = 50, FftSegments = 51,
     EnvelopeCols = 52, TriContourTess = 53, DepthSort = 54,
     ScatterSplat = 55, Streamlines = 56, FillBetweenTess = 57,
-    QuiverTess = 58,
+    QuiverTess = 58, XCorr = 59, SortFloats = 60,
 }
 
 export interface FrameHeader {
@@ -758,6 +760,48 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.slPipe = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
                 bindGroupLayouts: [this.slBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    // ── xcorr (op 59) — same layout shape as the FFT pipeline ───────
+    private xcBgl?: GPUBindGroupLayout;
+    private xcPipe?: GPUComputePipeline;
+
+    private ensureXcorr() {
+        if (this.xcPipe) return;
+        this.xcBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            ...[1, 2].map(binding =>
+                ({ binding, visibility: GPUShaderStage.COMPUTE,
+                   buffer: { type: 'read-only-storage' as
+                             GPUBufferBindingType } })),
+            { binding: 3, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: XCORR_WGSL });
+        this.xcPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.xcBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    // ── bitonic value sort (op 60) ───────────────────────────────────
+    private sfBgl?: GPUBindGroupLayout;
+    private sfPipe?: GPUComputePipeline;
+
+    private ensureSortFloats() {
+        if (this.sfPipe) return;
+        this.sfBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: SORTF_WGSL });
+        this.sfPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.sfBgl] }),
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
@@ -1619,6 +1663,80 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                                    staging, cntBytes, ptBytes);
             this.pendingBulk.push({ buf: staging, slot,
                                     bytes: cntBytes + ptBytes });
+            return;
+        }
+        if (op === Op.XCorr) {
+            // PXCorr {xBuf, yBuf, outBuf, n, maxLag, flags, invNorm,
+            //         mailbox}
+            const n = p.getUint32(12, true);
+            const maxLag = p.getUint32(16, true);
+            if (!n || !maxLag) return;
+            this.ensureXcorr();
+            const pc = new DataView(new ArrayBuffer(16));
+            pc.setUint32(0, n, true);
+            pc.setUint32(4, maxLag, true);
+            pc.setUint32(8, p.getUint32(20, true), true);   // flags
+            pc.setFloat32(12, p.getFloat32(24, true), true); // invNorm
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.xcPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.xcBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 16 } },
+                    { binding: 1, resource: { buffer:
+                        this.bufRef(p.getUint32(0, true)) } },
+                    { binding: 2, resource: { buffer:
+                        this.bufRef(p.getUint32(4, true)) } },
+                    { binding: 3, resource: { buffer:
+                        this.bufRef(p.getUint32(8, true)) } },
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil((maxLag * 2 + 1) / 64));
+            cpass.end();
+            const bytes = (maxLag * 2 + 1) * 4;
+            const staging = this.device.createBuffer({
+                size: bytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(this.bufRef(p.getUint32(8, true)), 0,
+                                   staging, 0, bytes);
+            this.pendingBulk.push({ buf: staging,
+                slot: p.getUint32(28, true), bytes });
+            return;
+        }
+        if (op === Op.SortFloats) {
+            // PSortFloats {buf, nReal, nPad, mailbox}
+            const buf = p.getUint32(0, true);
+            const nReal = p.getUint32(4, true);
+            const nPad = p.getUint32(8, true);
+            if (!nPad) return;
+            this.ensureSortFloats();
+            const pc = new DataView(new ArrayBuffer(16));
+            pc.setUint32(0, nPad, true);
+            const run = (k: number, j: number) => {
+                pc.setUint32(4, k, true);
+                pc.setUint32(8, j, true);
+                const off = this.uboWrite(new Uint8Array(pc.buffer));
+                const cpass = enc.beginComputePass();
+                cpass.setPipeline(this.sfPipe!);
+                cpass.setBindGroup(0, this.device.createBindGroup({
+                    layout: this.sfBgl!, entries: [
+                        { binding: 0, resource: { buffer: this.uniformRing,
+                                                  offset: off, size: 16 } },
+                        { binding: 1, resource: { buffer:
+                            this.bufRef(buf) } },
+                    ]}));
+                cpass.dispatchWorkgroups(Math.ceil(nPad / 64));
+                cpass.end();
+            };
+            for (let k = 2; k <= nPad; k <<= 1)
+                for (let j = k >> 1; j > 0; j >>= 1) run(k, j);
+            const bytes = nReal * 4;
+            const staging = this.device.createBuffer({
+                size: bytes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            enc.copyBufferToBuffer(this.bufRef(buf), 0, staging, 0, bytes);
+            this.pendingBulk.push({ buf: staging,
+                slot: p.getUint32(12, true), bytes });
             return;
         }
         if (op === Op.FillBetweenTess) {

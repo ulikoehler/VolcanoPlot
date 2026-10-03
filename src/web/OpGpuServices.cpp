@@ -2,6 +2,7 @@
 #include "OpGpuServices.hpp"
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include "OpFactory.hpp"
 #include <volcano/render/primitives/SpineRenderer.hpp>
 #include <volcano/render/primitives/PointRenderer.hpp>
@@ -271,6 +272,63 @@ OpGpuServices::fftSegments(std::span<const float> signal,
     stream_.emit(Op::FftSegments,
                  PFftSegments{sig, winBuf, out, n, step, numSegs,
                               uint32_t(signal.size()), st.slot});
+    return std::nullopt;
+}
+
+std::optional<std::vector<float>>
+OpGpuServices::xcorr(std::span<const float> x, std::span<const float> y,
+                     uint32_t maxLag, float invNorm, bool normed) {
+    const uint32_t n = uint32_t(std::min(x.size(), y.size()));
+    if (!n || !maxLag) return std::nullopt;
+    const uint32_t count = maxLag * 2 + 1;
+    // Params belong in the fingerprint too — a change of maxLag or
+    // normed must invalidate a cached result.
+    uint32_t normBits;
+    std::memcpy(&normBits, &invNorm, 4);
+    const uint64_t fp = fpFloats(x, y) ^
+        (uint64_t(maxLag) << 32) ^ (normed ? 0x9e3779b9ull : 0) ^
+        uint64_t(normBits);
+    auto st = binState(4, fp, count);
+    if (st.cached) {
+        std::vector<float> out(st.cached->size());
+        std::memcpy(out.data(), st.cached->data(), out.size() * 4);
+        return out;
+    }
+    if (!st.isNew) return std::nullopt;
+    uint32_t xb = createBufferRaw(x.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(xb, 0, x.data(), x.size_bytes());
+    uint32_t yb = xb;
+    if (y.data() != x.data()) {
+        yb = createBufferRaw(y.size_bytes() + 16, 1 | 2);
+        writeBufferRaw(yb, 0, y.data(), y.size_bytes());
+    }
+    uint32_t out = createBufferRaw(size_t(count) * 4 + 16, 2 | 16);
+    stream_.emit(Op::XCorr,
+                 PXCorr{xb, yb, out, n, maxLag, normed ? 1u : 0u,
+                        invNorm, st.slot});
+    return std::nullopt;
+}
+
+std::optional<std::vector<float>>
+OpGpuServices::sortFloats(std::span<const float> data) {
+    const uint32_t n = uint32_t(data.size());
+    if (n < 2) return std::nullopt;
+    // Pad to a power of two with +inf so the bitonic network is regular.
+    uint32_t nPad = 1;
+    while (nPad < n) nPad <<= 1;
+    const uint64_t fp = fpFloats(data);
+    auto st = binState(5, fp, n);
+    if (st.cached) {
+        std::vector<float> out(st.cached->size());
+        std::memcpy(out.data(), st.cached->data(), out.size() * 4);
+        return out;
+    }
+    if (!st.isNew) return std::nullopt;
+    std::vector<float> padded(nPad, std::numeric_limits<float>::infinity());
+    std::memcpy(padded.data(), data.data(), n * 4);
+    uint32_t buf = createBufferRaw(size_t(nPad) * 4 + 16, 1 | 2 | 16);
+    writeBufferRaw(buf, 0, padded.data(), size_t(nPad) * 4);
+    stream_.emit(Op::SortFloats, PSortFloats{buf, n, nPad, st.slot});
     return std::nullopt;
 }
 

@@ -165,6 +165,14 @@ public:
     std::optional<std::vector<float>> fftSegments(
         std::span<const float> signal, std::span<const float> win,
         uint32_t n, uint32_t step, uint32_t numSegs) override;
+    /// Same eventual-delivery contract: first call emits the lag
+    /// correlation + mailbox, later identical calls serve the result.
+    std::optional<std::vector<float>> xcorr(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t maxLag, float invNorm, bool normed) override;
+    /// Bitonic value sort: same eventual-delivery contract.
+    std::optional<std::vector<float>> sortFloats(
+        std::span<const float> data) override;
     [[nodiscard]] bool supportsContourTessellate() const noexcept override {
         return true;
     }

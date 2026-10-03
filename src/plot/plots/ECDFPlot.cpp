@@ -1,5 +1,6 @@
 // volcano/plot/plots/ECDFPlot.cpp — empirical CDF implementation
 #include "volcano/plot/plots/ECDFPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -10,16 +11,25 @@ namespace volcano::plot {
 ECDFPlot::ECDFPlot(std::vector<float> samples, ECDFConfig config)
     : samples_(std::move(samples)), config_(std::move(config)) {}
 
-void ECDFPlot::computeECDF() {
+void ECDFPlot::computeECDF(render::GpuServices& gpu) {
     if (samples_.empty()) {
         values_.clear();
         probs_.clear();
         return;
     }
 
-    // Sort samples.
-    std::vector<float> sorted = samples_;
-    std::sort(sorted.begin(), sorted.end());
+    // Sort samples — device bitonic sort when the ecdf offload is
+    // allowed (eventual delivery; the CPU sort covers the first
+    // frame and any declined request).
+    std::vector<float> sorted;
+    if (render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().ecdf)) {
+        if (auto s = gpu.sortFloats(samples_)) sorted = std::move(*s);
+    }
+    if (sorted.empty()) {
+        sorted = samples_;
+        std::sort(sorted.begin(), sorted.end());
+    }
 
     // Count unique values and their multiplicities.
     size_t n = sorted.size();
@@ -70,7 +80,7 @@ void ECDFPlot::buildStepPoints() {
 }
 
 void ECDFPlot::prepare(render::Renderer& r) {
-    computeECDF();
+    computeECDF(r.gpu());
     buildStepPoints();
 
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();

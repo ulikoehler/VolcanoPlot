@@ -61,6 +61,10 @@ struct OffloadConfig {
     /// Density splatting for huge scatter sets (datashader-style —
     /// changes semantics: density replaces overdraw).
     OffloadMode splatting = OffloadMode::Cpu;
+    /// O(n·lags) correlation for xcorr/acorr.
+    OffloadMode xcorr = OffloadMode::Auto;
+    /// Value sort for ecdf (bitonic on the device).
+    OffloadMode ecdf = OffloadMode::Auto;
 
     /// Process-wide config, initialised from VOLCANO_GPU_OFFLOAD /
     /// VOLCANO_GPU_HIST on first use.

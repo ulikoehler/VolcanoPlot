@@ -29,6 +29,8 @@ constexpr std::array kEntries{
     Entry{"streamlines", &OffloadConfig::streamlines},
     Entry{"depthsort", &OffloadConfig::depthsort},
     Entry{"splatting", &OffloadConfig::splatting},
+    Entry{"xcorr", &OffloadConfig::xcorr},
+    Entry{"ecdf", &OffloadConfig::ecdf},
 };
 
 /// Parse "auto" | "gpu" | "cpu" | "on" | "off" | "1" | "0".

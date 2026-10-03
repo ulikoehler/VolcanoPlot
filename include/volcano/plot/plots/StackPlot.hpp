@@ -66,6 +66,10 @@ private:
     std::vector<Point2D> fillPositions_;
     std::vector<Color> fillColors_;
     bool prepared_ = false;
+    // GPU band tessellation (fillbetween offload): one soup per band.
+    bool gpuTess_ = false;
+    std::vector<uint32_t> gpuMask_;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
 
     void computeStack() const;
     void buildFillTriangles();

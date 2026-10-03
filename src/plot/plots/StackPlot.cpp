@@ -1,5 +1,6 @@
 // volcano/plot/plots/StackPlot.cpp — stacked area plot implementation
 #include "volcano/plot/plots/StackPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include "volcano/render/VectorCanvas.hpp"
@@ -156,19 +157,68 @@ void StackPlot::buildFillTriangles() {
 
 void StackPlot::prepare(render::Renderer& r) {
     computeStack();
-    buildFillTriangles();
-    if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-    if (!fillPositions_.empty()) {
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+    // Each band between consecutive cumulative rows is a fill_between
+    // with an all-true mask — reuse that tessellation path.
+    gpuTess_ = render::OffloadConfig::allowGpu(
+                   render::OffloadConfig::global().fillbetween) &&
+               r.gpu().supportsFillBetweenTess() && x_.size() >= 2;
+    if (!gpuTess_) {
+        buildFillTriangles();
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        if (!fillPositions_.empty()) {
+            fillRenderer_->upload(std::span{fillPositions_},
+                                  std::span{fillColors_});
+        }
     }
     prepared_ = true;
 }
 
 void StackPlot::draw(render::Cmd& cmd, render::Renderer& r,
                      const Axes& axes, Rect2D rect) {
-    if (!prepared_ || fillPositions_.empty()) return;
-    Transform2D t = axes.transform();
+    if (!prepared_) return;
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
+    if (gpuTess_) {
+        if (axes.projection().kind == ProjectionKind::Rectilinear &&
+            axes.xscale().kind == ScaleKind::Linear &&
+            axes.yscale().kind == ScaleKind::Linear) {
+            const auto& vp = axes.viewport();
+            const float kx = vp.x.span() > 0.0f
+                ? float(rect.width) / vp.x.span() : 0.0f;
+            const float ky = vp.y.span() > 0.0f
+                ? float(rect.height) / vp.y.span() : 0.0f;
+            if (kx != 0.0f && ky != 0.0f) {
+                const float bx = float(rect.x) - vp.x.min * kx;
+                const float by = float(rect.y) + float(rect.height) +
+                                 vp.y.min * ky;
+                if (gpuMask_.empty())
+                    gpuMask_.assign(x_.size(), 1u);
+                bool allGpu = true;
+                for (size_t s = 0; s < ys_.size(); ++s) {
+                    if (!r.gpu().fillBetweenTess(
+                            x_, stack_[s], stack_[s + 1], gpuMask_,
+                            /*interpolate=*/false, bx, kx, by, -ky,
+                            colors_[s], gpuSoup_, gpuCount_)) {
+                        allGpu = false;
+                        break;
+                    }
+                    r.gpu().spine().drawTrianglesGpuIndirect(
+                        cmd, vrect, r.gpu().extent(), gpuSoup_, 0,
+                        gpuCount_);
+                }
+                if (allGpu) return;
+                gpuTess_ = false;
+            }
+        }
+        // Declined mid-draw: build the CPU mesh now.
+        gpuTess_ = false;
+        buildFillTriangles();
+        if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
+        if (!fillPositions_.empty())
+            fillRenderer_->upload(std::span{fillPositions_},
+                                  std::span{fillColors_});
+    }
+    if (fillPositions_.empty()) return;
+    Transform2D t = axes.transform();
     fillRenderer_->draw(cmd, vrect, t);
 }
 

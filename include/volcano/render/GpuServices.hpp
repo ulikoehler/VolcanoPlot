@@ -349,6 +349,29 @@ public:
         return std::nullopt;
     }
 
+    /// Cross/autocorrelation: c[k] = sum_i x[i]·y[i-lag] for lag =
+    /// k - maxLag, k in [0, 2*maxLag]. When `normed`, each value is
+    /// multiplied by `invNorm` (the caller computes the L2-norm
+    /// product — it is O(n), cheaper than a second GPU round trip).
+    /// Returns (2*maxLag+1) values or nullopt while the device result
+    /// is in flight / unsupported (the caller keeps its CPU loop).
+    /// The GPU accumulates in f32 while the CPU path uses f64, so
+    /// values can drift slightly at large n — opt-in only.
+    virtual std::optional<std::vector<float>> xcorr(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t maxLag, float invNorm, bool normed) {
+        (void)x; (void)y; (void)maxLag; (void)invNorm; (void)normed;
+        return std::nullopt;
+    }
+
+    /// Bitonic value sort on the device: returns `data` sorted
+    /// ascending, or nullopt while in flight / unsupported.
+    virtual std::optional<std::vector<float>> sortFloats(
+        std::span<const float> data) {
+        (void)data;
+        return std::nullopt;
+    }
+
     /// Pcolormesh quad tessellation compute: cell coords (x,y edges) +
     /// normalized scalar field `t` colormapped via `lut` → adopted
     /// per-vertex position/color buffers (6 verts/cell flat, 12 for

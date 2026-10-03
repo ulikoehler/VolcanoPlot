@@ -1,5 +1,6 @@
 // volcano/plot/plots/XCorrPlot.cpp — autocorrelation / cross-correlation implementation
 #include "volcano/plot/plots/XCorrPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -59,7 +60,41 @@ void XCorrPlot::computeCorrelation() {
 }
 
 void XCorrPlot::prepare(render::Renderer& r) {
-    computeCorrelation();
+    // GPU path: one invocation per lag computes the shifted dot
+    // product on the device (eventual delivery — the CPU loop covers
+    // the first frame and any declined request).
+    bool gpuDone = false;
+    const size_t n = x_.size();
+    if (n &&
+        render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().xcorr)) {
+        uint32_t maxLag = config_.maxLags;
+        if (maxLag == 0) maxLag = static_cast<uint32_t>(n - 1);
+        maxLag = std::min(maxLag, static_cast<uint32_t>(n - 1));
+        if (maxLag) {
+            double xDot = 0.0, yDot = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                xDot += static_cast<double>(x_[i]) * x_[i];
+                yDot += static_cast<double>(isAuto_ ? x_[i] : y_[i]) *
+                        (isAuto_ ? x_[i] : y_[i]);
+            }
+            double norm = std::sqrt(xDot * yDot);
+            if (norm < 1e-30) norm = 1.0;
+            const auto& yr = isAuto_ ? x_ : y_;
+            if (auto vals = r.gpu().xcorr(
+                    x_, yr, maxLag, float(1.0 / norm),
+                    config_.normed)) {
+                lags_.clear();
+                values_.clear();
+                for (uint32_t k = 0; k < vals->size(); ++k) {
+                    lags_.push_back(float(int(k) - int(maxLag)));
+                    values_.push_back((*vals)[k]);
+                }
+                gpuDone = true;
+            }
+        }
+    }
+    if (!gpuDone) computeCorrelation();
 
     // Build stem segments: vertical line from (lag, 0) to (lag, value).
     stemSegments_.clear();

@@ -7,6 +7,8 @@
 #include <vector>
 #include <string>
 
+namespace volcano::render { class GpuServices; }
+
 namespace volcano::plot {
 
 /// ECDF configuration.
@@ -71,7 +73,7 @@ private:
     std::vector<Color> fillColors_;
     bool prepared_ = false;
 
-    void computeECDF();
+    void computeECDF(render::GpuServices& gpu);
     void buildStepPoints();
 };
 

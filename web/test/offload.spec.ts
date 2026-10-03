@@ -55,6 +55,8 @@ const INIT = (mode: string) => {
     (window as any).__sl = 0;
     (window as any).__ds = 0;
     (window as any).__splat = 0;
+    (window as any).__xc = 0;
+    (window as any).__sf = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -74,6 +76,8 @@ const INIT = (mode: string) => {
                                streamlines: (window as any).__wantMode,
                                depthsort: (window as any).__wantMode,
                                splatting: (window as any).__wantMode,
+                               xcorr: (window as any).__wantMode,
+                               ecdf: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -92,6 +96,8 @@ const INIT = (mode: string) => {
                 if (a[2] === 56) (window as any).__sl++;
                 if (a[2] === 54) (window as any).__ds++;
                 if (a[2] === 55) (window as any).__splat++;
+                if (a[2] === 59) (window as any).__xc++;
+                if (a[2] === 60) (window as any).__sf++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -139,7 +145,9 @@ async function captureWith(page: any, kind: string, mode: string,
                  fb: (window as any).__fb,
                  sl: (window as any).__sl,
                  ds: (window as any).__ds,
-                 splat: (window as any).__splat };
+                 splat: (window as any).__splat,
+                 xc: (window as any).__xc,
+                 sf: (window as any).__sf };
     }, frames);
 }
 
@@ -325,6 +333,66 @@ test('GPU density splatting replaces marker overdraw', async ({ page }) => {
     // paints at most a few times the marker ink.
     expect(gpu.nonWhite).toBeGreaterThan(0.2 * cpu.nonWhite);
     expect(gpu.nonWhite).toBeLessThan(3 * cpu.nonWhite);
+});
+
+test('GPU xcorr correlation matches the CPU dot products', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'xcorr', 'cpu', 1);
+    // Mailbox delivery — needs a few frames before the device values
+    // replace the CPU cover.
+    const gpu = await captureWith(page, 'xcorr', 'gpu', 5);
+    console.log(`XCORR cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.xc).toBeGreaterThan(0);
+    expect(cpu.xc).toBe(0);
+    // f32 vs f64 accumulation can shift a stem by a pixel at most.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.05);
+});
+
+test('GPU bitonic sort produces the same ecdf', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'ecdf', 'cpu', 1);
+    const gpu = await captureWith(page, 'ecdf', 'gpu', 5);
+    console.log(`ECDF cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.sf).toBeGreaterThan(0);
+    expect(cpu.sf).toBe(0);
+    // Same sorted values → identical step curve.
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+});
+
+test('GPU band tessellation matches the CPU stackplot mesh', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'stackplot', 'cpu', 1);
+    const gpu = await captureWith(page, 'stackplot', 'gpu', 2);
+    console.log(`STACK cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    // Three bands → three fillBetweenTess dispatches.
+    expect(gpu.fb).toBeGreaterThanOrEqual(3);
+    expect(cpu.fb).toBe(0);
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.02);
 });
 
 test('GPU dash expansion matches the CPU stroker', async ({ page }) => {

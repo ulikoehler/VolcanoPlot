@@ -251,6 +251,17 @@ struct PDepthSort { uint32_t posBuf, idxBuf, keyBuf;
 struct PScatterSplat { uint32_t xyBuf, densBuf, packBuf, n;
                        uint32_t W, H, rowStride, tex;
                        float bx, ax, by, ay, radius, maxDensity; };
+/// Cross/autocorrelation: one invocation per lag index k in
+/// [0, 2*maxLag] computing sum_i x[i]·y[i-lag]; flags bit0 = normed
+/// (multiply by invNorm). Read back via bulk mailbox
+/// (slot → (2*maxLag+1) f32).
+struct PXCorr       { uint32_t xBuf, yBuf, outBuf;
+                      uint32_t n, maxLag, flags;
+                      float invNorm; uint32_t mailbox; };
+/// Bitonic value sort over a power-of-two-padded f32 buffer (the C++
+/// side seeds padding with +inf). The interpreter runs every (k, j)
+/// stage, then reads back the first nReal floats via bulk mailbox.
+struct PSortFloats  { uint32_t buf, nReal, nPad, mailbox; };
 #pragma pack(pop)
 
 } // namespace volcano::web

@@ -703,9 +703,21 @@ Also fixed in passing: `DrawTrisGpu` inherited the axes-rect viewport
 left set by the preceding line draw, which scaled and shifted every
 draw after a soup draw in the same pass.
 
-**Open item:** density splatting's density grid and packed buffer are
-computed correctly on the device (verified by readback: 141 572
-non-zero cells, counts up to 8), but the final buffer→r32float-texture
-blit does not yet carry the density into the image path — the render
-currently shows the colormap's low end across the whole axes rect.
-Needs debugging of the `copyBufferToTexture` step.
+**Open item — resolved:** the splat blit works; the pack pass needed
+its empty-cell NaN supplied through the push-constant block (WGSL has
+no NaN literal), and `drawImageTex` takes the transform as
+`const void*` to avoid an incomplete-type dependency.
+
+## GPU offload round 3 (xcorr → ecdf → stackplot)
+
+| Item | Op | Parity vs CPU |
+|---|---|---|
+| xcorr/acorr lag correlation (f32 sums; norm stays host-side) | 59 `XCorr` | bit-identical (69470 px) |
+| Bitonic value sort for ecdf | 60 `SortFloats` | bit-identical (1993 px) |
+| stackplot band tessellation | reuses 57 `FillBetweenTess` | bit-identical (102072 px) |
+
+New policy keys: `xcorr`, `ecdf` (stackplot rides `fillbetween`).
+Both mailbox ops use the same eventual-delivery contract as the
+binning/FFT paths: the first call emits compute + mailbox and the CPU
+covers that frame; identical inputs serve the cached device result
+afterward (maxLag/normed/invNorm are folded into the fingerprint).

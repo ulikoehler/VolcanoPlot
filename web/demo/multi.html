@@ -115,6 +115,12 @@ window.vpDone = (async () => {
             g.push(v);
         }
         vp.violin(g, 0.5, true, '#209040');
+    } else if (which === 'ecdf') {
+        const N = 4097, v = new Float32Array(N);   // non-pow2 → padded sort
+        for (let i = 0; i < N; i++)
+            v[i] = Math.sin(i * 0.37) + 0.3 * Math.sin(i * 0.113) +
+                   (rnd() - 0.5) * 0.4;
+        vp.ecdf(v);
     } else if (which === 'stackplot') {
         const N = 40, xs = new Float32Array(N);
         const l1 = new Float32Array(N), l2 = new Float32Array(N),
