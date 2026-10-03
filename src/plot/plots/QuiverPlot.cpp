@@ -1,5 +1,6 @@
 // volcano/plot/plots/QuiverPlot.cpp — quiver (vector field) plot implementation
 #include "volcano/plot/plots/QuiverPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -63,6 +64,7 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
     shaftSegs_.clear();
     headFillPos_.clear();
     headFillColors_.clear();
+    headSegsPx_.clear();
 
     const auto& vp = axes.viewport();
     size_t n = x_.size();
@@ -89,6 +91,10 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
     float hl = (cfg_.headlength > 0.0f ? cfg_.headlength : 5.0f) * shaftW;
     float hal = (cfg_.headaxislength > 0.0f ? cfg_.headaxislength : 4.5f) *
                 shaftW;
+    headMode_ = mplHead ? 1u : 0u;
+    headHw2_ = mplHead ? hw2 : cfg_.headWidth * 0.5f;
+    headHl_ = mplHead ? hl : cfg_.headLength;
+    headHal_ = hal;
 
     for (size_t i = 0; i < n; ++i) {
         // Arrow start and end in data space; pivot shifts the whole arrow
@@ -108,6 +114,17 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
         float dy = pEnd.y - pStart.y;
         float len = std::sqrt(dx * dx + dy * dy);
         if (len < 1.0f) continue;  // too short for arrowhead
+
+        // GPU head path: just record the pixel-space segment; the
+        // device shader replicates the len<1 skip and expands the
+        // head polygon.
+        if (gpuHeads_) {
+            headSegsPx_.push_back(pStart.x);
+            headSegsPx_.push_back(pStart.y);
+            headSegsPx_.push_back(pEnd.x);
+            headSegsPx_.push_back(pEnd.y);
+            continue;
+        }
 
         float ux = dx / len, uy = dy / len;
         // Perpendicular.
@@ -146,6 +163,9 @@ void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
 }
 
 void QuiverPlot::prepare(render::Renderer& r) {
+    gpuHeads_ = r.gpu().supportsQuiverTess() &&
+                render::OffloadConfig::allowGpu(
+                    render::OffloadConfig::global().arrows);
     if (!shaftRenderer_) shaftRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!headRenderer_) headRenderer_ = r.gpu().createFillRenderer();
     // Upload dummy data so renderers are ready. Actual geometry is built
@@ -171,6 +191,21 @@ void QuiverPlot::draw(render::Cmd& cmd, render::Renderer& r,
     if (!shaftSegs_.empty()) {
         shaftRenderer_->upload(std::span{shaftSegs_}, cfg_.color, shaftWpx_);
         shaftRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(shaftSegs_.size()));
+    }
+
+    // GPU arrowheads: expand the head polygon on the device into the
+    // same indirect soup the CPU polygon path draws.
+    if (cfg_.filledHeads && gpuHeads_ && !headSegsPx_.empty()) {
+        if (r.gpu().quiverHeads(headSegsPx_, headMode_, headHw2_,
+                                headHl_, headHal_, cfg_.color,
+                                gpuSoup_, gpuCount_)) {
+            auto ext = r.gpu().extent();
+            r.gpu().spine().drawTrianglesGpuIndirect(
+                cmd, Rect2D{0, 0, ext.width, ext.height}, ext,
+                gpuSoup_, 0, gpuCount_);
+        } else {
+            gpuHeads_ = false;
+        }
     }
 
     // Upload arrowhead triangles (pixel space → identity transform).

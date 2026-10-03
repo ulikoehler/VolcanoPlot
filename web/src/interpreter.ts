@@ -29,6 +29,7 @@ import CONTOUR_WGSL from './shaders/ContourTess.wgsl?raw';
 import FFT_WGSL from './shaders/FftSegments.wgsl?raw';
 import ENVELOPE_WGSL from './shaders/EnvelopeCols.wgsl?raw';
 import TRICONTOUR_WGSL from './shaders/TriContourTess.wgsl?raw';
+import QUIVER_WGSL from './shaders/QuiverTess.wgsl?raw';
 import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
 import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
@@ -677,6 +678,28 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         this.triContPipe = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
                 bindGroupLayouts: [this.triContBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } });
+    }
+
+    private quiverPipe?: GPUComputePipeline;
+    private quiverBgl?: GPUBindGroupLayout;
+
+    private ensureQuiver() {
+        if (this.quiverPipe) return;
+        this.quiverBgl = this.device.createBindGroupLayout({ entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' } },
+        ]});
+        const mod = this.device.createShaderModule({ code: QUIVER_WGSL });
+        this.quiverPipe = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.quiverBgl] }),
             compute: { module: mod, entryPoint: 'cs' } });
     }
 
@@ -1344,6 +1367,37 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             cpass.end();
             return;
         }
+        if (op === Op.QuiverTess) {
+            // PQuiverTess {segBuf, outBuf, counterBuf, n, mode,
+            //   maxVerts, hw2, hl, hal, pad, r, g, b, a}
+            const n = p.getUint32(12, true);
+            if (!n) return;
+            this.ensureQuiver();
+            const pc = new DataView(new ArrayBuffer(48));
+            pc.setUint32(0, n, true);
+            pc.setUint32(4, p.getUint32(16, true), true);   // mode
+            pc.setUint32(8, p.getUint32(20, true), true);   // maxVerts
+            pc.setFloat32(16, p.getFloat32(24, true), true); // hw2
+            pc.setFloat32(20, p.getFloat32(28, true), true); // hl
+            pc.setFloat32(24, p.getFloat32(32, true), true); // hal
+            for (let i = 0; i < 4; i++)
+                pc.setFloat32(32 + i * 4, p.getFloat32(40 + i * 4, true),
+                              true);
+            const off = this.uboWrite(new Uint8Array(pc.buffer));
+            const cpass = enc.beginComputePass();
+            cpass.setPipeline(this.quiverPipe!);
+            cpass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.quiverBgl!, entries: [
+                    { binding: 0, resource: { buffer: this.uniformRing,
+                                              offset: off, size: 48 } },
+                    ...[0, 4, 8].map((off2, i) =>
+                        ({ binding: i + 1, resource: { buffer:
+                            this.bufRef(p.getUint32(off2, true)) } })),
+                ]}));
+            cpass.dispatchWorkgroups(Math.ceil(n / 64));
+            cpass.end();
+            return;
+        }
         if (op !== Op.TessLines) return;
         this.ensureTess();
         // PTessLines {inBuf,inBase,outBuf,outBase,n,nSeg,hwidth,
@@ -1583,6 +1637,11 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
         }
         case Op.DrawTrisGpu: {    // {clip, resW, resH, buf, byteOff, n}
             this.scissor(pass, p);
+            // The soup shader maps px→NDC itself, so it needs the
+            // identity viewport — the preceding line draw leaves the
+            // axes-rect viewport set, and inheriting it would scale and
+            // shift every draw that follows in the pass.
+            pass.setViewport(0, 0, canvasWH[0], canvasWH[1], 0, 1);
             const ubo = new Float32Array(4);
             ubo[0] = p.getFloat32(16, true);      // resW
             ubo[1] = p.getFloat32(20, true);      // resH

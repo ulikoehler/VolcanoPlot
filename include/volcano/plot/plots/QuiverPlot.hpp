@@ -87,6 +87,15 @@ private:
     std::vector<Color> headFillColors_;  // per-vertex colors
     float shaftWpx_ = 1.0f;              // effective shaft width (px)
 
+    // GPU head expansion ('arrows' offload): pixel-space shaft
+    // endpoints feed the QuiverTess compute op; the device emits the
+    // head polygons into the indirect soup.
+    bool gpuHeads_ = false;
+    std::vector<float> headSegsPx_;
+    uint32_t headMode_ = 0;
+    float headHw2_ = 0, headHl_ = 0, headHal_ = 0;
+    render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
+
     std::unique_ptr<render::primitives::LineSegmentRenderer> shaftRenderer_;
     std::unique_ptr<render::primitives::FillRenderer> headRenderer_;
     bool prepared_ = false;

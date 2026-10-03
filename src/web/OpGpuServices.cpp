@@ -437,6 +437,35 @@ bool OpGpuServices::triContourTessellate(
     return true;
 }
 
+bool OpGpuServices::quiverHeads(
+    std::span<const float> segsPx,
+    uint32_t mode, float hw2, float hl, float hal, plot::Color color,
+    render::GpuBuf& soupOut, render::GpuBuf& countOut) {
+    const uint32_t n = uint32_t(segsPx.size() / 4);
+    if (!n) return false;
+    const uint32_t perArrow = mode == 1 ? 6u : 3u;
+    const uint64_t maxVerts = uint64_t(n) * perArrow;
+    if (maxVerts * 24 > (256ull << 20)) return false;
+
+    const uint32_t segBuf = createBufferRaw(segsPx.size_bytes() + 16,
+                                            1 | 2 | 16);
+    writeBufferRaw(segBuf, 0, segsPx.data(), segsPx.size_bytes());
+    const uint32_t soup = createBufferRaw(maxVerts * 24 + 16, 2 | 16);
+    const uint32_t counter = createBufferRaw(16, 2 | 16 | 32);
+    const uint32_t seed[4] = {0u, 1u, 0u, 0u};
+    writeBufferRaw(counter, 0, seed, sizeof(seed));
+
+    PQuiverTess p{};
+    p.segBuf = segBuf; p.outBuf = soup; p.counterBuf = counter;
+    p.n = n; p.mode = mode; p.maxVerts = uint32_t(maxVerts);
+    p.hw2 = hw2; p.hl = hl; p.hal = hal;
+    p.r = color.r; p.g = color.g; p.b = color.b; p.a = color.a;
+    stream_.emit(Op::QuiverTess, p);
+    soupOut = render::GpuBuf(soup);
+    countOut = render::GpuBuf(counter);
+    return true;
+}
+
 std::optional<std::vector<uint32_t>>
 OpGpuServices::hexBins(std::span<const float> x, std::span<const float> y,
                        uint32_t nx, uint32_t ny, float xMin, float yMin,

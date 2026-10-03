@@ -216,6 +216,22 @@ public:
         return false;
     }
 
+    /// Quiver arrowhead expansion on the device. `segsPx` packs
+    /// {x0, y0, x1, y1} pixel-space shaft endpoints per arrow; the
+    /// shader emits the head polygon into the same indirect soup
+    /// contract. mode 0 = simple triangle, mode 1 = mpl notched head.
+    virtual bool quiverHeads(std::span<const float> segsPx,
+                             uint32_t mode, float hw2, float hl,
+                             float hal, plot::Color color,
+                             GpuBuf& soupOut, GpuBuf& countOut) {
+        (void)segsPx; (void)mode; (void)hw2; (void)hl; (void)hal;
+        (void)color; (void)soupOut; (void)countOut;
+        return false;
+    }
+    [[nodiscard]] virtual bool supportsQuiverTess() const noexcept {
+        return false;
+    }
+
     /// Batched real-input FFT for the spectrum family: `numSegs` windows
     /// of `n` samples (hop `step`) taken from `signal`, multiplied by the
     /// `n`-sample window `win`, transformed. Returns `numSegs * n`

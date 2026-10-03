@@ -182,6 +182,15 @@ public:
         std::span<const float> dashes, uint32_t mode,
         render::GpuBuf& soupOut, render::GpuBuf& countOut) override;
 
+    [[nodiscard]] bool supportsQuiverTess() const noexcept override {
+        return true;
+    }
+    bool quiverHeads(std::span<const float> segsPx,
+                     uint32_t mode, float hw2, float hl, float hal,
+                     plot::Color color,
+                     render::GpuBuf& soupOut,
+                     render::GpuBuf& countOut) override;
+
     bool contourTessellate(
         std::span<const float> grid, uint32_t w, uint32_t h,
         std::span<const float> levels,

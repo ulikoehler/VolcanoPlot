@@ -50,6 +50,7 @@ const INIT = (mode: string) => {
     (window as any).__p3d = 0;
     (window as any).__inst = 0;
     (window as any).__tricont = 0;
+    (window as any).__quiver = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -64,6 +65,7 @@ const INIT = (mode: string) => {
                                dashes: (window as any).__wantMode,
                                fft: (window as any).__wantMode,
                                instancing: (window as any).__wantMode,
+                               arrows: (window as any).__wantMode,
                                projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
@@ -77,6 +79,7 @@ const INIT = (mode: string) => {
                 if (a[2] === 50) (window as any).__contours++;
                 if (a[2] === 51) (window as any).__fft++;
                 if (a[2] === 53) (window as any).__tricont++;
+                if (a[2] === 58) (window as any).__quiver++;
                 return oe(...a);
             };
             // 3D GPU-projection ops are draw calls (29–31).
@@ -119,7 +122,8 @@ async function captureWith(page: any, kind: string, mode: string,
                  fft: (window as any).__fft,
                  p3d: (window as any).__p3d,
                  inst: (window as any).__inst,
-                 tricont: (window as any).__tricont };
+                 tricont: (window as any).__tricont,
+                 quiver: (window as any).__quiver };
     }, frames);
 }
 
@@ -198,6 +202,27 @@ for (const kind of ['tricontour', 'tricontourf']) {
                    Math.max(1, cpu.chroma)).toBeLessThan(0.05);
     });
 }
+
+test('GPU arrowhead expansion matches the CPU polygons', async ({ page }) => {
+    const errs: string[] = [];
+    page.on('pageerror', e => errs.push(String(e)));
+    page.on('console', m => {
+        const t = m.text();
+        if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+    });
+    const cpu = await captureWith(page, 'quiver', 'cpu', 1);
+    const gpu = await captureWith(page, 'quiver', 'gpu', 2);
+    console.log(`QUIVER cpu=${JSON.stringify(cpu)} gpu=${JSON.stringify(gpu)}`);
+    expect(errs, errs.join('\n')).toEqual([]);
+    expect(gpu.quiver).toBeGreaterThan(0);
+    expect(cpu.quiver).toBe(0);
+    // Same head polygons → the same ink (a few pixels of boundary
+    // rasterization noise on the notched edges).
+    expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+           Math.max(1, cpu.nonWhite)).toBeLessThan(0.02);
+    expect(Math.abs(gpu.chroma - cpu.chroma) /
+           Math.max(1, cpu.chroma)).toBeLessThan(0.02);
+});
 
 test('GPU dash expansion matches the CPU stroker', async ({ page }) => {
     const errs: string[] = [];

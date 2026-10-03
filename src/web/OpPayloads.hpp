@@ -213,6 +213,14 @@ struct PTriContourTess { uint32_t xyzBuf, trisBuf, levelsBuf, colBuf,
                          uint32_t nTris, nLevels;
                          float bx, ax, by, ay;
                          float hwidth; uint32_t mode, maxVerts, dashMul; };
+/// Quiver arrowhead expansion (marching-heads): segsBuf packs
+/// {x0, y0, x1, y1} pixel-space shaft endpoints per arrow. mode 0 =
+/// simple triangle head, mode 1 = mpl notched head. Output = indirect
+/// triangle soup (same draw contract as ContourTess).
+struct PQuiverTess { uint32_t segBuf, outBuf, counterBuf;
+                     uint32_t n, mode, maxVerts;
+                     float hw2, hl, hal, pad;
+                     float r, g, b, a; };
 #pragma pack(pop)
 
 } // namespace volcano::web
