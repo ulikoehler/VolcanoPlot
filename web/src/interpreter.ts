@@ -27,6 +27,8 @@ import BINS2D_WGSL from './shaders/HistBins2D.wgsl?raw';
 import HEXBINS_WGSL from './shaders/HexBins.wgsl?raw';
 import CONTOUR_WGSL from './shaders/ContourTess.wgsl?raw';
 import FFT_WGSL from './shaders/FftSegments.wgsl?raw';
+import DRAW3D_WGSL from './shaders/Draw3D.wgsl?raw';
+import MARKERS_WGSL from './shaders/markers.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -46,6 +48,8 @@ export enum Op {
     DrawLines = 20, DrawLineSegs = 21, DrawPoints = 22,
     DrawTrisData = 23, DrawTrisGpu = 24, DrawPie = 25, DrawImage = 26,
     DrawSurface = 27, DrawGrid3D = 28,
+    DrawSegs3D = 29, DrawTris3D = 30, DrawPoints3D = 31,
+    DrawBoxes3D = 32,
 
     TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
     KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
@@ -140,6 +144,7 @@ interface PipeSpec {
     src: string;               // shader source (pre-transform include)
     defines?: string[];
     transform?: boolean;       // prepend transform.wgsl
+    markers?: boolean;         // prepend markers.wgsl (needs transform)
     topology: GPUPrimitiveTopology;
     bindings: GPUBindGroupLayoutEntry[];
     depth?: boolean;           // enable depth32float test+write (3D)
@@ -236,6 +241,7 @@ export class Interpreter {
                 this.bgls.set(key, bgl);
             }
             const src = (s.transform ? TRANSFORM_WGSL + '\n' : '') +
+                (s.markers ? MARKERS_WGSL + '\n' : '') +
                 buildWgsl(s.src, new Set(s.defines ?? []));
             const mod = this.device.createShaderModule({ code: src });
             // A pass with a depth attachment requires every pipeline it
@@ -289,16 +295,19 @@ export class Interpreter {
         mk('linesegs', { src: LINES_WGSL, transform: true,
                          topology: 'line-list', bindings: [ud, S(1)] });
         mk('points.c.s', { src: POINTS_WGSL, transform: true,
+                          markers: true,
                           defines: ['HAS_COL', 'HAS_SIZE'],
                           topology: 'triangle-list',
                           bindings: [ud, S(1), S(2), S(3)] });
         mk('points.c', { src: POINTS_WGSL, transform: true,
+                         markers: true,
                          defines: ['HAS_COL'], topology: 'triangle-list',
                          bindings: [ud, S(1), S(2)] });
         mk('points.s', { src: POINTS_WGSL, transform: true,
+                         markers: true,
                          defines: ['HAS_SIZE'], topology: 'triangle-list',
                          bindings: [ud, S(1), S(3)] });
-        mk('points', { src: POINTS_WGSL, transform: true,
+        mk('points', { src: POINTS_WGSL, transform: true, markers: true,
                        topology: 'triangle-list',
                        bindings: [ud, S(1)] });
         mk('trisData', { src: TRISDATA_WGSL, transform: true,
@@ -325,6 +334,39 @@ export class Interpreter {
                         bindings: [ub, S(1), S(2)] });
         mk('grid3d', { src: GRID3D_WGSL, topology: 'triangle-list',
                        bindings: [ub] });
+        // GPU-projected 3D primitives (projection3d offload). Painter's
+        // order, constant z — same raster semantics as the CPU path.
+        mk('segs3d', { src: DRAW3D_WGSL, defines: ['MODE_SEGS'],
+                       topology: 'line-list', bindings: [ub, S(1)] });
+        mk('tris3d', { src: DRAW3D_WGSL, defines: ['MODE_TRIS'],
+                       topology: 'triangle-list', bindings: [ub, S(1)] });
+        mk('tris3d.c', { src: DRAW3D_WGSL,
+                         defines: ['MODE_TRIS', 'HAS_COL'],
+                         topology: 'triangle-list',
+                         bindings: [ub, S(1), S(2)] });
+        mk('points3d.c.s', { src: DRAW3D_WGSL, markers: true,
+                             defines: ['MODE_POINTS', 'HAS_COL',
+                                       'HAS_SIZE'],
+                             topology: 'triangle-list',
+                             bindings: [ub, S(1), S(2), S(3)] });
+        mk('points3d.c', { src: DRAW3D_WGSL, markers: true,
+                           defines: ['MODE_POINTS', 'HAS_COL'],
+                           topology: 'triangle-list',
+                           bindings: [ub, S(1), S(2)] });
+        mk('points3d.s', { src: DRAW3D_WGSL, markers: true,
+                           defines: ['MODE_POINTS', 'HAS_SIZE'],
+                           topology: 'triangle-list',
+                           bindings: [ub, S(1), S(3)] });
+        mk('points3d', { src: DRAW3D_WGSL, markers: true,
+                         defines: ['MODE_POINTS'],
+                         topology: 'triangle-list',
+                         bindings: [ub, S(1)] });
+        // Instanced 3-D boxes (instancing offload): real clip z +
+        // depth test — occlusion without a CPU painter's sort.
+        mk('boxes3d', { src: DRAW3D_WGSL, defines: ['MODE_BOXES'],
+                        depth: true, blend: false,
+                        topology: 'triangle-list',
+                        bindings: [ub, S(1)] });
     }
 
     /** Pipeline set for passes that carry a depth attachment — every
@@ -438,7 +480,8 @@ export class Interpreter {
         if (drawOps.length) {
             const [cr, cg, cb, ca] = r.clearRGBA();
             // 3D ops need a depth buffer sized to the target.
-            const needDepth = drawOps.some(d => d.op === Op.DrawSurface);
+            const needDepth = drawOps.some(d => d.op === Op.DrawSurface ||
+                                                d.op === Op.DrawBoxes3D);
             this.activePipes = this.pipesFor(needDepth);
             let depthAttachment: GPURenderPassDepthStencilAttachment | undefined;
             if (needDepth) {
@@ -1537,6 +1580,87 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
                                           offset: off, size: 176 } },
             ]));
             pass.draw(3);   // fullscreen triangle
+            break;
+        }
+        case Op.DrawSegs3D:
+        case Op.DrawTris3D:
+        case Op.DrawPoints3D: {  // PDraw3D — see OpPayloads.hpp
+            const count = p.getUint32(108, true);
+            if (!count) break;
+            this.scissor(pass, p);
+            this.viewport(pass, p, 16);          // view = axes px rect
+            // ProjU @ubo 0..127: vp @32, rect=view @16, rgba @112,
+            // width @128 → misc.x, marker @136.
+            const ubo = new Uint8Array(128);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 32, 64), 0);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 16, 16), 64);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 112, 16), 80);
+            new DataView(ubo.buffer)
+                .setFloat32(96, p.getFloat32(128, true), true);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 136, 16),
+                    112);
+            const off = this.uboWrite(ubo);
+            const posBuf = p.getUint32(96, true);
+            const colBuf = p.getUint32(100, true);
+            const auxBuf = p.getUint32(104, true);
+            const flags  = p.getUint32(132, true);
+            let key: string, drawVerts = count, instances = 1;
+            const entries: GPUBindGroupEntry[] = [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 128 } },
+                { binding: 1, resource: { buffer:
+                    this.bufRef(posBuf) } }];
+            if (op === Op.DrawSegs3D) key = 'segs3d';
+            else if (op === Op.DrawTris3D) {
+                key = colBuf ? 'tris3d.c' : 'tris3d';
+            } else {
+                key = 'points3d' + (flags & 1 ? '.c' : '') +
+                                 (flags & 2 ? '.s' : '');
+                drawVerts = 6; instances = count;
+            }
+            if (op === Op.DrawTris3D && colBuf)
+                entries.push({ binding: 2, resource: { buffer:
+                    this.bufRef(colBuf) } });
+            if (op === Op.DrawPoints3D) {
+                if (flags & 1)
+                    entries.push({ binding: 2, resource: { buffer:
+                        this.bufRef(colBuf) } });
+                if (flags & 2)
+                    entries.push({ binding: 3, resource: { buffer:
+                        this.bufRef(auxBuf) } });
+            }
+            pass.setPipeline(this.activePipes.get(key)!);
+            pass.setBindGroup(0, this.bindGroup(key, entries));
+            pass.draw(drawVerts, instances);
+            // viewport persists — restore full-canvas for px ops.
+            pass.setViewport(0, 0, canvasWH[0], canvasWH[1], 0, 1);
+            break;
+        }
+        case Op.DrawBoxes3D: {   // PDraw3D — instBuf=posBuf, count=insts
+            const count = p.getUint32(108, true);
+            if (!count) break;
+            this.scissor(pass, p);
+            this.viewport(pass, p, 16);
+            // ProjU: vp @0, rect @64, rgba @80, misc @96, marker @112.
+            const ubo = new Uint8Array(128);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 32, 64), 0);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 16, 16), 64);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 112, 16), 80);
+            new DataView(ubo.buffer)
+                .setFloat32(96, p.getFloat32(128, true), true);
+            ubo.set(new Uint8Array(p.buffer, p.byteOffset + 136, 16),
+                    112);
+            const off = this.uboWrite(ubo);
+            const key = 'boxes3d';
+            pass.setPipeline(this.activePipes.get(key)!);
+            pass.setBindGroup(0, this.bindGroup(key, [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 128 } },
+                { binding: 1, resource: { buffer:
+                    this.bufRef(p.getUint32(96, true)) } },
+            ]));
+            pass.draw(36, count);
+            pass.setViewport(0, 0, canvasWH[0], canvasWH[1], 0, 1);
             break;
         }
         default: break;

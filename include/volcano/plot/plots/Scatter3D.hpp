@@ -66,7 +66,9 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::PointRenderer> pointRenderer_;
-    std::vector<Point2D> projectedPoints_;
+    /// Raw world-space centers — projected by the renderer.
+    std::vector<Point3D> projectedPoints_;
+    std::array<float, 16> vp_{};
     std::vector<Color> markerColors_;
     std::vector<float> markerSizes_;
 

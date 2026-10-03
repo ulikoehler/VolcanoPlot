@@ -47,6 +47,8 @@ const INIT = (mode: string) => {
     (window as any).__bins = 0;
     (window as any).__contours = 0;
     (window as any).__fft = 0;
+    (window as any).__p3d = 0;
+    (window as any).__inst = 0;
     (window as any).__wantMode = mode;
     let stored: any;
     Object.defineProperty(window, 'vp', {
@@ -59,7 +61,9 @@ const INIT = (mode: string) => {
                 v.setOffload({ binning: (window as any).__wantMode,
                                contours: (window as any).__wantMode,
                                dashes: (window as any).__wantMode,
-                               fft: (window as any).__wantMode });
+                               fft: (window as any).__wantMode,
+                               instancing: (window as any).__wantMode,
+                               projection3d: (window as any).__wantMode });
             const interp = v.interp;
             const orig = interp.dispatchBins.bind(interp);
             interp.dispatchBins = (...a: any[]) => {
@@ -72,6 +76,13 @@ const INIT = (mode: string) => {
                 if (a[2] === 50) (window as any).__contours++;
                 if (a[2] === 51) (window as any).__fft++;
                 return oe(...a);
+            };
+            // 3D GPU-projection ops are draw calls (29–31).
+            const od = interp.dispatchDraw.bind(interp);
+            interp.dispatchDraw = (...a: any[]) => {
+                if (a[3] >= 29 && a[3] <= 31) (window as any).__p3d++;
+                if (a[3] === 32) (window as any).__inst++;
+                return od(...a);
             };
         },
     });
@@ -103,7 +114,9 @@ async function captureWith(page: any, kind: string, mode: string,
         return { nonWhite, chroma, mean: sum / (px.length / 4 * 3),
                  dispatched: (window as any).__bins,
                  contours: (window as any).__contours,
-                 fft: (window as any).__fft };
+                 fft: (window as any).__fft,
+                 p3d: (window as any).__p3d,
+                 inst: (window as any).__inst };
     }, frames);
 }
 
@@ -175,6 +188,63 @@ test('GPU dash expansion matches the CPU stroker', async ({ page }) => {
     expect(Math.abs(gpu.chroma - cpu.chroma) /
            Math.max(1, cpu.chroma)).toBeLessThan(0.02);
 });
+
+for (const kind of ['plot3d', 'scatter3d', 'bar3d', 'wireframe',
+                    'quiver3d', 'errorbar3d', 'voxels', 'trisurf',
+                    'mexicanhat', 'contourf3d', 'tricontour3d',
+                    'tricontourf3d']) {
+    test(`GPU 3D projection matches the CPU path (${kind})`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 2);
+        const gpu = await captureWith(page, kind, 'gpu', 2);
+        console.log(`${kind.toUpperCase()} cpu=${JSON.stringify(cpu)} ` +
+                    `gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        // Ops 29–31 (raw vec3 buffers projected in the VS) run only
+        // under the gpu policy; 'cpu' projects on the WASM side.
+        expect(gpu.p3d).toBeGreaterThan(0);
+        expect(cpu.p3d).toBe(0);
+        // Same geometry → same ink. Painter's order is preserved in
+        // both paths; a rasterisation ulp can flip an edge pixel.
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.05);
+        expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.0);
+    });
+}
+
+for (const kind of ['bar3d', 'voxels']) {
+    test(`GPU instanced boxes match the CPU face path (${kind})`,
+         async ({ page }) => {
+        const errs: string[] = [];
+        page.on('pageerror', e => errs.push(String(e)));
+        page.on('console', m => {
+            const t = m.text();
+            if (!/404|favicon/.test(t)) errs.push('CON: ' + t.slice(0, 200));
+        });
+        const cpu = await captureWith(page, kind, 'cpu', 2);
+        const gpu = await captureWith(page, kind, 'gpu', 2);
+        console.log(`INST-${kind.toUpperCase()} cpu=${JSON.stringify(cpu)} ` +
+                    `gpu=${JSON.stringify(gpu)}`);
+        expect(errs, errs.join('\n')).toEqual([]);
+        // Op 32 (one 48 B record per box, cube expanded in the VS with
+        // real depth) runs only under the gpu policy; 'cpu' expands +
+        // painter-sorts on the WASM side.
+        expect(gpu.inst).toBeGreaterThan(0);
+        expect(cpu.inst).toBe(0);
+        // Depth-tested occlusion replaces painter's sort — the visible
+        // surface is the same, so coverage tracks closely. Face
+        // shading is the same orientation table on both paths.
+        expect(Math.abs(gpu.nonWhite - cpu.nonWhite) /
+               Math.max(1, cpu.nonWhite)).toBeLessThan(0.08);
+        expect(Math.abs(gpu.mean - cpu.mean)).toBeLessThan(1.5);
+    });
+}
 
 for (const kind of ['psd', 'csd', 'cohere', 'spectrum', 'specgram']) {
     test(`GPU batched FFT matches the CPU transform (${kind})`,

@@ -82,9 +82,12 @@ private:
     Camera3D camera_;
     Viewport range_;
     Axes3DConfig config_;
-    std::vector<Point2D> paneTris_;
-    std::vector<Point2D> lineSegs_;
+    /// Raw world-space pane fills / grid+box edges — projected by the
+    /// renderer (vertex shader on capable backends, CPU otherwise).
+    std::vector<Point3D> paneTris_;
+    std::vector<Point3D> lineSegs_;
     std::vector<Point2D> axisSegs_;  // tick edges + tick marks (axisColor)
+    std::array<float, 16> vp_{};
     std::vector<TickLabel> labels_;
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;

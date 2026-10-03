@@ -43,6 +43,7 @@ public:
 
     void upload(std::span<const Point2D> positions,
                 std::span<const Color> colors) override {
+        is3D_ = false; boxMode_ = false;
         count_ = uint32_t(positions.size());
         if (posBuf_) s_->releaseBuffer(posBuf_);
         if (colBuf_) s_->releaseBuffer(colBuf_);
@@ -55,14 +56,67 @@ public:
             s_->writeBufferRaw(colBuf_, 0, colors.data(),
                                colors.size_bytes());
     }
+    /// GPU projection3d offload: raw Point3D triangle soup + vp.
+    bool upload3DDevice(std::span<const Point3D> positions,
+                        std::span<const Color> colors,
+                        const std::array<float, 16>& vp) override {
+        is3D_ = true; boxMode_ = false;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i)
+                vp_[j * 4 + i] = vp[i * 4 + j];   // row → column major
+        count_ = uint32_t(positions.size());
+        if (posBuf_) s_->releaseBuffer(posBuf_);
+        if (colBuf_) s_->releaseBuffer(colBuf_);
+        posBuf_ = s_->createBufferRaw(positions.size_bytes() + 16, 1|2);
+        s_->writeBufferRaw(posBuf_, 0, positions.data(),
+                           positions.size_bytes());
+        colBuf_ = colors.empty() ? 0
+            : s_->createBufferRaw(colors.size_bytes() + 16, 1|2);
+        if (colBuf_)
+            s_->writeBufferRaw(colBuf_, 0, colors.data(),
+                               colors.size_bytes());
+        return true;
+    }
+    /// GPU instancing offload: one 48 B Box3DInstance per box; the
+    /// DrawBoxes3D vertex shader expands the unit cube and depth-tests.
+    bool uploadBoxes3DDevice(
+            std::span<const pr::Box3DInstance> boxes,
+            const std::array<float, 16>& vp) override {
+        boxMode_ = true; is3D_ = true;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i)
+                vp_[j * 4 + i] = vp[i * 4 + j];   // row → column major
+        count_ = uint32_t(boxes.size());
+        if (posBuf_) s_->releaseBuffer(posBuf_);
+        posBuf_ = s_->createBufferRaw(boxes.size_bytes() + 16, 1|2);
+        s_->writeBufferRaw(posBuf_, 0, boxes.data(), boxes.size_bytes());
+        return true;
+    }
     void adoptBuffers(GpuBuf positions, GpuBuf colors,
                       uint32_t count) override {
+        is3D_ = false; boxMode_ = false;
         posBuf_ = uint32_t(positions);
         colBuf_ = uint32_t(colors);
         count_ = count;
     }
     void draw(Cmd& cmd, Rect2D rect, const Transform2D& t) const override {
         if (!posBuf_ || count_ == 0) return;
+        if (boxMode_) {
+            PDraw3D p{};
+            p.clip = clipF(rect); p.view = clipF(rect);
+            std::copy(std::begin(vp_), std::end(vp_), p.vp);
+            p.posBuf = posBuf_; p.count = count_;
+            ops(cmd).emit(Op::DrawBoxes3D, p);
+            return;
+        }
+        if (is3D_) {
+            PDraw3D p{};
+            p.clip = clipF(rect); p.view = clipF(rect);
+            std::copy(std::begin(vp_), std::end(vp_), p.vp);
+            p.posBuf = posBuf_; p.colBuf = colBuf_; p.count = count_;
+            ops(cmd).emit(Op::DrawTris3D, p);
+            return;
+        }
         // Uniform color is unused when colBuf_ != 0 (per-vertex colors).
         PDrawTrisData p{clipF(rect), makeTransformUBO(t, rect, {}),
                         posBuf_, colBuf_, count_, 1, 1, 1, 1};
@@ -73,6 +127,8 @@ public:
 private:
     OpGpuServices* s_;
     uint32_t posBuf_ = 0, colBuf_ = 0, count_ = 0;
+    bool is3D_ = false, boxMode_ = false;
+    float vp_[16] = {};
 };
 
 // ═══ OpBarRenderer ═══════════════════════════════════════════════════

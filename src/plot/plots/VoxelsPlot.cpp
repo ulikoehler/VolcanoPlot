@@ -11,25 +11,12 @@ namespace volcano::plot {
 namespace {
 
 struct ProjectedFace {
-    Point2D verts[4];
+    /// Raw world-space corners — projected by the renderer (vertex
+    /// shader on capable backends, CPU otherwise).
+    Point3D verts[4];
     float depth;
     Color color;
 };
-
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-float projectDepth(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipZ = vp[8]*x + vp[9]*y + vp[10]*z + vp[11];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return 0.0f;
-    return clipZ / clipW;
-}
 
 // 6 faces, each defined by 4 corner indices (CCW when viewed from outside).
 // Corner index: bit 0 = +x, bit 1 = +y, bit 2 = +z.
@@ -65,10 +52,54 @@ void VoxelsPlot::projectVoxels() {
     fillPositions_.clear();
     fillColors_.clear();
     edgeSegments_.clear();
+    boxes_.clear();
+    boxesReady_ = false;
 
     if (filled_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
+    (void)vp;
+
+    auto voxelColor = [&](size_t linearIdx) -> Color {
+        if (linearIdx < config_.colors.size())
+            return config_.colors[linearIdx];
+        return config_.color;
+    };
+
+    // Instanced `DrawBoxes3D` offload: per-voxel instance records, the
+    // vertex shader expands the unit cube — no face expansion or
+    // painter's sort on the CPU. Per-face shading runs in the shader.
+    if (render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().instancing)) {
+        for (uint32_t ix = 0; ix < nx_; ++ix)
+            for (uint32_t iy = 0; iy < ny_; ++iy)
+                for (uint32_t iz = 0; iz < nz_; ++iz) {
+                    size_t idx = static_cast<size_t>(ix) * ny_ * nz_ +
+                                 static_cast<size_t>(iy) * nz_ + iz;
+                    if (!filled_[idx]) continue;
+                    boxes_.push_back({float(ix), float(iy), float(iz),
+                                      0.0f, 1.0f, 1.0f, 1.0f, 0.0f,
+                                      voxelColor(idx)});
+                }
+        boxesReady_ = true;
+        buildEdges();
+        return;
+    }
+
+    expandFaces();
+    buildEdges();
+}
+
+/// Painter's-algorithm face expansion — the CPU fallback for backends
+/// without uploadBoxes3DDevice (native Vulkan, Canvas2D).
+void VoxelsPlot::expandFaces() {
+    auto voxelColor = [&](size_t linearIdx) -> Color {
+        if (linearIdx < config_.colors.size())
+            return config_.colors[linearIdx];
+        return config_.color;
+    };
+    const auto& vp = vp_;
 
     auto corner = [&](int ix, int iy, int iz, int idx) -> Point3D {
         return {
@@ -76,12 +107,6 @@ void VoxelsPlot::projectVoxels() {
             static_cast<float>(iy) + (idx & 2 ? 1.0f : 0.0f),
             static_cast<float>(iz) + (idx & 4 ? 1.0f : 0.0f)
         };
-    };
-
-    auto voxelColor = [&](size_t linearIdx) -> Color {
-        if (linearIdx < config_.colors.size())
-            return config_.colors[linearIdx];
-        return config_.color;
     };
 
     std::vector<ProjectedFace> faces;
@@ -100,8 +125,8 @@ void VoxelsPlot::projectVoxels() {
                     float avgDepth = 0.0f;
                     for (int v = 0; v < 4; ++v) {
                         Point3D c = corner(ix, iy, iz, faceCorners[f][v]);
-                        pf.verts[v] = project(vp, c.x, c.y, c.z);
-                        avgDepth += projectDepth(vp, c.x, c.y, c.z);
+                        pf.verts[v] = c;
+                        avgDepth += projectDepth3D(vp, c);
                     }
                     pf.depth = avgDepth / 4.0f;
                     float shade = faceShade[f];
@@ -123,8 +148,8 @@ void VoxelsPlot::projectVoxels() {
 
     // Build fill triangles (2 per face).
     for (const auto& pf : faces) {
-        Point2D v0 = pf.verts[0], v1 = pf.verts[1];
-        Point2D v2 = pf.verts[2], v3 = pf.verts[3];
+        Point3D v0 = pf.verts[0], v1 = pf.verts[1];
+        Point3D v2 = pf.verts[2], v3 = pf.verts[3];
         fillPositions_.push_back(v0);
         fillPositions_.push_back(v1);
         fillPositions_.push_back(v2);
@@ -133,23 +158,28 @@ void VoxelsPlot::projectVoxels() {
         fillPositions_.push_back(v3);
         for (int k = 0; k < 6; ++k) fillColors_.push_back(pf.color);
     }
+}
 
-    // Build edge segments.
-    if (config_.drawEdges) {
-        for (uint32_t ix = 0; ix < nx_; ++ix)
-            for (uint32_t iy = 0; iy < ny_; ++iy)
-                for (uint32_t iz = 0; iz < nz_; ++iz) {
-                    size_t idx = static_cast<size_t>(ix) * ny_ * nz_ +
-                                 static_cast<size_t>(iy) * nz_ + iz;
-                    if (!filled_[idx]) continue;
-                    for (int e = 0; e < 12; ++e) {
-                        Point3D c0 = corner(ix, iy, iz, edges[e][0]);
-                        Point3D c1 = corner(ix, iy, iz, edges[e][1]);
-                        edgeSegments_.push_back(project(vp, c0.x, c0.y, c0.z));
-                        edgeSegments_.push_back(project(vp, c1.x, c1.y, c1.z));
-                    }
+void VoxelsPlot::buildEdges() {
+    edgeSegments_.clear();
+    if (!config_.drawEdges) return;
+    for (uint32_t ix = 0; ix < nx_; ++ix)
+        for (uint32_t iy = 0; iy < ny_; ++iy)
+            for (uint32_t iz = 0; iz < nz_; ++iz) {
+                size_t idx = static_cast<size_t>(ix) * ny_ * nz_ +
+                             static_cast<size_t>(iy) * nz_ + iz;
+                if (!filled_[idx]) continue;
+                for (int e = 0; e < 12; ++e) {
+                    edgeSegments_.push_back(
+                        {float(ix) + (edges[e][0] & 1 ? 1.0f : 0.0f),
+                         float(iy) + (edges[e][0] & 2 ? 1.0f : 0.0f),
+                         float(iz) + (edges[e][0] & 4 ? 1.0f : 0.0f)});
+                    edgeSegments_.push_back(
+                        {float(ix) + (edges[e][1] & 1 ? 1.0f : 0.0f),
+                         float(iy) + (edges[e][1] & 2 ? 1.0f : 0.0f),
+                         float(iz) + (edges[e][1] & 4 ? 1.0f : 0.0f)});
                 }
-    }
+            }
 }
 
 void VoxelsPlot::prepare(render::Renderer& r) {
@@ -157,14 +187,20 @@ void VoxelsPlot::prepare(render::Renderer& r) {
 
 
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-    if (!fillPositions_.empty()) {
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+    instanced_ = boxesReady_ &&
+                 fillRenderer_->uploadBoxes3D(std::span{boxes_}, vp_);
+    if (!instanced_ && boxesReady_ && fillPositions_.empty())
+        expandFaces();  // backend declined — paint the expanded soup
+    if (!instanced_ && !fillPositions_.empty()) {
+        fillRenderer_->upload3D(std::span{fillPositions_},
+                                std::span{fillColors_}, vp_);
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {
         if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
-        edgeRenderer_->upload(std::span{edgeSegments_}, config_.edgeColor,
-                             config_.edgeWidth);
+        edgeRenderer_->upload3D(std::span{edgeSegments_},
+                                config_.edgeColor,
+                                config_.edgeWidth, vp_);
     }
 
     prepared_ = true;
@@ -181,7 +217,7 @@ void VoxelsPlot::draw(render::Cmd& cmd, render::Renderer& r,
 
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    if (!fillPositions_.empty())
+    if (instanced_ || !fillPositions_.empty())
         fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawEdges && !edgeSegments_.empty())

@@ -66,15 +66,28 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
-    std::vector<Point2D> fillPositions_;
+    /// Raw world-space soup/edges — projected by the renderer.
+    std::vector<Point3D> fillPositions_;
     std::vector<Color> fillColors_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> edgeRenderer_;
-    std::vector<Point2D> edgeSegments_;
+    std::vector<Point3D> edgeSegments_;
+    std::array<float, 16> vp_{};
+
+    /// Per-voxel instance records for the instanced `DrawBoxes3D`
+    /// path (GPU instancing offload).
+    std::vector<render::primitives::Box3DInstance> boxes_;
+    bool boxesReady_ = false;
+    bool instanced_ = false;
 
     bool prepared_ = false;
 
     void projectVoxels();
+    /// Painter's-algorithm face expansion — CPU fallback when the
+    /// instanced path is unavailable.
+    void expandFaces();
+    /// Outline segments for every filled voxel.
+    void buildEdges();
 };
 
 } // namespace volcano::plot

@@ -8,9 +8,12 @@
 #include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
+#include <volcano/render/Offload.hpp>
 
+#include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace volcano::render::primitives {
 
@@ -31,6 +34,24 @@ public:
     virtual void upload(std::span<const plot::Point2D> points,
                         std::span<const plot::Color> colors,
                         std::span<const float> sizes) = 0;
+    /// Raw 3-D point centers + row-major view-projection; projected in
+    /// the vertex shader when the `projection3d` offload switch allows
+    /// and the backend implements upload3DDevice, else projected on the
+    /// CPU. Sizes/colors are already screen-space attributes and pass
+    /// through untouched.
+    void upload3D(std::span<const plot::Point3D> points,
+                  std::span<const plot::Color> colors,
+                  std::span<const float> sizes,
+                  const std::array<float, 16>& vp) {
+        if (OffloadConfig::allowGpu(
+                OffloadConfig::global().projection3d) &&
+            upload3DDevice(points, colors, sizes, vp)) return;
+        cpuPos_.clear();
+        cpuPos_.reserve(points.size());
+        for (const auto& p : points)
+            cpuPos_.push_back(plot::projectPoint3D(vp, p));
+        upload(cpuPos_, colors, sizes);
+    }
     virtual void draw(Cmd& cmd, plot::Rect2D rect,
                       const plot::Transform2D& transform,
                       uint32_t pointCount, MarkerParams marker = {}) const = 0;
@@ -57,6 +78,18 @@ public:
                               std::span<const float> sizes) = 0;
     /// Per-frame scratch release (retired buffers, pending state).
     virtual void resetScratch() = 0;
+
+protected:
+    /// Backend hook for upload3D (see LineSegmentRenderer).
+    virtual bool upload3DDevice(std::span<const plot::Point3D>,
+                                std::span<const plot::Color>,
+                                std::span<const float>,
+                                const std::array<float, 16>&) {
+        return false;
+    }
+
+private:
+    std::vector<plot::Point2D> cpuPos_;
 };
 
 } // namespace volcano::render::primitives

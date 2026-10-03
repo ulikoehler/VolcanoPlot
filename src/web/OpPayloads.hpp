@@ -95,6 +95,29 @@ struct PDrawSurface { Rect2Df clip; float vp[16]; float gridRange[4];
 /// The full 44-float push block from Grid3DRendererVk::draw.
 struct PDrawGrid3D { Rect2Df clip; float pc[44]; };
 
+/// Shared payload for the GPU-projection 3D ops (DrawSegs3D /
+/// DrawTris3D / DrawPoints3D): raw vec3f vertices in `posBuf` (C++
+/// Point3D = 12 B records — the shader pulls u32 triples), projected
+/// by `vp` in the vertex shader. `vp` is column-major (transposed from
+/// the row-major Camera3D matrix, matching PDrawSurface). Rasterization
+/// is painter's-order with constant depth — identical pixels to the
+/// CPU project-then-draw path.
+///   clip      @0   scissor rect
+///   view      @16  axes pixel rect (viewport)
+///   vp        @32  column-major view-projection
+///   posBuf    @96  vec3f storage buffer
+///   colBuf    @100 per-vertex vec4f colors (0 = flat `rgba`)
+///   auxBuf    @104 per-point f32 sizes (points only, 0 = none)
+///   count     @108 vertices (segs/tris) / points (points)
+///   rgba      @112 flat color
+///   width     @128
+///   flags     @132 points: bit0 hasCol, bit1 hasSize
+///   marker    @136 MarkerParams {code, fill, numsides, angle}
+struct PDraw3D { Rect2Df clip; Rect2Df view; float vp[16];
+                 uint32_t posBuf, colBuf, auxBuf, count;
+                 float r, g, b, a, width;
+                 uint32_t flags; float marker[4]; };
+
 // ── compute ops ──
 struct PTessLines  { uint32_t inBuf, inBase, outBuf, outBase;
                      uint32_t n, nSeg; float hwidth;

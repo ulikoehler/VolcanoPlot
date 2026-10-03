@@ -12,14 +12,6 @@ namespace volcano::plot {
 
 namespace {
 
-Point2D project3D(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
 std::vector<float> autoLevels(float vmin, float vmax, int n) {
     if (n < 2) n = 2;
     if (vmax <= vmin) vmax = vmin + 1.0f;
@@ -127,7 +119,7 @@ void TricontourPlot::extractContours() {
 
     float vmin = valueRangeMin(z_);
     float zLevel = config_.zOffset ? (vmin + config_.zLevel) : config_.zLevel;
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
 
     for (const auto& tri : triangles_) {
         if (tri.a >= x_.size() || tri.b >= x_.size() || tri.c >= x_.size())
@@ -154,8 +146,8 @@ void TricontourPlot::extractContours() {
 
             if (found == 2) {
                 const float z = config_.levelsAsZ ? level : zLevel;
-                segments_.push_back(project3D(vp, c0.x, c0.y, z));
-                segments_.push_back(project3D(vp, c1.x, c1.y, z));
+                segments_.push_back({c0.x, c0.y, z});
+                segments_.push_back({c1.x, c1.y, z});
                 segLevels_.push_back(level);
             }
         }
@@ -184,14 +176,15 @@ void TricontourPlot::prepare(render::Renderer& r) {
                 pr.first = r.gpu().createLineSegmentRenderer();
             const float t = std::clamp(
                 (level - lMin) / lRange, 0.0f, 1.0f);
-            pr.first->upload(std::span{pr.second},
-                             config_.cmap->sample(t), config_.lineWidth);
+            pr.first->upload3D(std::span{pr.second},
+                               config_.cmap->sample(t),
+                               config_.lineWidth, vp_);
         }
     } else {
         if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
         if (!segments_.empty()) {
-            renderer_->upload(std::span{segments_}, config_.lineColor,
-                             config_.lineWidth);
+            renderer_->upload3D(std::span{segments_}, config_.lineColor,
+                                config_.lineWidth, vp_);
         }
     }
     prepared_ = true;
@@ -272,7 +265,7 @@ void TricontourfPlot::extractContoursFilled() {
     if (vrange <= 0.0f) vrange = 1.0f;
 
     float zLevel = config_.zOffset ? (vmin + config_.zLevel) : config_.zLevel;
-    auto vp = camera_.viewProjection();
+    vpf_ = camera_.viewProjection();
 
     const auto& L = config_.levels;
     int numBands = static_cast<int>(L.size()) - 1;
@@ -309,9 +302,9 @@ void TricontourfPlot::extractContoursFilled() {
 
             const float bz = config_.levelsAsZ ? mid : zLevel;
             for (size_t k = 1; k + 1 < poly.size(); ++k) {
-                positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, bz));
-                positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, bz));
-                positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, bz));
+                positions_.push_back({poly[0].pos.x, poly[0].pos.y, bz});
+                positions_.push_back({poly[k].pos.x, poly[k].pos.y, bz});
+                positions_.push_back({poly[k+1].pos.x, poly[k+1].pos.y, bz});
                 for (int c = 0; c < 3; ++c) colors_.push_back(color);
             }
         }
@@ -323,7 +316,8 @@ void TricontourfPlot::prepare(render::Renderer& r) {
     extractContoursFilled();
     if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
-        renderer_->upload(std::span{positions_}, std::span{colors_});
+        renderer_->upload3D(std::span{positions_}, std::span{colors_},
+                            vpf_);
     }
     prepared_ = true;
 }

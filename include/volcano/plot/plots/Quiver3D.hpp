@@ -62,7 +62,9 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> shaftRenderer_;
-    std::vector<Point2D> shaftSegments_;
+    /// Raw world-space shafts — projected by the renderer.
+    std::vector<Point3D> shaftSegments_;
+    std::array<float, 16> vp_{};
 
     std::unique_ptr<render::primitives::FillRenderer> headRenderer_;
     std::vector<Point2D> headPositions_;

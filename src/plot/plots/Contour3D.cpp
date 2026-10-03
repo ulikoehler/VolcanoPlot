@@ -104,15 +104,6 @@ std::pair<float, float> gridValueRange(const Grid2D& grid) {
     return {vmin, vmax};
 }
 
-// Project a 3D point through a 4x4 row-major matrix to 2D NDC.
-Point2D project3D(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -138,7 +129,7 @@ void Contour3D::marchingSquares() {
     auto [vmin, vmax] = gridValueRange(g);
     float zLevel = config_.zOffset ? (vmin + config_.zLevel) : config_.zLevel;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
 
     float dx = g.xRange.span() / (g.width - 1);
     float dy = g.yRange.span() / (g.height - 1);
@@ -172,11 +163,13 @@ void Contour3D::marchingSquares() {
                                             x0, y0, x1, y1, vBL, vBR, vTR, vTL);
                     Point2D p1 = interpEdge(pairs[code].e1, level,
                                             x0, y0, x1, y1, vBL, vBR, vTR, vTL);
-                    // Project to 3D at zLevel (or at the contour
-                    // level itself — mpl offset=None semantics).
-                    const float z = config_.levelsAsZ ? level : zLevel;
-                    segments_.push_back(project3D(vp, p0.x, p0.y, z));
-                    segments_.push_back(project3D(vp, p1.x, p1.y, z));
+                    // Raw world-space z: zLevel, or the contour level
+                    // itself (mpl offset=None semantics). The renderer
+                    // projects them (vertex shader / CPU).
+                    segments_.push_back({p0.x, p0.y,
+                        config_.levelsAsZ ? level : zLevel});
+                    segments_.push_back({p1.x, p1.y,
+                        config_.levelsAsZ ? level : zLevel});
                     segLevels_.push_back(level);
                 }
             }
@@ -187,11 +180,7 @@ void Contour3D::marchingSquares() {
 void Contour3D::prepare(render::Renderer& r) {
     computeLevels();
     marchingSquares();
-    if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
-    if (!segments_.empty()) {
-        renderer_->upload(std::span{segments_}, config_.lineColor,
-                         config_.lineWidth);
-    }
+    (void)r;
     prepared_ = true;
 }
 
@@ -200,9 +189,10 @@ void Contour3D::draw(render::Cmd& cmd, render::Renderer& r,
     if (!prepared_ || segments_.empty()) return;
     // mpl colors each contour level from the colormap (default
     // image.cmap = viridis) and dashes negative levels.
-    auto toPx = [&](const Point2D& p) {
-        return Point2D{rect.x + (p.x * 0.5f + 0.5f) * float(rect.width),
-                       rect.y + (0.5f - p.y * 0.5f) * float(rect.height)};
+    auto toPx = [&](const Point3D& p) {
+        Point2D n = projectPoint3D(vp_, p);
+        return Point2D{rect.x + (n.x * 0.5f + 0.5f) * float(rect.width),
+                       rect.y + (0.5f - n.y * 0.5f) * float(rect.height)};
     };
     Rect2D clip = clipRectVk(rect, r.gpu().extent());
     Extent2D res = r.gpu().extent();
@@ -272,7 +262,8 @@ void Contourf3D::marchingSquaresFilled() {
     if (vrange <= 0.0f) vrange = 1.0f;
 
     float zLevel = config_.zOffset ? (vmin + config_.zLevel) : config_.zLevel;
-    auto vp = camera_.viewProjection();
+    vpf_ = camera_.viewProjection();
+    const auto& vp = vpf_;
 
     float dx = g.xRange.span() / (g.width - 1);
     float dy = g.yRange.span() / (g.height - 1);
@@ -318,9 +309,9 @@ void Contourf3D::marchingSquaresFilled() {
 
                 const float bz = config_.levelsAsZ ? mid : zLevel;
                 for (size_t k = 1; k + 1 < poly.size(); ++k) {
-                    positions_.push_back(project3D(vp, poly[0].pos.x, poly[0].pos.y, bz));
-                    positions_.push_back(project3D(vp, poly[k].pos.x, poly[k].pos.y, bz));
-                    positions_.push_back(project3D(vp, poly[k+1].pos.x, poly[k+1].pos.y, bz));
+                    positions_.push_back({poly[0].pos.x, poly[0].pos.y, bz});
+                    positions_.push_back({poly[k].pos.x, poly[k].pos.y, bz});
+                    positions_.push_back({poly[k+1].pos.x, poly[k+1].pos.y, bz});
                     for (int c = 0; c < 3; ++c) colors_.push_back(color);
                 }
             }
@@ -333,7 +324,8 @@ void Contourf3D::prepare(render::Renderer& r) {
     marchingSquaresFilled();
     if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!positions_.empty()) {
-        renderer_->upload(std::span{positions_}, std::span{colors_});
+        renderer_->upload3D(std::span{positions_}, std::span{colors_},
+                            vpf_);
     }
     prepared_ = true;
 }

@@ -8,18 +8,6 @@
 
 namespace volcano::plot {
 
-namespace {
-
-Point2D project3D(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-} // namespace
-
 Quiver3D::Quiver3D(std::vector<float> x, std::vector<float> y,
                    std::vector<float> z, std::vector<float> u,
                    std::vector<float> v, std::vector<float> w,
@@ -39,7 +27,8 @@ void Quiver3D::projectArrows() {
 
     if (x_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
     float s = config_.scale;
 
     for (size_t i = 0; i < x_.size(); ++i) {
@@ -48,12 +37,14 @@ void Quiver3D::projectArrows() {
         float ty = by + s * v_[i];
         float tz = bz + s * w_[i];
 
-        Point2D p0 = project3D(vp, bx, by, bz);
-        Point2D p1 = project3D(vp, tx, ty, tz);
+        // Shaft: raw world-space segment — projected by the renderer.
+        shaftSegments_.push_back({bx, by, bz});
+        shaftSegments_.push_back({tx, ty, tz});
 
-        // Shaft: line from base to tip.
-        shaftSegments_.push_back(p0);
-        shaftSegments_.push_back(p1);
+        // Arrowheads are built in screen space (constant NDC size), so
+        // the direction still needs the CPU projection.
+        Point2D p0 = projectPoint3D(vp, {bx, by, bz});
+        Point2D p1 = projectPoint3D(vp, {tx, ty, tz});
 
         // Arrowhead: filled triangle at tip, perpendicular to shaft in screen space.
         float dx = p1.x - p0.x;
@@ -85,8 +76,8 @@ void Quiver3D::prepare(render::Renderer& r) {
 
     if (!shaftRenderer_) shaftRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!shaftSegments_.empty()) {
-        shaftRenderer_->upload(std::span{shaftSegments_}, config_.color,
-                              config_.lineWidth);
+        shaftRenderer_->upload3D(std::span{shaftSegments_}, config_.color,
+                                 config_.lineWidth, vp_);
     }
 
     if (config_.filledHeads && !headPositions_.empty()) {

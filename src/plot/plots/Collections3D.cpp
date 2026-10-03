@@ -8,25 +8,6 @@
 
 namespace volcano::plot {
 
-namespace {
-
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-float projectDepth(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipZ = vp[8]*x + vp[9]*y + vp[10]*z + vp[11];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return 0.0f;
-    return clipZ / clipW;
-}
-
-} // namespace
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Line3DCollection
 // ═══════════════════════════════════════════════════════════════════════════
@@ -55,12 +36,12 @@ void Line3DCollection::projectSegments() {
 
     if (segments_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
 
     for (size_t i = 0; i < segments_.size(); ++i) {
         const auto& [p0, p1] = segments_[i];
-        projected_.push_back(project(vp, p0.x, p0.y, p0.z));
-        projected_.push_back(project(vp, p1.x, p1.y, p1.z));
+        projected_.push_back(p0);
+        projected_.push_back(p1);
         if (i < config_.colors.size())
             segmentColors_.push_back(config_.colors[i]);
         else
@@ -79,8 +60,8 @@ void Line3DCollection::prepare(render::Renderer& r) {
         // the current LineSegmentRenderer only supports one color.
         // We use the default color; per-segment colors are stored but
         // not used by the current renderer.
-        renderer_->upload(std::span{projected_}, config_.color,
-                         config_.lineWidth);
+        renderer_->upload3D(std::span{projected_}, config_.color,
+                            config_.lineWidth, vp_);
     }
 
     prepared_ = true;
@@ -132,10 +113,12 @@ void Poly3DCollection::projectPolygons() {
 
     if (polygons_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp2_ = camera_.viewProjection();
+    const auto& vp = vp2_;
 
     struct ProjectedPoly {
-        std::vector<Point2D> verts;
+        // Raw world-space verts — projected by the renderer.
+        std::vector<Point3D> verts;
         float depth;
         Color color;
     };
@@ -150,8 +133,8 @@ void Poly3DCollection::projectPolygons() {
         pp.verts.reserve(poly.size());
         float avgDepth = 0.0f;
         for (const auto& v : poly) {
-            pp.verts.push_back(project(vp, v.x, v.y, v.z));
-            avgDepth += projectDepth(vp, v.x, v.y, v.z);
+            pp.verts.push_back(v);
+            avgDepth += projectDepth3D(vp, v);
         }
         pp.depth = avgDepth / static_cast<float>(poly.size());
         pp.color = (i < config_.faceColors.size()) ? config_.faceColors[i] : config_.faceColor;
@@ -192,13 +175,15 @@ void Poly3DCollection::prepare(render::Renderer& r) {
 
     if (config_.drawFaces && !fillPositions_.empty()) {
         if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload3D(std::span{fillPositions_},
+                                std::span{fillColors_}, vp2_);
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {
         if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
-        edgeRenderer_->upload(std::span{edgeSegments_}, config_.edgeColor,
-                             config_.edgeWidth);
+        edgeRenderer_->upload3D(std::span{edgeSegments_},
+                                config_.edgeColor, config_.edgeWidth,
+                                vp2_);
     }
 
     prepared_ = true;

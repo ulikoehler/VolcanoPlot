@@ -64,9 +64,11 @@ private:
     Contour3DConfig config_;
     Camera3D camera_;
 
-    std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
-    std::vector<Point2D> segments_;
+    /// Raw world-space segment endpoints — projected in draw() for the
+    /// px-space stroker.
+    std::vector<Point3D> segments_;
     std::vector<float> segLevels_;
+    std::array<float, 16> vp_{};
     bool prepared_ = false;
 
     void computeLevels();
@@ -97,8 +99,10 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::FillRenderer> renderer_;
-    std::vector<Point2D> positions_;
+    /// Raw world-space triangle soup — projected by the renderer.
+    std::vector<Point3D> positions_;
     std::vector<Color> colors_;
+    std::array<float, 16> vpf_{};
     bool prepared_ = false;
 
     void computeLevels();

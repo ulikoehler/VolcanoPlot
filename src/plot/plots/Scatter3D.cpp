@@ -48,7 +48,8 @@ void Scatter3D::projectPoints() {
 
     if (x_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
 
     std::vector<float> depths;
     depths.reserve(x_.size());
@@ -56,16 +57,14 @@ void Scatter3D::projectPoints() {
     for (size_t i = 0; i < x_.size(); ++i) {
         float px = x_[i], py = y_[i], pz = z_[i];
 
-        float clipX = vp[0]*px + vp[1]*py + vp[2]*pz + vp[3];
-        float clipY = vp[4]*px + vp[5]*py + vp[6]*pz + vp[7];
         float clipZ = vp[8]*px + vp[9]*py + vp[10]*pz + vp[11];
         float clipW = vp[12]*px + vp[13]*py + vp[14]*pz + vp[15];
 
         if (std::abs(clipW) < 1e-30f) continue;
-        float ndcX = clipX / clipW;
-        float ndcY = -clipY / clipW;
 
-        projectedPoints_.push_back({ndcX, ndcY});
+        // Raw world position — the renderer projects it (vertex shader
+        // on capable backends, CPU otherwise).
+        projectedPoints_.push_back({px, py, pz});
         depths.push_back(clipZ / clipW);
 
         if (!perPointColors_.empty())
@@ -99,8 +98,9 @@ void Scatter3D::prepare(render::Renderer& r) {
     }
 
     if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
-    pointRenderer_->upload(std::span{projectedPoints_}, std::span{markerColors_},
-                          std::span{markerSizes_});
+    pointRenderer_->upload3D(std::span{projectedPoints_},
+                             std::span{markerColors_},
+                             std::span{markerSizes_}, vp_);
     prepared_ = true;
 }
 

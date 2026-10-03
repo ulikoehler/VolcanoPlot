@@ -14,7 +14,10 @@
 namespace volcano::plot {
 namespace {
 
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
+// NDC variant with the historical cw==0 → 1e-9 guard (the label/tick
+// math keeps its original degenerate behaviour).
+Point2D projectNdc(const std::array<float, 16>& vp,
+                   float x, float y, float z) {
     float cx = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
     float cy = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
     float cw = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
@@ -38,7 +41,8 @@ void Axes3DPlot::contributeToAutoscale(Viewport& v) const {
 void Axes3DPlot::prepare(render::Renderer& r) {
     // Idempotent: rebuild all cached geometry (invalidate() also clears).
     paneTris_.clear(); lineSegs_.clear(); axisSegs_.clear(); labels_.clear();
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
 
     float x0 = range_.x.min, x1 = range_.x.max;
     float y0 = range_.y.min, y1 = range_.y.max;
@@ -53,8 +57,12 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     float yp = camera_.eye.y > 0 ? y0 : y1;
     float zp = camera_.eye.z > 0 ? z0 : z1;
 
-    auto P = [&](float x, float y, float z) { return project(vp, x, y, z); };
-    auto quad = [&](Point2D a, Point2D b, Point2D c, Point2D d) {
+    // P: raw world point (renderer projects it); Pn: NDC for the
+    // screen-space tick/label math.
+    auto P = [&](float x, float y, float z) { return Point3D{x, y, z}; };
+    auto Pn = [&](float x, float y, float z) {
+        return projectNdc(vp, x, y, z); };
+    auto quad = [&](Point3D a, Point3D b, Point3D c, Point3D d) {
         paneTris_.insert(paneTris_.end(), {a, b, c, a, c, d});
     };
 
@@ -74,7 +82,7 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     };
     clipT(xt, x0, x1); clipT(yt, y0, y1); clipT(zt, z0, z1);
 
-    auto seg = [&](Point2D a, Point2D b) {
+    auto seg = [&](Point3D a, Point3D b) {
         lineSegs_.push_back(a); lineSegs_.push_back(b);
     };
 
@@ -109,11 +117,11 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     float zx = xf, zy = yf, bestX = -2.0f;
     for (float ex : {x0, x1})
         for (float ey : {y0, y1}) {
-            float nx = P(ex, ey, cz).x;
+            float nx = Pn(ex, ey, cz).x;
             if (nx > bestX) { bestX = nx; zx = ex; zy = ey; }
         }
     // Box center in NDC — tick marks and labels point away from it.
-    auto ctr = P(cx, cy, cz);
+    auto ctr = Pn(cx, cy, cz);
 
     // Axis lines: the three tick edges are drawn darker than the pane
     // edges (matplotlib draws the mplot3d axis line over the box edge).
@@ -151,22 +159,23 @@ void Axes3DPlot::prepare(render::Renderer& r) {
                                mid.y + perp.y * config_.axisLabelPad,
                                axisLabel});
     };
-    axisEdge(P(x0, yf, z0), P(x1, yf, z0), xt,
-             [&](float t) { return P(t, yf, z0); }, config_.xLabel);
-    axisEdge(P(xf, y0, z0), P(xf, y1, z0), yt,
-             [&](float t) { return P(xf, t, z0); }, config_.yLabel);
-    axisEdge(P(zx, zy, z0), P(zx, zy, z1), zt,
-             [&](float t) { return P(zx, zy, t); }, config_.zLabel);
+    axisEdge(Pn(x0, yf, z0), Pn(x1, yf, z0), xt,
+             [&](float t) { return Pn(t, yf, z0); }, config_.xLabel);
+    axisEdge(Pn(xf, y0, z0), Pn(xf, y1, z0), yt,
+             [&](float t) { return Pn(xf, t, z0); }, config_.yLabel);
+    axisEdge(Pn(zx, zy, z0), Pn(zx, zy, z1), zt,
+             [&](float t) { return Pn(zx, zy, t); }, config_.zLabel);
 
     if (!paneTris_.empty()) {
         if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
         std::vector<Color> cols(paneTris_.size(), config_.paneColor);
-        fillRenderer_->upload(std::span{paneTris_}, std::span{cols});
+        fillRenderer_->upload3D(std::span{paneTris_}, std::span{cols},
+                                vp_);
     }
     if (!lineSegs_.empty()) {
         if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
-        lineRenderer_->upload(std::span{lineSegs_}, config_.edgeColor,
-                             config_.lineWidth);
+        lineRenderer_->upload3D(std::span{lineSegs_}, config_.edgeColor,
+                                config_.lineWidth, vp_);
     }
     if (!axisSegs_.empty()) {
         if (!axisRenderer_) axisRenderer_ = r.gpu().createLineSegmentRenderer();

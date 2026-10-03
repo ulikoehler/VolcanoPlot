@@ -61,15 +61,34 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
-    std::vector<Point2D> fillPositions_;
+    /// Raw world-space triangle soup / edges — projected by the
+    /// renderer (vertex shader on capable backends, CPU otherwise).
+    std::vector<Point3D> fillPositions_;
     std::vector<Color> fillColors_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;
-    std::vector<Point2D> edgePoints_;
+    std::vector<Point3D> edgePoints_;
+    std::array<float, 16> vp_{};
+
+    /// Per-bar instance records for the instanced `DrawBoxes3D` path
+    /// (GPU instancing offload).
+    std::vector<render::primitives::Box3DInstance> boxes_;
+    bool boxesReady_ = false;
+    bool instanced_ = false;
 
     bool prepared_ = false;
 
+    /// Corner `idx` (bit 0/1/2 = +x/+y/+z) of bar `i`.
+    Point3D corner(size_t i, int idx) const {
+        return {x_[i] + (idx & 1 ? dx_[i] : 0.0f),
+                y_[i] + (idx & 2 ? dy_[i] : 0.0f),
+                z_[i] + (idx & 4 ? dz_[i] : 0.0f)};
+    }
     void projectBars();
+    /// Painter's-algorithm face expansion into fillPositions_.
+    void expandFaces();
+    /// Outline segments for every bar.
+    void buildEdges();
 };
 
 } // namespace volcano::plot

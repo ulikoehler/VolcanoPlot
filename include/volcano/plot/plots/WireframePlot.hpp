@@ -57,7 +57,10 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> lineRenderer_;
-    std::vector<Point2D> segments_;
+    /// Raw world-space segment endpoints — projected by the renderer
+    /// (vertex shader on capable backends, CPU otherwise).
+    std::vector<Point3D> segments_;
+    std::array<float, 16> vp_{};
     bool prepared_ = false;
 
     void projectWireframe();

@@ -10,21 +10,6 @@ namespace volcano::plot {
 
 namespace {
 
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-float projectDepth(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipZ = vp[8]*x + vp[9]*y + vp[10]*z + vp[11];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return 0.0f;
-    return clipZ / clipW;
-}
-
 /// Evaluate the 2D Mexican hat (Ricker) wavelet.
 float mexicanHat2D(float x, float y, float sigma) {
     float s2 = sigma * sigma;
@@ -34,7 +19,8 @@ float mexicanHat2D(float x, float y, float sigma) {
 }
 
 struct ProjectedQuad {
-    Point2D v[4];
+    // Raw world-space corners — projected by the renderer.
+    Point3D v[4];
     float depth;
     float zAvg;
 };
@@ -77,7 +63,8 @@ void MexicanHatPlot::projectSurface() {
 
     if (zValues_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
     const auto& cmap = Colormap::byName(config_.colormap);
 
     // Helper to get (x, y, z) at grid point (i, j).
@@ -106,16 +93,13 @@ void MexicanHatPlot::projectSurface() {
             Point3D p01 = gridPoint(i, j + 1);
 
             ProjectedQuad q;
-            q.v[0] = project(vp, p00.x, p00.y, p00.z);
-            q.v[1] = project(vp, p10.x, p10.y, p10.z);
-            q.v[2] = project(vp, p11.x, p11.y, p11.z);
-            q.v[3] = project(vp, p01.x, p01.y, p01.z);
+            q.v[0] = p00; q.v[1] = p10; q.v[2] = p11; q.v[3] = p01;
 
             float avgDepth = 0.0f;
-            avgDepth += projectDepth(vp, p00.x, p00.y, p00.z);
-            avgDepth += projectDepth(vp, p10.x, p10.y, p10.z);
-            avgDepth += projectDepth(vp, p11.x, p11.y, p11.z);
-            avgDepth += projectDepth(vp, p01.x, p01.y, p01.z);
+            avgDepth += projectDepth3D(vp, p00);
+            avgDepth += projectDepth3D(vp, p10);
+            avgDepth += projectDepth3D(vp, p11);
+            avgDepth += projectDepth3D(vp, p01);
             q.depth = avgDepth * 0.25f;
 
             q.zAvg = (p00.z + p10.z + p11.z + p01.z) * 0.25f;
@@ -158,8 +142,8 @@ void MexicanHatPlot::projectSurface() {
             for (uint32_t i = 0; i + 1 < gridW_; ++i) {
                 Point3D p0 = gridPoint(i, j);
                 Point3D p1 = gridPoint(i + 1, j);
-                wireSegments_.push_back(project(vp, p0.x, p0.y, p0.z));
-                wireSegments_.push_back(project(vp, p1.x, p1.y, p1.z));
+                wireSegments_.push_back(p0);
+                wireSegments_.push_back(p1);
             }
         }
 
@@ -168,8 +152,8 @@ void MexicanHatPlot::projectSurface() {
             for (uint32_t j = 0; j + 1 < gridH_; ++j) {
                 Point3D p0 = gridPoint(i, j);
                 Point3D p1 = gridPoint(i, j + 1);
-                wireSegments_.push_back(project(vp, p0.x, p0.y, p0.z));
-                wireSegments_.push_back(project(vp, p1.x, p1.y, p1.z));
+                wireSegments_.push_back(p0);
+                wireSegments_.push_back(p1);
             }
         }
     }
@@ -182,13 +166,15 @@ void MexicanHatPlot::prepare(render::Renderer& r) {
 
     if (config_.drawSurface && !fillPositions_.empty()) {
         if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload3D(std::span{fillPositions_},
+                                std::span{fillColors_}, vp_);
     }
 
     if (config_.drawWireframe && !wireSegments_.empty()) {
         if (!wireRenderer_) wireRenderer_ = r.gpu().createLineSegmentRenderer();
-        wireRenderer_->upload(std::span{wireSegments_}, config_.wireframeColor,
-                             config_.wireframeWidth);
+        wireRenderer_->upload3D(std::span{wireSegments_},
+                                config_.wireframeColor,
+                                config_.wireframeWidth, vp_);
     }
 
     prepared_ = true;

@@ -8,17 +8,7 @@
 
 namespace volcano::plot {
 
-namespace {
-
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-} // namespace
+namespace {} // namespace
 
 WireframePlot::WireframePlot(Grid2D grid, WireframeConfig config)
     : grid_(std::move(grid)), config_(std::move(config)) {
@@ -35,7 +25,7 @@ void WireframePlot::projectWireframe() {
 
     if (grid_.width < 2 || grid_.height < 2) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
 
     // Map grid (i, j) to 3D coordinates.
     // x = xRange.min + i / (width-1) * xRange.span()
@@ -56,20 +46,16 @@ void WireframePlot::projectWireframe() {
     // Row lines (constant j, varying i): connect adjacent points along x.
     for (uint32_t j = 0; j < grid_.height; j += config_.rowStride) {
         for (uint32_t i = 0; i + 1 < grid_.width; ++i) {
-            Point3D p0 = gridToWorld(i, j);
-            Point3D p1 = gridToWorld(i + 1, j);
-            segments_.push_back(project(vp, p0.x, p0.y, p0.z));
-            segments_.push_back(project(vp, p1.x, p1.y, p1.z));
+            segments_.push_back(gridToWorld(i, j));
+            segments_.push_back(gridToWorld(i + 1, j));
         }
     }
 
     // Column lines (constant i, varying j): connect adjacent points along y.
     for (uint32_t i = 0; i < grid_.width; i += config_.colStride) {
         for (uint32_t j = 0; j + 1 < grid_.height; ++j) {
-            Point3D p0 = gridToWorld(i, j);
-            Point3D p1 = gridToWorld(i, j + 1);
-            segments_.push_back(project(vp, p0.x, p0.y, p0.z));
-            segments_.push_back(project(vp, p1.x, p1.y, p1.z));
+            segments_.push_back(gridToWorld(i, j));
+            segments_.push_back(gridToWorld(i, j + 1));
         }
     }
 }
@@ -79,7 +65,9 @@ void WireframePlot::prepare(render::Renderer& r) {
 
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
-        lineRenderer_->upload(std::span{segments_}, config_.color, config_.lineWidth);
+        // projection3d offload: raw 3D verts + vp → vertex shader.
+        lineRenderer_->upload3D(std::span{segments_}, config_.color,
+                                config_.lineWidth, vp_);
     }
     prepared_ = true;
 }

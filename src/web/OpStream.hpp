@@ -40,6 +40,10 @@ enum class Op : uint16_t {
     DrawImage        = 26,
     DrawSurface      = 27,
     DrawGrid3D       = 28,
+    DrawSegs3D       = 29,
+    DrawTris3D       = 30,
+    DrawPoints3D     = 31,
+    DrawBoxes3D      = 32,
 
     TessLines        = 40,
     EvalFunc         = 41,

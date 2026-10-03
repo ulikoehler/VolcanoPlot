@@ -11,25 +11,13 @@ namespace volcano::plot {
 namespace {
 
 struct ProjectedFace {
-    Point2D verts[4];
+    /// Raw world-space corners — the renderer projects them
+    /// (vertex shader on capable backends, CPU otherwise).
+    Point3D verts[4];
     float depth;
+    /// Face orientation index (0..5) — keys the shade table.
+    int face;
 };
-
-// Project a 3D point through a 4x4 row-major matrix to 2D NDC.
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-float projectDepth(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipZ = vp[8]*x + vp[9]*y + vp[10]*z + vp[11];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return 0.0f;
-    return clipZ / clipW;
-}
 
 } // namespace
 
@@ -45,24 +33,52 @@ Bar3D::Bar3D(std::vector<float> x, std::vector<float> y, std::vector<float> z,
         throw std::invalid_argument("Bar3D: all arrays must have the same size");
 }
 
+void Bar3D::buildEdges() {
+    edgePoints_.clear();
+    if (!config_.drawEdges) return;
+    static const int edges[12][2] = {
+        {0,1}, {1,3}, {3,2}, {2,0},  // bottom face
+        {4,5}, {5,7}, {7,6}, {6,4},  // top face
+        {0,4}, {1,5}, {3,7}, {2,6},  // vertical edges
+    };
+    for (size_t bar = 0; bar < x_.size(); ++bar)
+        for (int e = 0; e < 12; ++e) {
+            edgePoints_.push_back(corner(bar, edges[e][0]));
+            edgePoints_.push_back(corner(bar, edges[e][1]));
+        }
+}
+
 void Bar3D::projectBars() {
     fillPositions_.clear();
     fillColors_.clear();
-    edgePoints_.clear();
+    boxes_.clear();
+    boxesReady_ = false;
 
     if (x_.empty()) return;
+    vp_ = camera_.viewProjection();
 
-    auto vp = camera_.viewProjection();
+    // Instanced `DrawBoxes3D` offload: the renderer consumes the raw
+    // per-box records and the vertex shader expands the unit cube —
+    // no face expansion or painter's sort on the CPU. Face shading is
+    // applied per-orientation in the shader (the same table the
+    // expansion path uses).
+    if (render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().instancing)) {
+        boxes_.reserve(x_.size());
+        for (size_t bar = 0; bar < x_.size(); ++bar)
+            boxes_.push_back({x_[bar], y_[bar], z_[bar], 0.0f,
+                              dx_[bar], dy_[bar], dz_[bar], 0.0f,
+                              config_.color});
+        boxesReady_ = true;
+        buildEdges();
+        return;
+    }
+    expandFaces();
+    buildEdges();
+}
 
-    // 8 corners of a box: (x, y, z) + (dx, dy, dz) combinations.
-    // Index: bit 0 = dx, bit 1 = dy, bit 2 = dz.
-    auto corner = [&](size_t barIdx, int idx) -> Point3D {
-        return {
-            x_[barIdx] + (idx & 1 ? dx_[barIdx] : 0.0f),
-            y_[barIdx] + (idx & 2 ? dy_[barIdx] : 0.0f),
-            z_[barIdx] + (idx & 4 ? dz_[barIdx] : 0.0f)
-        };
-    };
+void Bar3D::expandFaces() {
+    const auto& vp = vp_;
 
     // 6 faces, each defined by 4 corner indices (CCW when viewed from outside).
     static const int faceCorners[6][4] = {
@@ -74,7 +90,7 @@ void Bar3D::projectBars() {
         {1, 3, 7, 5},  // +Z face (z = z1, top)
     };
 
-    // Shade factor per face for simple lighting effect.
+    // Shade factor per face orientation for simple lighting effect.
     static const float faceShade[6] = {0.7f, 0.85f, 0.6f, 0.8f, 0.5f, 1.0f};
 
     std::vector<ProjectedFace> faces;
@@ -82,11 +98,12 @@ void Bar3D::projectBars() {
     for (size_t bar = 0; bar < x_.size(); ++bar) {
         for (int f = 0; f < 6; ++f) {
             ProjectedFace pf;
+            pf.face = f;
             float avgDepth = 0.0f;
             for (int v = 0; v < 4; ++v) {
                 Point3D c = corner(bar, faceCorners[f][v]);
-                pf.verts[v] = project(vp, c.x, c.y, c.z);
-                avgDepth += projectDepth(vp, c.x, c.y, c.z);
+                pf.verts[v] = c;
+                avgDepth += projectDepth3D(vp, c);
             }
             pf.depth = avgDepth / 4.0f;
             faces.push_back(pf);
@@ -99,11 +116,9 @@ void Bar3D::projectBars() {
                   return a.depth > b.depth;  // larger depth = farther away
               });
 
-    // Build fill triangles (2 per face) and edge line segments.
-    for (size_t i = 0; i < faces.size(); ++i) {
-        const auto& pf = faces[i];
-        int faceIdx = static_cast<int>(i) % 6;
-        float shade = faceShade[faceIdx];
+    // Build fill triangles (2 per face).
+    for (const auto& pf : faces) {
+        float shade = faceShade[pf.face];
         Color faceColor = {
             config_.color.r * shade,
             config_.color.g * shade,
@@ -111,9 +126,8 @@ void Bar3D::projectBars() {
             config_.color.a
         };
 
-        // Two triangles: (v0, v1, v2) and (v0, v2, v3).
-        Point2D v0 = pf.verts[0], v1 = pf.verts[1];
-        Point2D v2 = pf.verts[2], v3 = pf.verts[3];
+        Point3D v0 = pf.verts[0], v1 = pf.verts[1];
+        Point3D v2 = pf.verts[2], v3 = pf.verts[3];
 
         fillPositions_.push_back(v0);
         fillPositions_.push_back(v1);
@@ -123,39 +137,32 @@ void Bar3D::projectBars() {
         fillPositions_.push_back(v3);
         for (int k = 0; k < 6; ++k) fillColors_.push_back(faceColor);
     }
-
-    // Build edges for all bars (not sorted — edges drawn on top).
-    if (config_.drawEdges) {
-        for (size_t bar = 0; bar < x_.size(); ++bar) {
-            // 12 edges of the box.
-            static const int edges[12][2] = {
-                {0,1}, {1,3}, {3,2}, {2,0},  // bottom face
-                {4,5}, {5,7}, {7,6}, {6,4},  // top face
-                {0,4}, {1,5}, {3,7}, {2,6},  // vertical edges
-            };
-            for (int e = 0; e < 12; ++e) {
-                Point3D c0 = corner(bar, edges[e][0]);
-                Point3D c1 = corner(bar, edges[e][1]);
-                edgePoints_.push_back(project(vp, c0.x, c0.y, c0.z));
-                edgePoints_.push_back(project(vp, c1.x, c1.y, c1.z));
-            }
-        }
-    }
 }
 
 void Bar3D::prepare(render::Renderer& r) {
     projectBars();
 
-
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
-    if (!fillPositions_.empty()) {
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+    // Instanced path consumed the box records directly.
+    if (boxesReady_ && fillRenderer_->uploadBoxes3D(std::span{boxes_},
+                                                  vp_)) {
+        instanced_ = true;
+    } else {
+        instanced_ = false;
+        // A backend that declines instancing still gets the expanded
+        // soup — built now if the instancing branch skipped it.
+        if (fillPositions_.empty() && !x_.empty()) {
+            expandFaces();
+        }
+        if (!fillPositions_.empty())
+            fillRenderer_->upload3D(std::span{fillPositions_},
+                                    std::span{fillColors_}, vp_);
     }
 
     if (config_.drawEdges && !edgePoints_.empty()) {
         if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
-        lineRenderer_->upload(std::span{edgePoints_}, config_.edgeColor,
-                             config_.edgeWidth);
+        lineRenderer_->upload3D(std::span{edgePoints_}, config_.edgeColor,
+                                config_.edgeWidth, vp_);
     }
 
     prepared_ = true;
@@ -172,7 +179,7 @@ void Bar3D::draw(render::Cmd& cmd, render::Renderer& r,
 
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    if (!fillPositions_.empty())
+    if (instanced_ || !fillPositions_.empty())
         fillRenderer_->draw(cmd, vrect, t);
 
     if (config_.drawEdges && edgePoints_.size() >= 2)

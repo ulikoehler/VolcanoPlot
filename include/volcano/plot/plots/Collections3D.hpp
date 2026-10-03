@@ -62,7 +62,9 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> renderer_;
-    std::vector<Point2D> projected_;       // 2 points per segment
+    /// Raw world-space endpoints — projected by the renderer.
+    std::vector<Point3D> projected_;       // 2 points per segment
+    std::array<float, 16> vp_{};
     std::vector<Color> segmentColors_;     // 1 color per segment (for per-vertex)
     bool prepared_ = false;
 
@@ -122,11 +124,13 @@ private:
     Camera3D camera_;
 
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
-    std::vector<Point2D> fillPositions_;
+    /// Raw world-space soup/edges — projected by the renderer.
+    std::vector<Point3D> fillPositions_;
     std::vector<Color> fillColors_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> edgeRenderer_;
-    std::vector<Point2D> edgeSegments_;
+    std::vector<Point3D> edgeSegments_;
+    std::array<float, 16> vp2_{};
 
     bool prepared_ = false;
 

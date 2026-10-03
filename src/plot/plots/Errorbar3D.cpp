@@ -8,18 +8,6 @@
 
 namespace volcano::plot {
 
-namespace {
-
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
-
-} // namespace
-
 Errorbar3D::Errorbar3D(std::vector<float> x, std::vector<float> y,
                        std::vector<float> z, Errorbar3DConfig config)
     : x_(std::move(x)), y_(std::move(y)), z_(std::move(z)),
@@ -45,14 +33,16 @@ void Errorbar3D::errBounds(size_t i, const std::vector<float>& sym,
 }
 
 void Errorbar3D::projectGeometry(float canvasW, float canvasH) {
-    errorSegments_.clear();
+    barSegs_.clear();
+    capSegs_.clear();
     markerPoints_.clear();
     markerColors_.clear();
     markerSizes_.clear();
 
     if (x_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
 
     // Cap size in NDC: capSize is pixels; NDC spans [-1,1] = 2 units over
     // the canvas extent (mpl capsize is absolute points → absolute px).
@@ -69,11 +59,9 @@ void Errorbar3D::projectGeometry(float canvasW, float canvasH) {
 
         float px = x_[i], py = y_[i], pz = z_[i];
 
-        // Project the data point.
-        Point2D center = project(vp, px, py, pz);
-
         if (config_.drawMarker) {
-            markerPoints_.push_back(center);
+            // Raw world-space marker center — projected by the renderer.
+            markerPoints_.push_back({px, py, pz});
             markerColors_.push_back(config_.markerColor);
             markerSizes_.push_back(config_.markerSize);
         }
@@ -81,51 +69,51 @@ void Errorbar3D::projectGeometry(float canvasW, float canvasH) {
         // X error bar: from (px - xlo, py, pz) to (px + xhi, py, pz)
         if (xlo > 0 || xhi > 0) {
             hasErrors_ = true;
-            Point2D p1 = project(vp, px - xlo, py, pz);
-            Point2D p2 = project(vp, px + xhi, py, pz);
-            errorSegments_.push_back(p1);
-            errorSegments_.push_back(p2);
+            barSegs_.push_back({px - xlo, py, pz});
+            barSegs_.push_back({px + xhi, py, pz});
 
             if (config_.drawCaps) {
                 // Caps perpendicular to the error bar direction in screen space.
                 // For X error bars, caps are vertical in screen space (approximate).
-                errorSegments_.push_back({p1.x, p1.y - capNdcY});
-                errorSegments_.push_back({p1.x, p1.y + capNdcY});
-                errorSegments_.push_back({p2.x, p2.y - capNdcY});
-                errorSegments_.push_back({p2.x, p2.y + capNdcY});
+                Point2D p1 = projectPoint3D(vp, {px - xlo, py, pz});
+                Point2D p2 = projectPoint3D(vp, {px + xhi, py, pz});
+                capSegs_.push_back({p1.x, p1.y - capNdcY});
+                capSegs_.push_back({p1.x, p1.y + capNdcY});
+                capSegs_.push_back({p2.x, p2.y - capNdcY});
+                capSegs_.push_back({p2.x, p2.y + capNdcY});
             }
         }
 
         // Y error bar: from (px, py - ylo, pz) to (px, py + yhi, pz)
         if (ylo > 0 || yhi > 0) {
             hasErrors_ = true;
-            Point2D p1 = project(vp, px, py - ylo, pz);
-            Point2D p2 = project(vp, px, py + yhi, pz);
-            errorSegments_.push_back(p1);
-            errorSegments_.push_back(p2);
+            barSegs_.push_back({px, py - ylo, pz});
+            barSegs_.push_back({px, py + yhi, pz});
 
             if (config_.drawCaps) {
-                errorSegments_.push_back({p1.x - capNdcX, p1.y});
-                errorSegments_.push_back({p1.x + capNdcX, p1.y});
-                errorSegments_.push_back({p2.x - capNdcX, p2.y});
-                errorSegments_.push_back({p2.x + capNdcX, p2.y});
+                Point2D p1 = projectPoint3D(vp, {px, py - ylo, pz});
+                Point2D p2 = projectPoint3D(vp, {px, py + yhi, pz});
+                capSegs_.push_back({p1.x - capNdcX, p1.y});
+                capSegs_.push_back({p1.x + capNdcX, p1.y});
+                capSegs_.push_back({p2.x - capNdcX, p2.y});
+                capSegs_.push_back({p2.x + capNdcX, p2.y});
             }
         }
 
         // Z error bar: from (px, py, pz - zlo) to (px, py, pz + zhi)
         if (zlo > 0 || zhi > 0) {
             hasErrors_ = true;
-            Point2D p1 = project(vp, px, py, pz - zlo);
-            Point2D p2 = project(vp, px, py, pz + zhi);
-            errorSegments_.push_back(p1);
-            errorSegments_.push_back(p2);
+            barSegs_.push_back({px, py, pz - zlo});
+            barSegs_.push_back({px, py, pz + zhi});
 
             if (config_.drawCaps) {
                 // Z error bars project roughly vertically, so caps are horizontal.
-                errorSegments_.push_back({p1.x - capNdcX, p1.y});
-                errorSegments_.push_back({p1.x + capNdcX, p1.y});
-                errorSegments_.push_back({p2.x - capNdcX, p2.y});
-                errorSegments_.push_back({p2.x + capNdcX, p2.y});
+                Point2D p1 = projectPoint3D(vp, {px, py, pz - zlo});
+                Point2D p2 = projectPoint3D(vp, {px, py, pz + zhi});
+                capSegs_.push_back({p1.x - capNdcX, p1.y});
+                capSegs_.push_back({p1.x + capNdcX, p1.y});
+                capSegs_.push_back({p2.x - capNdcX, p2.y});
+                capSegs_.push_back({p2.x + capNdcX, p2.y});
             }
         }
     }
@@ -136,18 +124,25 @@ void Errorbar3D::prepare(render::Renderer& r) {
     projectGeometry(float(ext.width), float(ext.height));
 
 
-    // Init and upload error bar segments.
-    if (hasErrors_ && !errorSegments_.empty()) {
+    // Init and upload error bar segments. Bars are world-space (GPU
+    // projection); caps are fixed-NDC screen-space stubs.
+    if (hasErrors_ && !barSegs_.empty()) {
         if (!errorRenderer_) errorRenderer_ = r.gpu().createLineSegmentRenderer();
-        errorRenderer_->upload(std::span{errorSegments_}, config_.errorbarColor,
-                              config_.errorbarWidth);
+        errorRenderer_->upload3D(std::span{barSegs_}, config_.errorbarColor,
+                                 config_.errorbarWidth, vp_);
+    }
+    if (!capSegs_.empty()) {
+        if (!capRenderer_) capRenderer_ = r.gpu().createLineSegmentRenderer();
+        capRenderer_->upload(std::span{capSegs_}, config_.errorbarColor,
+                             config_.errorbarWidth);
     }
 
     // Init and upload markers.
     if (config_.drawMarker && !markerPoints_.empty()) {
         if (!pointRenderer_) pointRenderer_ = r.gpu().createPointRenderer();
-        pointRenderer_->upload(std::span{markerPoints_}, std::span{markerColors_},
-                              std::span{markerSizes_});
+        pointRenderer_->upload3D(std::span{markerPoints_},
+                                std::span{markerColors_},
+                                std::span{markerSizes_}, vp_);
     }
 
     prepared_ = true;
@@ -164,8 +159,10 @@ void Errorbar3D::draw(render::Cmd& cmd, render::Renderer& r,
 
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    if (hasErrors_ && !errorSegments_.empty())
-        errorRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(errorSegments_.size()));
+    if (hasErrors_ && !barSegs_.empty())
+        errorRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(barSegs_.size()));
+    if (!capSegs_.empty())
+        capRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(capSegs_.size()));
 
     if (config_.drawMarker && !markerPoints_.empty())
         pointRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(markerPoints_.size()));

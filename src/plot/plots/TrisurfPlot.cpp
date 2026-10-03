@@ -15,20 +15,7 @@ const Colormap& defaultColormap() {
     return colormaps::viridis();
 }
 
-Point2D project(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipX = vp[0]*x + vp[1]*y + vp[2]*z + vp[3];
-    float clipY = vp[4]*x + vp[5]*y + vp[6]*z + vp[7];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return {0, 0};
-    return {clipX / clipW, -clipY / clipW};
-}
 
-float projectDepth(const std::array<float, 16>& vp, float x, float y, float z) {
-    float clipZ = vp[8]*x + vp[9]*y + vp[10]*z + vp[11];
-    float clipW = vp[12]*x + vp[13]*y + vp[14]*z + vp[15];
-    if (std::abs(clipW) < 1e-30f) return 0.0f;
-    return clipZ / clipW;
-}
 
 } // namespace
 
@@ -66,7 +53,8 @@ void TrisurfPlot::projectSurface() {
 
     if (x_.empty() || triangles_.empty()) return;
 
-    auto vp = camera_.viewProjection();
+    vp_ = camera_.viewProjection();
+    const auto& vp = vp_;
 
     // Compute z range for color mapping.
     Range zRange = config_.valueRange;
@@ -91,7 +79,8 @@ void TrisurfPlot::projectSurface() {
 
     // Project each triangle and compute average depth for sorting.
     struct ProjectedTri {
-        Point2D v0, v1, v2;
+        // Raw world-space verts — projected by the renderer.
+        Point3D v0, v1, v2;
         float depth;
         Color color;
     };
@@ -105,9 +94,9 @@ void TrisurfPlot::projectSurface() {
         Point3D p1{x_[tri.b], y_[tri.b], z_[tri.b]};
         Point3D p2{x_[tri.c], y_[tri.c], z_[tri.c]};
 
-        float avgDepth = (projectDepth(vp, p0.x, p0.y, p0.z) +
-                          projectDepth(vp, p1.x, p1.y, p1.z) +
-                          projectDepth(vp, p2.x, p2.y, p2.z)) / 3.0f;
+        float avgDepth = (projectDepth3D(vp, p0) +
+                          projectDepth3D(vp, p1) +
+                          projectDepth3D(vp, p2)) / 3.0f;
 
         float avgZ = (p0.z + p1.z + p2.z) / 3.0f;
         float t;
@@ -118,13 +107,7 @@ void TrisurfPlot::projectSurface() {
         }
         Color color = cmap.sample(t);
 
-        tris.push_back({
-            project(vp, p0.x, p0.y, p0.z),
-            project(vp, p1.x, p1.y, p1.z),
-            project(vp, p2.x, p2.y, p2.z),
-            avgDepth,
-            color
-        });
+        tris.push_back({p0, p1, p2, avgDepth, color});
     }
 
     // Sort back-to-front (painter's algorithm).
@@ -149,12 +132,12 @@ void TrisurfPlot::projectSurface() {
             Point3D p0{x_[tri.a], y_[tri.a], z_[tri.a]};
             Point3D p1{x_[tri.b], y_[tri.b], z_[tri.b]};
             Point3D p2{x_[tri.c], y_[tri.c], z_[tri.c]};
-            edgeSegments_.push_back(project(vp, p0.x, p0.y, p0.z));
-            edgeSegments_.push_back(project(vp, p1.x, p1.y, p1.z));
-            edgeSegments_.push_back(project(vp, p1.x, p1.y, p1.z));
-            edgeSegments_.push_back(project(vp, p2.x, p2.y, p2.z));
-            edgeSegments_.push_back(project(vp, p2.x, p2.y, p2.z));
-            edgeSegments_.push_back(project(vp, p0.x, p0.y, p0.z));
+            edgeSegments_.push_back(p0);
+            edgeSegments_.push_back(p1);
+            edgeSegments_.push_back(p1);
+            edgeSegments_.push_back(p2);
+            edgeSegments_.push_back(p2);
+            edgeSegments_.push_back(p0);
         }
     }
 }
@@ -165,13 +148,14 @@ void TrisurfPlot::prepare(render::Renderer& r) {
 
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {
-        fillRenderer_->upload(std::span{fillPositions_}, std::span{fillColors_});
+        fillRenderer_->upload3D(std::span{fillPositions_},
+                                std::span{fillColors_}, vp_);
     }
 
     if (config_.drawEdges && !edgeSegments_.empty()) {
         if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
-        edgeRenderer_->upload(std::span{edgeSegments_}, config_.edgeColor,
-                             config_.edgeWidth);
+        edgeRenderer_->upload3D(std::span{edgeSegments_},
+                                config_.edgeColor, config_.edgeWidth, vp_);
     }
 
     prepared_ = true;

@@ -211,15 +211,56 @@ public:
 
     void upload(std::span<const Point2D> points, Color color,
                 float width) override {
-        color_ = color; width_ = width;
+        color_ = color; width_ = width; is3D_ = false;
         if (buf_) s_->releaseBuffer(buf_);
         buf_ = s_->createBufferRaw(points.size_bytes() + 16, 1|2);
         s_->writeBufferRaw(buf_, 0, points.data(), points.size_bytes());
         count_ = uint32_t(points.size());
     }
+    /// GPU projection3d offload: keep the raw Point3D records and the
+    /// view-projection; DrawSegs3D projects in the vertex shader.
+    bool upload3DDevice(std::span<const Point3D> points, Color color,
+                        float width,
+                        const std::array<float, 16>& vp) override {
+        color_ = color; width_ = width; is3D_ = true;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i)
+                vp_[j * 4 + i] = vp[i * 4 + j];   // row → column major
+        if (buf_) s_->releaseBuffer(buf_);
+        buf_ = s_->createBufferRaw(points.size_bytes() + 16, 1|2);
+        s_->writeBufferRaw(buf_, 0, points.data(), points.size_bytes());
+        count_ = uint32_t(points.size());
+        return true;
+    }
+    /// CPU fallback: DrawLines/DrawLineSegs write clip.y = -ndc.y for
+    /// y-up 2-D data. Our projected NDC is already in clip convention
+    /// (-cy/w like the tri/point paths), so pre-negate to cancel the
+    /// shader's flip — same pixels as the DrawSegs3D vertex shader.
+    void upload3DCpu(std::span<const Point3D> points, Color color,
+                     float width,
+                     const std::array<float, 16>& vp) override {
+        scratch_.clear();
+        scratch_.reserve(points.size());
+        for (const auto& p : points) {
+            Point2D n = plot::projectPoint3D(vp, p);
+            scratch_.push_back({n.x, -n.y});
+        }
+        upload(scratch_, color, width);
+    }
     void draw(Cmd& cmd, Rect2D rect, const Transform2D& t,
               uint32_t vertexCount) const override {
         if (!buf_ || vertexCount < 2) return;
+        if (is3D_) {
+            PDraw3D p{};
+            p.clip = clipF(rect); p.view = clipF(rect);
+            std::copy(std::begin(vp_), std::end(vp_), p.vp);
+            p.posBuf = buf_; p.count = vertexCount;
+            p.r = color_.r; p.g = color_.g; p.b = color_.b;
+            p.a = color_.a; p.width = width_;
+            ops(cmd).emit(Op::DrawSegs3D, p);
+            return;
+        }
+
         PDrawLines p{clipF(rect), clipF(rect),
                      makeTransformUBO(t, rect, color_),
                      buf_, vertexCount,
@@ -233,6 +274,9 @@ private:
     uint32_t buf_ = 0, count_ = 0;
     Color color_{};
     float width_ = 1.0f;
+    bool is3D_ = false;
+    float vp_[16] = {};
+    std::vector<Point2D> scratch_;
 };
 
 // ═══ OpPointRenderer ═════════════════════════════════════════════════
@@ -244,6 +288,7 @@ public:
     void upload(std::span<const Point2D> points,
                 std::span<const Color> colors,
                 std::span<const float> sizes) override {
+        is3D_ = false;
         count_ = uint32_t(points.size());
         ensureBufs(count_);
         hasCol_ = !colors.empty(); hasSize_ = !sizes.empty();
@@ -255,10 +300,32 @@ public:
             s_->writeBufferRaw(sizeBuf_, 0, sizes.data(),
                                sizes.size_bytes());
     }
+    /// GPU projection3d offload: raw Point3D centers + vp.
+    bool upload3DDevice(std::span<const Point3D> points,
+                        std::span<const Color> colors,
+                        std::span<const float> sizes,
+                        const std::array<float, 16>& vp) override {
+        is3D_ = true;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i)
+                vp_[j * 4 + i] = vp[i * 4 + j];   // row → column major
+        count_ = uint32_t(points.size());
+        ensureBufs3D(count_);
+        hasCol_ = !colors.empty(); hasSize_ = !sizes.empty();
+        s_->writeBufferRaw(posBuf_, 0, points.data(), points.size_bytes());
+        if (!colors.empty())
+            s_->writeBufferRaw(colBuf_, 0, colors.data(),
+                               colors.size_bytes());
+        if (!sizes.empty())
+            s_->writeBufferRaw(sizeBuf_, 0, sizes.data(),
+                               sizes.size_bytes());
+        return true;
+    }
     void updatePoints(std::span<const Point2D> points,
                       std::span<const Color> colors,
                       std::span<const float> sizes) override {
         if (points.size() > capacity_) { upload(points, colors, sizes); return; }
+        is3D_ = false;
         count_ = uint32_t(points.size());
         hasCol_ = !colors.empty(); hasSize_ = !sizes.empty();
         s_->writeBufferRaw(posBuf_, 0, points.data(), points.size_bytes());
@@ -278,6 +345,20 @@ public:
               const Transform2D& t, uint32_t count,
               render::primitives::MarkerParams marker) const override {
         if (!posBuf_ || count == 0) return;
+        if (is3D_) {
+            PDraw3D p{};
+            p.clip = clipF(scissor); p.view = clipF(viewport);
+            std::copy(std::begin(vp_), std::end(vp_), p.vp);
+            p.posBuf = posBuf_;
+            p.colBuf = hasCol_ ? colBuf_ : 0;
+            p.auxBuf = hasSize_ ? sizeBuf_ : 0;
+            p.count = count;
+            p.flags = (hasCol_ ? 1u : 0u) | (hasSize_ ? 2u : 0u);
+            p.marker[0] = marker.code; p.marker[1] = marker.fill;
+            p.marker[2] = marker.numsides; p.marker[3] = marker.angle;
+            ops(cmd).emit(Op::DrawPoints3D, p);
+            return;
+        }
         PDrawPoints p{clipF(scissor), clipF(viewport),
                       makeTransformUBO(t, viewport, {}),
                       posBuf_, colBuf_, sizeBuf_, count,
@@ -296,15 +377,31 @@ private:
         if (posBuf_) { s_->releaseBuffer(posBuf_);
                        s_->releaseBuffer(colBuf_);
                        s_->releaseBuffer(sizeBuf_); }
+        cap3D_ = 0;
         posBuf_ = s_->createBufferRaw(uint64_t(n) * 8 + 16, 1|2);
         colBuf_ = s_->createBufferRaw(uint64_t(n) * 16 + 16, 1|2);
         sizeBuf_ = s_->createBufferRaw(uint64_t(n) * 4 + 16, 1|2);
         capacity_ = n;
     }
+    /// Point3D records are 12 B — grow the position buffer when needed.
+    void ensureBufs3D(uint32_t n) {
+        if (n <= cap3D_) return;
+        if (posBuf_) { s_->releaseBuffer(posBuf_);
+                       s_->releaseBuffer(colBuf_);
+                       s_->releaseBuffer(sizeBuf_);
+                       posBuf_ = colBuf_ = sizeBuf_ = 0;
+                       capacity_ = 0; }
+        posBuf_ = s_->createBufferRaw(uint64_t(n) * 12 + 16, 1|2);
+        colBuf_ = s_->createBufferRaw(uint64_t(n) * 16 + 16, 1|2);
+        sizeBuf_ = s_->createBufferRaw(uint64_t(n) * 4 + 16, 1|2);
+        cap3D_ = n;
+    }
     OpGpuServices* s_;
     uint32_t posBuf_ = 0, colBuf_ = 0, sizeBuf_ = 0;
-    uint32_t count_ = 0, capacity_ = 0;
+    uint32_t count_ = 0, capacity_ = 0, cap3D_ = 0;
     bool hasCol_ = false, hasSize_ = false;
+    bool is3D_ = false;
+    float vp_[16] = {};
 };
 
 namespace op {

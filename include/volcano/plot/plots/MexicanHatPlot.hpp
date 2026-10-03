@@ -77,11 +77,13 @@ private:
     float zMin_ = 0.0f, zMax_ = 0.0f;
 
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
-    std::vector<Point2D> fillPositions_;
+    /// Raw world-space soup/edges — projected by the renderer.
+    std::vector<Point3D> fillPositions_;
     std::vector<Color> fillColors_;
 
     std::unique_ptr<render::primitives::LineSegmentRenderer> wireRenderer_;
-    std::vector<Point2D> wireSegments_;
+    std::vector<Point3D> wireSegments_;
+    std::array<float, 16> vp_{};
 
     bool prepared_ = false;
 

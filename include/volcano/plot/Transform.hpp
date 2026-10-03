@@ -367,4 +367,28 @@ struct Camera3D {
                                            float dist = 10.0f) noexcept;
 };
 
+/// Project a world point through a row-major view-projection matrix to
+/// NDC (y flipped to match the data-space y-up convention the 2D
+/// pipelines draw in). Degenerate |w| → {0,0}. This is the CPU
+/// reference for the DrawSegs3D/DrawTris3D/DrawPoints3D shaders — keep
+/// the math identical.
+[[nodiscard]] inline Point2D projectPoint3D(
+    const std::array<float, 16>& vp, Point3D p) noexcept {
+    const float cx = vp[0]*p.x + vp[1]*p.y + vp[2]*p.z  + vp[3];
+    const float cy = vp[4]*p.x + vp[5]*p.y + vp[6]*p.z  + vp[7];
+    const float cw = vp[12]*p.x + vp[13]*p.y + vp[14]*p.z + vp[15];
+    if (std::abs(cw) < 1e-30f) return {0, 0};
+    return {cx / cw, -cy / cw};
+}
+
+/// View depth of a world point (clip z / w) — painter's-algorithm sort
+/// key; stays on the CPU since ordering is inherently sequential.
+[[nodiscard]] inline float projectDepth3D(
+    const std::array<float, 16>& vp, Point3D p) noexcept {
+    const float cz = vp[8]*p.x + vp[9]*p.y + vp[10]*p.z + vp[11];
+    const float cw = vp[12]*p.x + vp[13]*p.y + vp[14]*p.z + vp[15];
+    if (std::abs(cw) < 1e-30f) return 0.0f;
+    return cz / cw;
+}
+
 } // namespace volcano::plot
