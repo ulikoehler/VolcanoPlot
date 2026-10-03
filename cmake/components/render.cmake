@@ -5,6 +5,7 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/RenderPass.cpp
     ${VOLCANO_ROOT}/src/render/Frame.cpp
     ${VOLCANO_ROOT}/src/render/Renderer.cpp
+    ${VOLCANO_ROOT}/src/render/Offload.cpp
     ${VOLCANO_ROOT}/src/render/VulkanGpuServices.cpp
     ${VOLCANO_ROOT}/src/render/MplCanvas.cpp
     ${VOLCANO_ROOT}/src/render/primitives/PointRenderer.cpp

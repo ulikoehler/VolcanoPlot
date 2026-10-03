@@ -92,7 +92,8 @@ private:
     std::vector<Color> fillColors_;
     bool prepared_ = false;
 
-    void computeBins();
+    /// `r` (optional) enables the GPU binning path.
+    void computeBins(render::Renderer* r = nullptr);
     void buildGeometry();
 };
 

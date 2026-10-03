@@ -22,6 +22,9 @@ import GRID3D_WGSL from './shaders/DrawGrid3D.wgsl?raw';
 import KDE_WGSL from './shaders/KdeEval2D.wgsl?raw';
 import PCM_WGSL from './shaders/PcmTess.wgsl?raw';
 import KDE1_WGSL from './shaders/KdeEval1D.wgsl?raw';
+import BINS_WGSL from './shaders/HistBins.wgsl?raw';
+import BINS2D_WGSL from './shaders/HistBins2D.wgsl?raw';
+import HEXBINS_WGSL from './shaders/HexBins.wgsl?raw';
 
 export const VPOP_MAGIC = 0x564f5050; // 'VPOP'
 export const OP_VERSION = 1;
@@ -44,6 +47,7 @@ export enum Op {
 
     TessLines = 40, EvalFunc = 41, FuncDef = 42, ReduceMinMax = 43,
     KdeEval2D = 44, HistBins = 45, PcmTess = 46, ViolinKde = 47,
+    HistBins2D = 48, HexBins = 49,
 }
 
 export interface FrameHeader {
@@ -597,6 +601,57 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             compute: { module: mod, entryPoint: 'main' } });
     }
 
+    // ── binning (hist / hist2d / hexbin) ─────────────────────────────
+    private binsBgl?: GPUBindGroupLayout;
+    private binsPipes = new Map<number, GPUComputePipeline>();
+
+    /** Atomic-count compute pipelines — one per binning opcode. */
+    private ensureBins(op: number, src: string) {
+        if (!this.binsBgl) {
+            this.binsBgl = this.device.createBindGroupLayout({ entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'storage' } },
+            ]});
+        }
+        if (this.binsPipes.has(op)) return;
+        const mod = this.device.createShaderModule({ code: src });
+        this.binsPipes.set(op, this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.binsBgl] }),
+            compute: { module: mod, entryPoint: 'cs' } }));
+    }
+
+    /** Zero a count buffer, run the binning pass, and queue the u32
+     * readback for the bulk mailbox. */
+    private dispatchBins(enc: GPUCommandEncoder, op: number, src: string,
+                         pc: Uint32Array<ArrayBuffer>, srcBuf: number,
+                         outBuf: number,
+                         n: number, count: number, slot: number) {
+        this.ensureBins(op, src);
+        const off = this.uboWrite(pc);
+        const cpass = enc.beginComputePass();
+        cpass.setPipeline(this.binsPipes.get(op)!);
+        cpass.setBindGroup(0, this.device.createBindGroup({
+            layout: this.binsBgl!, entries: [
+                { binding: 0, resource: { buffer: this.uniformRing,
+                                          offset: off, size: 32 } },
+                { binding: 1, resource: { buffer: this.bufRef(srcBuf) } },
+                { binding: 2, resource: { buffer: this.bufRef(outBuf) } },
+            ]}));
+        cpass.dispatchWorkgroups(Math.ceil(n / 256));
+        cpass.end();
+        const bytes = count * 4;
+        const staging = this.device.createBuffer({
+            size: bytes,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        enc.copyBufferToBuffer(this.bufRef(outBuf), 0, staging, 0, bytes);
+        this.pendingBulk.push({ buf: staging, slot, bytes });
+    }
+
     private pendingMaps: { buf: GPUBuffer; out: GPUBuffer;
                            slot: number }[] = [];
     private reducePipe?: GPUComputePipeline;
@@ -940,6 +995,70 @@ fn cs(@builtin(global_invocation_id) gid : vec3u) {
             cpass.end();
             enc.copyBufferToBuffer(out, 0, staging, 0, 16);
             this.pendingMaps.push({ buf: staging, out, slot });
+            return;
+        }
+        if (op === Op.HistBins) {
+            // PHistBins {srcBuf, n, binsBuf, e0, invW, nBins, mailbox}
+            const n = p.getUint32(4, true);
+            const nBins = p.getUint32(20, true);
+            if (!n || !nBins) return;
+            const outBuf = p.getUint32(8, true);
+            // Atomic accumulation needs a zeroed target.
+            this.device.queue.writeBuffer(this.bufRef(outBuf), 0,
+                new Uint32Array(nBins));
+            const pc = new Uint32Array(8);
+            pc[0] = n; pc[1] = nBins;
+            const dv = new DataView(pc.buffer);
+            dv.setFloat32(16, p.getFloat32(12, true), true);  // e0
+            dv.setFloat32(20, p.getFloat32(16, true), true);  // invW
+            this.dispatchBins(enc, op, BINS_WGSL, pc, p.getUint32(0, true),
+                              outBuf, n, nBins, p.getUint32(24, true));
+            return;
+        }
+        if (op === Op.HistBins2D) {
+            // PHistBins2D {xyBuf, n, binsBuf, x0, invWX, y0, invWY,
+            //              nBinsX, nBinsY, mailbox}
+            const n = p.getUint32(4, true);
+            const nBinsX = p.getUint32(28, true);
+            const nBinsY = p.getUint32(32, true);
+            if (!n || !nBinsX || !nBinsY) return;
+            const outBuf = p.getUint32(8, true);
+            const count = nBinsX * nBinsY;
+            this.device.queue.writeBuffer(this.bufRef(outBuf), 0,
+                new Uint32Array(count));
+            const pc = new Uint32Array(8);
+            pc[0] = n; pc[1] = nBinsX; pc[2] = nBinsY;
+            const dv = new DataView(pc.buffer);
+            dv.setFloat32(16, p.getFloat32(12, true), true);  // x0
+            dv.setFloat32(20, p.getFloat32(16, true), true);  // invWX
+            dv.setFloat32(24, p.getFloat32(20, true), true);  // y0
+            dv.setFloat32(28, p.getFloat32(24, true), true);  // invWY
+            this.dispatchBins(enc, op, BINS2D_WGSL, pc,
+                              p.getUint32(0, true), outBuf, n, count,
+                              p.getUint32(36, true));
+            return;
+        }
+        if (op === Op.HexBins) {
+            // PHexBins {xyBuf, n, outBuf, xMin, yMin, sx, sy, nx, ny,
+            //           mailbox}
+            const n = p.getUint32(4, true);
+            const nx = p.getUint32(28, true);
+            const ny = p.getUint32(32, true);
+            if (!n || !nx || !ny) return;
+            const outBuf = p.getUint32(8, true);
+            const count = (nx + 1) * (ny + 1) + nx * ny;
+            this.device.queue.writeBuffer(this.bufRef(outBuf), 0,
+                new Uint32Array(count));
+            const pc = new Uint32Array(8);
+            pc[0] = n; pc[1] = nx; pc[2] = ny;
+            const dv = new DataView(pc.buffer);
+            dv.setFloat32(16, p.getFloat32(12, true), true);  // xMin
+            dv.setFloat32(20, p.getFloat32(16, true), true);  // yMin
+            dv.setFloat32(24, p.getFloat32(20, true), true);  // sx
+            dv.setFloat32(28, p.getFloat32(24, true), true);  // sy
+            this.dispatchBins(enc, op, HEXBINS_WGSL, pc,
+                              p.getUint32(0, true), outBuf, n, count,
+                              p.getUint32(36, true));
             return;
         }
         if (op !== Op.TessLines) return;

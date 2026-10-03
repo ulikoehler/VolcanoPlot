@@ -1,5 +1,6 @@
 // volcano/plot/plots/HexbinPlot.cpp — hexagonal binning implementation
 #include "volcano/plot/plots/HexbinPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -57,7 +58,7 @@ std::array<Point2D, 6> HexbinPlot::hexVertices(float cx, float cy, float r) cons
     return verts;
 }
 
-void HexbinPlot::computeBins() {
+void HexbinPlot::computeBins(render::Renderer* r) {
     centers_.clear();
     counts_.clear();
     if (x_.empty()) return;
@@ -88,7 +89,25 @@ void HexbinPlot::computeBins() {
         // counts indexed [lattice][q][r]: A in [0..nx]x[0..ny],
         // B in [0..nx)x[0..ny).
         std::vector<int> cA((nx + 1) * (ny + 1), 0), cB(nx * ny, 0);
-        for (size_t k = 0; k < x_.size(); ++k) {
+        // GPU lattice accumulation is opt-in (`binning=gpu`) — it frees
+        // the CPU, and under WASM the CPU is the main thread. The counts
+        // arrive one frame later; the CPU loop covers the first frame.
+        bool counted = false;
+        if (r && render::OffloadConfig::allowGpu(
+                     render::OffloadConfig::global().binning) &&
+            x_.size() >= 2048) {
+            if (auto gpu = r->gpu().hexBins(x_, y_, uint32_t(nx),
+                                            uint32_t(ny), xMin_, yMin_,
+                                            sx, sy);
+                gpu && gpu->size() == cA.size() + cB.size()) {
+                for (size_t i = 0; i < cA.size(); ++i)
+                    cA[i] = int((*gpu)[i]);
+                for (size_t i = 0; i < cB.size(); ++i)
+                    cB[i] = int((*gpu)[cA.size() + i]);
+                counted = true;
+            }
+        }
+        for (size_t k = 0; !counted && k < x_.size(); ++k) {
             float ix = (x_[k] - xMin_) / sx;
             float iy = (y_[k] - yMin_) / sy;
             int ix1 = int(std::round(ix)), iy1 = int(std::round(iy));
@@ -199,7 +218,7 @@ void HexbinPlot::buildGeometry() {
 }
 
 void HexbinPlot::prepare(render::Renderer& r) {
-    computeBins();
+    computeBins(&r);
     buildGeometry();
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {

@@ -89,7 +89,8 @@ private:
     std::unique_ptr<render::primitives::FillRenderer> fillRenderer_;
     bool prepared_ = false;
 
-    void computeBins();
+    /// `r` (optional) enables the GPU lattice-count path.
+    void computeBins(render::Renderer* r = nullptr);
     void buildGeometry();
 
     /// Get the 6 vertices of a hexagon at center (cx, cy) with given radius.

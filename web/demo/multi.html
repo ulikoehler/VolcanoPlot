@@ -66,6 +66,13 @@ window.vpDone = (async () => {
         }
         if (which === 'hist2d') vp.hist2d(xs, ys, 24);
         else vp.kde(xs, ys);
+    } else if (which === 'hexbin') {
+        const n = 4000, xs = new Float32Array(n), ys = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = Math.sin(i * 0.61) + Math.sin(i * 1.13) * 0.4;
+            ys[i] = Math.cos(i * 0.37) + Math.cos(i * 0.83) * 0.4;
+        }
+        vp.hexbin(xs, ys);
     } else if (which === 'box') {
         vp.boxplot([[1, 2, 3, 4, 5, 2.5], [2, 4, 6, 8, 3],
                     [0.5, 1, 1.5, 2, 9]]);

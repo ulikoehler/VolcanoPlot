@@ -49,6 +49,8 @@ enum class Op : uint16_t {
     HistBins         = 45,
     PcmTess          = 46,
     ViolinKde        = 47,
+    HistBins2D       = 48,
+    HexBins          = 49,
 };
 
 /// Reference to bulk data. kind 0 = ARENA (off = byte offset into the

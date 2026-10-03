@@ -1,6 +1,7 @@
 // volcano/plot/plots/HistPlot.cpp
 #include "volcano/plot/plots/HistPlot.hpp"
 #include "volcano/render/Renderer.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/VectorCanvas.hpp"
 #include "../VectorEmitHelpers.hpp"
 #include "volcano/render/primitives/ReduceRenderer.hpp"
@@ -152,12 +153,12 @@ void HistPlot::computeBins(render::Renderer* r) {
         // GPU binning is opt-in: uploading the samples to a host-visible
         // buffer costs more than the 8-thread CPU count on discrete GPUs
         // (measured: 118 ms GPU vs ~50 ms CPU at 10M). Unified-memory
-        // setups may win — VOLCANO_GPU_HIST=1.
-        static const bool gpuHistOn_ = [] {
-            const char* v = std::getenv("VOLCANO_GPU_HIST");
-            return v && v[0] == '1';
-        }();
-        if (gpuHistOn_ && uniform && r && data.size() >= kPar) {
+        // setups — and any integrator who wants the CPU free — can turn
+        // it on with VOLCANO_GPU_OFFLOAD=binning=gpu (or the legacy
+        // VOLCANO_GPU_HIST=1).
+        const bool gpuHistOn = render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().binning);
+        if (gpuHistOn && uniform && r && data.size() >= kPar) {
             if (auto counts = r->gpu().histBin(data, nBins, e0, invW);
                 counts && !counts->empty()) {
                 for (size_t i = 0; i < nBins; ++i)

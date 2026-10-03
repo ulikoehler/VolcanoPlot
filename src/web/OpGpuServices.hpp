@@ -144,6 +144,21 @@ public:
     std::optional<std::vector<float>> kde1d(
         std::span<const float> data, float lo, float step, float bw,
         uint32_t n) override;
+    /// Binning: same eventual-delivery contract — the first call emits
+    /// the atomic-count compute + mailbox and returns nullopt so the
+    /// caller's CPU counts cover that frame; identical later calls serve
+    /// the delivered counts with no further GPU work.
+    std::optional<std::vector<uint32_t>> histBin(
+        std::span<const float> data, uint32_t nBins,
+        float e0, float invW) override;
+    std::optional<std::vector<uint32_t>> histBin2D(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t nBinsX, uint32_t nBinsY,
+        float x0, float invWX, float y0, float invWY) override;
+    std::optional<std::vector<uint32_t>> hexBins(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t nx, uint32_t ny, float xMin, float yMin,
+        float sx, float sy) override;
     bool pcmTessellate(std::span<const float> x,
                        std::span<const float> y,
                        std::span<const float> t,
@@ -184,6 +199,28 @@ private:
         uint32_t slot; std::vector<float> cached;
     };
     std::vector<Kde1dReq> kdeReqs_;
+
+    /// One in-flight/recently-delivered binning request. Binning is
+    /// data-parallel and idempotent per input fingerprint, so results
+    /// are cached per (kind, fingerprint) — a re-render with unchanged
+    /// data reuses the delivered counts with no further GPU work.
+    struct BinReq {
+        uint32_t kind;      ///< 0 hist1d, 1 hist2d, 2 hexbin
+        uint64_t fp;        ///< input fingerprint
+        uint32_t slot;
+        uint32_t count;     ///< number of u32 counts expected
+        std::vector<uint32_t> cached;
+    };
+    std::vector<BinReq> binReqs_;
+    /// State of one binning request.
+    struct BinState {
+        const std::vector<uint32_t>* cached = nullptr;  ///< delivered
+        uint32_t slot = 0;   ///< mailbox slot to emit with
+        bool isNew = false;  ///< true when this call created the request
+    };
+    /// Look up (kind, fp); creates the request (allocating a slot) when
+    /// unknown. `cached` is set once JS delivers the counts.
+    BinState binState(uint32_t kind, uint64_t fp, uint32_t count);
     std::unordered_map<uint32_t, render::primitives::MinMax2D>
         reduceResults_;
 };

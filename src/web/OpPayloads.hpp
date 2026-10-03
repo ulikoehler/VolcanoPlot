@@ -117,6 +117,19 @@ struct PPcmTess    { uint32_t xBuf, yBuf, tBuf, lutBuf, posBuf, colBuf;
 /// Result read back via bulk mailbox (slot → ne f32).
 struct PViolinKde  { uint32_t inBuf, n, outBuf, ne;
                      float lo, step, bw; uint32_t mailbox; };
+/// 2-D histogram binning: x/y sample pairs → nBinsX*nBinsY counts
+/// (row-major, y-major). Uniform edges: bin = (v - e0) * invW.
+/// Result read back via bulk mailbox (slot → nBinsX*nBinsY u32).
+struct PHistBins2D { uint32_t xyBuf, n, binsBuf;
+                     float x0, invWX, y0, invWY;
+                     uint32_t nBinsX, nBinsY, mailbox; };
+/// mpl hexbin (pointy-top) lattice counts: two interleaved lattices
+/// A (nx+1)x(ny+1) at (i*sx, j*sy) and B nx*ny offset by (+.5sx,+.5sy).
+/// Result read back via bulk mailbox
+/// (slot → [(nx+1)*(ny+1) + nx*ny] u32, A then B).
+struct PHexBins    { uint32_t xyBuf, n, outBuf;
+                     float xMin, yMin, sx, sy;
+                     uint32_t nx, ny, mailbox; };
 #pragma pack(pop)
 
 } // namespace volcano::web

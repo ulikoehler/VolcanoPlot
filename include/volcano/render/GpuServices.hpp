@@ -156,6 +156,31 @@ public:
         return std::nullopt;
     }
 
+    /// 2-D histogram binning with uniform edges: x/y sample pairs →
+    /// nBinsX*nBinsY counts, row-major (y-major). Nullopt when the
+    /// backend has no GPU path or the result is not ready yet (the
+    /// caller then keeps its CPU counts for this frame).
+    virtual std::optional<std::vector<uint32_t>> histBin2D(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t nBinsX, uint32_t nBinsY,
+        float x0, float invWX, float y0, float invWY) {
+        (void)x; (void)y; (void)nBinsX; (void)nBinsY;
+        (void)x0; (void)invWX; (void)y0; (void)invWY;
+        return std::nullopt;
+    }
+
+    /// mpl hexbin (pointy-top) lattice counts: lattice A of
+    /// (nx+1)*(ny+1) cells followed by lattice B of nx*ny cells.
+    /// Nullopt when unavailable (see histBin2D).
+    virtual std::optional<std::vector<uint32_t>> hexBins(
+        std::span<const float> x, std::span<const float> y,
+        uint32_t nx, uint32_t ny, float xMin, float yMin,
+        float sx, float sy) {
+        (void)x; (void)y; (void)nx; (void)ny;
+        (void)xMin; (void)yMin; (void)sx; (void)sy;
+        return std::nullopt;
+    }
+
     /// 1-D Gaussian KDE over `data` evaluated at `n` points from `lo`
     /// with spacing `step` and bandwidth `bw`. Nullopt when unavailable.
     virtual std::optional<std::vector<float>> kde1d(

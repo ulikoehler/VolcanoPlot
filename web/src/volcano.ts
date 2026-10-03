@@ -76,6 +76,7 @@ interface VolcanoModule {
                    w: number, h: number): number;
     _vp_subplot(nrows: number, ncols: number, index: number): number;
     _vp_setInteractive(on: boolean): void;
+    _vp_setOffload(csv: string): void;
     _vp_dispatch(type: number, x: number, y: number,
                  button: number, step: number): boolean;
     _vp_xlim(a: number, lo: number, hi: number): void;
@@ -162,6 +163,10 @@ interface VolcanoModule {
                   quiverHandle: number, label: string): number;
     HEAPU8: Uint8Array<ArrayBuffer>;
 }
+export type OffloadMode = 'auto' | 'gpu' | 'cpu';
+export type OffloadKey = 'stroking' | 'dashes' | 'contours' | 'binning'
+    | 'projection3d' | 'instancing' | 'fft' | 'envelope';
+
 type ModuleFactory = (opts?: unknown) => Promise<VolcanoModule>;
 
 export class VolcanoCanvas {
@@ -581,6 +586,21 @@ export class VolcanoCanvas {
          coords: 'data'|'axes'|'figure' = 'data') {
         this.mod._vp_text(this.cur, x, y, txt,
             coords === 'data' ? 0 : coords === 'axes' ? 1 : 2);
+    }
+
+    /** Choose where offloadable workloads run. Every key defaults to
+     * `'auto'` (GPU when the backend implements it). Use `'gpu'` to
+     * force a workload off the CPU — useful even where the CPU is
+     * nominally faster, since this engine is single-threaded under WASM
+     * and a busy CPU blocks input/animation. `'cpu'` pins to the CPU.
+     *
+     * Keys: `stroking`, `dashes`, `contours`, `binning`, `projection3d`,
+     * `instancing`, `fft`, `envelope`.
+     *
+     * @example vp.setOffload({ binning: 'gpu', fft: 'gpu' }) */
+    setOffload(cfg: Partial<Record<OffloadKey, OffloadMode>>) {
+        this.mod._vp_setOffload(
+            Object.entries(cfg).map(([k, v]) => `${k}=${v}`).join(','));
     }
 
     /** mpl-style interaction: left-drag pans, scroll zooms about the

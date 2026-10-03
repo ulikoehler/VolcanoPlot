@@ -1,5 +1,6 @@
 // volcano/plot/plots/Hist2DPlot.cpp — 2D histogram implementation
 #include "volcano/plot/plots/Hist2DPlot.hpp"
+#include "volcano/render/Offload.hpp"
 #include "volcano/render/Renderer.hpp"
 #include "volcano/backend/Backend.hpp"
 #include <algorithm>
@@ -66,7 +67,7 @@ Color Hist2DPlot::legendColor() const {
     return cmap.sample(0.5f);
 }
 
-void Hist2DPlot::computeBins() {
+void Hist2DPlot::computeBins(render::Renderer* r) {
     if (x_.empty()) {
         xEdges_ = {0.0f, 1.0f};
         yEdges_ = {0.0f, 1.0f};
@@ -121,7 +122,33 @@ void Hist2DPlot::computeBins() {
 
     // Count samples in 2D bins.
     counts_.assign(nBinsX_ * nBinsY_, 0.0f);
-    for (size_t k = 0; k < x_.size(); ++k) {
+    // GPU binning is opt-in (`VOLCANO_GPU_OFFLOAD=binning=gpu`, or the
+    // web `setOffload` API) — it frees the CPU, and under WASM the CPU
+    // is the main thread. Only uniform edges are supported on the GPU;
+    // explicit edge arrays fall back to the CPU loop. The GPU result
+    // arrives one frame later, so the CPU counts stand in until then.
+    bool countedOnGpu = false;
+    if (r && config_.bins != Hist2DBinMethod::Edges &&
+        render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().binning) &&
+        x_.size() >= 2048) {
+        const float x0 = xEdges_.front(), x1 = xEdges_.back();
+        const float y0 = yEdges_.front(), y1 = yEdges_.back();
+        const float invWX = (x1 > x0)
+            ? float(nBinsX_) / (x1 - x0) : 0.0f;
+        const float invWY = (y1 > y0)
+            ? float(nBinsY_) / (y1 - y0) : 0.0f;
+        if (invWX > 0.0f && invWY > 0.0f) {
+            if (auto gpu = r->gpu().histBin2D(
+                    x_, y_, nBinsX_, nBinsY_, x0, invWX, y0, invWY);
+                gpu && gpu->size() == counts_.size()) {
+                for (size_t i = 0; i < counts_.size(); ++i)
+                    counts_[i] = float((*gpu)[i]);
+                countedOnGpu = true;
+            }
+        }
+    }
+    for (size_t k = 0; !countedOnGpu && k < x_.size(); ++k) {
         float xv = x_[k], yv = y_[k];
         if (xv < xEdges_.front() || xv > xEdges_.back()) continue;
         if (yv < yEdges_.front() || yv > yEdges_.back()) continue;
@@ -208,7 +235,7 @@ void Hist2DPlot::buildGeometry() {
 }
 
 void Hist2DPlot::prepare(render::Renderer& r) {
-    computeBins();
+    computeBins(&r);
     buildGeometry();
     if (!renderer_) renderer_ = r.gpu().createFillRenderer();
     if (!fillPositions_.empty()) {

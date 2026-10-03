@@ -141,6 +141,132 @@ void OpGpuServices::writeBuffer(render::GpuBuf buf, uint64_t offset,
                                 std::span<const std::byte> data) {
     writeBufferRaw(uint32_t(buf), offset, data.data(), data.size());
 }
+namespace {
+
+/// Cheap content fingerprint: element count plus a strided sample of
+/// the values (up to 64 probes + first/last). Binning results are
+/// cached per fingerprint, so identical re-renders cost no GPU work —
+/// while any real data change invalidates the cache.
+uint64_t fpFloats(std::span<const float> a,
+                  std::span<const float> b = {}) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    auto sample = [&mix](std::span<const float> v) {
+        mix(v.size());
+        if (v.empty()) return;
+        const size_t step = std::max<size_t>(1, v.size() / 64);
+        for (size_t i = 0; i < v.size(); i += step) {
+            uint32_t bits;
+            std::memcpy(&bits, &v[i], sizeof(bits));
+            mix(bits);
+        }
+        uint32_t last;
+        std::memcpy(&last, &v.back(), sizeof(last));
+        mix(last);
+    };
+    sample(a);
+    sample(b);
+    return h;
+}
+
+} // namespace
+
+OpGpuServices::BinState OpGpuServices::binState(uint32_t kind,
+                                                uint64_t fp,
+                                                uint32_t count) {
+    for (auto& q : binReqs_) {
+        if (q.kind != kind || q.fp != fp) continue;
+        BinState st{};
+        st.slot = q.slot;
+        if (!q.cached.empty()) {
+            st.cached = &q.cached;
+        } else if (mailboxReady(q.slot)) {
+            auto bytes = mailboxTake(q.slot);
+            q.cached.assign(bytes.size() / 4, 0u);
+            std::memcpy(q.cached.data(), bytes.data(),
+                        q.cached.size() * 4);
+            if (q.cached.size() != count) q.cached.clear();
+            if (!q.cached.empty()) st.cached = &q.cached;
+        }
+        return st;
+    }
+    BinReq req{kind, fp, allocMailbox(), count, {}};
+    binReqs_.push_back(std::move(req));
+    if (binReqs_.size() > 24) binReqs_.erase(binReqs_.begin());
+    return BinState{nullptr, binReqs_.back().slot, true};
+}
+
+std::optional<std::vector<uint32_t>>
+OpGpuServices::histBin(std::span<const float> data, uint32_t nBins,
+                       float e0, float invW) {
+    if (data.empty() || !nBins) return std::nullopt;
+    const uint64_t fp = fpFloats(data);
+    auto st = binState(0, fp, nBins);
+    if (st.cached) return *st.cached;
+    if (!st.isNew) return std::nullopt;   // readback still in flight
+    uint32_t in = createBufferRaw(data.size_bytes() + 16, 1 | 2);
+    writeBufferRaw(in, 0, data.data(), data.size_bytes());
+    uint32_t bins = createBufferRaw(size_t(nBins) * 4 + 16, 2 | 16);
+    stream_.emit(Op::HistBins,
+                 PHistBins{in, uint32_t(data.size()), bins, e0, invW,
+                           nBins, st.slot});
+    return std::nullopt;
+}
+
+std::optional<std::vector<uint32_t>>
+OpGpuServices::histBin2D(std::span<const float> x, std::span<const float> y,
+                         uint32_t nBinsX, uint32_t nBinsY,
+                         float x0, float invWX, float y0, float invWY) {
+    const size_t n = std::min(x.size(), y.size());
+    if (!n || !nBinsX || !nBinsY) return std::nullopt;
+    const uint32_t count = nBinsX * nBinsY;
+    const uint64_t fp = fpFloats(x.first(n), y.first(n));
+    auto st = binState(1, fp, count);
+    if (st.cached) return *st.cached;
+    if (!st.isNew) return std::nullopt;
+    // Interleave the samples: the shader reads vec2f pairs.
+    std::vector<float> xy(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        xy[i * 2] = x[i];
+        xy[i * 2 + 1] = y[i];
+    }
+    uint32_t in = createBufferRaw(xy.size() * 4 + 16, 1 | 2);
+    writeBufferRaw(in, 0, xy.data(), xy.size() * 4);
+    uint32_t bins = createBufferRaw(size_t(count) * 4 + 16, 2 | 16);
+    stream_.emit(Op::HistBins2D,
+                 PHistBins2D{in, uint32_t(n), bins, x0, invWX, y0, invWY,
+                             nBinsX, nBinsY, st.slot});
+    return std::nullopt;
+}
+
+std::optional<std::vector<uint32_t>>
+OpGpuServices::hexBins(std::span<const float> x, std::span<const float> y,
+                       uint32_t nx, uint32_t ny, float xMin, float yMin,
+                       float sx, float sy) {
+    const size_t n = std::min(x.size(), y.size());
+    if (!n || !nx || !ny || sx == 0.0f || sy == 0.0f) return std::nullopt;
+    const uint32_t count = (nx + 1) * (ny + 1) + nx * ny;
+    const uint64_t fp = fpFloats(x.first(n), y.first(n));
+    auto st = binState(2, fp, count);
+    if (st.cached) return *st.cached;
+    if (!st.isNew) return std::nullopt;
+    std::vector<float> xy(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        xy[i * 2] = x[i];
+        xy[i * 2 + 1] = y[i];
+    }
+    uint32_t in = createBufferRaw(xy.size() * 4 + 16, 1 | 2);
+    writeBufferRaw(in, 0, xy.data(), xy.size() * 4);
+    uint32_t out = createBufferRaw(size_t(count) * 4 + 16, 2 | 16);
+    stream_.emit(Op::HexBins,
+                 PHexBins{in, uint32_t(n), out, xMin, yMin, sx, sy,
+                          nx, ny, st.slot});
+    return std::nullopt;
+}
+
 std::optional<std::vector<float>>
 OpGpuServices::kde1d(std::span<const float> data, float lo, float step,
                      float bw, uint32_t ne) {

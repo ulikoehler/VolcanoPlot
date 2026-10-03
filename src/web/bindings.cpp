@@ -71,6 +71,7 @@
 #include <volcano/plot/plots/BarLabelPlot.hpp>
 #include <volcano/plot/plots/Axes3DPlot.hpp>
 #include <volcano/plot/Colormap.hpp>
+#include <volcano/render/Offload.hpp>
 #include <algorithm>
 #include <limits>
 #include <unordered_map>
@@ -1100,6 +1101,10 @@ EMSCRIPTEN_BINDINGS(volcanoplot) {
     em::function("_vp_kde", &kde);
     em::function("_vp_subplot", &subplot);
     em::function("_vp_setInteractive", &setInteractive);
+    em::function("_vp_setOffload",
+        +[](const std::string& csv) {
+            render::OffloadConfig::global().parse(csv);
+        });
     em::function("_vp_dispatch", &dispatchEvent);
     em::function("_vp_violin", &violin);
     em::function("_vp_stackplot", &stackplot);
