@@ -229,7 +229,13 @@ struct ComputePipe {
     }
 };
 
-ComputePipe histPipe_, kde1dPipe_, pcmPipe_;
+// Process-lifetime: the Unique* members would call vkDestroy* during
+// static teardown — after the device (and possibly the driver) is
+// already gone. Leaking three small pipeline objects is the standard
+// fix for GPU globals that outlive the context.
+ComputePipe* histPipe_  = new ComputePipe();
+ComputePipe* kde1dPipe_ = new ComputePipe();
+ComputePipe* pcmPipe_   = new ComputePipe();
 
 } // namespace
 
@@ -455,7 +461,7 @@ std::optional<std::vector<uint32_t>>
 VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
                            float e0, float invW) {
     const vk::Device dev = device();
-    if (data.empty() || nBins == 0 || !histPipe_.build(dev, kHistGlsl, 2, 16))
+    if (data.empty() || nBins == 0 || !histPipe_->build(dev, kHistGlsl, 2, 16))
         return std::nullopt;
 
     core::BufferDesc inDesc{};
@@ -475,7 +481,7 @@ VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
     vk::DescriptorPoolSize ps{};
     ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(2);
     core::DescriptorPool onePool(dev, {ps}, 1);
-    vk::DescriptorSet set = onePool.allocate(histPipe_.descLayout.get());
+    vk::DescriptorSet set = onePool.allocate(histPipe_->descLayout.get());
     vk::DescriptorBufferInfo ii{}, oi{};
     ii.setBuffer(inBuf.handle()).setOffset(0).setRange(inDesc.size);
     oi.setBuffer(binBuf.handle()).setOffset(0).setRange(binsBytes);
@@ -501,13 +507,13 @@ VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
         dep.setMemoryBarriers(bar);
         cmd.handle().pipelineBarrier2(dep);
         cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
-                                  histPipe_.pipe.get());
+                                  histPipe_->pipe.get());
         cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                                        histPipe_.pipeLayout.get(), 0,
+                                        histPipe_->pipeLayout.get(), 0,
                                         set, {});
         struct { uint32_t n, nbins; float e0, invW; } pcv{
             uint32_t(data.size()), nBins, e0, invW};
-        cmd.handle().pushConstants(histPipe_.pipeLayout.get(),
+        cmd.handle().pushConstants(histPipe_->pipeLayout.get(),
                                    vk::ShaderStageFlagBits::eCompute, 0,
                                    16, &pcv);
         uint32_t threads = uint32_t(std::min<size_t>(
@@ -524,7 +530,7 @@ std::optional<std::vector<float>>
 VulkanGpuServices::kde1d(std::span<const float> data, float lo,
                         float step, float bw, uint32_t n) {
     const vk::Device dev = device();
-    if (data.empty() || n == 0 || !kde1dPipe_.build(dev, kKde1dGlsl, 2, 20))
+    if (data.empty() || n == 0 || !kde1dPipe_->build(dev, kKde1dGlsl, 2, 20))
         return std::nullopt;
 
     core::BufferDesc sd{};
@@ -544,7 +550,7 @@ VulkanGpuServices::kde1d(std::span<const float> data, float lo,
     vk::DescriptorPoolSize ps{};
     ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(2);
     core::DescriptorPool onePool(dev, {ps}, 1);
-    vk::DescriptorSet set = onePool.allocate(kde1dPipe_.descLayout.get());
+    vk::DescriptorSet set = onePool.allocate(kde1dPipe_->descLayout.get());
     vk::DescriptorBufferInfo ii{}, oi{};
     ii.setBuffer(srcBuf.handle()).setOffset(0).setRange(sd.size);
     oi.setBuffer(dstBuf.handle()).setOffset(0).setRange(dd.size);
@@ -560,13 +566,13 @@ VulkanGpuServices::kde1d(std::span<const float> data, float lo,
     {
         core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue());
         cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
-                                  kde1dPipe_.pipe.get());
+                                  kde1dPipe_->pipe.get());
         cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                                        kde1dPipe_.pipeLayout.get(), 0,
+                                        kde1dPipe_->pipeLayout.get(), 0,
                                         set, {});
         struct { uint32_t ns, ne; float lo, step, bw; } pcv{
             uint32_t(data.size()), n, lo, step, bw};
-        cmd.handle().pushConstants(kde1dPipe_.pipeLayout.get(),
+        cmd.handle().pushConstants(kde1dPipe_->pipeLayout.get(),
                                    vk::ShaderStageFlagBits::eCompute, 0,
                                    20, &pcv);
         cmd.handle().dispatch((n + 255) / 256, 1, 1);
@@ -588,7 +594,7 @@ bool VulkanGpuServices::pcmTessellate(
     const uint32_t vertsPerCell = gouraud ? 12 : 6;
     const uint64_t nVerts = uint64_t(cells) * vertsPerCell;
     if (cells == 0 || nVerts > (1ull << 31)) return false;
-    if (!pcmPipe_.build(dev, kPcmTessGlsl, 6, 16)) return false;
+    if (!pcmPipe_->build(dev, kPcmTessGlsl, 6, 16)) return false;
 
     auto mkStorage = [&](const void* data, size_t bytes) {
         core::BufferDesc d{};
@@ -617,7 +623,7 @@ bool VulkanGpuServices::pcmTessellate(
     vk::DescriptorPoolSize ps{};
     ps.setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(6);
     core::DescriptorPool descPool(dev, {ps}, 1);
-    vk::DescriptorSet dset = descPool.allocate(pcmPipe_.descLayout.get());
+    vk::DescriptorSet dset = descPool.allocate(pcmPipe_->descLayout.get());
 
     vk::DescriptorBufferInfo infos[6];
     std::array<std::pair<vk::Buffer, vk::DeviceSize>, 6> bufs{{
@@ -637,11 +643,11 @@ bool VulkanGpuServices::pcmTessellate(
         core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue());
         auto c = cmd.handle();
         c.bindPipeline(vk::PipelineBindPoint::eCompute,
-                       pcmPipe_.pipe.get());
+                       pcmPipe_->pipe.get());
         c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                             pcmPipe_.pipeLayout.get(), 0, dset, {});
+                             pcmPipe_->pipeLayout.get(), 0, dset, {});
         uint32_t pcv[4] = {nCols, nRows, gouraud ? 1u : 0u, flags};
-        c.pushConstants(pcmPipe_.pipeLayout.get(),
+        c.pushConstants(pcmPipe_->pipeLayout.get(),
                         vk::ShaderStageFlagBits::eCompute, 0, 16, pcv);
         c.dispatch((cells + 255) / 256, 1, 1);
         vk::BufferMemoryBarrier barriers[2];

@@ -28,87 +28,86 @@ the *shape*, not the spec. See `docs/PERFORMANCE.md` for details.
 
 | case | Agg | mpl+VP | VP (C++) | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_100 | 80.6 | 95.5 | 15.3 | 0.84x | 5.28x |
-| line_2k + scatter + legend | 97.1 | 69.5 | 16.3 | 1.40x | 5.96x |
-| scatter_100 | 49.1 | 72.0 | 14.7 | 0.68x | 3.34x |
-| bar_10 | 48.2 | 70.0 | 14.2 | 0.69x | 3.40x |
-| errorbar_50 | 46.7 | 62.5 | 11.9 | 0.75x | 3.93x |
-| boxplot_6 | 47.4 | 71.5 | 13.9 | 0.66x | 3.40x |
-| text_50 | 105.9 | 55.4 | 13.3 | 1.91x | 7.98x |
-| pie_4 | 21.3 | 19.6 | 13.1 | 1.09x | 1.63x |
-| **50 figs × line_2k** (ms/fig) | 71.0 | 169.9 | 5.9 | 0.42x | 12.10x |
+| line_100 | 148.5 | 79.1 | 25.5 | 1.88x | 5.83x |
+| line_2k + scatter + legend | 178.9 | 88.4 | 17.8 | 2.02x | 10.04x |
+| scatter_100 | 101.1 | 65.1 | 15.0 | 1.55x | 6.72x |
+| bar_10 | 93.1 | 51.1 | 15.6 | 1.82x | 5.96x |
+| errorbar_50 | 151.5 | 65.8 | 13.4 | 2.30x | 11.32x |
+| boxplot_6 | 107.1 | 65.9 | 14.2 | 1.62x | 7.53x |
+| text_50 | 285.9 | 67.8 | 20.9 | 4.22x | 13.65x |
+| pie_4 | 44.5 | 24.5 | 20.6 | 1.81x | 2.16x |
+| **50 figs × line_2k** (ms/fig) | 80.0 | 219.5 | 6.5 | 0.36x | 12.30x |
 
 ### Medium
 
 | case | Agg | mpl+VP | VP (C++) | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_10k | 70.3 | 53.0 | 13.9 | 1.33x | 5.07x |
-| line_100k | 73.9 | 69.2 | 14.1 | 1.07x | 5.22x |
-| multiline_20×100k | 245.1 | 134.9 | 46.2 | 1.82x | 5.31x |
-| scatter_10k | 222.2 | 111.2 | 37.8 | 2.00x | 5.88x |
-| scatter_50k | 903.5 | 112.6 | 38.4 | 8.02x | 23.55x |
-| hist_100k | 67.2 | 80.8 | 14.3 | 0.83x | 4.70x |
-| bar_1k | 257.9 | 242.7 | 14.0 | 1.06x | 18.47x |
-| bar_5k | 1118.8 | 1148.0 | 16.2 | 0.97x | 69.26x |
-| contourf_100 | 48.9 | 73.9 | 18.3 | 0.66x | 2.67x |
-| quiver_30×30 | 71.3 | 68.7 | 13.9 | 1.04x | 5.13x |
-| step_50k | 73.3 | 61.9 | 13.1 | 1.18x | 5.60x |
-| fill_100k | 81.4 | 68.3 | 39.3 | 1.19x | 2.07x |
-| eventplot_2k | 1079.1 | 1077.4 | 16.9 | 1.00x | 63.79x |
-| stackplot_5×1k | 146.4 | 64.1 | 14.3 | 2.28x | 10.24x |
-| errorbar_5k | 149.2 | 67.4 | 12.5 | 2.21x | 11.91x |
-| violin_8×2k | 104.5 | 83.8 | 27.5 | 1.25x | 3.80x |
-| stem_2k | 167.5 | 70.1 | 15.6 | 2.39x | 10.77x |
+| line_10k | 276.8 | 70.8 | 14.8 | 3.91x | 18.65x |
+| line_100k | 164.9 | 67.7 | 21.9 | 2.44x | 7.51x |
+| multiline_20×100k | 631.8 | 181.2 | 40.3 | 3.49x | 15.66x |
+| scatter_10k | 663.2 | 89.7 | 32.9 | 7.39x | 20.18x |
+| scatter_50k | 1924.3 | 146.4 | 40.0 | 13.14x | 48.15x |
+| hist_100k | 190.6 | 67.4 | 12.9 | 2.83x | 14.77x |
+| bar_1k | 585.4 | 254.4 | 11.8 | 2.30x | 49.48x |
+| bar_5k | 1138.5 | 1155.5 | 12.1 | 0.99x | 94.34x |
+| contourf_100 | 48.6 | 108.0 | 30.5 | 0.45x | 1.60x |
+| quiver_30×30 | 78.0 | 83.6 | 30.4 | 0.93x | 2.56x |
+| step_50k | 59.6 | 101.6 | 15.6 | 0.59x | 3.81x |
+| fill_100k | 67.2 | 77.3 | 41.4 | 0.87x | 1.62x |
+| eventplot_2k | 1056.0 | 1199.5 | 16.4 | 0.88x | 64.29x |
+| stackplot_5×1k | 175.6 | 111.7 | 13.3 | 1.57x | 13.22x |
+| errorbar_5k | 111.3 | 175.8 | 12.4 | 0.63x | 9.00x |
+| violin_8×2k | 62.0 | 126.1 | 20.5 | 0.49x | 3.03x |
+| stem_2k | 125.6 | 116.2 | 12.0 | 1.08x | 10.45x |
 
 ### Large
 
 | case | Agg | mpl+VP | VP (C++) | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_1M | 174.0 | 77.2 | 19.5 | 2.25x | 8.94x |
-| line_10M | 1111.6 | 1726.6 | 83.2 | 0.64x | 13.36x |
-| line_10M @dpi300 | 1552.5 | 914.5 | 83.7 | 1.70x | 18.56x |
-| scatter_200k | 4214.4 | 182.1 | 43.0 | 23.15x | 98.06x |
-| scatter_200k @dpi300 | 8743.1 | 745.0 | 69.7 | 11.74x | 125.37x |
-| scatter_1M | 12902.9 | 491.6 | 65.2 | 26.25x | 197.94x |
-| scatter_2M @dpi400 | 3987.0 | 519.6 | 81.3 | 7.67x | 49.01x |
-| scatter per-point s/c 200k | 3688.1 | 156.0 | 49.0 | 23.65x | 75.25x |
-| scatter per-point s/c 1M @dpi400 | 41948.5 | 929.6 | 114.1 | 45.12x | 367.70x |
-| markers_100k | 117.5 | 52.2 | 19.8 | 2.25x | 5.94x |
-| hist_10M | 80.3 | 84.3 | 82.1 | 0.95x | 0.98x |
-| fill_1M | 205.7 | 89.1 | 36.9 | 2.31x | 5.58x |
-| fill_1M @dpi300 | 410.5 | 198.4 | 59.0 | 2.07x | 6.96x |
-| bar_50k | 9001.0 | 11061.8 | 15.4 | 0.81x | 584.35x |
-| eventplot_20k | 3999.6 | 6658.1 | 17.1 | 0.60x | 233.79x |
-| pcolormesh_2M | 802.3 | 251.3 | 38.4 | 3.19x | 20.89x |
-| pcolormesh_2M @dpi300 | 1074.5 | 479.7 | 68.2 | 2.24x | 15.75x |
-| pcolormesh_7M @dpi400 | 3769.9 | 6814.3 | 94.8 | 0.55x | 39.78x |
-| quadmesh_1M @dpi400 | 921.9 | 732.2 | 64.0 | 1.26x | 14.40x |
-| imshow_4M none @dpi300 | 2253.9 | 726.9 | 114.9 | 3.10x | 19.61x |
-| imshow_16M none @dpi400 | 4403.6 | 2155.3 | 270.5 | 2.04x | 16.28x |
-| imshow_9M bilinear | 1719.2 | 3379.3 | 177.4 | 0.51x | 9.69x |
-| contourf_400 | 53.6 | 64.2 | 71.9 | 0.83x | 0.75x |
+| line_1M | 129.1 | 93.3 | 15.9 | 1.38x | 8.11x |
+| line_10M | 865.4 | 418.1 | 54.4 | 2.07x | 15.92x |
+| line_10M @dpi300 | 2714.4 | 773.8 | 86.2 | 3.51x | 31.48x |
+| scatter_200k | 7359.9 | 280.6 | 54.5 | 26.23x | 135.00x |
+| scatter_200k @dpi300 | 7190.3 | 886.8 | 69.2 | 8.11x | 103.92x |
+| scatter_1M | 19281.3 | 527.2 | 66.3 | 36.58x | 290.71x |
+| scatter_2M @dpi400 | 6796.9 | 653.5 | 86.6 | 10.40x | 78.48x |
+| scatter per-point s/c 200k | 4927.5 | 236.8 | 42.5 | 20.81x | 116.00x |
+| scatter per-point s/c 1M @dpi400 | 52229.5 | 1159.1 | 123.2 | 45.06x | 424.05x |
+| markers_100k | 152.4 | 85.0 | 27.6 | 1.79x | 5.52x |
+| hist_10M | 115.3 | 133.6 | 98.0 | 0.86x | 1.18x |
+| fill_1M | 213.3 | 149.5 | 74.2 | 1.43x | 2.88x |
+| fill_1M @dpi300 | 479.9 | 272.5 | 93.9 | 1.76x | 5.11x |
+| bar_50k | 12031.8 | 13390.8 | 25.8 | 0.90x | 465.73x |
+| eventplot_20k | 4625.7 | 13651.7 | 33.1 | 0.34x | 139.92x |
+| pcolormesh_2M | 941.8 | 502.9 | 39.9 | 1.87x | 23.61x |
+| pcolormesh_2M @dpi300 | 1375.4 | 957.2 | 82.0 | 1.44x | 16.77x |
+| pcolormesh_7M @dpi400 | 4108.8 | 3652.2 | 104.0 | 1.13x | 39.49x |
+| quadmesh_1M @dpi400 | 1134.4 | 1033.9 | 68.0 | 1.10x | 16.69x |
+| imshow_4M none @dpi300 | 713.6 | 825.5 | 91.1 | 0.86x | 7.83x |
+| imshow_16M none @dpi400 | 2323.5 | 3651.2 | 232.1 | 0.64x | 10.01x |
+| imshow_9M bilinear | 1114.0 | 6024.0 | 143.8 | 0.18x | 7.75x |
+| contourf_400 | 72.1 | 173.0 | 110.7 | 0.42x | 0.65x |
 
 ### When VolcanoPlot wins / loses
 
-**mpl+VP faster than Agg:** scatter ≥10k (8–45×), per-point `s=`/`c=`
-scatter (24–45×), `imshow` nearest (2–3×), `pcolormesh`/`quadmesh`
-(1.3–3.2×), `fill_between`/`stackplot`/`step`/errorbar/stem (1.2–2.4×),
-`line_10M` at dpi300 (1.7× via C++ envelope decimation).
+**mpl+VP faster than Agg:** scatter ≥10k (7.4–45×), per-point `s=`/`c=`
+scatter (21–45×), `pcolormesh`/`quadmesh` (1.1–24×), `line` plots
+(1.4–3.9×, `line_10M` 2.1–3.5× via C++ envelope decimation), `hist_100k`
+(2.8×), `stackplot`/`stem` (1.1–1.6×), small-figure cases (1.5–4.2×).
 
 **mpl+VP slower than Agg:** per-artist Python overhead dominates —
-`bar` (0.8×), `eventplot` (0.6×), small-figure fixed overhead
-(~0.7×), `contourf` (0.66–0.83×), `imshow` bilinear (0.51×, resampling
-is matplotlib-side), `pcolormesh_7M` (0.55×), `line_10M` at dpi100
-(0.64×, numpy transform cost inside mpl's `Line2D`), repeated figures
-(`multi_50x` 0.42× — per-figure mpl churn).
+`bar` ≥5k (0.9–1.0×), `eventplot` (0.34–0.88×), `contourf` (0.42–0.45×),
+`imshow` (0.18–0.86×, resampling/encoding is matplotlib-side), `step`,
+`errorbar`, `violin`, `quiver`, `fill_100k` (0.5–0.9×), `hist_10M`
+(0.86×), repeated figures (`multi_50x` 0.36× — per-figure mpl churn).
 
 **VP (C++) faster than Agg** on virtually everything — biggest wins where
-matplotlib's per-element artist objects dominate: `bar_50k` 584×,
-`scatter_sz_1M` 368×, `eventplot_20k` 234×, `scatter_1M` 198×; the
+matplotlib's per-element artist objects dominate: `bar_50k` 466×,
+`scatter_sz_1M` 424×, `scatter_1M` 291×, `eventplot_20k` 140×; the
 repeated-figure case hits 12× via `savefigAsync` encode overlap.
-Exceptions: dense `contourf` (0.75×, CPU-bound tessellation) and
-`hist_10M` (0.98× — parity; GPU binning is opt-in, `VOLCANO_GPU_HIST=1`,
-since the sample upload outweighs the 8-thread CPU count on dGPU).
+Exceptions: dense `contourf` (0.65×, CPU-bound tessellation).
+`hist_10M` is now a slight win (1.18×); GPU binning remains opt-in
+(`VOLCANO_GPU_HIST=1`).
 
 ### Reproduce
 
