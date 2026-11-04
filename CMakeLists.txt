@@ -102,6 +102,7 @@ if(VOLCANO_WEB)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/ffi.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/web.cmake)
     return()
 endif()
@@ -319,6 +320,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/plot.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/encode.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/glyb.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/text.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/components/ffi.cmake)
 
 # -----------------------------------------------------------------------------
 # CLI applications
