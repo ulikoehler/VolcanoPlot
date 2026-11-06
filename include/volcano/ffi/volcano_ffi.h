@@ -42,6 +42,8 @@ void vp_set_axis_labels(VpFigure* fig, const char* x_label,
 
 /// Background: 0 = dark (default mpl), 1 = white.
 void vp_set_background(VpFigure* fig, int white);
+/// Set the canvas+axes background to an exact color (egui panel_fill).
+void vp_set_background_rgba(VpFigure* fig, float r, float g, float b);
 
 /// Render one frame into `out` (must be width*height*4 bytes).
 /// Returns width*height*4 on success, 0 on failure.

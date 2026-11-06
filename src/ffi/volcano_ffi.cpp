@@ -26,7 +26,9 @@ struct VpFigure {
     std::unique_ptr<backend::IBackend> backend;
     std::unique_ptr<render::Renderer> renderer;
     std::unique_ptr<plot::Figure> figure;
-    float margin_l = 0.07f, margin_r = 0.985f, margin_b = 0.16f, margin_t = 0.985f;
+    float margin_l = 0.07f, margin_r = 0.985f, margin_b = 0.20f, margin_t = 0.985f;
+    plot::Color custom_bg{0,0,0,0};
+    bool has_custom_bg = false;
     plot::Axes* axes = nullptr;
 
     struct TraceData {
@@ -228,6 +230,34 @@ void vp_set_viewport(VpFigure* fig, double xmin, double xmax, double ymin,
     } catch (...) {}
 }
 
+void vp_set_margins(VpFigure* f, float left, float right, float bottom, float top) {
+    try {
+        if (!f) return;
+        f->margin_l = left; f->margin_r = right;
+        f->margin_b = bottom; f->margin_t = top;
+        if (f->figure) {
+            f->figure->grid().left = left;
+            f->figure->grid().right = right;
+            f->figure->grid().bottom = bottom;
+            f->figure->grid().top = top;
+        }
+    } catch (...) {}
+}
+
+void vp_set_background_rgba(VpFigure* fig, float r, float g, float b) {
+    try {
+        if (!fig) return;
+        fig->custom_bg = plot::Color::fromRgba8(
+            int(r * 255), int(g * 255), int(b * 255), 255);
+        fig->has_custom_bg = true;
+        if (fig->figure) {
+            fig->figure->style().faceColor = fig->custom_bg;
+            fig->figure->style().edgeColor = fig->custom_bg;
+        }
+        if (fig->axes) fig->axes->style().faceColor = fig->custom_bg;
+    } catch (...) {}
+}
+
 void vp_set_axis_labels(VpFigure* fig, const char* x_label,
                         const char* y_label) {
     try {
@@ -258,6 +288,11 @@ void vp_set_background(VpFigure* fig, int white) {
             st.yAxis.gridLineWidth = 0.6f;
             if (fig->figure) fig->figure->style() = st;
             fig->axes->setStyle(st);
+            // setStyle wipes the labels — re-apply them.
+            if (!fig->x_label.empty())
+                fig->axes->style().xAxis.label = fig->x_label;
+            if (!fig->y_label.empty())
+                fig->axes->style().yAxis.label = fig->y_label;
         }
     } catch (...) {}
 }
