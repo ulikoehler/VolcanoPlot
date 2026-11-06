@@ -62,6 +62,7 @@ static void rebuild_figure(VpFigure* f) {
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
     f->traces.clear();
     for (auto& [id, td] : f->trace_data) {
+        if (td.x.empty()) continue; // empty LinePlot crashes renderFrame
         auto lp = std::make_shared<plot::LinePlot>(plot::Series2D{});
         auto* raw = lp.get();
         f->axes->addPlot(std::move(lp));
@@ -162,7 +163,21 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
         td.style = style;
 
         auto it = fig->traces.find(id);
-        if (it == fig->traces.end()) return;
+        // An empty LinePlot crashes renderFrame — drop it until data
+        // arrives again.
+        if (n == 0) {
+            if (it != fig->traces.end()) {
+                fig->axes->removePlot(it->second);
+                fig->traces.erase(it);
+            }
+            return;
+        }
+        if (it == fig->traces.end()) {
+            auto lp2 = std::make_shared<plot::LinePlot>(plot::Series2D{});
+            auto* raw = lp2.get();
+            fig->axes->addPlot(std::move(lp2));
+            it = fig->traces.emplace(id, raw).first;
+        }
         auto* lp = it->second;
         lp->setData(td.x, td.y);
         auto& s = lp->series();
