@@ -45,6 +45,13 @@ struct VpFigure {
 
 static void rebuild_figure(VpFigure* f) {
     f->figure = std::make_unique<plot::Figure>(1, 1);
+    // Fill the whole canvas — the texture must align with the egui
+    // plot transform underneath it (default margins are matplotlib's
+    // 0.125/0.9/0.11/0.88 which would squeeze the data area).
+    f->figure->grid().left = 0.0f;
+    f->figure->grid().right = 1.0f;
+    f->figure->grid().bottom = 0.0f;
+    f->figure->grid().top = 1.0f;
     f->axes = f->figure->addAxes();
     f->axes->setStyle(f->white_bg ? plot::styles::defaultStyle()
                                   : plot::styles::darkBackground());
