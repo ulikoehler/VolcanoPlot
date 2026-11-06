@@ -56,8 +56,12 @@ static void rebuild_figure(VpFigure* f) {
     f->figure->grid().bottom = 0.14f;
     f->figure->grid().top = 0.985f;
     f->axes = f->figure->addAxes();
-    f->axes->setStyle(f->white_bg ? plot::styles::defaultStyle()
-                                  : plot::styles::darkBackground());
+    auto st = f->white_bg ? plot::styles::defaultStyle()
+                          : plot::styles::darkBackground();
+    st.xAxis.grid = true;
+    st.yAxis.grid = true;
+    f->figure->style() = st;   // canvas/margins adopt the theme too
+    f->axes->setStyle(st);
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
     f->traces.clear();
@@ -234,8 +238,12 @@ void vp_set_background(VpFigure* fig, int white) {
         if (!fig) return;
         fig->white_bg = white != 0;
         if (fig->axes) {
-            fig->axes->setStyle(white ? plot::styles::defaultStyle()
-                                      : plot::styles::darkBackground());
+            auto st = white ? plot::styles::defaultStyle()
+                            : plot::styles::darkBackground();
+            st.xAxis.grid = true;
+            st.yAxis.grid = true;
+            if (fig->figure) fig->figure->style() = st;
+            fig->axes->setStyle(st);
         }
     } catch (...) {}
 }
