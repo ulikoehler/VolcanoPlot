@@ -26,6 +26,7 @@ struct VpFigure {
     std::unique_ptr<backend::IBackend> backend;
     std::unique_ptr<render::Renderer> renderer;
     std::unique_ptr<plot::Figure> figure;
+    float margin_l = 0.07f, margin_r = 0.985f, margin_b = 0.16f, margin_t = 0.985f;
     plot::Axes* axes = nullptr;
 
     struct TraceData {
@@ -51,15 +52,22 @@ static void rebuild_figure(VpFigure* f) {
     // Leave room for VolcanoPlot's own axes/ticks/labels — liveplot
     // computes the same axes rect (left .11, right .985, bottom .14,
     // top .985) to align overlay coordinates.
-    f->figure->grid().left = 0.11f;
-    f->figure->grid().right = 0.985f;
-    f->figure->grid().bottom = 0.14f;
-    f->figure->grid().top = 0.985f;
+    f->figure->grid().left = f->margin_l;
+    f->figure->grid().right = f->margin_r;
+    f->figure->grid().bottom = f->margin_b;
+    f->figure->grid().top = f->margin_t;
     f->axes = f->figure->addAxes();
     auto st = f->white_bg ? plot::styles::defaultStyle()
                           : plot::styles::darkBackground();
     st.xAxis.grid = true;
     st.yAxis.grid = true;
+    // Subtle grid — muted against the plot bg.
+    auto gc = f->white_bg ? plot::Color::fromRgba8(200, 200, 200, 110)
+                          : plot::Color::fromRgba8(80, 80, 80, 110);
+    st.xAxis.gridColor = gc;
+    st.yAxis.gridColor = gc;
+    st.xAxis.gridLineWidth = 0.6f;
+    st.yAxis.gridLineWidth = 0.6f;
     f->figure->style() = st;   // canvas/margins adopt the theme too
     f->axes->setStyle(st);
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
@@ -242,6 +250,12 @@ void vp_set_background(VpFigure* fig, int white) {
                             : plot::styles::darkBackground();
             st.xAxis.grid = true;
             st.yAxis.grid = true;
+            auto gc = white ? plot::Color::fromRgba8(200, 200, 200, 110)
+                            : plot::Color::fromRgba8(80, 80, 80, 110);
+            st.xAxis.gridColor = gc;
+            st.yAxis.gridColor = gc;
+            st.xAxis.gridLineWidth = 0.6f;
+            st.yAxis.gridLineWidth = 0.6f;
             if (fig->figure) fig->figure->style() = st;
             fig->axes->setStyle(st);
         }
