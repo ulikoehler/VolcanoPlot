@@ -48,10 +48,13 @@ static void rebuild_figure(VpFigure* f) {
     // Fill the whole canvas — the texture must align with the egui
     // plot transform underneath it (default margins are matplotlib's
     // 0.125/0.9/0.11/0.88 which would squeeze the data area).
-    f->figure->grid().left = 0.0f;
-    f->figure->grid().right = 1.0f;
-    f->figure->grid().bottom = 0.0f;
-    f->figure->grid().top = 1.0f;
+    // Leave room for VolcanoPlot's own axes/ticks/labels — liveplot
+    // computes the same axes rect (left .11, right .985, bottom .14,
+    // top .985) to align overlay coordinates.
+    f->figure->grid().left = 0.11f;
+    f->figure->grid().right = 0.985f;
+    f->figure->grid().bottom = 0.14f;
+    f->figure->grid().top = 0.985f;
     f->axes = f->figure->addAxes();
     f->axes->setStyle(f->white_bg ? plot::styles::defaultStyle()
                                   : plot::styles::darkBackground());
