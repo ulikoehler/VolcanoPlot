@@ -27,6 +27,7 @@ struct VpFigure {
     std::unique_ptr<render::Renderer> renderer;
     std::unique_ptr<plot::Figure> figure;
     float margin_l = 0.07f, margin_r = 0.985f, margin_b = 0.20f, margin_t = 0.985f;
+    bool grid_on = true;
     plot::Color custom_bg{0,0,0,0};
     bool has_custom_bg = false;
     plot::Axes* axes = nullptr;
@@ -81,8 +82,8 @@ static void rebuild_figure(VpFigure* f) {
     f->axes = f->figure->addAxes();
     auto st = f->white_bg ? plot::styles::defaultStyle()
                           : plot::styles::darkBackground();
-    st.xAxis.grid = true;
-    st.yAxis.grid = true;
+    st.xAxis.grid = f->grid_on;
+    st.yAxis.grid = f->grid_on;
     // Subtle grid — muted against the plot bg.
     auto gc = f->white_bg ? plot::Color::fromRgba8(200, 200, 200, 110)
                           : plot::Color::fromRgba8(80, 80, 80, 110);
@@ -289,6 +290,17 @@ void vp_set_axis_labels(VpFigure* fig, const char* x_label,
     } catch (...) {}
 }
 
+void vp_set_grid(VpFigure* fig, int on) {
+    try {
+        if (!fig) return;
+        fig->grid_on = on != 0;
+        if (fig->axes) {
+            fig->axes->style().xAxis.grid = fig->grid_on;
+            fig->axes->style().yAxis.grid = fig->grid_on;
+        }
+    } catch (...) {}
+}
+
 void vp_set_background(VpFigure* fig, int white) {
     try {
         if (!fig) return;
@@ -296,8 +308,8 @@ void vp_set_background(VpFigure* fig, int white) {
         if (fig->axes) {
             auto st = white ? plot::styles::defaultStyle()
                             : plot::styles::darkBackground();
-            st.xAxis.grid = true;
-            st.yAxis.grid = true;
+            st.xAxis.grid = fig->grid_on;
+            st.yAxis.grid = fig->grid_on;
             auto gc = white ? plot::Color::fromRgba8(200, 200, 200, 110)
                             : plot::Color::fromRgba8(80, 80, 80, 110);
             st.xAxis.gridColor = gc;
