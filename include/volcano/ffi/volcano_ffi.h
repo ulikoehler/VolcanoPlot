@@ -29,6 +29,13 @@ uint64_t vp_trace_add(VpFigure* fig);
 void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
                   uint32_t rgba8, float width, int style);
 
+/// Marker glyph at each data point — independent of `style`, so any
+/// line style can be combined with markers. `marker` is a
+/// plot::MarkerStyle ordinal (0..41; 40 = None). `size` is the marker
+/// size in pixels; <= 0 keeps the previous size.
+void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
+                         float size);
+
 void vp_trace_remove(VpFigure* fig, uint64_t id);
 
 /// Explicit viewport (data coords). Any axis may be left at autoscale by

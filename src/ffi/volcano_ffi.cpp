@@ -36,6 +36,8 @@ struct VpFigure {
         uint32_t rgba8 = 0xFFFFFFFF;
         float width = 1.5f;
         int style = 0;
+        int marker = 40;        // plot::MarkerStyle::None
+        float marker_size = 6.0f;
     };
     std::unordered_map<uint64_t, TraceData> trace_data;
     std::unordered_map<uint64_t, plot::LinePlot*> traces;
@@ -45,6 +47,24 @@ struct VpFigure {
     bool white_bg = false;
     int w = 0, h = 0;
 };
+
+static void apply_trace_style(const VpFigure::TraceData& td,
+                              plot::Series2D& s) {
+    s.color = plot::Color::fromRgba8(
+        (td.rgba8 >> 24) & 0xFF, (td.rgba8 >> 16) & 0xFF,
+        (td.rgba8 >> 8) & 0xFF, td.rgba8 & 0xFF);
+    s.lineWidth = td.width;
+    s.lineStyle = td.style == 1 ? plot::LineStyle::Dashed
+                  : td.style == 2 ? plot::LineStyle::Dotted
+                                  : plot::LineStyle::Solid;
+    // style==3 (legacy points flag) forces a Circle marker when the
+    // dedicated marker field is still at its default.
+    s.marker = td.marker != 40
+                   ? static_cast<plot::MarkerStyle>(td.marker)
+                   : (td.style == 3 ? plot::MarkerStyle::Circle
+                                    : plot::MarkerStyle::None);
+    if (td.marker != 40) s.size = td.marker_size;
+}
 
 static void rebuild_figure(VpFigure* f) {
     f->figure = std::make_unique<plot::Figure>(1, 1);
@@ -81,16 +101,7 @@ static void rebuild_figure(VpFigure* f) {
         auto* raw = lp.get();
         f->axes->addPlot(std::move(lp));
         raw->setData(td.x, td.y);
-        auto& s = raw->series();
-        s.color = plot::Color::fromRgba8(
-            (td.rgba8 >> 24) & 0xFF, (td.rgba8 >> 16) & 0xFF,
-            (td.rgba8 >> 8) & 0xFF, td.rgba8 & 0xFF);
-        s.lineWidth = td.width;
-        s.lineStyle = td.style == 1 ? plot::LineStyle::Dashed
-                      : td.style == 2 ? plot::LineStyle::Dotted
-                                      : plot::LineStyle::Solid;
-        s.marker = td.style == 3 ? plot::MarkerStyle::Circle
-                                 : plot::MarkerStyle::None;
+        apply_trace_style(td, raw->series());
         f->traces[id] = raw;
     }
 }
@@ -194,16 +205,23 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
         }
         auto* lp = it->second;
         lp->setData(td.x, td.y);
-        auto& s = lp->series();
-        s.color = plot::Color::fromRgba8(
-            (rgba8 >> 24) & 0xFF, (rgba8 >> 16) & 0xFF, (rgba8 >> 8) & 0xFF,
-            rgba8 & 0xFF);
-        s.lineWidth = width;
-        s.lineStyle = style == 1 ? plot::LineStyle::Dashed
-                      : style == 2 ? plot::LineStyle::Dotted
-                                   : plot::LineStyle::Solid;
-        s.marker = style == 3 ? plot::MarkerStyle::Circle
-                              : plot::MarkerStyle::None;
+        apply_trace_style(td, lp->series());
+    } catch (...) {}
+}
+
+void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
+                         float size) {
+    try {
+        if (!fig) return;
+        auto td_it = fig->trace_data.find(id);
+        if (td_it == fig->trace_data.end()) return;
+        auto& td = td_it->second;
+        td.marker = marker;
+        if (size > 0.0f) td.marker_size = size;
+        auto it = fig->traces.find(id);
+        if (it != fig->traces.end()) {
+            apply_trace_style(td, it->second->series());
+        }
     } catch (...) {}
 }
 
