@@ -630,7 +630,13 @@ std::unique_ptr<render::Cmd> ScreenBackend::beginFrame() {
     vk::CommandBufferBeginInfo bi{};
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cb.begin(bi);
+    passBegun_ = false;
+    return std::make_unique<render::VkCmd>(cb);
+}
 
+void ScreenBackend::beginRenderPass() {
+    if (passBegun_) return;
+    auto cb = commandBuffers_[currentFrame_].get();
     // MSAA adds a resolve attachment at index 1, pushing depth to 2.
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
     std::array<vk::ClearValue, 3> clears{};
@@ -643,10 +649,11 @@ std::unique_ptr<render::Cmd> ScreenBackend::beginFrame() {
        .setRenderArea(vk::Rect2D{}.setOffset({0,0}).setExtent(extent_))
        .setClearValues(clears);
     cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
-    return std::make_unique<render::VkCmd>(cb);
+    passBegun_ = true;
 }
 
 void ScreenBackend::endFrame() {
+    beginRenderPass();   // frames that never drew still submit a clear
     auto cb = commandBuffers_[currentFrame_].get();
     cb.endRenderPass();
     cb.end();

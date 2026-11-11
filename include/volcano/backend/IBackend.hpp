@@ -66,6 +66,13 @@ public:
     /// an OpStream recorder on the web backend).
     virtual std::unique_ptr<render::Cmd> beginFrame() = 0;
 
+    /// Open the render pass on the frame's command buffer. Called by
+    /// the renderer between the compute pre-pass and the first draw —
+    /// compute dispatches must stay outside the render pass, so
+    /// beginning it is explicit rather than part of beginFrame().
+    /// No-op for backends without a Vulkan render pass (op stream).
+    virtual void beginRenderPass() {}
+
     /// End the frame: finish command recording, submit, and present
     /// (screen) / resolve (headless) / flush the op stream (web).
     virtual void endFrame() = 0;

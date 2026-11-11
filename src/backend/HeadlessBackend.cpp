@@ -271,7 +271,15 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
     vk::CommandBufferBeginInfo bi{};
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     cb.begin(bi);
+    frameBegun_ = true;
+    passBegun_ = false;
+    pendingLoad_ = false;
+    return std::make_unique<render::VkCmd>(cb);
+}
 
+void HeadlessBackend::beginRenderPass() {
+    if (!frameBegun_ || passBegun_) return;
+    auto cb = commandBuffer_.get();
     // MSAA adds a resolve attachment at index 1, pushing depth to 2.
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
     std::array<vk::ClearValue, 3> clears{};
@@ -279,13 +287,13 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
                                 clearColor_[2], clearColor_[3]});
     clears[msaa ? 2 : 1].depthStencil.setDepth(1.0f).setStencil(0);
     vk::RenderPassBeginInfo rpi{};
-    rpi.setRenderPass(renderPass_.get())
+    rpi.setRenderPass(pendingLoad_ ? renderPassLoad_.get()
+                                   : renderPass_.get())
        .setFramebuffer(framebuffer_.get())
        .setRenderArea(vk::Rect2D{}.setOffset({0,0}).setExtent(extent_))
        .setClearValues(clears);
     cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
-    frameBegun_ = true;
-    return std::make_unique<render::VkCmd>(cb);
+    passBegun_ = true;
 }
 
 void HeadlessBackend::ensureStaging() {
@@ -301,6 +309,8 @@ void HeadlessBackend::ensureStaging() {
 
 void HeadlessBackend::endFrame() {
     if (!frameBegun_) return;
+    beginRenderPass();   // frames that never opened the pass still
+                         // submit a valid (clear-only) buffer
     auto cb = commandBuffer_.get();
     cb.endRenderPass();
 
@@ -340,6 +350,7 @@ void HeadlessBackend::endFrame() {
                          stagingBuffer_.handle(), region);
     cb.end();
     frameBegun_ = false;
+    passBegun_ = false;
 
     auto dev = ctx_.device.handle();
     dev.resetFences(renderFence_.get());
@@ -425,18 +436,9 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
         vk::ImageLayout::eTransferSrcOptimal,
         vk::ImageLayout::eTransferDstOptimal);
 
-    // Begin the load-variant pass (clear values are ignored but the
-    // count must match the attachment list).
-    std::array<vk::ClearValue, 3> clears{};
-    clears[samples_ != vk::SampleCountFlagBits::e1 ? 2 : 1]
-        .depthStencil.setDepth(1.0f).setStencil(0);
-    vk::RenderPassBeginInfo rpi{};
-    rpi.setRenderPass(renderPassLoad_.get())
-       .setFramebuffer(framebuffer_.get())
-       .setRenderArea(vk::Rect2D{}.setOffset({0,0}).setExtent(extent_))
-       .setClearValues(clears);
-    cb.beginRenderPass(rpi, vk::SubpassContents::eInline);
     frameBegun_ = true;
+    passBegun_ = false;
+    pendingLoad_ = true;
     return std::make_unique<render::VkCmd>(cb);
 }
 

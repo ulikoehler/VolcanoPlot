@@ -206,6 +206,7 @@ void MplCanvas::endFrame() {
         backend_->setClearColor(clear_.r, clear_.g, clear_.b, clear_.a);
         auto cmd = backend_->beginFrame();
         backend_->gpu().beginFrameScratch();
+        backend_->beginRenderPass();
         execute(*cmd);
         backend_->endFrame();
         if (!text_->atlasDirty()) break;

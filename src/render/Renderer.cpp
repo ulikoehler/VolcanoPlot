@@ -1945,31 +1945,27 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
     if (figure.alignXLabels() || figure.alignYLabels())
         alignAxesLabels(figure);
 
-    // GPU pre-pass: IPlot::preDraw records compute work (line
-    // tessellation, ...) that must run outside the render pass. The
-    // pre-pass is submitted on the graphics queue ahead of the frame —
-    // same-queue ordering makes its writes visible to the draw
-    // submission (same mechanism as staging uploads).
-    {
-        auto pre = gpu().beginPrePass();
-        gpu().gpuLine().resetScratch();
-        for (auto& p : figure.placements())
-            for (auto* plot : p.axes->drawOrder()) {
-                if (subset == DrawSubset::StaticOnly && plot->animated)
-                    continue;
-                if (subset == DrawSubset::AnimatedOnly && !plot->animated)
-                    continue;
-                const_cast<plot::IPlot*>(plot)->preDraw(
-                    *pre, *this, *p.axes, p.axes->rect);
-            }
-        gpu().submitPrePass(std::move(pre));
-    }
-
     auto cmdOwner = subset == DrawSubset::AnimatedOnly
                         ? backend_.beginFrameLoad()
                         : backend_.beginFrame();
     render::Cmd& cmd = *cmdOwner;
     gpu().beginFrameScratch();
+
+    // GPU pre-pass: IPlot::preDraw records compute work (line
+    // tessellation, transforms) into the frame's command buffer ahead
+    // of the render pass — one submission + fence wait per frame (was a
+    // separate prepass command buffer + submit + wait). The recorded
+    // barriers keep the compute writes visible to the draw commands.
+    for (auto& p : figure.placements())
+        for (auto* plot : p.axes->drawOrder()) {
+            if (subset == DrawSubset::StaticOnly && plot->animated)
+                continue;
+            if (subset == DrawSubset::AnimatedOnly && !plot->animated)
+                continue;
+            const_cast<plot::IPlot*>(plot)->preDraw(
+                cmd, *this, *p.axes, p.axes->rect);
+        }
+    backend_.beginRenderPass();
 
     // Figure patch (figure.facecolor) fills the canvas under everything.
     const auto& figFc = figure.style().faceColor;
@@ -3003,6 +2999,7 @@ bool Renderer::savefigVector(plot::Figure& figure,
             gpu().instancedPath().resetScratch();
             gpu().sharedPoints().resetScratch();
             gpu().text().resetScratch();
+            backend_.beginRenderPass();
             for (auto* p : plots)
                 if (p->visible)
                     const_cast<plot::IPlot*>(p)->draw(cmd, *this, axes,

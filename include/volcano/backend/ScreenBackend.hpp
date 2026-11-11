@@ -24,6 +24,7 @@ public:
     void setWindowTitle(std::string_view title) override;
     void toggleFullscreen() override;
     std::unique_ptr<render::Cmd> beginFrame() override;
+    void beginRenderPass() override;
     void endFrame() override;
     render::GpuServices& gpu() override;
 
@@ -102,6 +103,9 @@ private:
     uint32_t currentFrame_ = 0;
     uint32_t imageIndex_ = 0;
     bool resized_ = false;
+    /// True once beginRenderPass() opened the pass this frame —
+    /// endFrame() auto-begins for frames that never drew.
+    bool passBegun_ = false;
     /// Queued input events translated during pollEvents().
     std::vector<InputEvent> pendingEvents_;
 

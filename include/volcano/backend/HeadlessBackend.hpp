@@ -23,6 +23,7 @@ public:
     bool pollEvents() override { return true; }
     std::unique_ptr<render::Cmd> beginFrame() override;
     std::unique_ptr<render::Cmd> beginFrameLoad() override;
+    void beginRenderPass() override;
     void endFrame() override;
     std::vector<uint8_t> readbackRgba8() override;
     size_t readbackRgba8Into(uint8_t* dst, size_t dstLen) override;
@@ -85,6 +86,12 @@ private:
     vk::UniqueCommandBuffer commandBuffer_;
     vk::UniqueFence renderFence_;
     bool frameBegun_ = false;
+    /// Which pass beginRenderPass() opens: clear (false) or the
+    /// blit-load variant (true). Set by beginFrame*/beginFrameLoad.
+    bool pendingLoad_ = false;
+    /// True once beginRenderPass() has opened the pass this frame —
+    /// endFrame() auto-begins for frames that never drew.
+    bool passBegun_ = false;
 
     /// Persistent host-visible readback target — the image→buffer
     /// copy is recorded into `commandBuffer_` inside endFrame(), so a
