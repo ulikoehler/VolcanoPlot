@@ -56,6 +56,8 @@ std::shared_ptr<GpuContext> sharedGpuContext() {
     core::DeviceDesc ddesc{};
     ddesc.hasSurface = false;
     ddesc.features.features.wideLines = VK_TRUE;
+    if (c->physical.handle().getFeatures().shaderFloat64)
+        ddesc.features.features.shaderFloat64 = VK_TRUE;
     c->device = core::Device(c->physical, ddesc);
     c->allocator = core::Allocator(c->instance.handle(),
                                  c->physical.handle(),

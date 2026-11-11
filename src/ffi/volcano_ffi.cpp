@@ -34,7 +34,10 @@ struct VpFigure {
     plot::Axes* axes = nullptr;
 
     struct TraceData {
-        std::vector<float> x, y;
+        // Interleaved [x,y] pairs — populated on figure rebuild by
+        // pulling the live plot's raw f64 store back out (takeRawF64),
+        // so it costs nothing while the figure is intact.
+        std::vector<double> xy;
         uint32_t rgba8 = 0xFFFFFFFF;
         float width = 1.5f;
         int style = 0;
@@ -69,6 +72,12 @@ static void apply_trace_style(const VpFigure::TraceData& td,
 }
 
 static void rebuild_figure(VpFigure* f) {
+    // Recover raw point data from live plots before the old figure is
+    // destroyed — the rebuilt plots take the same buffers back, so a
+    // rebuild doesn't cost a data copy.
+    for (auto& [id, lp] : f->traces)
+        if (lp) f->trace_data[id].xy = lp->takeRawF64();
+    f->traces.clear();
     f->figure = std::make_unique<plot::Figure>(1, 1);
     // Fill the whole canvas — the texture must align with the egui
     // plot transform underneath it (default margins are matplotlib's
@@ -96,13 +105,12 @@ static void rebuild_figure(VpFigure* f) {
     f->axes->setStyle(st);
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
-    f->traces.clear();
     for (auto& [id, td] : f->trace_data) {
-        if (td.x.empty()) continue; // empty LinePlot crashes renderFrame
+        if (td.xy.empty()) continue; // empty LinePlot crashes renderFrame
         auto lp = std::make_shared<plot::LinePlot>(plot::Series2D{});
         auto* raw = lp.get();
         f->axes->addPlot(std::move(lp));
-        raw->setData(td.x, td.y);
+        raw->setDataF64(std::move(td.xy));
         apply_trace_style(td, raw->series());
         f->traces[id] = raw;
     }
@@ -112,6 +120,10 @@ static bool init(VpFigure* f, int w, int h) {
     // Tear down the old figure *before* the backend: plots own GPU
     // buffers tied to the old device — destroying them after the
     // backend is gone trips vkDestroyBuffer on an invalid device.
+    // Pull the raw point data out of the live plots first so the
+    // rebuilt figure keeps it.
+    for (auto& [id, lp] : f->traces)
+        if (lp) f->trace_data[id].xy = lp->takeRawF64();
     f->traces.clear();
     f->figure = std::make_unique<plot::Figure>(1, 1);
     f->axes = nullptr;
@@ -185,12 +197,6 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
         auto td_it = fig->trace_data.find(id);
         if (td_it == fig->trace_data.end()) return;
         auto& td = td_it->second;
-        td.x.assign(n, 0.0f);
-        td.y.assign(n, 0.0f);
-        for (size_t i = 0; i < n; ++i) {
-            td.x[i] = static_cast<float>(xy[2 * i]);
-            td.y[i] = static_cast<float>(xy[2 * i + 1]);
-        }
         td.rgba8 = rgba8;
         td.width = width;
         td.style = style;
@@ -199,6 +205,7 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
         // An empty LinePlot crashes renderFrame — drop it until data
         // arrives again.
         if (n == 0) {
+            td.xy.clear();
             if (it != fig->traces.end()) {
                 fig->axes->removePlot(it->second);
                 fig->traces.erase(it);
@@ -212,7 +219,10 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
             it = fig->traces.emplace(id, raw).first;
         }
         auto* lp = it->second;
-        lp->setData(td.x, td.y);
+        // One memcpy into the plot's recycled f64 buffer — the f64→f32
+        // narrowing runs on the GPU, so there's no host-side
+        // de-interleave + re-interleave pass at all.
+        lp->setDataF64(std::span<const double>{xy, 2 * n});
         apply_trace_style(td, lp->series());
     } catch (...) {}
 }
@@ -344,6 +354,18 @@ size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len) {
         return fig->backend->readbackRgba8Into(out, need) == need ? need : 0;
     } catch (...) {
         return 0;
+    }
+}
+
+const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
+    try {
+        if (!fig || !out_len) return nullptr;
+        *out_len = 0;
+        fig->renderer->prepare(*fig->figure);
+        fig->renderer->renderFrame(*fig->figure);
+        return fig->backend->rgba8View(out_len);
+    } catch (...) {
+        return nullptr;
     }
 }
 

@@ -51,6 +51,10 @@ public:
         return ctx_.device.physical().getProperties()
             .limits.pointSizeRange[1];
     }
+    /// The wrapped physical device handle (feature queries).
+    [[nodiscard]] vk::PhysicalDevice physical() const {
+        return ctx_.device.physical();
+    }
     [[nodiscard]] vk::CommandPool computePool() const {
         return ctx_.computePool.handle();
     }

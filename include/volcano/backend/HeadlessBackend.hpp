@@ -26,6 +26,7 @@ public:
     void endFrame() override;
     std::vector<uint8_t> readbackRgba8() override;
     size_t readbackRgba8Into(uint8_t* dst, size_t dstLen) override;
+    const uint8_t* rgba8View(size_t* outLen) override;
     render::GpuServices& gpu() override;
 
     bool blitCapture() override;

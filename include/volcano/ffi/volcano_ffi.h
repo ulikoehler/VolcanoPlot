@@ -59,6 +59,13 @@ void vp_set_background_rgba(VpFigure* fig, float r, float g, float b);
 /// Returns width*height*4 on success, 0 on failure.
 size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len);
 
+/// Render one frame and return a borrowed pointer into the backend's
+/// readback staging buffer — skips the staging→caller memcpy. The
+/// pointer stays valid until the next render/readback on `fig`.
+/// Returns nullptr (and *out_len = 0) on failure or when the backend
+/// has no view support; fall back to vp_render_rgba.
+const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len);
+
 /// Current size after create/resize.
 int vp_figure_width(const VpFigure* fig);
 int vp_figure_height(const VpFigure* fig);

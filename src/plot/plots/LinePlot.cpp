@@ -23,6 +23,8 @@ void LinePlot::setData(std::vector<float> x, std::vector<float> y) {
     touch();
 }
 void LinePlot::setXdata(std::vector<float> x) {
+    ensureCpuPoints();
+    useF64_ = false;
     const size_t n = std::min(x.size(), series_.points.size());
     series_.points.resize(n);
     for (size_t i = 0; i < n; ++i) series_.points[i].x = x[i];
@@ -30,6 +32,8 @@ void LinePlot::setXdata(std::vector<float> x) {
     touch();
 }
 void LinePlot::setYdata(std::vector<float> y) {
+    ensureCpuPoints();
+    useF64_ = false;
     const size_t n = std::min(y.size(), series_.points.size());
     series_.points.resize(n);
     for (size_t i = 0; i < n; ++i) series_.points[i].y = y[i];
@@ -37,20 +41,75 @@ void LinePlot::setYdata(std::vector<float> y) {
     touch();
 }
 
+void LinePlot::setDataF64(std::vector<double> xy) {
+    rawF64_ = std::move(xy);
+    useF64_ = true;
+    cpuDirty_ = true;
+    series_.points.clear();
+    dataDirty_ = true;
+    touch();
+}
+
+void LinePlot::setDataF64(std::span<const double> xy) {
+    rawF64_.assign(xy.begin(), xy.end());
+    useF64_ = true;
+    cpuDirty_ = true;
+    series_.points.clear();
+    dataDirty_ = true;
+    touch();
+}
+
+std::vector<double> LinePlot::takeRawF64() {
+    if (useF64_) return std::move(rawF64_);
+    std::vector<double> v;
+    v.reserve(series_.points.size() * 2);
+    for (const auto& p : series_.points) {
+        v.push_back(p.x);
+        v.push_back(p.y);
+    }
+    return v;
+}
+
+void LinePlot::ensureCpuPoints() const {
+    if (!useF64_ || !cpuDirty_) return;
+    auto& pts = const_cast<LinePlot*>(this)->series_.points;
+    const size_t n = rawF64_.size() / 2;
+    pts.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        pts[i] = {static_cast<float>(rawF64_[2 * i]),
+                  static_cast<float>(rawF64_[2 * i + 1])};
+    cpuDirty_ = false;
+}
+
 void LinePlot::prepare(render::Renderer& r) {
     if (prepared_) {
         // In-place update: memcpy into the host-visible buffer (reallocs
         // only on growth). Skip when the data hasn't changed — re-uploading
         // every frame costs O(N) per trace per render, which dominates CPU
-        // on live plots with several large traces.
+        // on live plots with several large traces. The f64 path uploads
+        // the raw dvec2 data — one memcpy, no host-side narrowing.
         if (dataDirty_) {
-            renderer_->updatePoints(std::span{series_.points});
+            if (!useF64_ || f64Failed_ ||
+                !renderer_->updatePointsF64(
+                    std::span<const double>{rawF64_})) {
+                if (useF64_) f64Failed_ = true;
+                ensureCpuPoints();
+                renderer_->updatePoints(std::span{series_.points});
+            }
             dataDirty_ = false;
         }
         return;
     }
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
-    renderer_->upload(std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
+    if (useF64_ &&
+        renderer_->updatePointsF64(std::span<const double>{rawF64_})) {
+        renderer_->setStyle(series_.resolvedColor(), series_.lineWidth);
+    } else {
+        if (useF64_) f64Failed_ = true;
+        ensureCpuPoints();
+        renderer_->upload(std::span{series_.points},
+                          series_.resolvedColor(), series_.lineWidth);
+    }
     prepared_ = true;
     dataDirty_ = false;
 }
@@ -149,7 +208,7 @@ std::vector<size_t> markerIndices(const Series2D& series,
 
 void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
                        const Axes& axes, Rect2D rect) {
-    if (!prepared_ || series_.points.size() < 2 ||
+    if (!prepared_ || dataCount() < 2 ||
         series_.lineStyle == LineStyle::None ||
         axes.style().sketchScale > 0.0f)
         return;
@@ -172,6 +231,23 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     sp.cap = series_.capStyle;
     auto& gpu = r.gpu().gpuLine();
     if (!gpu.inited()) return;
+    // Narrow a pending f64 upload into the f32 point buffer on the
+    // device — one compute dispatch instead of an O(N) host pass.
+    // Permanent fallback to the f32 upload path when the device has
+    // no fp64 support.
+    if (useF64_ && renderer_->f64Pending()) {
+        if (!f64Failed_ &&
+            gpu.convertF64ToF32(cmd, renderer_->pointBufferF64(),
+                                renderer_->pointBuffer(),
+                                renderer_->pointCount())) {
+            renderer_->clearF64Pending();
+        } else {
+            f64Failed_ = true;
+            ensureCpuPoints();
+            renderer_->updatePoints(std::span{series_.points});
+            renderer_->clearF64Pending();
+        }
+    }
     const float W = float(r.gpu().extent().width);
     const size_t huge =
         size_t(std::max(8192.0f, W * 4.0f));
@@ -179,7 +255,7 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // decimate the *data* points into a per-pixel-column envelope before
     // any data→pixel mapping — O(n) scalar pass instead of transforming
     // all n points. Only ~2 envelope verts per column get mapped.
-    if (!transform && series_.points.size() > huge &&
+    if (!transform && dataCount() > huge &&
         !render::OffloadConfig::forceCpu(
             render::OffloadConfig::global().envelope) &&
         series_.drawStyle == DrawStyle::Default &&
@@ -207,6 +283,7 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
             ax, kx, 0, int(W) - 1, mn, mx);
         std::vector<Point2D> px;
         bool usedGpu = gpuOk && !mn.empty();
+        if (!usedGpu) ensureCpuPoints();
         if (!usedGpu &&
             !std::is_sorted(series_.points.begin(), series_.points.end(),
                             [](const Point2D& a, const Point2D& b) {
@@ -236,8 +313,8 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     if (!transform && series_.drawStyle == DrawStyle::Default &&
         !render::OffloadConfig::forceCpu(
             render::OffloadConfig::global().xform) &&
-        series_.points.size() > huge &&
-        renderer_->pointCount() == series_.points.size() &&
+        dataCount() > huge &&
+        renderer_->pointCount() == dataCount() &&
         axes.projection().kind == ProjectionKind::Rectilinear &&
         axes.xscale().shaderSupported() && axes.yscale().shaderSupported()) {
         render::GpuBuf pxBuf = 0;
@@ -252,6 +329,7 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         }
     }
 noDecimate:
+    ensureCpuPoints();
     auto px = pixelPoints(series_, axes, rect, transform.get());
     // Same envelope trick post-transform for the general case (custom
     // mpl transforms, nonlinear scales, steps draw styles).
@@ -275,9 +353,9 @@ noDecimate:
 
 void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
-    if (!prepared_ || series_.points.empty()) return;
+    if (!prepared_ || dataCount() == 0) return;
     const float dpi = axes.style().dpi;
-    if (series_.points.size() < 2 ||
+    if (dataCount() < 2 ||
         series_.lineStyle == LineStyle::None) {
         // Marker-only (linestyle 'None') still draws markers.
         if (pathEffects.empty()) {
@@ -317,6 +395,7 @@ void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
     std::optional<std::vector<Point2D>> pxHold;
     auto px = [&]() -> std::vector<Point2D>& {
         if (!pxHold) {
+            ensureCpuPoints();
             pxHold = pixelPoints(series_, axes, rect, transform.get());
             // xkcd-style sketch wobble (path.sketch).
             if (axes.style().sketchScale > 0.0f)
@@ -429,6 +508,7 @@ void LinePlot::drawMarkersAtPoints(render::Cmd& cmd,
                                    const Axes& axes, Rect2D rect,
                                    const MarkerFx* fx) {
     if (series_.size <= 0 || series_.marker == MarkerStyle::None) return;
+    ensureCpuPoints();
     auto eff = clipRect(rect, r.gpu().extent());
     Rect2D clip{eff.x, eff.y, eff.width, eff.height};
     Point2D off = fx ? fx->offset : Point2D{0.0f, 0.0f};
@@ -492,6 +572,7 @@ void LinePlot::drawMarkersAtPoints(render::Cmd& cmd,
 }
 void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                           Rect2D rect) {
+    ensureCpuPoints();
     if (series_.points.empty()) return;
     const float dpi = axes.style().dpi;
     auto toPx = [&](Point2D p) {
@@ -578,7 +659,7 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     }
 
     const bool hasLine = series_.lineStyle != LineStyle::None &&
-                         series_.points.size() >= 2;
+                         dataCount() >= 2;
     std::vector<Point2D> px;
     if (hasLine) {
         auto pts = applyDrawStyle(src, series_.drawStyle);
@@ -654,6 +735,7 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     }
 }
 void LinePlot::contributeToAutoscale(Viewport& v) const {
+    ensureCpuPoints();
     for (const auto& p : series_.points) {
         v.x.min = std::min(v.x.min, p.x); v.x.max = std::max(v.x.max, p.x);
         v.y.min = std::min(v.y.min, p.y); v.y.max = std::max(v.y.max, p.y);
@@ -662,6 +744,7 @@ void LinePlot::contributeToAutoscale(Viewport& v) const {
 void LinePlot::contributeToAutoscaleScaled(Viewport& v,
                                            const AxisScale& xscale,
                                            const AxisScale& yscale) const {
+    ensureCpuPoints();
     for (const auto& p : series_.points) {
         if (!pointInDomain(p, xscale, yscale) ||
             !std::isfinite(p.x) || !std::isfinite(p.y))

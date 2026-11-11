@@ -59,6 +59,17 @@ public:
         return false;
     }
 
+    /// Narrow an interleaved f64 (dvec2) point buffer to f32 (vec2)
+    /// on the device — records a compute dispatch into `cmd` plus the
+    /// barrier making the result visible to later passes in the same
+    /// command buffer. Returns false when unavailable (no fp64
+    /// pipeline); the caller then falls back to CPU conversion.
+    [[nodiscard]] virtual bool convertF64ToF32(Cmd& cmd, GpuBuf src64,
+                                               GpuBuf dst32, uint32_t n) {
+        (void)cmd; (void)src64; (void)dst32; (void)n;
+        return false;
+    }
+
     /// Column-wise min/max envelope over a point buffer (compute).
     /// Returns false when unavailable — callers fall back to CPU.
     /// On the op-stream backend the result arrives via a mailbox next

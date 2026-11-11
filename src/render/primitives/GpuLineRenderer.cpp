@@ -2,6 +2,7 @@
 #include "volcano/render/primitives/GpuLineRenderer.hpp"
 #include "../VkFactory.hpp"
 #include "../VulkanGpuServices.hpp"
+#include "../shaders/TransformGlsl.hpp"
 
 #include <volcano/core/CommandBuffer.hpp>
 #include <volcano/core/DescriptorPool.hpp>
@@ -10,6 +11,7 @@
 
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 
 namespace volcano::render::primitives {
 
@@ -249,6 +251,71 @@ void main() {
 }
 )GLSL";
 
+// Data→pixel transform — replaces the host-side pixelPoints() pass for
+// massively oversampled traces. Applies the closed-form axis scale
+// (kScaleFn is prepended at compile time), masks out-of-domain values
+// to NaN the same way maskPointsForScales does, and writes pixel-space
+// vec2s that tessellateDevice strokes straight from device memory.
+const char* kXformHead = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Src { vec2 p[]; } src;
+layout(std430, binding = 1) writeonly buffer Dst { vec2 p[]; } dst;
+layout(push_constant) uniform PC {
+    vec4 u_viewMinSpan;   // display-space (scaled) viewport min/span
+    vec4 u_rect;          // pixel rect
+    vec4 u_scaleX;        // (code, param1, param2, param3)
+    vec4 u_scaleY;
+    uint n;
+} pc;
+)GLSL";
+
+const char* kXformMain = R"GLSL(
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    vec2 d = src.p[i];
+    // maskPointsForScales parity: non-finite or out-of-domain points
+    // (log: x <= 0, logit: x outside (0,1)) become NaN — the stroker
+    // drops every segment touching them.
+    bool ok = !isinf(d.x) && !isinf(d.y) && d.x == d.x && d.y == d.y;
+    int cx = int(pc.u_scaleX.x + 0.5);
+    int cy = int(pc.u_scaleY.x + 0.5);
+    if (cx == 1 || cx == 7) ok = ok && d.x > 0.0;
+    else if (cx == 3) ok = ok && d.x > 0.0 && d.x < 1.0;
+    if (cy == 1 || cy == 7) ok = ok && d.y > 0.0;
+    else if (cy == 3) ok = ok && d.y > 0.0 && d.y < 1.0;
+    if (!ok) {
+        dst.p[i] = vec2(uintBitsToFloat(0x7FC00000u));
+        return;
+    }
+    vec2 s = vec2(scaleFwd(d.x, pc.u_scaleX), scaleFwd(d.y, pc.u_scaleY));
+    vec2 f = (s - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw;
+    dst.p[i] = vec2(pc.u_rect.x + f.x * pc.u_rect.z,
+                    pc.u_rect.y + (1.0 - f.y) * pc.u_rect.w);
+}
+)GLSL";
+
+// f64→f32 narrowing: uploaded traces stay in their source dvec2
+// layout so the host only memcpy's raw data — the conversion to the
+// vec2 point buffer runs here on the device.
+const char* kConvertGlsl = R"GLSL(
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src64 { dvec2 p[]; } src;
+layout(set = 0, binding = 1) writeonly buffer Dst32 { vec2 p[]; } dst;
+
+layout(push_constant) uniform PC { uint n; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    dst.p[i] = vec2(src.p[i]);
+}
+)GLSL";
+
 class GpuLineRendererVk final : public GpuLineRenderer {
 public:
     explicit GpuLineRendererVk(VulkanGpuServices& svcs) : svcs_(&svcs) {}
@@ -264,6 +331,17 @@ public:
                                        int cx0, int cx1,
                                        std::vector<float>& mn,
                                        std::vector<float>& mx) override;
+    [[nodiscard]] bool convertF64ToF32(Cmd& cmd, GpuBuf src64,
+                                       GpuBuf dst32, uint32_t n) override;
+    [[nodiscard]] bool transformPoints(Cmd& cmd, GpuBuf points,
+                                       uint32_t count,
+                                       const plot::Transform2D& t,
+                                       plot::Rect2D rect,
+                                       GpuBuf& out) override;
+    std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
+                                       uint32_t count,
+                                       const plot::StrokeParams& sp,
+                                       plot::Color color) override;
     void resetScratch() override;
     [[nodiscard]] bool inited() const noexcept override { return inited_; }
 
@@ -297,6 +375,37 @@ private:
     vk::UniqueDescriptorSetLayout envDescLayout_;
     vk::UniquePipelineLayout envPipeLayout_;
     vk::UniquePipeline envPipe_;
+
+    // f64→f32 narrow pass — lazily created on first f64 upload; stays
+    // absent (and convertF64ToF32 returns false) on devices without
+    // shaderFloat64.
+    vk::UniqueDescriptorSetLayout cvtDescLayout_;
+    vk::UniquePipelineLayout cvtPipeLayout_;
+    vk::UniquePipeline cvtPipe_;
+    // One set per (src,dst) buffer pair — buffers persist between
+    // uploads, so steady-state frames don't rewrite descriptors.
+    std::unordered_map<uint64_t, vk::DescriptorSet> cvtDsets_;
+    int cvtState_ = -1;   ///< -1 = untried, 0 = unavailable, 1 = ready
+
+    // data→pixel transform pass (xform offload) — lazily created on
+    // first oversampled trace.
+    vk::UniqueDescriptorSetLayout xformDescLayout_;
+    vk::UniquePipelineLayout xformPipeLayout_;
+    vk::UniquePipeline xformPipe_;
+    int xformState_ = -1;   ///< -1 = untried, 0 = unavailable, 1 = ready
+    /// Device-resident pixel-space point buffer (transform output,
+    /// tessellate input). Shared across traces — the WAR barrier in
+    /// transformPoints serializes reader→writer between dispatches.
+    core::Buffer xformBuf_;
+    std::vector<core::Buffer> retiredXform_;
+    uint32_t xformCap_ = 0;
+    /// src-buffer → descriptor set cache (dst is always xformBuf_;
+    /// the map is cleared whenever xformBuf_ regrows).
+    std::unordered_map<uint64_t, vk::DescriptorSet> xformDsets_;
+    /// tessellateDevice's (xformBuf_, outBuf_) binding — rewritten only
+    /// when either buffer regrows.
+    vk::DescriptorSet devDset_{};
+    vk::Buffer devSrc_{}, devDst_{};
 
     core::Buffer inBuf_;
     core::Buffer outBuf_;
@@ -387,6 +496,7 @@ void GpuLineRendererVk::resetScratch() {
     outOff_ = 0;
     retiredIn_.clear();
     retiredOut_.clear();
+    retiredXform_.clear();
 }
 
 namespace {
@@ -476,6 +586,267 @@ bool GpuLineRendererVk::envelopeColumns(GpuBuf points, uint32_t count,
         mx[i] = unord(words[W + i]);
     }
     return true;
+}
+
+bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
+                                        GpuBuf dst32, uint32_t n) {
+    if (!inited_ || !src64 || !dst32 || !n || cvtState_ == 0)
+        return false;
+    const auto c = vkCmd(cmd);
+    if (cvtState_ < 0) {
+        cvtState_ = 0;
+        if (!svcs_->physical().getFeatures().shaderFloat64)
+            return false;
+        auto spv = core::ShaderModule::compileGlsl(kConvertGlsl, "comp");
+        if (spv.empty()) return false;
+        core::ShaderModule shader(device_, spv);
+        vk::DescriptorSetLayoutBinding b[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            b[i].setBinding(i)
+               .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+               .setDescriptorCount(1)
+               .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        vk::DescriptorSetLayoutCreateInfo dlci{};
+        dlci.setBindings(b);
+        cvtDescLayout_ = device_.createDescriptorSetLayoutUnique(dlci);
+        vk::PushConstantRange pcr{};
+        pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
+           .setOffset(0).setSize(4);
+        vk::PipelineLayoutCreateInfo plci{};
+        plci.setSetLayouts(cvtDescLayout_.get())
+            .setPushConstantRanges(pcr);
+        cvtPipeLayout_ = device_.createPipelineLayoutUnique(plci);
+        vk::ComputePipelineCreateInfo ci{};
+        ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+            .setModule(shader.handle()).setPName("main");
+        ci.setLayout(cvtPipeLayout_.get());
+        auto& cache = svcs_->pipelineCache();
+        std::lock_guard lock(core::pipelineCreationMutex());
+        auto res = device_.createComputePipelineUnique(cache.handle(), ci);
+        if (res.result != vk::Result::eSuccess)
+            return false;
+        cvtPipe_ = std::move(res.value);
+        cvtState_ = 1;
+    }
+    // Descriptors are keyed by (src,dst) buffer pair — trace buffers
+    // persist between uploads, so steady-state frames reuse the sets
+    // instead of rewriting them on every dispatch.
+    const uint64_t key = (uint64_t(VkBuffer(svcs_->vkBufferOf(src64))) << 1) ^
+                         uint64_t(VkBuffer(svcs_->vkBufferOf(dst32)));
+    auto [dit, fresh] = cvtDsets_.try_emplace(key);
+    if (fresh) {
+        vk::DescriptorBufferInfo infos[2];
+        infos[0].setBuffer(svcs_->vkBufferOf(src64)).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        infos[1].setBuffer(svcs_->vkBufferOf(dst32)).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        vk::WriteDescriptorSet writes[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            writes[i].setDstBinding(i)
+                     .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                     .setBufferInfo(infos[i]);
+        dit->second = descPool_->allocate(cvtDescLayout_.get());
+        for (auto& w : writes) w.setDstSet(dit->second);
+        device_.updateDescriptorSets(writes, {});
+    }
+    c.bindPipeline(vk::PipelineBindPoint::eCompute, cvtPipe_.get());
+    c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                         cvtPipeLayout_.get(), 0, dit->second, {});
+    c.pushConstants(cvtPipeLayout_.get(),
+                    vk::ShaderStageFlagBits::eCompute, 0, 4, &n);
+    c.dispatch((n + 255) / 256, 1, 1);
+    // The narrow writes the f32 point buffer — later compute passes in
+    // the same submission (transformPoints, envelope) must see them.
+    // Vertex-attribute reads are covered by queue/submission order.
+    vk::MemoryBarrier2 bar{};
+    bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+       .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo dep{};
+    dep.setMemoryBarriers(bar);
+    c.pipelineBarrier2(dep);
+    return true;
+}
+
+bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
+                                        uint32_t count,
+                                        const plot::Transform2D& t,
+                                        plot::Rect2D rect, GpuBuf& out) {
+    if (!inited_ || !points || count < 2 || xformState_ == 0)
+        return false;
+    const auto c = vkCmd(cmd);
+    if (xformState_ < 0) {
+        xformState_ = 0;
+        const std::string src = std::string(kXformHead) +
+                                shaders::kScaleFn + kXformMain;
+        auto spv = core::ShaderModule::compileGlsl(src, "comp");
+        if (spv.empty()) return false;
+        core::ShaderModule shader(device_, spv);
+        vk::DescriptorSetLayoutBinding b[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            b[i].setBinding(i)
+               .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+               .setDescriptorCount(1)
+               .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+        vk::DescriptorSetLayoutCreateInfo dlci{};
+        dlci.setBindings(b);
+        xformDescLayout_ = device_.createDescriptorSetLayoutUnique(dlci);
+        vk::PushConstantRange pcr{};
+        pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
+           .setOffset(0).setSize(80);
+        vk::PipelineLayoutCreateInfo plci{};
+        plci.setSetLayouts(xformDescLayout_.get())
+            .setPushConstantRanges(pcr);
+        xformPipeLayout_ = device_.createPipelineLayoutUnique(plci);
+        vk::ComputePipelineCreateInfo ci{};
+        ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+            .setModule(shader.handle()).setPName("main");
+        ci.setLayout(xformPipeLayout_.get());
+        auto& cache = svcs_->pipelineCache();
+        std::lock_guard lock(core::pipelineCreationMutex());
+        auto res = device_.createComputePipelineUnique(cache.handle(), ci);
+        if (res.result != vk::Result::eSuccess)
+            return false;
+        xformPipe_ = std::move(res.value);
+        xformState_ = 1;
+    }
+    // Grow the shared pixel-space buffer. Retire the old one instead of
+    // destroying it — the previous frame's submitted commands may still
+    // reference it (same pattern as inBuf_/outBuf_).
+    if (count > xformCap_) {
+        if (xformBuf_.handle()) retiredXform_.push_back(std::move(xformBuf_));
+        core::BufferDesc d{};
+        d.size = vk::DeviceSize(count) * 2 * 8;
+        d.usage = core::BufferUsage::Storage;
+        xformBuf_ = core::Buffer(allocator_, d);
+        xformCap_ = count * 2;
+        xformDsets_.clear();
+        devSrc_ = vk::Buffer{};   // force devDset_ rewrite
+    }
+    // The WAR barrier: the previous trace's tessellate reads xformBuf_ —
+    // order this write behind that read (same-queue execution barrier).
+    vk::MemoryBarrier2 war{};
+    war.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setSrcAccessMask(vk::AccessFlagBits2::eShaderRead |
+                         vk::AccessFlagBits2::eShaderWrite)
+       .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setDstAccessMask(vk::AccessFlagBits2::eShaderWrite);
+    vk::DependencyInfo warDep{};
+    warDep.setMemoryBarriers(war);
+    c.pipelineBarrier2(warDep);
+
+    const uint64_t key = uint64_t(VkBuffer(svcs_->vkBufferOf(points)));
+    auto [dit, fresh] = xformDsets_.try_emplace(key);
+    if (fresh) {
+        vk::DescriptorBufferInfo infos[2];
+        infos[0].setBuffer(svcs_->vkBufferOf(points)).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        infos[1].setBuffer(xformBuf_.handle()).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        vk::WriteDescriptorSet writes[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            writes[i].setDstBinding(i)
+                     .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                     .setBufferInfo(infos[i]);
+        dit->second = descPool_->allocate(xformDescLayout_.get());
+        for (auto& w : writes) w.setDstSet(dit->second);
+        device_.updateDescriptorSets(writes, {});
+    }
+    struct PC {
+        float viewMinX, viewMinY, viewSpanX, viewSpanY;
+        float rectX, rectY, rectW, rectH;
+        float sxCode, sxP1, sxP2, sxPad;
+        float syCode, syP1, syP2, syPad;
+        uint32_t n;
+        uint32_t pad[3];
+    } pc{t.view.x.min, t.view.y.min, t.view.x.span(), t.view.y.span(),
+         float(rect.x), float(rect.y), float(rect.width), float(rect.height),
+         float(int(t.codeX())), t.scaleX.param1, t.scaleX.param2,
+         t.scaleX.param3,
+         float(int(t.codeY())), t.scaleY.param1, t.scaleY.param2,
+         t.scaleY.param3,
+         count, {0, 0, 0}};
+    c.bindPipeline(vk::PipelineBindPoint::eCompute, xformPipe_.get());
+    c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                         xformPipeLayout_.get(), 0, dit->second, {});
+    c.pushConstants(xformPipeLayout_.get(),
+                    vk::ShaderStageFlagBits::eCompute, 0, sizeof(PC), &pc);
+    c.dispatch((count + 255) / 256, 1, 1);
+    // RAW barrier: tessellateDevice's stroker reads what we just wrote.
+    vk::MemoryBarrier2 bar{};
+    bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+       .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo dep{};
+    dep.setMemoryBarriers(bar);
+    c.pipelineBarrier2(dep);
+    out = GpuBuf(VkBuffer(xformBuf_.handle()));
+    return true;
+}
+
+std::vector<GpuLineRendererVk::Mesh>
+GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
+                                    uint32_t count,
+                                    const plot::StrokeParams& sp,
+                                    plot::Color color) {
+    const vk::CommandBuffer cmd = vkCmd(cmdRef);
+    std::vector<Mesh> out;
+    // Dashes need CPU cumulative arc lengths — unreachable through
+    // LinePlot (supportsDashes() is false) but keep the guard.
+    if (!inited_ || !points || count < 2 || !sp.dashes.empty())
+        return out;
+    const uint32_t nSeg = count - 1;
+    const size_t outVerts = size_t(nSeg) * kSegVerts +
+                            size_t(count) * kJoinVerts;
+    ensureOut(outVerts);
+    // Rebind the (device-src, outBuf_) descriptor set only when a
+    // buffer regrew — steady-state frames reuse it as-is.
+    const vk::Buffer src = svcs_->vkBufferOf(points);
+    if (src != devSrc_ || outBuf_.handle() != devDst_) {
+        if (!devDset_) devDset_ = descPool_->allocate(descLayout_.get());
+        vk::DescriptorBufferInfo infos[2];
+        infos[0].setBuffer(src).setOffset(0).setRange(VK_WHOLE_SIZE);
+        infos[1].setBuffer(outBuf_.handle()).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        vk::WriteDescriptorSet writes[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            writes[i].setDstSet(devDset_).setDstBinding(i)
+                     .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                     .setBufferInfo(infos[i]);
+        device_.updateDescriptorSets(writes, {});
+        devSrc_ = src;
+        devDst_ = outBuf_.handle();
+    }
+    struct PC {
+        uint32_t n, nSeg;
+        float hwidth;
+        uint32_t join, cap;
+        float miterLimit;
+        uint32_t inBase, outBase;
+        float r, g, b, a;
+    } pc{count, nSeg, sp.width * 0.5f,
+         uint32_t(sp.join), uint32_t(sp.cap), sp.miterLimit,
+         0u, uint32_t(outOff_),
+         color.r, color.g, color.b, color.a};
+    cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipe_.get());
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                           pipeLayout_.get(), 0, devDset_, {});
+    cmd.pushConstants(pipeLayout_.get(), vk::ShaderStageFlagBits::eCompute,
+                      0, sizeof(PC), &pc);
+    cmd.dispatch((count + nSeg + 255) / 256, 1, 1);
+    vk::BufferMemoryBarrier bar{};
+    bar.setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
+       .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
+       .setBuffer(outBuf_.handle()).setOffset(0).setSize(outBuf_.size());
+    cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                        vk::PipelineStageFlagBits::eVertexInput,
+                        {}, {}, bar, {});
+    out.push_back(Mesh{GpuBuf(VkBuffer(outBuf_.handle())),
+                       uint64_t(outOff_), uint32_t(outVerts)});
+    outOff_ += outVerts;
+    return out;
 }
 
 void GpuLineRendererVk::ensureIn(size_t points) {

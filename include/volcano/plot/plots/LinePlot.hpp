@@ -66,6 +66,7 @@ public:
 
     /// Fraction of series points inside the data-space box (loc="best").
     [[nodiscard]] float occupancy(Range xr, Range yr) const override {
+        ensureCpuPoints();
         if (series_.points.empty()) return 0.0f;
         size_t n = 0;
         for (const auto& p : series_.points)
@@ -78,6 +79,7 @@ public:
     /// Picking: hit when the data point is within half the line width
     /// (+2px) of a segment in pixel space.
     bool contains(const Axes& axes, Point2D pt) const override {
+        ensureCpuPoints();
         auto px = [&](Point2D p) {
             auto f = axes.dataToFraction(p);
             return Point2D{axes.rect.x + f.x * float(axes.rect.width),
@@ -104,6 +106,22 @@ public:
     void setData(std::vector<float> x, std::vector<float> y);
     void setXdata(std::vector<float> x);
     void setYdata(std::vector<float> y);
+    /// Interleaved-f64 variant: the raw dvec2 data is canonical and
+    /// uploads to the device unchanged (plain memcpy) — the f64→f32
+    /// narrowing runs on the GPU (GpuLineRenderer::convertF64ToF32)
+    /// instead of an O(N) host conversion. series_.points is then only
+    /// materialized lazily by CPU consumers via ensureCpuPoints().
+    void setDataF64(std::vector<double> xy);
+    /// Span variant — assigns into the existing rawF64_ allocation so
+    /// steady-state updates don't malloc a fresh buffer per call.
+    void setDataF64(std::span<const double> xy);
+    /// Move the raw interleaved f64 back out (used when the owning FFI
+    /// figure rebuilds its plots from trace state).
+    [[nodiscard]] std::vector<double> takeRawF64();
+    /// Point count regardless of which store is canonical.
+    [[nodiscard]] size_t dataCount() const noexcept {
+        return useF64_ ? rawF64_.size() / 2 : series_.points.size();
+    }
     /// GPU point buffer — stable handle lets tests verify in-place reuse.
     [[nodiscard]] render::GpuBuf pointBuffer() const noexcept {
         return renderer_->pointBuffer();
@@ -126,12 +144,23 @@ private:
     void drawMarkersAtPoints(render::Cmd& cmd, render::Renderer& r,
                              const Axes& axes, Rect2D rect,
                              const MarkerFx* fx = nullptr);
+    /// Materialize series_.points from rawF64_ — called by every CPU
+    /// path that reads point values (markers, fallbacks, autoscale,
+    /// picking). No-op when the f32 store is canonical or already
+    /// materialized. const so const consumers can call it.
+    void ensureCpuPoints() const;
     Series2D series_;
     std::unique_ptr<render::primitives::LineRenderer> renderer_;
     /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).
     std::vector<render::primitives::GpuLineRenderer::Mesh> gpuMeshes_;
     uint64_t gpuMeshSeq_ = 0;
+    /// Canonical f64 data while useF64_ — series_.points stays empty
+    /// until ensureCpuPoints() materializes it.
+    std::vector<double> rawF64_;
     bool prepared_ = false;
     bool dataDirty_ = false;
+    bool useF64_ = false;
+    mutable bool cpuDirty_ = false;   ///< rawF64_ not yet in series_.points
+    bool f64Failed_ = false;          ///< device lacks the fp64 path
 };
 } // namespace volcano::plot

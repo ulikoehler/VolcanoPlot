@@ -70,6 +70,14 @@ public:
     }
     [[nodiscard]] uint32_t pointCount() const noexcept override { return count_; }
     void updatePoints(std::span<const plot::Point2D> points) override;
+    bool updatePointsF64(std::span<const double> xy) override;
+    [[nodiscard]] GpuBuf pointBufferF64() const noexcept override {
+        return GpuBuf(VkBuffer(pointBufferF64_.handle()));
+    }
+    [[nodiscard]] bool f64Pending() const noexcept override {
+        return f64Pending_;
+    }
+    void clearF64Pending() noexcept override { f64Pending_ = false; }
     void setStyle(plot::Color color, float width) override {
         color_ = color; width_ = width;
     }
@@ -86,12 +94,15 @@ private:
     vk::UniquePipelineLayout pipelineLayout_;
     vk::UniquePipeline pipeline_;
     core::Buffer pointBuffer_;
+    core::Buffer pointBufferF64_;   ///< raw dvec2 upload (pre-narrow)
     GpuBuf externalBuf_ = 0;
     VmaAllocator allocator_ = nullptr;
     plot::Color color_;
     float width_ = 1.0f;
     uint32_t count_ = 0;
     uint32_t capacity_ = 0;      ///< allocated point capacity
+    uint32_t capacity64_ = 0;    ///< allocated f64 point capacity
+    bool f64Pending_ = false;    ///< f64 data awaits GPU narrowing
     bool inited_ = false;
 };
 
@@ -216,6 +227,39 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
                 points.size_bytes());
     count_ = static_cast<uint32_t>(points.size());
     capacity_ = count_;
+}
+
+bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
+    const uint32_t n = static_cast<uint32_t>(xy.size() / 2);
+    if (n == 0) {
+        count_ = 0;
+        f64Pending_ = false;
+        return true;
+    }
+    if (!allocator_) allocator_ = svcs_->allocator();
+    if (n > capacity64_) {
+        core::BufferDesc d;
+        d.size = vk::DeviceSize(n) * 16;
+        d.usage = core::BufferUsage::Storage;
+        d.hostVisible = true;   // in-place memcpy updates, GPU reads
+        pointBufferF64_ = core::Buffer(allocator_, d);
+        capacity64_ = n;
+    }
+    std::memcpy(pointBufferF64_.mappedData(), xy.data(),
+                vk::DeviceSize(n) * 16);
+    // The f32 buffer is written by the GPU narrowing pass — grow it
+    // here so convertF64ToF32 always has a destination.
+    if (n > capacity_) {
+        core::BufferDesc d;
+        d.size = vk::DeviceSize(n) * 8;
+        d.usage = core::BufferUsage::VertexStorage;
+        d.hostVisible = true;
+        pointBuffer_ = core::Buffer(allocator_, d);
+        capacity_ = n;
+    }
+    count_ = n;
+    f64Pending_ = true;
+    return true;
 }
 
 void LineRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,

@@ -104,6 +104,16 @@ public:
         return n;
     }
 
+    /// Borrowed view of the last readback — valid until the next
+    /// render/readback call. Lets zero-copy consumers read straight
+    /// out of the staging buffer. nullptr when unsupported or no
+    /// frame has been read back; callers fall back to
+    /// readbackRgba8Into.
+    virtual const uint8_t* rgba8View(size_t* outLen) {
+        if (outLen) *outLen = 0;
+        return nullptr;
+    }
+
     /// Drain queued input events (screen backends translate windowing
     /// events during pollEvents; headless returns empty).
     virtual std::vector<InputEvent> takeEvents() { return {}; }

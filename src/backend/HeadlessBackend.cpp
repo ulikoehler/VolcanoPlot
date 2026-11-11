@@ -44,6 +44,10 @@ void HeadlessBackend::createContext() {
     core::DeviceDesc ddesc{};
     ddesc.hasSurface = false;
     ddesc.features.features.wideLines = VK_TRUE;
+    // fp64 when the device supports it — the f64 point-upload path
+    // (updatePointsF64 + convertF64ToF32) needs it to narrow on the GPU.
+    if (ctx_.physical.handle().getFeatures().shaderFloat64)
+        ddesc.features.features.shaderFloat64 = VK_TRUE;
     ctx_.device = core::Device(ctx_.physical, ddesc);
     ctx_.allocator = core::Allocator(ctx_.instance.handle(), ctx_.physical.handle(), ctx_.device.handle());
     ctx_.graphicsPool = core::CommandPool(ctx_.device.handle(), ctx_.device.graphicsFamily(),
@@ -444,6 +448,17 @@ size_t HeadlessBackend::readbackRgba8Into(uint8_t* dst, size_t dstLen) {
     stagingBuffer_.invalidate();
     std::memcpy(dst, stagingBuffer_.mappedData(), size);
     return size;
+}
+
+const uint8_t* HeadlessBackend::rgba8View(size_t* outLen) {
+    if (outLen) *outLen = 0;
+    if (!stagingBuffer_.handle() || !stagingBuffer_.mappedData())
+        return nullptr;
+    stagingBuffer_.invalidate();
+    size_t size = size_t(extent_.width) * extent_.height * 4;
+    if (stagingBuffer_.size() < size) return nullptr;
+    if (outLen) *outLen = size;
+    return static_cast<const uint8_t*>(stagingBuffer_.mappedData());
 }
 
 std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
