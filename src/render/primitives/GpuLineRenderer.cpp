@@ -296,6 +296,50 @@ void main() {
 }
 )GLSL";
 
+// Fused variant of the transform pass for f64 uploads: reads the raw
+// dvec2 buffer, narrows to f32 inline, then applies the identical
+// scale/mask math — bit-identical to convertF64ToF32 + transformPoints
+// but skips the extra dispatch, barrier and f32 buffer entirely.
+const char* kXformHead64 = R"GLSL(
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Src { dvec2 p[]; } src;
+layout(std430, binding = 1) writeonly buffer Dst { vec2 p[]; } dst;
+layout(push_constant) uniform PC {
+    vec4 u_viewMinSpan;   // display-space (scaled) viewport min/span
+    vec4 u_rect;          // pixel rect
+    vec4 u_scaleX;        // (code, param1, param2, param3)
+    vec4 u_scaleY;
+    uint n;
+} pc;
+)GLSL";
+
+const char* kXformMain64 = R"GLSL(
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    // Narrow first — the domain mask and scaleFwd then see the same f32
+    // values the CPU path (f32 series_.points) would.
+    vec2 d = vec2(src.p[i]);
+    bool ok = !isinf(d.x) && !isinf(d.y) && d.x == d.x && d.y == d.y;
+    int cx = int(pc.u_scaleX.x + 0.5);
+    int cy = int(pc.u_scaleY.x + 0.5);
+    if (cx == 1 || cx == 7) ok = ok && d.x > 0.0;
+    else if (cx == 3) ok = ok && d.x > 0.0 && d.x < 1.0;
+    if (cy == 1 || cy == 7) ok = ok && d.y > 0.0;
+    else if (cy == 3) ok = ok && d.y > 0.0 && d.y < 1.0;
+    if (!ok) {
+        dst.p[i] = vec2(uintBitsToFloat(0x7FC00000u));
+        return;
+    }
+    vec2 s = vec2(scaleFwd(d.x, pc.u_scaleX), scaleFwd(d.y, pc.u_scaleY));
+    vec2 f = (s - pc.u_viewMinSpan.xy) / pc.u_viewMinSpan.zw;
+    dst.p[i] = vec2(pc.u_rect.x + f.x * pc.u_rect.z,
+                    pc.u_rect.y + (1.0 - f.y) * pc.u_rect.w);
+}
+)GLSL";
+
 // f64→f32 narrowing: uploaded traces stay in their source dvec2
 // layout so the host only memcpy's raw data — the conversion to the
 // vec2 point buffer runs here on the device.
@@ -338,6 +382,11 @@ public:
                                        const plot::Transform2D& t,
                                        plot::Rect2D rect,
                                        GpuBuf& out) override;
+    [[nodiscard]] bool transformPointsF64(Cmd& cmd, GpuBuf src64,
+                                          uint32_t count,
+                                          const plot::Transform2D& t,
+                                          plot::Rect2D rect,
+                                          GpuBuf& out) override;
     std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
                                        uint32_t count,
                                        const plot::StrokeParams& sp,
@@ -393,6 +442,18 @@ private:
     vk::UniquePipelineLayout xformPipeLayout_;
     vk::UniquePipeline xformPipe_;
     int xformState_ = -1;   ///< -1 = untried, 0 = unavailable, 1 = ready
+    // Fused f64-source transform — shares xformDescLayout_ /
+    // xformPipeLayout_ (same bindings + push constants); lazily created
+    // on first f64 trace taking the device transform path.
+    vk::UniquePipeline xformPipe64_;
+    int xform64State_ = -1;   ///< -1 = untried, 0 = unavailable, 1 = ready
+    /// Shared layout creation for the transform pipelines (f32 + f64).
+    [[nodiscard]] bool ensureXformLayout();
+    /// The shared dispatch body: grow xformBuf_, barriers, descriptors,
+    /// push constants. `pipe` selects the f32 or f64 shader variant.
+    bool xformDispatch(vk::CommandBuffer c, GpuBuf src, uint32_t count,
+                       const plot::Transform2D& t, plot::Rect2D rect,
+                       vk::Pipeline pipe, GpuBuf& out);
     /// Device-resident pixel-space point buffer (transform output,
     /// tessellate input). Shared across traces — the WAR barrier in
     /// transformPoints serializes reader→writer between dispatches.
@@ -669,6 +730,27 @@ bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
     return true;
 }
 
+bool GpuLineRendererVk::ensureXformLayout() {
+    if (xformDescLayout_) return true;
+    vk::DescriptorSetLayoutBinding b[2];
+    for (uint32_t i = 0; i < 2; ++i)
+        b[i].setBinding(i)
+           .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+           .setDescriptorCount(1)
+           .setStageFlags(vk::ShaderStageFlagBits::eCompute);
+    vk::DescriptorSetLayoutCreateInfo dlci{};
+    dlci.setBindings(b);
+    xformDescLayout_ = device_.createDescriptorSetLayoutUnique(dlci);
+    vk::PushConstantRange pcr{};
+    pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
+       .setOffset(0).setSize(80);
+    vk::PipelineLayoutCreateInfo plci{};
+    plci.setSetLayouts(xformDescLayout_.get())
+        .setPushConstantRanges(pcr);
+    xformPipeLayout_ = device_.createPipelineLayoutUnique(plci);
+    return true;
+}
+
 bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
                                         uint32_t count,
                                         const plot::Transform2D& t,
@@ -678,27 +760,12 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
     const auto c = vkCmd(cmd);
     if (xformState_ < 0) {
         xformState_ = 0;
+        if (!ensureXformLayout()) return false;
         const std::string src = std::string(kXformHead) +
                                 shaders::kScaleFn + kXformMain;
         auto spv = core::ShaderModule::compileGlsl(src, "comp");
         if (spv.empty()) return false;
         core::ShaderModule shader(device_, spv);
-        vk::DescriptorSetLayoutBinding b[2];
-        for (uint32_t i = 0; i < 2; ++i)
-            b[i].setBinding(i)
-               .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-               .setDescriptorCount(1)
-               .setStageFlags(vk::ShaderStageFlagBits::eCompute);
-        vk::DescriptorSetLayoutCreateInfo dlci{};
-        dlci.setBindings(b);
-        xformDescLayout_ = device_.createDescriptorSetLayoutUnique(dlci);
-        vk::PushConstantRange pcr{};
-        pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
-           .setOffset(0).setSize(80);
-        vk::PipelineLayoutCreateInfo plci{};
-        plci.setSetLayouts(xformDescLayout_.get())
-            .setPushConstantRanges(pcr);
-        xformPipeLayout_ = device_.createPipelineLayoutUnique(plci);
         vk::ComputePipelineCreateInfo ci{};
         ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
             .setModule(shader.handle()).setPName("main");
@@ -711,6 +778,47 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
         xformPipe_ = std::move(res.value);
         xformState_ = 1;
     }
+    return xformDispatch(c, points, count, t, rect, xformPipe_.get(), out);
+}
+
+bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
+                                           uint32_t count,
+                                           const plot::Transform2D& t,
+                                           plot::Rect2D rect,
+                                           GpuBuf& out) {
+    if (!inited_ || !src64 || count < 2 || xform64State_ == 0)
+        return false;
+    const auto c = vkCmd(cmd);
+    if (xform64State_ < 0) {
+        xform64State_ = 0;
+        if (!svcs_->physical().getFeatures().shaderFloat64)
+            return false;
+        if (!ensureXformLayout()) return false;
+        const std::string src = std::string(kXformHead64) +
+                                shaders::kScaleFn + kXformMain64;
+        auto spv = core::ShaderModule::compileGlsl(src, "comp");
+        if (spv.empty()) return false;
+        core::ShaderModule shader(device_, spv);
+        vk::ComputePipelineCreateInfo ci{};
+        ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+            .setModule(shader.handle()).setPName("main");
+        ci.setLayout(xformPipeLayout_.get());
+        auto& cache = svcs_->pipelineCache();
+        std::lock_guard lock(core::pipelineCreationMutex());
+        auto res = device_.createComputePipelineUnique(cache.handle(), ci);
+        if (res.result != vk::Result::eSuccess)
+            return false;
+        xformPipe64_ = std::move(res.value);
+        xform64State_ = 1;
+    }
+    return xformDispatch(c, src64, count, t, rect, xformPipe64_.get(), out);
+}
+
+bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
+                                      uint32_t count,
+                                      const plot::Transform2D& t,
+                                      plot::Rect2D rect,
+                                      vk::Pipeline pipe, GpuBuf& out) {
     // Grow the shared pixel-space buffer. Retire the old one instead of
     // destroying it — the previous frame's submitted commands may still
     // reference it (same pattern as inBuf_/outBuf_).
@@ -767,7 +875,7 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
          float(int(t.codeY())), t.scaleY.param1, t.scaleY.param2,
          t.scaleY.param3,
          count, {0, 0, 0}};
-    c.bindPipeline(vk::PipelineBindPoint::eCompute, xformPipe_.get());
+    c.bindPipeline(vk::PipelineBindPoint::eCompute, pipe);
     c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
                          xformPipeLayout_.get(), 0, dit->second, {});
     c.pushConstants(xformPipeLayout_.get(),

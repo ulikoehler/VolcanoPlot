@@ -231,11 +231,35 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     sp.cap = series_.capStyle;
     auto& gpu = r.gpu().gpuLine();
     if (!gpu.inited()) return;
+    const float W = float(r.gpu().extent().width);
+    const size_t huge =
+        size_t(std::max(8192.0f, W * 4.0f));
+    const bool envelopeOk =
+        !transform && dataCount() > huge &&
+        !render::OffloadConfig::forceCpu(
+            render::OffloadConfig::global().envelope) &&
+        series_.drawStyle == DrawStyle::Default &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().kind == ScaleKind::Linear &&
+        axes.yscale().kind == ScaleKind::Linear;
+    const bool xformOk =
+        !transform && series_.drawStyle == DrawStyle::Default &&
+        !render::OffloadConfig::forceCpu(
+            render::OffloadConfig::global().xform) &&
+        dataCount() > huge &&
+        renderer_->pointCount() == dataCount() &&
+        axes.projection().kind == ProjectionKind::Rectilinear &&
+        axes.xscale().shaderSupported() && axes.yscale().shaderSupported();
+    // Fused f64→pixel transform: when the device transform path will run
+    // on an f64 trace, transformPointsF64 reads the dvec2 buffer
+    // directly — the standalone f32 narrow is only recorded when a real
+    // consumer (envelope, f32 transform, CPU fallback) needs it.
+    const bool fuseF64 = useF64_ && !f64Failed_ && !envelopeOk && xformOk;
     // Narrow a pending f64 upload into the f32 point buffer on the
     // device — one compute dispatch instead of an O(N) host pass.
     // Permanent fallback to the f32 upload path when the device has
     // no fp64 support.
-    if (useF64_ && renderer_->f64Pending()) {
+    auto narrow64 = [&]() {
         if (!f64Failed_ &&
             gpu.convertF64ToF32(cmd, renderer_->pointBufferF64(),
                                 renderer_->pointBuffer(),
@@ -247,21 +271,14 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
             renderer_->updatePoints(std::span{series_.points});
             renderer_->clearF64Pending();
         }
-    }
-    const float W = float(r.gpu().extent().width);
-    const size_t huge =
-        size_t(std::max(8192.0f, W * 4.0f));
+    };
+    if (useF64_ && renderer_->f64Pending() && !fuseF64)
+        narrow64();
     // Massively oversampled x-monotonic polylines on linear scales:
     // decimate the *data* points into a per-pixel-column envelope before
     // any data→pixel mapping — O(n) scalar pass instead of transforming
     // all n points. Only ~2 envelope verts per column get mapped.
-    if (!transform && dataCount() > huge &&
-        !render::OffloadConfig::forceCpu(
-            render::OffloadConfig::global().envelope) &&
-        series_.drawStyle == DrawStyle::Default &&
-        axes.projection().kind == ProjectionKind::Rectilinear &&
-        axes.xscale().kind == ScaleKind::Linear &&
-        axes.yscale().kind == ScaleKind::Linear) {
+    if (envelopeOk) {
         const auto& vp = axes.viewport();
         float fx0 = axes.xscale().forward(vp.x.min);
         float fx1 = axes.xscale().forward(vp.x.max);
@@ -310,17 +327,23 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // consumes the result directly — the host never touches the points.
     // Custom mpl transforms, sketch/steps styles and non-rectilinear
     // projections stay on the CPU pass.
-    if (!transform && series_.drawStyle == DrawStyle::Default &&
-        !render::OffloadConfig::forceCpu(
-            render::OffloadConfig::global().xform) &&
-        dataCount() > huge &&
-        renderer_->pointCount() == dataCount() &&
-        axes.projection().kind == ProjectionKind::Rectilinear &&
-        axes.xscale().shaderSupported() && axes.yscale().shaderSupported()) {
+    if (xformOk) {
         render::GpuBuf pxBuf = 0;
-        if (gpu.transformPoints(cmd, renderer_->pointBuffer(),
-                                renderer_->pointCount(), axes.transform(),
-                                rect, pxBuf)) {
+        bool mapped = false;
+        if (useF64_ && !f64Failed_) {
+            mapped = gpu.transformPointsF64(
+                cmd, renderer_->pointBufferF64(), renderer_->pointCount(),
+                axes.transform(), rect, pxBuf);
+            // Fused variant unavailable on this backend — narrow into
+            // the f32 buffer, then take the regular f32 transform.
+            if (!mapped && renderer_->f64Pending())
+                narrow64();
+        }
+        if (!mapped)
+            mapped = gpu.transformPoints(cmd, renderer_->pointBuffer(),
+                                         renderer_->pointCount(),
+                                         axes.transform(), rect, pxBuf);
+        if (mapped) {
             gpuMeshes_ = gpu.tessellateDevice(cmd, pxBuf,
                                               renderer_->pointCount(), sp,
                                               series_.resolvedColor());

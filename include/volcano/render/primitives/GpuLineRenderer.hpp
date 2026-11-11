@@ -70,6 +70,20 @@ public:
         return false;
     }
 
+    /// transformPoints reading a dvec2 (f64) source buffer directly —
+    /// fuses the f64→f32 narrow into the data→pixel pass so the f32
+    /// point buffer never materializes on the device. The shader
+    /// narrows first, then applies the same scale/mask math, so the
+    /// output is bit-identical to convertF64ToF32 + transformPoints.
+    /// Returns false when unavailable (no fp64 transform pipeline);
+    /// the caller then narrows separately and uses transformPoints.
+    [[nodiscard]] virtual bool transformPointsF64(
+        Cmd& cmd, GpuBuf src64, uint32_t count,
+        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out) {
+        (void)cmd; (void)src64; (void)count; (void)t; (void)rect; (void)out;
+        return false;
+    }
+
     /// Column-wise min/max envelope over a point buffer (compute).
     /// Returns false when unavailable — callers fall back to CPU.
     /// On the op-stream backend the result arrives via a mailbox next
