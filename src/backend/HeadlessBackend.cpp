@@ -5,7 +5,9 @@
 #include <volcano/core/Buffer.hpp>
 #include <volcano/core/CommandBuffer.hpp>
 
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 
 namespace volcano::backend {
 
@@ -245,6 +247,7 @@ void HeadlessBackend::resize(uint32_t width, uint32_t height) {
     msaaImage_ = core::Image{};
     depthImage_ = core::Image{};
     blitImage_ = core::Image{};
+    stagingBuffer_ = core::Buffer{};
     blitCaptured_ = false;
     createFramebuffer();
 }
@@ -281,17 +284,72 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
     return std::make_unique<render::VkCmd>(cb);
 }
 
+void HeadlessBackend::ensureStaging() {
+    vk::DeviceSize size = vk::DeviceSize(extent_.width) * extent_.height * 4;
+    if (stagingBuffer_.handle() && stagingBuffer_.size() >= size) return;
+    core::BufferDesc bdesc{};
+    bdesc.size = size;
+    bdesc.usage = core::BufferUsage::Staging;
+    bdesc.hostVisible = true;
+    bdesc.hostCached = true;
+    stagingBuffer_ = core::Buffer(ctx_.allocator.handle(), bdesc);
+}
+
 void HeadlessBackend::endFrame() {
     if (!frameBegun_) return;
     auto cb = commandBuffer_.get();
     cb.endRenderPass();
+
+    // A headless frame exists to be read back — record the
+    // image→staging copy into this same submission. One submit + one
+    // fence wait per frame (was: a second one-time command buffer with
+    // its own submit + queue waitIdle, plus a per-frame VMA alloc).
+    ensureStaging();
+    vk::ImageMemoryBarrier barrier{};
+    barrier.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
+           .setDstAccessMask(vk::AccessFlagBits::eTransferRead)
+           .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
+           .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
+           .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+           .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+           .setImage(colorImage_.handle())
+           .setSubresourceRange(vk::ImageSubresourceRange{}
+               .setAspectMask(vk::ImageAspectFlagBits::eColor)
+               .setBaseMipLevel(0).setLevelCount(1)
+               .setBaseArrayLayer(0).setLayerCount(1));
+    cb.pipelineBarrier(
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eTransfer,
+        {}, {}, {}, barrier);
+
+    vk::BufferImageCopy region{};
+    region.setBufferOffset(0)
+          .setBufferRowLength(extent_.width)
+          .setBufferImageHeight(extent_.height)
+          .setImageSubresource(vk::ImageSubresourceLayers{}
+              .setAspectMask(vk::ImageAspectFlagBits::eColor)
+              .setMipLevel(0).setBaseArrayLayer(0).setLayerCount(1))
+          .setImageOffset({0,0,0})
+          .setImageExtent({extent_.width, extent_.height, 1});
+    cb.copyImageToBuffer(colorImage_.handle(),
+                         vk::ImageLayout::eTransferSrcOptimal,
+                         stagingBuffer_.handle(), region);
     cb.end();
     frameBegun_ = false;
 
+    auto dev = ctx_.device.handle();
+    dev.resetFences(renderFence_.get());
     vk::SubmitInfo si{};
     si.setCommandBuffers(cb);
     ctx_.device.graphicsQueue().submit(si, renderFence_.get());
-    ctx_.device.waitIdle();
+
+    // GPU-side execution of a large-trace frame takes real time
+    // (~4ms at 8x200k) and vkWaitForFences burns that time spinning
+    // in the driver on some stacks. Poll the fence status with a
+    // short sleep instead — same synchronous semantics, ~zero CPU.
+    while (dev.getFenceStatus(renderFence_.get()) == vk::Result::eNotReady) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
 }
 
 // ─── Blitting (mpl restore_region) ──────────────────────────────────────────
@@ -378,60 +436,19 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
     return std::make_unique<render::VkCmd>(cb);
 }
 
+size_t HeadlessBackend::readbackRgba8Into(uint8_t* dst, size_t dstLen) {
+    // endFrame() already submitted render+copy and waited on the
+    // fence — stagingBuffer_ holds the finished frame.
+    size_t size = size_t(extent_.width) * extent_.height * 4;
+    if (!dst || dstLen < size || !stagingBuffer_.handle()) return 0;
+    stagingBuffer_.invalidate();
+    std::memcpy(dst, stagingBuffer_.mappedData(), size);
+    return size;
+}
+
 std::vector<uint8_t> HeadlessBackend::readbackRgba8() {
-    auto dev = ctx_.device.handle();
-    auto queue = ctx_.device.graphicsQueue();
-    auto pool = ctx_.graphicsPool.handle();
-
-    // Create a host-visible staging buffer.
-    vk::DeviceSize size = vk::DeviceSize(extent_.width) * extent_.height * 4;
-    core::BufferDesc bdesc{};
-    bdesc.size = size;
-    bdesc.usage = core::BufferUsage::Staging;
-    bdesc.hostVisible = true;
-    bdesc.hostCached = true;
-    core::Buffer staging(ctx_.allocator.handle(), bdesc);
-
-    // Copy image → buffer via a one-time command buffer.
-    // The color image is already in eTransferSrcOptimal (render pass final layout).
-    {
-        core::OneTimeCommands cmd(dev, pool, queue);
-
-        // Ensure render pass writes are visible to the transfer read.
-        vk::ImageMemoryBarrier barrier{};
-        barrier.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
-               .setDstAccessMask(vk::AccessFlagBits::eTransferRead)
-               .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
-               .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
-               .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-               .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-               .setImage(colorImage_.handle())
-               .setSubresourceRange(vk::ImageSubresourceRange{}
-                   .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                   .setBaseMipLevel(0).setLevelCount(1)
-                   .setBaseArrayLayer(0).setLayerCount(1));
-        cmd.handle().pipelineBarrier(
-            vk::PipelineStageFlagBits::eColorAttachmentOutput,
-            vk::PipelineStageFlagBits::eTransfer,
-            {}, {}, {}, barrier);
-
-        vk::BufferImageCopy region{};
-        region.setBufferOffset(0)
-              .setBufferRowLength(extent_.width)
-              .setBufferImageHeight(extent_.height)
-              .setImageSubresource(vk::ImageSubresourceLayers{}
-                  .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                  .setMipLevel(0).setBaseArrayLayer(0).setLayerCount(1))
-              .setImageOffset({0,0,0})
-              .setImageExtent({extent_.width, extent_.height, 1});
-        cmd.handle().copyImageToBuffer(colorImage_.handle(),
-                                       vk::ImageLayout::eTransferSrcOptimal,
-                                       staging.handle(), region);
-    } // ~OneTimeCommands submits and waits for completion.
-
-    // Map and copy out.
-    std::vector<uint8_t> out(size);
-    std::memcpy(out.data(), staging.mappedData(), size);
+    std::vector<uint8_t> out(size_t(extent_.width) * extent_.height * 4);
+    out.resize(readbackRgba8Into(out.data(), out.size()));
     return out;
 }
 

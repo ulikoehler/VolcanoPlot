@@ -10,8 +10,10 @@
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -90,6 +92,17 @@ public:
     /// For headless: read back the rendered color image as RGBA8.
     /// For screen: returns empty (no readback).
     virtual std::vector<uint8_t> readbackRgba8() { return {}; }
+
+    /// Readback straight into a caller buffer — avoids the
+    /// intermediate vector for FFI callers. Returns bytes written.
+    /// Default composes readbackRgba8() + one memcpy; backends with a
+    /// persistent staging buffer can make this the only CPU copy.
+    virtual size_t readbackRgba8Into(uint8_t* dst, size_t dstLen) {
+        auto px = readbackRgba8();
+        size_t n = std::min(dstLen, px.size());
+        if (dst && n) std::memcpy(dst, px.data(), n);
+        return n;
+    }
 
     /// Drain queued input events (screen backends translate windowing
     /// events during pollEvents; headless returns empty).

@@ -180,6 +180,8 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // any data→pixel mapping — O(n) scalar pass instead of transforming
     // all n points. Only ~2 envelope verts per column get mapped.
     if (!transform && series_.points.size() > huge &&
+        !render::OffloadConfig::forceCpu(
+            render::OffloadConfig::global().envelope) &&
         series_.drawStyle == DrawStyle::Default &&
         axes.projection().kind == ProjectionKind::Rectilinear &&
         axes.xscale().kind == ScaleKind::Linear &&
@@ -232,6 +234,8 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // Custom mpl transforms, sketch/steps styles and non-rectilinear
     // projections stay on the CPU pass.
     if (!transform && series_.drawStyle == DrawStyle::Default &&
+        !render::OffloadConfig::forceCpu(
+            render::OffloadConfig::global().xform) &&
         series_.points.size() > huge &&
         renderer_->pointCount() == series_.points.size() &&
         axes.projection().kind == ProjectionKind::Rectilinear &&

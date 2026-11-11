@@ -10,6 +10,7 @@
 #include <volcano/plot/Axes.hpp>
 #include <volcano/plot/Style.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
+#include <volcano/render/Offload.hpp>
 #include <volcano/render/Renderer.hpp>
 
 #include <cmath>
@@ -131,6 +132,12 @@ extern "C" {
 
 VpFigure* vp_figure_create(int width, int height) {
     try {
+        // The column-envelope decimation costs a host readback round
+        // trip per trace per frame (~0.4ms CPU each on this backend);
+        // the xform+tessellateDevice path keeps the whole stroke on the
+        // GPU — cheaper for FFI/live-plot use and closer to a plain
+        // draw-all-points renderer.
+        render::OffloadConfig::global().envelope = render::OffloadMode::Cpu;
         auto* f = new VpFigure();
         if (!init(f, width, height)) {
             delete f;
@@ -334,10 +341,7 @@ size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len) {
         if (out_len < need) return 0;
         fig->renderer->prepare(*fig->figure);
         fig->renderer->renderFrame(*fig->figure);
-        auto px = fig->backend->readbackRgba8();
-        if (px.size() != need) return 0;
-        std::memcpy(out, px.data(), need);
-        return need;
+        return fig->backend->readbackRgba8Into(out, need) == need ? need : 0;
     } catch (...) {
         return 0;
     }

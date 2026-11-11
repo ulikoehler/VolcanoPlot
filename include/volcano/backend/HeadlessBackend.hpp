@@ -5,6 +5,7 @@
 
 #include <volcano/core/Instance.hpp>
 #include <volcano/core/Image.hpp>
+#include <volcano/core/Buffer.hpp>
 
 #include <vulkan/vulkan.hpp>
 
@@ -24,6 +25,7 @@ public:
     std::unique_ptr<render::Cmd> beginFrameLoad() override;
     void endFrame() override;
     std::vector<uint8_t> readbackRgba8() override;
+    size_t readbackRgba8Into(uint8_t* dst, size_t dstLen) override;
     render::GpuServices& gpu() override;
 
     bool blitCapture() override;
@@ -59,6 +61,9 @@ private:
     /// Render pass + framebuffer + command buffer on the (possibly
     /// shared) context.
     void createTargets();
+    /// Lazily (re)create the persistent readback staging buffer to
+    /// fit the current extent.
+    void ensureStaging();
 
     BackendDesc desc_;
     GpuContext ctx_;
@@ -79,6 +84,12 @@ private:
     vk::UniqueCommandBuffer commandBuffer_;
     vk::UniqueFence renderFence_;
     bool frameBegun_ = false;
+
+    /// Persistent host-visible readback target — the image→buffer
+    /// copy is recorded into `commandBuffer_` inside endFrame(), so a
+    /// frame is ONE submit + ONE fence wait instead of a second
+    /// one-time submit + queue wait + per-frame VMA alloc.
+    core::Buffer stagingBuffer_;
 
     /// Blit state: eLoad-variant render pass + snapshot image.
     vk::UniqueRenderPass renderPassLoad_;

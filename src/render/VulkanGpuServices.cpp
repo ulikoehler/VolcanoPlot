@@ -22,9 +22,11 @@
 #include <volcano/text/TextRenderer.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 
 namespace volcano::render {
@@ -447,11 +449,20 @@ std::unique_ptr<Cmd> VulkanGpuServices::beginPrePass() {
 void VulkanGpuServices::submitPrePass(std::unique_ptr<Cmd> /*cmd*/) {
     if (!preCmd_) return;
     preCmd_->end();
+    auto dev = device();
+    if (!preFence_) preFence_ = dev.createFenceUnique({});
+    dev.resetFences(preFence_.get());
     vk::SubmitInfo submit{};
     vk::CommandBuffer pcb = preCmd_->handle();
     submit.setCommandBuffers(pcb);
-    graphicsQueue().submit(submit);
-    graphicsQueue().waitIdle();
+    graphicsQueue().submit(submit, preFence_.get());
+    // The compute pre-pass (line tessellation of every dirty trace)
+    // can run for milliseconds — waitIdle() would spin in the driver
+    // that whole time. Poll the fence status with a short sleep
+    // instead: same synchronous semantics, ~zero CPU.
+    while (dev.getFenceStatus(preFence_.get()) == vk::Result::eNotReady) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
     preCmd_.reset();
 }
 

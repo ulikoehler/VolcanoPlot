@@ -167,6 +167,10 @@ private:
 
     /// Pre-pass command buffer for IPlot::preDraw compute work.
     std::optional<core::CommandBuffer> preCmd_;
+    /// Fence for the pre-pass submission — the wait is polled with a
+    /// sleep loop because queue.waitIdle() spins in the driver on some
+    /// stacks, burning the GPU exec time as CPU every frame.
+    vk::UniqueFence preFence_;
 };
 
 } // namespace volcano::render
