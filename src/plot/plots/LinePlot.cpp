@@ -40,10 +40,13 @@ void LinePlot::setYdata(std::vector<float> y) {
 void LinePlot::prepare(render::Renderer& r) {
     if (prepared_) {
         // In-place update: memcpy into the host-visible buffer (reallocs
-        // only on growth). Direct series() writes stay correct — there is
-        // no dirty flag to bypass, the upload is just cheap.
-        renderer_->updatePoints(std::span{series_.points});
-        dataDirty_ = false;
+        // only on growth). Skip when the data hasn't changed — re-uploading
+        // every frame costs O(N) per trace per render, which dominates CPU
+        // on live plots with several large traces.
+        if (dataDirty_) {
+            renderer_->updatePoints(std::span{series_.points});
+            dataDirty_ = false;
+        }
         return;
     }
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
