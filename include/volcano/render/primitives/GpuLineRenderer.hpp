@@ -114,6 +114,13 @@ public:
 
     virtual void resetScratch() = 0;
     [[nodiscard]] virtual bool inited() const noexcept = 0;
+
+    /// Called once after all plot preDraw() calls in a frame. The
+    /// Vulkan impl records the single compute→vertex barrier covering
+    /// every tessellateDevice write recorded this frame (they write
+    /// disjoint arena regions, so per-trace barriers are redundant).
+    /// Default no-op — op-stream backends order via submission.
+    virtual void endPreDraw(Cmd& cmd) { (void)cmd; }
 };
 
 } // namespace volcano::render::primitives

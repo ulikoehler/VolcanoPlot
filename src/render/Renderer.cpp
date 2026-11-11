@@ -1965,6 +1965,10 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
             const_cast<plot::IPlot*>(plot)->preDraw(
                 cmd, *this, *p.axes, p.axes->rect);
         }
+    // One compute→vertex barrier covering every device tessellation
+    // recorded above (disjoint arena regions make per-trace barriers
+    // redundant).
+    gpu().gpuLine().endPreDraw(cmd);
     backend_.beginRenderPass();
 
     // Figure patch (figure.facecolor) fills the canvas under everything.

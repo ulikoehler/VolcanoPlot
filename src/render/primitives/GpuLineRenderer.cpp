@@ -397,6 +397,7 @@ public:
                                        plot::Color color) override;
     void resetScratch() override;
     [[nodiscard]] bool inited() const noexcept override { return inited_; }
+    void endPreDraw(Cmd& cmd) override;
 
 private:
     static constexpr uint32_t kJoinVerts = 8 * 3;
@@ -479,6 +480,9 @@ private:
     core::Buffer outBuf_;
     std::vector<core::Buffer> retiredIn_, retiredOut_;
     vk::DeviceSize inOff_ = 0, outOff_ = 0;
+    /// Set by tessellateDevice; endPreDraw turns it into the single
+    /// compute→vertex barrier covering all device tessellate writes.
+    bool vertexBarrierPending_ = false;
 };
 
 } // namespace
@@ -563,6 +567,7 @@ void GpuLineRendererVk::resetScratch() {
     inOff_ = 0;
     outOff_ = 0;
     xformOff_ = 0;
+    vertexBarrierPending_ = false;
     retiredIn_.clear();
     retiredOut_.clear();
     retiredXform_.clear();
@@ -954,6 +959,20 @@ GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
     cmd.pushConstants(pipeLayout_.get(), vk::ShaderStageFlagBits::eCompute,
                       0, sizeof(PC), &pc);
     cmd.dispatch((count + nSeg + 255) / 256, 1, 1);
+    // The compute→vertex barrier is deferred to endPreDraw(): each
+    // trace writes a disjoint outBuf_ region, so one barrier after the
+    // preDraw loop covers all of this frame's device tessellations.
+    vertexBarrierPending_ = true;
+    out.push_back(Mesh{GpuBuf(VkBuffer(outBuf_.handle())),
+                       uint64_t(outOff_), uint32_t(outVerts)});
+    outOff_ += outVerts;
+    return out;
+}
+
+void GpuLineRendererVk::endPreDraw(Cmd& cmdRef) {
+    if (!vertexBarrierPending_) return;
+    vertexBarrierPending_ = false;
+    const vk::CommandBuffer cmd = vkCmd(cmdRef);
     vk::BufferMemoryBarrier bar{};
     bar.setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
        .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
@@ -961,10 +980,6 @@ GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
     cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
                         vk::PipelineStageFlagBits::eVertexInput,
                         {}, {}, bar, {});
-    out.push_back(Mesh{GpuBuf(VkBuffer(outBuf_.handle())),
-                       uint64_t(outOff_), uint32_t(outVerts)});
-    outOff_ += outVerts;
-    return out;
 }
 
 void GpuLineRendererVk::ensureIn(size_t points) {
