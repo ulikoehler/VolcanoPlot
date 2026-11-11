@@ -38,13 +38,17 @@ public:
                                          plot::Color color) = 0;
 
     /// Stroke a polyline that already lives in a device buffer (e.g. the
-    /// output of transformPoints) — no host upload. Returns {} when the
-    /// backend has no device-buffer entry point.
+    /// output of transformPoints) — no host upload. `inBase` is the
+    /// point-index offset of the polyline inside `points` (0 for a
+    /// dedicated buffer). Returns {} when the backend has no
+    /// device-buffer entry point.
     virtual std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
                                                uint32_t count,
+                                               uint32_t inBase,
                                                const plot::StrokeParams& sp,
                                                plot::Color color) {
-        (void)cmd; (void)points; (void)count; (void)sp; (void)color;
+        (void)cmd; (void)points; (void)count; (void)inBase; (void)sp;
+        (void)color;
         return {};
     }
 
@@ -52,10 +56,14 @@ public:
     /// closed-form axis scales + projection and masks out-of-domain
     /// points to NaN. Returns false when unavailable (caller keeps the
     /// CPU transform); the result is a device buffer, not a readback.
+    /// `outBase` (optional) receives the point-index offset of the
+    /// output inside `out` — pass it as tessellateDevice's `inBase`.
     [[nodiscard]] virtual bool transformPoints(
         Cmd& cmd, GpuBuf points, uint32_t count,
-        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out) {
-        (void)cmd; (void)points; (void)count; (void)t; (void)rect; (void)out;
+        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out,
+        uint32_t* outBase = nullptr) {
+        (void)cmd; (void)points; (void)count; (void)t; (void)rect;
+        (void)out; (void)outBase;
         return false;
     }
 
@@ -79,8 +87,10 @@ public:
     /// the caller then narrows separately and uses transformPoints.
     [[nodiscard]] virtual bool transformPointsF64(
         Cmd& cmd, GpuBuf src64, uint32_t count,
-        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out) {
-        (void)cmd; (void)src64; (void)count; (void)t; (void)rect; (void)out;
+        const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out,
+        uint32_t* outBase = nullptr) {
+        (void)cmd; (void)src64; (void)count; (void)t; (void)rect;
+        (void)out; (void)outBase;
         return false;
     }
 

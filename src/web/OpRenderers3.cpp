@@ -302,7 +302,7 @@ public:
     /// tessellateDevice directly, so no host pass over the data happens.
     bool transformPoints(Cmd& cmd, GpuBuf points, uint32_t count,
                          const plot::Transform2D& t, Rect2D rect,
-                         GpuBuf& out) override {
+                         GpuBuf& out, uint32_t* outBase) override {
         if (!points || count < 2) return false;
         if (!render::OffloadConfig::allowGpu(
                 render::OffloadConfig::global().xform))
@@ -317,6 +317,7 @@ public:
                       PTransformPoints{uint32_t(points), outBuf, count,
                                        1u, ubo});
         out = GpuBuf(outBuf);
+        if (outBase) *outBase = 0;
         return true;
     }
 
@@ -324,14 +325,14 @@ public:
     /// to tessellate() minus the host upload; the dashed path needs the
     /// CPU cumulative arc lengths, so it stays on the upload path.
     std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
-                                       uint32_t count,
+                                       uint32_t count, uint32_t inBase,
                                        const StrokeParams& sp,
                                        Color color) override {
         if (!points || count < 2 || !sp.dashes.empty()) return {};
         auto& os = ops(cmd);
         uint64_t outBytes = uint64_t(count) * 6 * 32 + 64;
         uint32_t outBuf = s_->createBufferRaw(outBytes, 1 | 2);
-        PTessLines p{uint32_t(points), 0, outBuf, 0, count, count - 1,
+        PTessLines p{uint32_t(points), inBase, outBuf, 0, count, count - 1,
                      sp.width * 0.5f,
                      uint8_t(sp.join), uint8_t(sp.cap), sp.miterLimit,
                      color.r, color.g, color.b, color.a};

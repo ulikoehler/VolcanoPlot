@@ -329,11 +329,12 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // projections stay on the CPU pass.
     if (xformOk) {
         render::GpuBuf pxBuf = 0;
+        uint32_t pxBase = 0;
         bool mapped = false;
         if (useF64_ && !f64Failed_) {
             mapped = gpu.transformPointsF64(
                 cmd, renderer_->pointBufferF64(), renderer_->pointCount(),
-                axes.transform(), rect, pxBuf);
+                axes.transform(), rect, pxBuf, &pxBase);
             // Fused variant unavailable on this backend — narrow into
             // the f32 buffer, then take the regular f32 transform.
             if (!mapped && renderer_->f64Pending())
@@ -342,10 +343,12 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         if (!mapped)
             mapped = gpu.transformPoints(cmd, renderer_->pointBuffer(),
                                          renderer_->pointCount(),
-                                         axes.transform(), rect, pxBuf);
+                                         axes.transform(), rect, pxBuf,
+                                         &pxBase);
         if (mapped) {
             gpuMeshes_ = gpu.tessellateDevice(cmd, pxBuf,
-                                              renderer_->pointCount(), sp,
+                                              renderer_->pointCount(),
+                                              pxBase, sp,
                                               series_.resolvedColor());
             gpuMeshSeq_ = r.frameSeq();
             return;
