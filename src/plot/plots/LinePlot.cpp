@@ -20,6 +20,7 @@ void LinePlot::setData(std::vector<float> x, std::vector<float> y) {
     for (size_t i = 0; i < n; ++i)
         series_.points[i] = {x[i], y[i]};
     dataDirty_ = true;
+    ++dataVersion_;
     touch();
 }
 void LinePlot::setXdata(std::vector<float> x) {
@@ -29,6 +30,7 @@ void LinePlot::setXdata(std::vector<float> x) {
     series_.points.resize(n);
     for (size_t i = 0; i < n; ++i) series_.points[i].x = x[i];
     dataDirty_ = true;
+    ++dataVersion_;
     touch();
 }
 void LinePlot::setYdata(std::vector<float> y) {
@@ -38,6 +40,7 @@ void LinePlot::setYdata(std::vector<float> y) {
     series_.points.resize(n);
     for (size_t i = 0; i < n; ++i) series_.points[i].y = y[i];
     dataDirty_ = true;
+    ++dataVersion_;
     touch();
 }
 
@@ -47,6 +50,7 @@ void LinePlot::setDataF64(std::vector<double> xy) {
     cpuDirty_ = true;
     series_.points.clear();
     dataDirty_ = true;
+    ++dataVersion_;
     touch();
 }
 
@@ -56,6 +60,7 @@ void LinePlot::setDataF64(std::span<const double> xy) {
     cpuDirty_ = true;
     series_.points.clear();
     dataDirty_ = true;
+    ++dataVersion_;
     touch();
 }
 
@@ -212,6 +217,9 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         series_.lineStyle == LineStyle::None ||
         axes.style().sketchScale > 0.0f)
         return;
+    // Fresh tessellation below bakes positions at the current view —
+    // the pan-reuse path re-assigns it.
+    meshOffset_ = {0, 0};
     // Sketch lines stay on the CPU stroker (they jitter per vertex).
     // Dashes now ride the GPU path too: the pattern is expanded on the
     // device from per-point cumulative arc lengths, so a dashed line no
@@ -328,6 +336,49 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // Custom mpl transforms, sketch/steps styles and non-rectilinear
     // projections stay on the CPU pass.
     if (xformOk) {
+        // Persistent-mesh cache: when every input to transform +
+        // tessellate is unchanged, skip both dispatches and reuse last
+        // frame's stroke — on live multi-trace figures only the churning
+        // trace re-records; unchanged ones cost a key compare.
+        const auto& t = axes.transform();
+        const auto rc = series_.resolvedColor();
+        MeshCacheKey key{dataVersion_, uint32_t(dataCount()),
+                         t.view.x.min, t.view.x.span(),
+                         t.view.y.min, t.view.y.span(),
+                         int(t.codeX()), int(t.codeY()),
+                         t.scaleX.param1, t.scaleX.param2, t.scaleX.param3,
+                         t.scaleY.param1, t.scaleY.param2, t.scaleY.param3,
+                         float(rect.x), float(rect.y),
+                         float(rect.width), float(rect.height),
+                         sp.width, int(sp.join), int(sp.cap),
+                         sp.miterLimit,
+                         rc.r, rc.g, rc.b, rc.a};
+        if (!meshStore_) meshStore_ = gpu.createMeshStore();
+        if (meshStore_ && meshKeyValid_ && !persistentMeshes_.empty() &&
+            meshEpoch_ == gpu.meshEpoch()) {
+            if (meshKey_ == key) {
+                gpuMeshes_ = persistentMeshes_;
+                meshOffset_ = {0, 0};
+                gpuMeshSeq_ = r.frameSeq();
+                return;
+            }
+            // Pure viewport pan: the mesh is baked for ALL points (no
+            // view clipping), so a viewMin shift is exactly a rigid
+            // pixel translate — reuse the stroke with a vertex offset.
+            MeshCacheKey pan = meshKey_;
+            pan.viewMinX = key.viewMinX;
+            pan.viewMinY = key.viewMinY;
+            if (pan == key) {
+                gpuMeshes_ = persistentMeshes_;
+                meshOffset_ = {
+                    (meshKey_.viewMinX - key.viewMinX) /
+                        key.viewSpanX * key.rectW,
+                    (key.viewMinY - meshKey_.viewMinY) /
+                        key.viewSpanY * key.rectH};
+                gpuMeshSeq_ = r.frameSeq();
+                return;
+            }
+        }
         render::GpuBuf pxBuf = 0;
         uint32_t pxBase = 0;
         bool mapped = false;
@@ -345,14 +396,30 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
                                          renderer_->pointCount(),
                                          axes.transform(), rect, pxBuf,
                                          &pxBase);
+        if (mapped && meshStore_) {
+            persistentMeshes_ = gpu.tessellateDeviceTo(
+                cmd, pxBuf, renderer_->pointCount(), pxBase,
+                *meshStore_, sp, rc);
+            if (!persistentMeshes_.empty()) {
+                gpuMeshes_ = persistentMeshes_;
+                gpuMeshSeq_ = r.frameSeq();
+                meshKey_ = key;
+                meshEpoch_ = gpu.meshEpoch();
+                meshKeyValid_ = true;
+                return;
+            }
+        }
         if (mapped) {
             gpuMeshes_ = gpu.tessellateDevice(cmd, pxBuf,
                                               renderer_->pointCount(),
-                                              pxBase, sp,
-                                              series_.resolvedColor());
+                                              pxBase, sp, rc);
             gpuMeshSeq_ = r.frameSeq();
+            meshKeyValid_ = false;
             return;
         }
+        meshKeyValid_ = false;
+    } else {
+        meshKeyValid_ = false;
     }
 noDecimate:
     ensureCpuPoints();
@@ -472,7 +539,7 @@ void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
             for (auto& m : gpuMeshes_)
                 spine.drawTrianglesGpu(cmd, clip, res, m.buffer,
                                        m.firstVertex * 6 * sizeof(float),
-                                       m.vertexCount);
+                                       m.vertexCount, meshOffset_);
         } else {
             linePass(sp, series_.resolvedColor(), {});
         }

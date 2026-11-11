@@ -115,6 +115,39 @@ public:
     virtual void resetScratch() = 0;
     [[nodiscard]] virtual bool inited() const noexcept = 0;
 
+    /// Opaque persistent tessellate destination owned by a plot — see
+    /// tessellateDeviceTo(). Backends without persistent output regions
+    /// return nullptr from createMeshStore().
+    struct MeshStore {
+        virtual ~MeshStore() = default;
+    };
+
+    /// Allocate a persistent mesh destination — a plot keeps it for its
+    /// lifetime so a cached Mesh stays valid across frames.
+    virtual std::unique_ptr<MeshStore> createMeshStore() {
+        return nullptr;
+    }
+
+    /// Generation counter for the underlying vertex buffer(s): bumped
+    /// whenever they regrow, which invalidates every Mesh handle cached
+    /// under an older epoch. Plots must rebuild on mismatch.
+    [[nodiscard]] virtual uint64_t meshEpoch() const noexcept { return 0; }
+
+    /// tessellateDevice variant writing a caller-owned persistent
+    /// region: the returned Mesh stays valid across frames until the
+    /// store is rewritten or meshEpoch() bumps — the caller may skip
+    /// transform+tessellate entirely while all mesh inputs (data,
+    /// transform, rect, stroke, color) are unchanged. Returns {} when
+    /// unsupported; the caller then falls back to tessellateDevice.
+    virtual std::vector<Mesh> tessellateDeviceTo(
+        Cmd& cmd, GpuBuf points, uint32_t count, uint32_t inBase,
+        MeshStore& dst, const plot::StrokeParams& sp,
+        plot::Color color) {
+        (void)cmd; (void)points; (void)count; (void)inBase; (void)dst;
+        (void)sp; (void)color;
+        return {};
+    }
+
     /// Called once after all plot preDraw() calls in a frame. The
     /// Vulkan impl records the single compute→vertex barrier covering
     /// every tessellateDevice write recorded this frame (they write

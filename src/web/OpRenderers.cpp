@@ -169,7 +169,9 @@ public:
     }
     void drawTrianglesGpu(Cmd& cmd, Rect2D clip, Extent2D res,
                           GpuBuf buffer, uint64_t byteOffset,
-                          uint32_t vertexCount) override {
+                          uint32_t vertexCount,
+                          plot::Point2D offset = {0, 0}) override {
+        (void)offset;   // persistent-mesh translate reuse is Vulkan-only
         PDrawTrisGpu p{clipF(clip), float(res.width), float(res.height),
                        uint32_t(buffer), byteOffset, vertexCount, 0};
         ops(cmd).emit(Op::DrawTrisGpu, p);

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <array>
 
 namespace volcano::render::primitives {
 
@@ -398,6 +399,14 @@ public:
     void resetScratch() override;
     [[nodiscard]] bool inited() const noexcept override { return inited_; }
     void endPreDraw(Cmd& cmd) override;
+    std::unique_ptr<MeshStore> createMeshStore() override;
+    [[nodiscard]] uint64_t meshEpoch() const noexcept override {
+        return meshEpoch_;
+    }
+    std::vector<Mesh> tessellateDeviceTo(
+        Cmd& cmd, GpuBuf points, uint32_t count, uint32_t inBase,
+        MeshStore& dst, const plot::StrokeParams& sp,
+        plot::Color color) override;
 
 private:
     static constexpr uint32_t kJoinVerts = 8 * 3;
@@ -483,6 +492,35 @@ private:
     /// Set by tessellateDevice; endPreDraw turns it into the single
     /// compute→vertex barrier covering all device tessellate writes.
     bool vertexBarrierPending_ = false;
+
+    /// Persistent per-plot region inside outBuf_ — the leading
+    /// [0, persistOff_) of the buffer is permanent (mesh cache), the
+    /// scratch arena bump-allocates above it and rewinds each frame.
+    /// Regrowing outBuf_ bumps meshEpoch_, which tells every plot its
+    /// cached Mesh handles went stale. Regions outlive their store's
+    /// frame; destroyed stores return theirs to freeRegions_.
+    struct VkMeshStore final : MeshStore {
+        GpuLineRendererVk* owner;
+        uint32_t base = 0, cap = 0;   ///< vertex units
+        explicit VkMeshStore(GpuLineRendererVk* o) : owner(o) {}
+        ~VkMeshStore() override {
+            if (owner && cap) owner->freeMeshRegion(base, cap);
+        }
+    };
+    uint64_t meshEpoch_ = 0;
+    uint32_t persistOff_ = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> freeRegions_;
+    uint32_t allocMeshRegion(uint32_t verts);
+    void freeMeshRegion(uint32_t base, uint32_t cap);
+    /// Records one stroker dispatch writing `outBase` of outBuf_.
+    /// Caller guarantees capacity (`ensureOutCap`/`allocMeshRegion`).
+    Mesh recordDeviceTessellate(vk::CommandBuffer cmd, GpuBuf points,
+                                uint32_t count, uint32_t inBase,
+                                uint32_t outBase,
+                                const plot::StrokeParams& sp,
+                                plot::Color color);
+    /// Grow outBuf_ until `totalVerts` fit; bumps meshEpoch_ on regrow.
+    void ensureOutCap(vk::DeviceSize totalVerts);
 };
 
 } // namespace
@@ -565,7 +603,9 @@ void GpuLineRendererVk::init() {
 
 void GpuLineRendererVk::resetScratch() {
     inOff_ = 0;
-    outOff_ = 0;
+    // Scratch space lives above the persistent mesh region — rewind to
+    // persistOff_, not 0, so cached per-plot meshes stay intact.
+    outOff_ = persistOff_;
     xformOff_ = 0;
     vertexBarrierPending_ = false;
     retiredIn_.clear();
@@ -924,6 +964,22 @@ GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
     const size_t outVerts = size_t(nSeg) * kSegVerts +
                             size_t(count) * kJoinVerts;
     ensureOut(outVerts);
+    out.push_back(recordDeviceTessellate(cmd, points, count, inBase,
+                                         uint32_t(outOff_), sp, color));
+    outOff_ += outVerts;
+    return out;
+}
+
+GpuLineRendererVk::Mesh
+GpuLineRendererVk::recordDeviceTessellate(vk::CommandBuffer cmd,
+                                          GpuBuf points, uint32_t count,
+                                          uint32_t inBase,
+                                          uint32_t outBase,
+                                          const plot::StrokeParams& sp,
+                                          plot::Color color) {
+    const uint32_t nSeg = count - 1;
+    const size_t outVerts = size_t(nSeg) * kSegVerts +
+                            size_t(count) * kJoinVerts;
     // Rebind the (device-src, outBuf_) descriptor set only when a
     // buffer regrew — steady-state frames reuse it as-is.
     const vk::Buffer src = svcs_->vkBufferOf(points);
@@ -951,7 +1007,7 @@ GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
         float r, g, b, a;
     } pc{count, nSeg, sp.width * 0.5f,
          uint32_t(sp.join), uint32_t(sp.cap), sp.miterLimit,
-         inBase, uint32_t(outOff_),
+         inBase, outBase,
          color.r, color.g, color.b, color.a};
     cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipe_.get());
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -963,9 +1019,58 @@ GpuLineRendererVk::tessellateDevice(Cmd& cmdRef, GpuBuf points,
     // trace writes a disjoint outBuf_ region, so one barrier after the
     // preDraw loop covers all of this frame's device tessellations.
     vertexBarrierPending_ = true;
-    out.push_back(Mesh{GpuBuf(VkBuffer(outBuf_.handle())),
-                       uint64_t(outOff_), uint32_t(outVerts)});
-    outOff_ += outVerts;
+    return Mesh{GpuBuf(VkBuffer(outBuf_.handle())),
+                uint64_t(outBase), uint32_t(outVerts)};
+}
+
+std::unique_ptr<GpuLineRendererVk::MeshStore>
+GpuLineRendererVk::createMeshStore() {
+    return std::make_unique<VkMeshStore>(this);
+}
+
+uint32_t GpuLineRendererVk::allocMeshRegion(uint32_t verts) {
+    // First-fit into a freed region — split the remainder back.
+    for (auto it = freeRegions_.begin(); it != freeRegions_.end(); ++it) {
+        if (it->second < verts) continue;
+        const uint32_t base = it->first;
+        if (it->second == verts) freeRegions_.erase(it);
+        else { it->first += verts; it->second -= verts; }
+        return base;
+    }
+    const uint32_t base = persistOff_;
+    persistOff_ += verts;
+    // A persistent alloc must never collide with scratch space already
+    // handed out this frame.
+    if (outOff_ < persistOff_) outOff_ = persistOff_;
+    return base;
+}
+
+void GpuLineRendererVk::freeMeshRegion(uint32_t base, uint32_t cap) {
+    freeRegions_.emplace_back(base, cap);
+}
+
+std::vector<GpuLineRendererVk::Mesh>
+GpuLineRendererVk::tessellateDeviceTo(Cmd& cmdRef, GpuBuf points,
+                                      uint32_t count, uint32_t inBase,
+                                      MeshStore& dst,
+                                      const plot::StrokeParams& sp,
+                                      plot::Color color) {
+    const vk::CommandBuffer cmd = vkCmd(cmdRef);
+    std::vector<Mesh> out;
+    if (!inited_ || !points || count < 2 || !sp.dashes.empty())
+        return out;
+    const uint32_t nSeg = count - 1;
+    const uint32_t outVerts = uint32_t(size_t(nSeg) * kSegVerts +
+                                       size_t(count) * kJoinVerts);
+    auto& s = static_cast<VkMeshStore&>(dst);
+    if (s.cap < outVerts) {
+        if (s.cap) freeMeshRegion(s.base, s.cap);
+        s.base = allocMeshRegion(outVerts);
+        s.cap = outVerts;
+    }
+    ensureOutCap(s.base + outVerts);
+    out.push_back(recordDeviceTessellate(cmd, points, count, inBase,
+                                         s.base, sp, color));
     return out;
 }
 
@@ -973,13 +1078,26 @@ void GpuLineRendererVk::endPreDraw(Cmd& cmdRef) {
     if (!vertexBarrierPending_) return;
     vertexBarrierPending_ = false;
     const vk::CommandBuffer cmd = vkCmd(cmdRef);
-    vk::BufferMemoryBarrier bar{};
-    bar.setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
-       .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
-       .setBuffer(outBuf_.handle()).setOffset(0).setSize(outBuf_.size());
+    // Barrier every generation a dispatch may have written: a mid-frame
+    // regrow retires the old outBuf_, and meshes recorded before it
+    // still draw from that buffer.
+    std::array<vk::BufferMemoryBarrier, 16> bars{};
+    size_t n = 0;
+    const auto addBar = [&](vk::Buffer b, vk::DeviceSize sz) {
+        if (!b || n >= std::size(bars)) return;
+        bars[n].setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
+               .setDstAccessMask(vk::AccessFlagBits::eVertexAttributeRead)
+               .setBuffer(b).setOffset(0).setSize(sz);
+        ++n;
+    };
+    addBar(outBuf_.handle(), outBuf_.size());
+    for (const auto& r : retiredOut_) addBar(r.handle(), r.size());
     cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
                         vk::PipelineStageFlagBits::eVertexInput,
-                        {}, {}, bar, {});
+                        {}, {},
+                        vk::ArrayProxy<const vk::BufferMemoryBarrier>(
+                            n, bars.data()),
+                        {});
 }
 
 void GpuLineRendererVk::ensureIn(size_t points) {
@@ -999,15 +1117,20 @@ void GpuLineRendererVk::ensureIn(size_t points) {
 }
 
 void GpuLineRendererVk::ensureOut(size_t verts) {
-    if (outOff_ + verts <= outBuf_.size() / (sizeof(float) * 6)) return;
+    ensureOutCap(outOff_ + verts);
+}
+
+void GpuLineRendererVk::ensureOutCap(vk::DeviceSize totalVerts) {
+    if (totalVerts <= outBuf_.size() / (sizeof(float) * 6)) return;
     retiredOut_.push_back(std::move(outBuf_));
-    size_t cap = std::max<size_t>(verts + outOff_, 16384) * 2;
+    size_t cap = std::max<size_t>(totalVerts, 16384) * 2;
     if (vk::DeviceSize(cap * sizeof(float) * 6) > kMaxBufferBytes)
-        cap = verts + outOff_;
+        cap = totalVerts;
     core::BufferDesc d{};
     d.size = cap * sizeof(float) * 6;
     d.usage = core::BufferUsage::VertexStorage;
     outBuf_ = core::Buffer(allocator_, d);
+    ++meshEpoch_;   // every cached persistent Mesh handle went stale
     rebind();
 }
 

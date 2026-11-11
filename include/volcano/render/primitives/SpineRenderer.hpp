@@ -108,11 +108,14 @@ public:
 
     /// Draw a GPU-generated LineVertex triangle soup produced by
     /// GpuLineRenderer (compute-stroked polylines). `byteOffset` selects
-    /// the first vertex inside `buffer`.
+    /// the first vertex inside `buffer`. `offset` is a uniform
+    /// pixel-space translation added to every vertex — lets a cached
+    /// mesh be reused across pure viewport pans without re-tessellation.
     virtual void drawTrianglesGpu(Cmd& cmd, plot::Rect2D clip,
                                   plot::Extent2D resolution,
                                   GpuBuf buffer, uint64_t byteOffset,
-                                  uint32_t vertexCount) = 0;
+                                  uint32_t vertexCount,
+                                  plot::Point2D offset = {0, 0}) = 0;
 };
 
 } // namespace volcano::render::primitives

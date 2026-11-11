@@ -154,6 +154,39 @@ private:
     /// GPU-tessellated stroke produced by preDraw (valid for frameSeq()).
     std::vector<render::primitives::GpuLineRenderer::Mesh> gpuMeshes_;
     uint64_t gpuMeshSeq_ = 0;
+    /// Persistent mesh store + input cache for the device transform
+    /// path: while data/transform/rect/stroke are unchanged the plot
+    /// reuses the previous frame's tessellation instead of recording
+    /// transform + tessellate dispatches again — the dominant per-frame
+    /// cost on multi-trace live plots where only some traces churn.
+    std::unique_ptr<render::primitives::GpuLineRenderer::MeshStore>
+        meshStore_;
+    std::vector<render::primitives::GpuLineRenderer::Mesh>
+        persistentMeshes_;
+    /// Everything the device path bakes into the mesh — compared
+    /// memberwise each preDraw.
+    struct MeshCacheKey {
+        uint64_t dataVer = 0;
+        uint32_t count = 0;
+        float viewMinX = 0, viewSpanX = 0, viewMinY = 0, viewSpanY = 0;
+        int codeX = 0, codeY = 0;
+        float sxP1 = 0, sxP2 = 0, sxP3 = 0;
+        float syP1 = 0, syP2 = 0, syP3 = 0;
+        float rectX = 0, rectY = 0, rectW = 0, rectH = 0;
+        float width = 0;
+        int join = 0, cap = 0;
+        float miterLimit = 0;
+        float r = 0, g = 0, b = 0, a = 0;
+        bool operator==(const MeshCacheKey&) const = default;
+    };
+    MeshCacheKey meshKey_{};
+    uint64_t meshEpoch_ = 0;    ///< gpuLine().meshEpoch() at cache time
+    bool meshKeyValid_ = false;
+    /// Pixel translate applied when drawing the cached mesh — nonzero
+    /// on a pure viewport pan (viewMin moved, everything else equal).
+    Point2D meshOffset_{0, 0};
+    /// Bumped by every data mutator — part of MeshCacheKey.
+    uint64_t dataVersion_ = 0;
     /// Canonical f64 data while useF64_ — series_.points stays empty
     /// until ensureCpuPoints() materializes it.
     std::vector<double> rawF64_;
