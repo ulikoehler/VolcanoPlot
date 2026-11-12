@@ -40,6 +40,16 @@ public:
                          const Axes& axes, Rect2D rect) {
         (void)cmd; (void)renderer; (void)axes; (void)rect;
     }
+    /// Second pre-pass phase — runs after ALL plots' preDraw() calls,
+    /// with a single transform→consume barrier recorded in between.
+    /// Plots that phase their compute work (transforms in preDraw,
+    /// dependent dispatches here) get one shared barrier instead of
+    /// one per trace. Default: nothing.
+    virtual void preDraw2(render::Cmd& cmd,
+                          render::Renderer& renderer,
+                          const Axes& axes, Rect2D rect) {
+        (void)cmd; (void)renderer; (void)axes; (void)rect;
+    }
     /// Called every frame to record draw commands.
     virtual void draw(render::Cmd& cmd, render::Renderer& renderer,
                       const Axes& axes, Rect2D rect) = 0;

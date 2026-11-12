@@ -391,20 +391,23 @@ public:
                                        const plot::Transform2D& t,
                                        plot::Rect2D rect,
                                        GpuBuf& out,
-                                       uint32_t* outBase) override;
+                                       uint32_t* outBase,
+                                       bool deferBarrier) override;
     [[nodiscard]] bool transformPointsF64(Cmd& cmd, GpuBuf src64,
                                           uint32_t count,
                                           uint32_t srcHead, uint32_t srcCap,
                                           const plot::Transform2D& t,
                                           plot::Rect2D rect,
                                           GpuBuf& out,
-                                          uint32_t* outBase) override;
+                                          uint32_t* outBase,
+                                          bool deferBarrier) override;
     std::vector<Mesh> tessellateDevice(Cmd& cmd, GpuBuf points,
                                        uint32_t count, uint32_t inBase,
                                        const plot::StrokeParams& sp,
                                        plot::Color color) override;
     void resetScratch() override;
     [[nodiscard]] bool inited() const noexcept override { return inited_; }
+    void endTransforms(Cmd& cmd) override;
     void endPreDraw(Cmd& cmd) override;
     std::unique_ptr<MeshStore> createMeshStore() override;
     [[nodiscard]] uint64_t meshEpoch() const noexcept override {
@@ -474,7 +477,7 @@ private:
     /// transform into this trace's disjoint region, RAW barrier, out.
     /// `pipe` selects the f32 or f64 shader variant.
     bool xformDispatch(vk::CommandBuffer c, GpuBuf src, uint32_t count,
-                       uint32_t srcHead, uint32_t srcCap,
+                       uint32_t srcHead, uint32_t srcCap, bool deferBarrier,
                        const plot::Transform2D& t, plot::Rect2D rect,
                        vk::Pipeline pipe, GpuBuf& out, uint32_t* outBase);
     /// Device-resident pixel-space point arena (transform outputs,
@@ -500,6 +503,9 @@ private:
     /// Set by tessellateDevice; endPreDraw turns it into the single
     /// compute→vertex barrier covering all device tessellate writes.
     bool vertexBarrierPending_ = false;
+    /// Set by deferred xformDispatch calls; endTransforms emits the
+    /// one compute→compute barrier covering all transform writes.
+    bool xformBarrierPending_ = false;
 
     /// Persistent per-plot region inside outBuf_ — the leading
     /// [0, persistOff_) of the buffer is permanent (mesh cache), the
@@ -616,6 +622,7 @@ void GpuLineRendererVk::resetScratch() {
     outOff_ = persistOff_;
     xformOff_ = 0;
     vertexBarrierPending_ = false;
+    xformBarrierPending_ = false;
     retiredIn_.clear();
     retiredOut_.clear();
     retiredXform_.clear();
@@ -819,7 +826,8 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
                                         uint32_t count,
                                         const plot::Transform2D& t,
                                         plot::Rect2D rect, GpuBuf& out,
-                                        uint32_t* outBase) {
+                                        uint32_t* outBase,
+                                        bool deferBarrier) {
     if (!inited_ || !points || count < 2 || xformState_ == 0)
         return false;
     const auto c = vkCmd(cmd);
@@ -843,8 +851,8 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
         xformPipe_ = std::move(res.value);
         xformState_ = 1;
     }
-    return xformDispatch(c, points, count, 0, count, t, rect,
-                         xformPipe_.get(), out, outBase);
+    return xformDispatch(c, points, count, 0, count, deferBarrier,
+                         t, rect, xformPipe_.get(), out, outBase);
 }
 
 bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
@@ -853,7 +861,8 @@ bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
                                            uint32_t srcCap,
                                            const plot::Transform2D& t,
                                            plot::Rect2D rect,
-                                           GpuBuf& out, uint32_t* outBase) {
+                                           GpuBuf& out, uint32_t* outBase,
+                                           bool deferBarrier) {
     if (!inited_ || !src64 || count < 2 || xform64State_ == 0)
         return false;
     const auto c = vkCmd(cmd);
@@ -880,13 +889,14 @@ bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
         xform64State_ = 1;
     }
     return xformDispatch(c, src64, count, srcHead,
-                         srcCap ? srcCap : count, t, rect,
-                         xformPipe64_.get(), out, outBase);
+                         srcCap ? srcCap : count, deferBarrier,
+                         t, rect, xformPipe64_.get(), out, outBase);
 }
 
 bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
                                       uint32_t count,
                                       uint32_t srcHead, uint32_t srcCap,
+                                      bool deferBarrier,
                                       const plot::Transform2D& t,
                                       plot::Rect2D rect,
                                       vk::Pipeline pipe, GpuBuf& out,
@@ -950,15 +960,21 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
     c.pushConstants(xformPipeLayout_.get(),
                     vk::ShaderStageFlagBits::eCompute, 0, sizeof(PC), &pc);
     c.dispatch((count + 255) / 256, 1, 1);
-    // RAW barrier: tessellateDevice's stroker reads what we just wrote.
-    vk::MemoryBarrier2 bar{};
-    bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
-       .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
-       .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
-       .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
-    vk::DependencyInfo dep{};
-    dep.setMemoryBarriers(bar);
-    c.pipelineBarrier2(dep);
+    // RAW barrier: tessellateDevice's stroker reads what we just
+    // wrote. Deferred callers get one shared barrier via endTransforms
+    // instead of one per trace.
+    if (deferBarrier) {
+        xformBarrierPending_ = true;
+    } else {
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        c.pipelineBarrier2(dep);
+    }
     out = GpuBuf(VkBuffer(xformBuf_.handle()));
     if (outBase) *outBase = base;
     xformOff_ = base + count;
@@ -1088,6 +1104,23 @@ GpuLineRendererVk::tessellateDeviceTo(Cmd& cmdRef, GpuBuf points,
     out.push_back(recordDeviceTessellate(cmd, points, count, inBase,
                                          s.base, sp, color));
     return out;
+}
+
+void GpuLineRendererVk::endTransforms(Cmd& cmdRef) {
+    if (!xformBarrierPending_) return;
+    xformBarrierPending_ = false;
+    const vk::CommandBuffer c = vkCmd(cmdRef);
+    // One compute-write→compute-read barrier covering every deferred
+    // transform recorded this frame — the phased preDraw/preDraw2
+    // split records all transforms before any tessellate reads them.
+    vk::MemoryBarrier2 bar{};
+    bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+       .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+       .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+    vk::DependencyInfo dep{};
+    dep.setMemoryBarriers(bar);
+    c.pipelineBarrier2(dep);
 }
 
 void GpuLineRendererVk::endPreDraw(Cmd& cmdRef) {

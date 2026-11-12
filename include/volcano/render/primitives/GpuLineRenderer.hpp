@@ -58,12 +58,15 @@ public:
     /// CPU transform); the result is a device buffer, not a readback.
     /// `outBase` (optional) receives the point-index offset of the
     /// output inside `out` — pass it as tessellateDevice's `inBase`.
+    /// `deferBarrier`: skip the per-dispatch RAW barrier — the caller
+    /// guarantees endTransforms() runs before any consumer dispatch
+    /// (the phased preDraw/preDraw2 split batches N barriers into one).
     [[nodiscard]] virtual bool transformPoints(
         Cmd& cmd, GpuBuf points, uint32_t count,
         const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out,
-        uint32_t* outBase = nullptr) {
+        uint32_t* outBase = nullptr, bool deferBarrier = false) {
         (void)cmd; (void)points; (void)count; (void)t; (void)rect;
-        (void)out; (void)outBase;
+        (void)out; (void)outBase; (void)deferBarrier;
         return false;
     }
 
@@ -96,9 +99,9 @@ public:
         Cmd& cmd, GpuBuf src64, uint32_t count,
         uint32_t srcHead, uint32_t srcCap,
         const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out,
-        uint32_t* outBase = nullptr) {
+        uint32_t* outBase = nullptr, bool deferBarrier = false) {
         (void)cmd; (void)src64; (void)count; (void)t; (void)rect;
-        (void)out; (void)outBase;
+        (void)out; (void)outBase; (void)deferBarrier;
         return false;
     }
 
@@ -155,6 +158,12 @@ public:
         (void)sp; (void)color;
         return {};
     }
+
+    /// Called once between the preDraw and preDraw2 loops when
+    /// transforms were recorded with deferBarrier — emits the single
+    /// compute-write→compute-read barrier covering every transform
+    /// this frame. Default no-op.
+    virtual void endTransforms(Cmd& cmd) { (void)cmd; }
 
     /// Called once after all plot preDraw() calls in a frame. The
     /// Vulkan impl records the single compute→vertex barrier covering

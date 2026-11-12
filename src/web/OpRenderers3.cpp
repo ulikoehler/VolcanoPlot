@@ -302,7 +302,9 @@ public:
     /// tessellateDevice directly, so no host pass over the data happens.
     bool transformPoints(Cmd& cmd, GpuBuf points, uint32_t count,
                          const plot::Transform2D& t, Rect2D rect,
-                         GpuBuf& out, uint32_t* outBase) override {
+                         GpuBuf& out, uint32_t* outBase,
+                         bool deferBarrier) override {
+        (void)deferBarrier;   // op-stream orders via submission
         if (!points || count < 2) return false;
         if (!render::OffloadConfig::allowGpu(
                 render::OffloadConfig::global().xform))

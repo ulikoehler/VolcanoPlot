@@ -442,7 +442,8 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
             mapped = gpu.transformPointsF64(
                 cmd, renderer_->pointBufferF64(), renderer_->pointCount(),
                 ringHead, ringCap,
-                axes.transform(), rect, pxBuf, &pxBase);
+                axes.transform(), rect, pxBuf, &pxBase,
+                /*deferBarrier=*/true);
             // Fused variant unavailable on this backend — narrow into
             // the f32 buffer, then take the regular f32 transform.
             if (!mapped && renderer_->f64Pending())
@@ -452,26 +453,15 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
             mapped = gpu.transformPoints(cmd, renderer_->pointBuffer(),
                                          renderer_->pointCount(),
                                          axes.transform(), rect, pxBuf,
-                                         &pxBase);
-        if (mapped && meshStore_) {
-            persistentMeshes_ = gpu.tessellateDeviceTo(
-                cmd, pxBuf, renderer_->pointCount(), pxBase,
-                *meshStore_, sp, rc);
-            if (!persistentMeshes_.empty()) {
-                gpuMeshes_ = persistentMeshes_;
-                gpuMeshSeq_ = r.frameSeq();
-                meshKey_ = key;
-                meshEpoch_ = gpu.meshEpoch();
-                meshKeyValid_ = true;
-                return;
-            }
-        }
+                                         &pxBase,
+                                         /*deferBarrier=*/true);
         if (mapped) {
-            gpuMeshes_ = gpu.tessellateDevice(cmd, pxBuf,
-                                              renderer_->pointCount(),
-                                              pxBase, sp, rc);
-            gpuMeshSeq_ = r.frameSeq();
-            meshKeyValid_ = false;
+            // Tessellation runs in preDraw2 after the frame's shared
+            // transform barrier — the per-trace RAW barrier is dropped.
+            tessPending_ = PendingTess{pxBuf, pxBase,
+                                       renderer_->pointCount(),
+                                       r.frameSeq(), bool(meshStore_),
+                                       key, sp, rc};
             return;
         }
         meshKeyValid_ = false;
@@ -499,6 +489,35 @@ noDecimate:
     }
     gpuMeshes_ = gpu.tessellate(cmd, px, sp, series_.resolvedColor());
     gpuMeshSeq_ = r.frameSeq();
+}
+
+void LinePlot::preDraw2(render::Cmd& cmd, render::Renderer& r,
+                        const Axes& axes, Rect2D rect) {
+    (void)axes; (void)rect;
+    if (!tessPending_) return;
+    auto pt = std::move(*tessPending_);
+    tessPending_.reset();
+    // A stale entry (preDraw2 skipped by a draw subset) is dropped —
+    // its buffers belong to an older arena generation.
+    if (pt.seq != r.frameSeq()) return;
+    auto& gpu = r.gpu().gpuLine();
+    if (pt.persistent && meshStore_) {
+        persistentMeshes_ = gpu.tessellateDeviceTo(
+            cmd, pt.pxBuf, pt.count, pt.pxBase, *meshStore_, pt.sp,
+            pt.color);
+        if (!persistentMeshes_.empty()) {
+            gpuMeshes_ = persistentMeshes_;
+            gpuMeshSeq_ = r.frameSeq();
+            meshKey_ = pt.key;
+            meshEpoch_ = gpu.meshEpoch();
+            meshKeyValid_ = true;
+            return;
+        }
+    }
+    gpuMeshes_ = gpu.tessellateDevice(cmd, pt.pxBuf, pt.count,
+                                      pt.pxBase, pt.sp, pt.color);
+    gpuMeshSeq_ = r.frameSeq();
+    meshKeyValid_ = false;
 }
 
 void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,

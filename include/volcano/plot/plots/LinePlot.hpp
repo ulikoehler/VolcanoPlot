@@ -16,6 +16,11 @@ public:
     /// into a vertex soup consumed by draw() in the same frame.
     void preDraw(render::Cmd& cmd, render::Renderer& r,
                  const Axes& axes, Rect2D rect) override;
+    /// Phase 2: the device tessellation queued by preDraw — runs after
+    /// the frame's shared transform barrier, so N traces cost 2
+    /// barriers total instead of N+1.
+    void preDraw2(render::Cmd& cmd, render::Renderer& r,
+                  const Axes& axes, Rect2D rect) override;
     void draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
     /// Log/logit scales drop out-of-domain points from the data limits.
@@ -208,6 +213,20 @@ private:
     uint32_t slideDrop_ = 0;
     size_t slideTailOff_ = 0;
     size_t slideTailLen_ = 0;
+
+    /// Tessellation queued by preDraw for the phased barrier model —
+    /// consumed by preDraw2 in the same frame (seq-guarded).
+    struct PendingTess {
+        render::GpuBuf pxBuf;
+        uint32_t pxBase;
+        uint32_t count;
+        uint64_t seq;
+        bool persistent;
+        MeshCacheKey key;
+        StrokeParams sp;
+        Color color;
+    };
+    std::optional<PendingTess> tessPending_;
     bool prepared_ = false;
     bool dataDirty_ = false;
     bool useF64_ = false;
