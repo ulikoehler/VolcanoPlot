@@ -144,12 +144,22 @@ extern "C" {
 
 VpFigure* vp_figure_create(int width, int height) {
     try {
-        // The column-envelope decimation costs a host readback round
-        // trip per trace per frame (~0.4ms CPU each on this backend);
-        // the xform+tessellateDevice path keeps the whole stroke on the
-        // GPU — cheaper for FFI/live-plot use and closer to a plain
-        // draw-all-points renderer.
-        render::OffloadConfig::global().envelope = render::OffloadMode::Cpu;
+        // The column-envelope decimation is fully device-resident
+        // (reduce + polyline emit stay in the frame's compute stream —
+        // no readback round trip), so Auto lets huge traces use it.
+        // An explicit envelope= choice in VOLCANO_GPU_OFFLOAD still
+        // wins; the legacy submit+readback envelope remains as the
+        // fallback behind VOLCANO_ENVDEV=0.
+        static const bool userEnv =
+            [] {
+                const char* v = std::getenv("VOLCANO_GPU_OFFLOAD");
+                return v &&
+                       std::string_view{v}.find("envelope") !=
+                           std::string_view::npos;
+            }();
+        if (!userEnv)
+            render::OffloadConfig::global().envelope =
+                render::OffloadMode::Auto;
         auto* f = new VpFigure();
         if (!init(f, width, height)) {
             delete f;

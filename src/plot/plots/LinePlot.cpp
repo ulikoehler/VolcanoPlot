@@ -369,14 +369,56 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         float ky = (fy1 != fy0) ? 1.0f / (fy1 - fy0) : 0.0f;
         float pyA = float(rect.y) + float(rect.height);
         float pyB = float(rect.height) * ky;
-        // GPU envelope: the uploaded point buffer is reduced on-device by
-        // a compute shader into per-pixel-column min/max — works for
-        // unsorted x too (atomics), and skips the O(n) host scan.
-        // Falls back to the CPU pass on failure.
-        std::vector<float> mn, mx;
         // Column affine: pixel col = ax + kx * dataX  →  ax folds in the
         // viewport offset so fx0 lands at rect.x.
         const float ax = float(rect.x) - fx0 * kx;
+
+        // Device-resident envelope→polyline: reduce, emit and
+        // tessellate all record into the frame's compute stream — the
+        // host never touches the points. Same mesh-cache key as the
+        // transform path, but only exact hits reuse: the column grid
+        // is pixel-anchored, so a pure pan regroups points and the
+        // baked stroke can't be reused by translation.
+        const auto& t = axes.transform();
+        const auto rc = series_.resolvedColor();
+        MeshCacheKey key{dataVersion_, uint32_t(dataCount()),
+                         t.view.x.min, t.view.x.span(),
+                         t.view.y.min, t.view.y.span(),
+                         int(t.codeX()), int(t.codeY()),
+                         t.scaleX.param1, t.scaleX.param2, t.scaleX.param3,
+                         t.scaleY.param1, t.scaleY.param2, t.scaleY.param3,
+                         float(rect.x), float(rect.y),
+                         float(rect.width), float(rect.height),
+                         sp.width, int(sp.join), int(sp.cap),
+                         sp.miterLimit,
+                         rc.r, rc.g, rc.b, rc.a};
+        if (!meshStore_) meshStore_ = gpu.createMeshStore();
+        if (meshStore_ && meshKeyValid_ && !persistentMeshes_.empty() &&
+            meshEpoch_ == gpu.meshEpoch() && meshKey_ == key) {
+            gpuMeshes_ = persistentMeshes_;
+            meshOffset_ = {0, 0};
+            gpuMeshSeq_ = r.frameSeq();
+            return;
+        }
+        render::GpuBuf pxBuf = 0;
+        uint32_t pxBase = 0;
+        if (gpu.envelopePolyline(cmd, renderer_->pointBuffer(),
+                                 renderer_->pointCount(), ax, kx,
+                                 pyA, pyB, fy0, 0, int(W) - 1,
+                                 pxBuf, &pxBase,
+                                 /*deferBarrier=*/true)) {
+            tessPending_ = PendingTess{pxBuf, pxBase,
+                                       2u * uint32_t(W),
+                                       r.frameSeq(), bool(meshStore_),
+                                       key, sp, rc};
+            return;
+        }
+
+        // GPU envelope with host readback: the uploaded point buffer is
+        // reduced on-device into per-pixel-column min/max — works for
+        // unsorted x too (atomics), and skips the O(n) host scan.
+        // Falls back to the CPU pass on failure.
+        std::vector<float> mn, mx;
         bool gpuOk = gpu.envelopeColumns(renderer_->pointBuffer(), renderer_->pointCount(),
             ax, kx, 0, int(W) - 1, mn, mx);
         std::vector<Point2D> px;

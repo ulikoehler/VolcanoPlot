@@ -116,6 +116,29 @@ public:
                                                std::vector<float>& mn,
                                                std::vector<float>& mx) = 0;
 
+    /// Column envelope + polyline emission fully on the device: the
+    /// min/max-per-column reduce writes into the shared transform
+    /// arena, then an emit pass produces the 2-verts-per-column
+    /// pixel-space polyline (alternating lo/hi order, NaN pairs for
+    /// empty columns — identical to envelopeRuns) that
+    /// tessellateDevice strokes directly. No host readback.
+    /// `ax`/`kx` map data-x to pixel columns; `pyA`/`pyB`/`fy0` map
+    /// data-y to pixels: py = pyA - (y - fy0) * pyB.
+    /// out/outBase describe the emitted polyline of
+    /// 2*(cx1-cx0+1) points inside `out` — pass to tessellateDevice.
+    /// deferBarrier works like transformPoints: the caller must run
+    /// endTransforms() before the stroker dispatch.
+    [[nodiscard]] virtual bool envelopePolyline(
+        Cmd& cmd, GpuBuf points, uint32_t count,
+        float ax, float kx, float pyA, float pyB, float fy0,
+        int cx0, int cx1, GpuBuf& out, uint32_t* outBase = nullptr,
+        bool deferBarrier = false) {
+        (void)cmd; (void)points; (void)count; (void)ax; (void)kx;
+        (void)pyA; (void)pyB; (void)fy0; (void)cx0; (void)cx1;
+        (void)out; (void)outBase; (void)deferBarrier;
+        return false;
+    }
+
     /// True when tessellate() honours `StrokeParams::dashes`. The
     /// Vulkan backend strokes solid polylines only, so dashed strokes
     /// must stay on the CPU stroker there.

@@ -252,6 +252,127 @@ void main() {
 }
 )GLSL";
 
+// Device-resident variant of the envelope reduce: identical math, but
+// min/max columns land in the shared transform arena (xformBuf_) at a
+// word offset instead of a dedicated readback buffer. The dst binding
+// is the arena; envBase is the u32-word offset of cmn[] inside it
+// (cmx[] follows at +W). This keeps the whole envelope→polyline chain
+// inside the frame's compute stream — no submit, no readback.
+const char* kEnvelopeDevGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src { vec2 p[]; } src;
+layout(set = 0, binding = 1) buffer Env { uint m[]; } env;
+
+layout(push_constant) uniform PC {
+    float ax; float kx;
+    int   cx0; int cx1;
+    uint  n;
+    uint  envBase;
+} pc;
+
+uint ord(float f) {
+    uint u = floatBitsToUint(f);
+    return u ^ (((u & 0x80000000u) != 0u) ? 0xFFFFFFFFu : 0x80000000u);
+}
+
+void upd(int c, float lo, float hi) {
+    int i = c - pc.cx0;
+    uint W = uint(pc.cx1 - pc.cx0 + 1);
+    if (i < 0 || uint(i) >= W) return;
+    atomicMin(env.m[pc.envBase + uint(i)], ord(lo));
+    atomicMax(env.m[pc.envBase + W + uint(i)], ord(hi));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i == 0u || i >= pc.n) return;
+    vec2 a = src.p[i - 1u], b = src.p[i];
+    if (isnan(a.x) || isinf(a.x) || isnan(a.y) || isinf(a.y) ||
+        isnan(b.x) || isinf(b.x) || isnan(b.y) || isinf(b.y))
+        return;
+    float xa = pc.ax + pc.kx * a.x, xb = pc.ax + pc.kx * b.x;
+    float xlo = min(xa, xb), xhi = max(xa, xb);
+    int s = max(pc.cx0, int(floor(xlo)));
+    int e = min(pc.cx1, int(floor(xhi)));
+    if (s > e) return;
+    if (s == e) { upd(s, min(a.y, b.y), max(a.y, b.y)); return; }
+    for (int c = s; c <= e; ++c) {
+        float lo, hi;
+        if (xhi - xlo < 1e-6) {
+            lo = min(a.y, b.y); hi = max(a.y, b.y);
+        } else {
+            float xl = max(xlo, float(c)), xr = min(xhi, float(c + 1));
+            float t0 = (xl - xa) / (xb - xa);
+            float t1 = (xr - xa) / (xb - xa);
+            float yl = a.y + (b.y - a.y) * t0;
+            float yr = a.y + (b.y - a.y) * t1;
+            lo = min(yl, yr); hi = max(yl, yr);
+        }
+        upd(c, lo, hi);
+    }
+}
+)GLSL";
+
+// Envelope→polyline emit: one thread per pixel column writes the two
+// envelope verts (alternating lo/hi so connectors stay on the envelope
+// edges — the same zigzag envelopeRuns produces on the CPU). Empty
+// columns emit a NaN pair, which the stroker drops like any other
+// masked point. The y affine (pyA - (y - fy0) * pyB) bakes the
+// data→pixel mapping, so the output plugs straight into
+// tessellateDevice.
+const char* kEnvEmitGlsl = R"GLSL(
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Env { uint m[]; } env;
+layout(set = 0, binding = 1) buffer Dst { vec2 p[]; } dst;
+
+layout(push_constant) uniform PC {
+    int   cx0;
+    uint  W;
+    float pyA; float pyB; float fy0;
+    uint  envBase;
+    uint  pxBase;
+} pc;
+
+float unord(uint u) {
+    u ^= (u & 0x80000000u) != 0u ? 0x80000000u : 0xFFFFFFFFu;
+    return uintBitsToFloat(u);
+}
+
+// ord() is order-preserving, so untouched (+inf/-inf) columns compare
+// lo > hi — validity is a plain uint compare, no decode needed.
+bool validCol(uint j) {
+    return env.m[pc.envBase + j] <= env.m[pc.envBase + pc.W + j];
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.W) return;
+    uint o = pc.pxBase + 2u * i;
+    vec2 nan = vec2(uintBitsToFloat(0x7FC00000u));
+    if (!validCol(i)) {
+        dst.p[o] = nan;
+        dst.p[o + 1u] = nan;
+        return;
+    }
+    // Alternating order restarts at each valid run — scan back to the
+    // run start for parity. Runs are bounded by the column count
+    // (canvas width), so the worst case is a short cache-hot loop.
+    uint rs = i;
+    while (rs > 0u && validCol(rs - 1u)) --rs;
+    float x = float(pc.cx0 + int(i)) + 0.5;
+    float lo = unord(env.m[pc.envBase + i]);
+    float hi = unord(env.m[pc.envBase + pc.W + i]);
+    vec2 vlo = vec2(x, pc.pyA - (lo - pc.fy0) * pc.pyB);
+    vec2 vhi = vec2(x, pc.pyA - (hi - pc.fy0) * pc.pyB);
+    if (((i - rs) & 1u) == 0u) { dst.p[o] = vlo; dst.p[o + 1u] = vhi; }
+    else                       { dst.p[o] = vhi; dst.p[o + 1u] = vlo; }
+}
+)GLSL";
+
 // Data→pixel transform — replaces the host-side pixelPoints() pass for
 // massively oversampled traces. Applies the closed-form axis scale
 // (kScaleFn is prepended at compile time), masks out-of-domain values
@@ -382,6 +503,13 @@ public:
                                        int cx0, int cx1,
                                        std::vector<float>& mn,
                                        std::vector<float>& mx) override;
+    [[nodiscard]] bool envelopePolyline(Cmd& cmd, GpuBuf points,
+                                        uint32_t count,
+                                        float ax, float kx,
+                                        float pyA, float pyB, float fy0,
+                                        int cx0, int cx1, GpuBuf& out,
+                                        uint32_t* outBase,
+                                        bool deferBarrier) override;
     [[nodiscard]] bool convertF64ToF32(Cmd& cmd, GpuBuf src64,
                                        GpuBuf dst32, uint32_t n,
                                        uint32_t srcHead,
@@ -495,6 +623,24 @@ private:
     /// when either buffer regrows.
     vk::DescriptorSet devDset_{};
     vk::Buffer devSrc_{}, devDst_{};
+
+    /// Device-resident envelope→polyline chain (huge-trace decimation
+    /// without a host readback): the reduce writes cmn/cmx words into
+    /// xformBuf_, the emit pass expands them into the stroker's
+    /// 2-verts-per-column polyline in the same arena. Shares
+    /// xformDescLayout_ (2 storage bindings) and the xformDsets_
+    /// src→set cache.
+    vk::UniquePipelineLayout envDevPipeLayout_;
+    vk::UniquePipeline envDevPipe_;
+    vk::UniquePipelineLayout envEmitPipeLayout_;
+    vk::UniquePipeline envEmitPipe_;
+    int envDevState_ = -1;   ///< -1 = untried, 0 = unavailable, 1 = ready
+    /// emit pass's {xformBuf_, xformBuf_} binding — rewritten on regrow.
+    vk::DescriptorSet envEmitDset_{};
+    vk::Buffer envEmitSrc_{};
+    /// Lazily builds both envelope-device pipelines (compileGlsl can
+    /// fail → envDevState_ = 0 and callers fall back to the CPU path).
+    [[nodiscard]] bool ensureEnvDev();
 
     core::Buffer inBuf_;
     core::Buffer outBuf_;
@@ -918,6 +1064,7 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
         xformBuf_ = core::Buffer(allocator_, d);
         xformCap_ = uint32_t(cap);
         xformDsets_.clear();
+        envEmitDset_ = vk::DescriptorSet{};
         devSrc_ = vk::Buffer{};   // force devDset_ rewrite
     }
 
@@ -978,6 +1125,198 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
     out = GpuBuf(VkBuffer(xformBuf_.handle()));
     if (outBase) *outBase = base;
     xformOff_ = base + count;
+    return true;
+}
+
+bool GpuLineRendererVk::ensureEnvDev() {
+    if (envDevState_ >= 0) return envDevState_ == 1;
+    envDevState_ = 0;
+    // Debug/test kill-switch — VOLCANO_ENVDEV=0 pins the envelope to
+    // the legacy submit+readback path for A/B pixel comparisons.
+    if (const char* v = std::getenv("VOLCANO_ENVDEV");
+        v && v[0] == '0')
+        return false;
+    if (!ensureXformLayout()) return false;
+    auto& cache = svcs_->pipelineCache();
+    auto mk = [&](const char* glsl, uint32_t pcSize,
+                  vk::UniquePipelineLayout& layout,
+                  vk::UniquePipeline& pipe) -> bool {
+        vk::PushConstantRange pcr{};
+        pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
+           .setOffset(0).setSize(pcSize);
+        vk::PipelineLayoutCreateInfo plci{};
+        plci.setSetLayouts(xformDescLayout_.get())
+            .setPushConstantRanges(pcr);
+        layout = device_.createPipelineLayoutUnique(plci);
+        auto spv = core::ShaderModule::compileGlsl(glsl, "comp");
+        if (spv.empty()) return false;
+        core::ShaderModule shader(device_, spv);
+        vk::ComputePipelineCreateInfo ci{};
+        ci.stage.setStage(vk::ShaderStageFlagBits::eCompute)
+            .setModule(shader.handle()).setPName("main");
+        ci.setLayout(layout.get());
+        std::lock_guard lock(core::pipelineCreationMutex());
+        auto res =
+            device_.createComputePipelineUnique(cache.handle(), ci);
+        if (res.result != vk::Result::eSuccess) return false;
+        pipe = std::move(res.value);
+        return true;
+    };
+    if (!mk(kEnvelopeDevGlsl, 24, envDevPipeLayout_, envDevPipe_))
+        return false;
+    if (!mk(kEnvEmitGlsl, 28, envEmitPipeLayout_, envEmitPipe_))
+        return false;
+    envDevState_ = 1;
+    return true;
+}
+
+bool GpuLineRendererVk::envelopePolyline(Cmd& cmdRef, GpuBuf points,
+                                         uint32_t count,
+                                         float ax, float kx,
+                                         float pyA, float pyB, float fy0,
+                                         int cx0, int cx1, GpuBuf& out,
+                                         uint32_t* outBase,
+                                         bool deferBarrier) {
+    const auto c = vkCmd(cmdRef);
+    const uint32_t W =
+        cx1 >= cx0 ? uint32_t(cx1 - cx0 + 1) : 0;
+    if (!inited_ || !points || count < 2 || !W) return false;
+    if (!ensureEnvDev()) return false;
+
+    // Arena layout: [cmn W u32][cmx W u32][px 2W vec2] = 3W points of
+    // scratch. Same regrow/retire pattern as xformDispatch.
+    const uint32_t need = W * 3;
+    const uint32_t base = xformOff_;
+    if (uint64_t(base) + need > xformCap_) {
+        if (xformBuf_.handle())
+            retiredXform_.push_back(std::move(xformBuf_));
+        uint64_t cap = std::max<uint64_t>(
+            (uint64_t(base) + need) * 2, 1u << 20);
+        if (cap * 8 > kMaxBufferBytes)
+            cap = uint64_t(base) + need;
+        core::BufferDesc d{};
+        d.size = vk::DeviceSize(cap) * 8;
+        d.usage = core::BufferUsage::Storage;
+        xformBuf_ = core::Buffer(allocator_, d);
+        xformCap_ = uint32_t(cap);
+        xformDsets_.clear();
+        envEmitDset_ = vk::DescriptorSet{};
+        devSrc_ = vk::Buffer{};   // force devDset_ rewrite
+    }
+
+    const vk::DeviceSize envByte = vk::DeviceSize(base) * 8;
+    c.fillBuffer(xformBuf_.handle(), envByte, vk::DeviceSize(W) * 4,
+                 kOrdPosInf);
+    c.fillBuffer(xformBuf_.handle(), envByte + vk::DeviceSize(W) * 4,
+                 vk::DeviceSize(W) * 4, kOrdNegInf);
+    {
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
+           .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
+                             vk::AccessFlagBits2::eShaderWrite);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        c.pipelineBarrier2(dep);
+    }
+
+    // Envelope reduce — src/dst bindings are identical to the
+    // transform pass, so the same cached descriptor set binds.
+    const uint64_t key = uint64_t(VkBuffer(svcs_->vkBufferOf(points)));
+    auto [dit, fresh] = xformDsets_.try_emplace(key);
+    if (fresh) {
+        vk::DescriptorBufferInfo infos[2];
+        infos[0].setBuffer(svcs_->vkBufferOf(points)).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        infos[1].setBuffer(xformBuf_.handle()).setOffset(0)
+                .setRange(VK_WHOLE_SIZE);
+        vk::WriteDescriptorSet writes[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            writes[i].setDstBinding(i)
+                     .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                     .setBufferInfo(infos[i]);
+        dit->second = descPool_->allocate(xformDescLayout_.get());
+        for (auto& w : writes) w.setDstSet(dit->second);
+        device_.updateDescriptorSets(writes, {});
+    }
+    struct EnvPC {
+        float ax, kx;
+        int32_t cx0, cx1;
+        uint32_t n, envBase;
+    } epc{ax, kx, cx0, cx1, count, base * 2};
+    c.bindPipeline(vk::PipelineBindPoint::eCompute, envDevPipe_.get());
+    c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                         envDevPipeLayout_.get(), 0, dit->second, {});
+    c.pushConstants(envDevPipeLayout_.get(),
+                    vk::ShaderStageFlagBits::eCompute, 0,
+                    sizeof(epc), &epc);
+    c.dispatch((count + 255) / 256, 1, 1);
+
+    // env write → emit read. Kept inline (not deferred): emit is
+    // recorded now, so it must see the reduce's results.
+    {
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead |
+                             vk::AccessFlagBits2::eShaderWrite);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        c.pipelineBarrier2(dep);
+    }
+
+    // Emit — both bindings alias xformBuf_ (uint env words in, vec2
+    // polyline out); the set is rewritten only on arena regrow.
+    if (!envEmitDset_ || envEmitSrc_ != xformBuf_.handle()) {
+        if (!envEmitDset_)
+            envEmitDset_ =
+                descPool_->allocate(xformDescLayout_.get());
+        vk::DescriptorBufferInfo infos[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            infos[i].setBuffer(xformBuf_.handle()).setOffset(0)
+                     .setRange(VK_WHOLE_SIZE);
+        vk::WriteDescriptorSet writes[2];
+        for (uint32_t i = 0; i < 2; ++i)
+            writes[i].setDstBinding(i)
+                     .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                     .setBufferInfo(infos[i])
+                     .setDstSet(envEmitDset_);
+        device_.updateDescriptorSets(writes, {});
+        envEmitSrc_ = xformBuf_.handle();
+    }
+    struct EmitPC {
+        int32_t cx0;
+        uint32_t W;
+        float pyA, pyB, fy0;
+        uint32_t envBase, pxBase;
+    } ipc{cx0, W, pyA, pyB, fy0, base * 2, base + W};
+    c.bindPipeline(vk::PipelineBindPoint::eCompute, envEmitPipe_.get());
+    c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                         envEmitPipeLayout_.get(), 0, envEmitDset_, {});
+    c.pushConstants(envEmitPipeLayout_.get(),
+                    vk::ShaderStageFlagBits::eCompute, 0,
+                    sizeof(ipc), &ipc);
+    c.dispatch((W + 255) / 256, 1, 1);
+
+    // Emit write → stroker read: deferred callers get the shared
+    // endTransforms barrier like transform outputs.
+    if (deferBarrier) {
+        xformBarrierPending_ = true;
+    } else {
+        vk::MemoryBarrier2 bar{};
+        bar.setSrcStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setSrcAccessMask(vk::AccessFlagBits2::eShaderWrite)
+           .setDstStageMask(vk::PipelineStageFlagBits2::eComputeShader)
+           .setDstAccessMask(vk::AccessFlagBits2::eShaderRead);
+        vk::DependencyInfo dep{};
+        dep.setMemoryBarriers(bar);
+        c.pipelineBarrier2(dep);
+    }
+    out = GpuBuf(VkBuffer(xformBuf_.handle()));
+    if (outBase) *outBase = base + W;
+    xformOff_ = base + need;
     return true;
 }
 
