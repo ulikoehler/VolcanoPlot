@@ -42,6 +42,21 @@ public:
     virtual bool updatePointsF64(std::span<const double> xy) {
         (void)xy; return false;
     }
+    /// Sliding-window update: drop `drop` points from the front of the
+    /// logical data range and append `tail` (interleaved f64) at the
+    /// back. Implemented as a ring buffer — only the tail is memcpy'd,
+    /// O(new) instead of O(total). Returns false when unsupported or
+    /// when the new total exceeds the ring capacity; the caller then
+    /// falls back to a full updatePointsF64 of the window.
+    virtual bool updatePointsF64Append(uint32_t drop,
+                                       std::span<const double> tail) {
+        (void)drop; (void)tail; return false;
+    }
+    /// Ring state of the f64 buffer: logical index i lives at slot
+    /// (head + i) % cap. cap == 0 means "linear" (head always 0).
+    virtual void f64Ring(uint32_t& head, uint32_t& cap) const noexcept {
+        head = 0; cap = 0;
+    }
     /// Opaque token for the f64 point buffer (dvec2 data).
     [[nodiscard]] virtual GpuBuf pointBufferF64() const noexcept { return 0; }
     /// True while an f64 upload is awaiting the GPU-side narrowing pass.

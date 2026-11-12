@@ -227,6 +227,28 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
     } catch (...) {}
 }
 
+void vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
+                    const double* tail, size_t tail_n, uint32_t rgba8,
+                    float width, int style) {
+    try {
+        if (!fig) return;
+        auto td_it = fig->trace_data.find(id);
+        if (td_it == fig->trace_data.end()) return;
+        auto it = fig->traces.find(id);
+        if (it == fig->traces.end()) return;
+        auto& td = td_it->second;
+        td.rgba8 = rgba8;
+        td.width = width;
+        td.style = style;
+        auto* lp = it->second;
+        // tail_n == 0 is legal (look-only change) — slideDataF64 still
+        // applies the eviction; the upload falls back to a full set.
+        lp->slideDataF64(
+            drop, std::span<const double>{tail, 2 * tail_n});
+        apply_trace_style(td, lp->series());
+    } catch (...) {}
+}
+
 void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
                          float size) {
     try {

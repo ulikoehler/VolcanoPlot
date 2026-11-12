@@ -72,9 +72,14 @@ public:
     /// barrier making the result visible to later passes in the same
     /// command buffer. Returns false when unavailable (no fp64
     /// pipeline); the caller then falls back to CPU conversion.
+    /// srcHead/srcCap describe a ring layout in src64: logical index i
+    /// is read from slot (srcHead + i) % srcCap. srcCap >= n always.
     [[nodiscard]] virtual bool convertF64ToF32(Cmd& cmd, GpuBuf src64,
-                                               GpuBuf dst32, uint32_t n) {
+                                               GpuBuf dst32, uint32_t n,
+                                               uint32_t srcHead = 0,
+                                               uint32_t srcCap = 0) {
         (void)cmd; (void)src64; (void)dst32; (void)n;
+        (void)srcHead; (void)srcCap;
         return false;
     }
 
@@ -85,8 +90,11 @@ public:
     /// output is bit-identical to convertF64ToF32 + transformPoints.
     /// Returns false when unavailable (no fp64 transform pipeline);
     /// the caller then narrows separately and uses transformPoints.
+    /// srcHead/srcCap: ring layout of src64 — logical index i is read
+    /// from slot (srcHead + i) % srcCap (srcCap >= count always).
     [[nodiscard]] virtual bool transformPointsF64(
         Cmd& cmd, GpuBuf src64, uint32_t count,
+        uint32_t srcHead, uint32_t srcCap,
         const plot::Transform2D& t, plot::Rect2D rect, GpuBuf& out,
         uint32_t* outBase = nullptr) {
         (void)cmd; (void)src64; (void)count; (void)t; (void)rect;

@@ -118,9 +118,18 @@ public:
     /// Move the raw interleaved f64 back out (used when the owning FFI
     /// figure rebuilds its plots from trace state).
     [[nodiscard]] std::vector<double> takeRawF64();
+    /// Sliding-window update for live traces: `drop` points are
+    /// evicted from the front and `tailXY` (interleaved f64) appended
+    /// at the back. rawF64_ keeps a logical window [rawFront_, end) so
+    /// the host never memmoves; the GPU side receives only the tail
+    /// via a ring-buffered buffer (updatePointsF64Append). Callers
+    /// must guarantee drop <= dataCount() and that the retained suffix
+    /// is unchanged — anything else needs a full setDataF64.
+    void slideDataF64(uint32_t drop, std::span<const double> tailXY);
     /// Point count regardless of which store is canonical.
     [[nodiscard]] size_t dataCount() const noexcept {
-        return useF64_ ? rawF64_.size() / 2 : series_.points.size();
+        return useF64_ ? rawF64_.size() / 2 - rawFront_
+                       : series_.points.size();
     }
     /// GPU point buffer — stable handle lets tests verify in-place reuse.
     [[nodiscard]] render::GpuBuf pointBuffer() const noexcept {
@@ -190,6 +199,15 @@ private:
     /// Canonical f64 data while useF64_ — series_.points stays empty
     /// until ensureCpuPoints() materializes it.
     std::vector<double> rawF64_;
+    /// Logical window start (points) inside rawF64_ — slideDataF64
+    /// advances this instead of erasing; compacted lazily.
+    size_t rawFront_ = 0;
+    /// Pending incremental upload for prepare(): front-drop count and
+    /// the tail's element range inside rawF64_.
+    bool slidePending_ = false;
+    uint32_t slideDrop_ = 0;
+    size_t slideTailOff_ = 0;
+    size_t slideTailLen_ = 0;
     bool prepared_ = false;
     bool dataDirty_ = false;
     bool useF64_ = false;

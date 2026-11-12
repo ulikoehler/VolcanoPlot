@@ -46,6 +46,8 @@ void LinePlot::setYdata(std::vector<float> y) {
 
 void LinePlot::setDataF64(std::vector<double> xy) {
     rawF64_ = std::move(xy);
+    rawFront_ = 0;
+    slidePending_ = false;
     useF64_ = true;
     cpuDirty_ = true;
     series_.points.clear();
@@ -56,6 +58,8 @@ void LinePlot::setDataF64(std::vector<double> xy) {
 
 void LinePlot::setDataF64(std::span<const double> xy) {
     rawF64_.assign(xy.begin(), xy.end());
+    rawFront_ = 0;
+    slidePending_ = false;
     useF64_ = true;
     cpuDirty_ = true;
     series_.points.clear();
@@ -64,8 +68,43 @@ void LinePlot::setDataF64(std::span<const double> xy) {
     touch();
 }
 
+void LinePlot::slideDataF64(uint32_t drop,
+                            std::span<const double> tailXY) {
+    const size_t have = dataCount();
+    if (drop > have) drop = static_cast<uint32_t>(have);
+    rawFront_ += drop;
+    // Compact once the dead prefix outweighs a quarter of the stored
+    // range — amortized O(N), keeps rawF64_ bounded on slides.
+    if (rawFront_ && rawFront_ * 8 >= rawF64_.size()) {
+        rawF64_.erase(rawF64_.begin(),
+                      rawF64_.begin() +
+                          static_cast<std::ptrdiff_t>(rawFront_) * 2);
+        rawFront_ = 0;
+    }
+    slideTailOff_ = rawF64_.size();
+    slideTailLen_ = tailXY.size();
+    rawF64_.insert(rawF64_.end(), tailXY.begin(), tailXY.end());
+    useF64_ = true;
+    cpuDirty_ = true;
+    series_.points.clear();
+    slidePending_ = true;
+    slideDrop_ = drop;
+    dataDirty_ = true;
+    ++dataVersion_;
+    touch();
+}
+
 std::vector<double> LinePlot::takeRawF64() {
-    if (useF64_) return std::move(rawF64_);
+    if (useF64_) {
+        std::vector<double> v;
+        v.reserve(dataCount() * 2);
+        v.insert(v.end(), rawF64_.begin() +
+                              static_cast<std::ptrdiff_t>(rawFront_) * 2,
+                 rawF64_.end());
+        rawF64_.clear();
+        rawFront_ = 0;
+        return v;
+    }
     std::vector<double> v;
     v.reserve(series_.points.size() * 2);
     for (const auto& p : series_.points) {
@@ -78,11 +117,12 @@ std::vector<double> LinePlot::takeRawF64() {
 void LinePlot::ensureCpuPoints() const {
     if (!useF64_ || !cpuDirty_) return;
     auto& pts = const_cast<LinePlot*>(this)->series_.points;
-    const size_t n = rawF64_.size() / 2;
+    const size_t n = dataCount();
+    const double* d = rawF64_.data() + rawFront_ * 2;
     pts.resize(n);
     for (size_t i = 0; i < n; ++i)
-        pts[i] = {static_cast<float>(rawF64_[2 * i]),
-                  static_cast<float>(rawF64_[2 * i + 1])};
+        pts[i] = {static_cast<float>(d[2 * i]),
+                  static_cast<float>(d[2 * i + 1])};
     cpuDirty_ = false;
 }
 
@@ -94,13 +134,26 @@ void LinePlot::prepare(render::Renderer& r) {
         // on live plots with several large traces. The f64 path uploads
         // the raw dvec2 data — one memcpy, no host-side narrowing.
         if (dataDirty_) {
-            if (!useF64_ || f64Failed_ ||
-                !renderer_->updatePointsF64(
-                    std::span<const double>{rawF64_})) {
+            bool ok = false;
+            if (useF64_ && !f64Failed_) {
+                if (slidePending_)
+                    ok = renderer_->updatePointsF64Append(
+                        slideDrop_,
+                        std::span<const double>{
+                            rawF64_.data() + slideTailOff_,
+                            slideTailLen_});
+                if (!ok)
+                    ok = renderer_->updatePointsF64(
+                        std::span<const double>{
+                            rawF64_.data() + rawFront_ * 2,
+                            dataCount() * 2});
+            }
+            if (!ok) {
                 if (useF64_) f64Failed_ = true;
                 ensureCpuPoints();
                 renderer_->updatePoints(std::span{series_.points});
             }
+            slidePending_ = false;
             dataDirty_ = false;
         }
         return;
@@ -267,11 +320,14 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // device — one compute dispatch instead of an O(N) host pass.
     // Permanent fallback to the f32 upload path when the device has
     // no fp64 support.
+    uint32_t ringHead = 0, ringCap = 0;
+    if (useF64_) renderer_->f64Ring(ringHead, ringCap);
     auto narrow64 = [&]() {
         if (!f64Failed_ &&
             gpu.convertF64ToF32(cmd, renderer_->pointBufferF64(),
                                 renderer_->pointBuffer(),
-                                renderer_->pointCount())) {
+                                renderer_->pointCount(),
+                                ringHead, ringCap)) {
             renderer_->clearF64Pending();
         } else {
             f64Failed_ = true;
@@ -385,6 +441,7 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         if (useF64_ && !f64Failed_) {
             mapped = gpu.transformPointsF64(
                 cmd, renderer_->pointBufferF64(), renderer_->pointCount(),
+                ringHead, ringCap,
                 axes.transform(), rect, pxBuf, &pxBase);
             // Fused variant unavailable on this backend — narrow into
             // the f32 buffer, then take the regular f32 transform.

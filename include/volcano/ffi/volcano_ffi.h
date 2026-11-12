@@ -29,6 +29,17 @@ uint64_t vp_trace_add(VpFigure* fig);
 void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
                   uint32_t rgba8, float width, int style);
 
+/// Sliding-window update: evict `drop` points from the front of the
+/// trace's data and append `tail`/`tail_n` (interleaved f64) at the
+/// back, plus the same style args as vp_trace_set. Only the tail is
+/// uploaded — O(new) instead of O(total). The caller MUST guarantee
+/// the retained suffix is identical to the previous data (slide
+/// detection is the caller's job); any other change needs
+/// vp_trace_set.
+void vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
+                    const double* tail, size_t tail_n, uint32_t rgba8,
+                    float width, int style);
+
 /// Marker glyph at each data point — independent of `style`, so any
 /// line style can be combined with markers. `marker` is a
 /// plot::MarkerStyle ordinal (0..41; 40 = None). `size` is the marker

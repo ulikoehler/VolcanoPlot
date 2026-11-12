@@ -269,6 +269,8 @@ layout(push_constant) uniform PC {
     vec4 u_scaleY;
     uint n;
     uint outBase;         // dst point-index offset (arena region)
+    uint srcHead;         // ring read: logical i -> slot (srcHead+i)%srcCap
+    uint srcCap;
 } pc;
 )GLSL";
 
@@ -276,7 +278,7 @@ const char* kXformMain = R"GLSL(
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.n) return;
-    vec2 d = src.p[i];
+    vec2 d = src.p[(pc.srcHead + i) % pc.srcCap];
     // maskPointsForScales parity: non-finite or out-of-domain points
     // (log: x <= 0, logit: x outside (0,1)) become NaN — the stroker
     // drops every segment touching them.
@@ -315,6 +317,8 @@ layout(push_constant) uniform PC {
     vec4 u_scaleY;
     uint n;
     uint outBase;         // dst point-index offset (arena region)
+    uint srcHead;         // ring read: logical i -> slot (srcHead+i)%srcCap
+    uint srcCap;
 } pc;
 )GLSL";
 
@@ -324,7 +328,7 @@ void main() {
     if (i >= pc.n) return;
     // Narrow first — the domain mask and scaleFwd then see the same f32
     // values the CPU path (f32 series_.points) would.
-    vec2 d = vec2(src.p[i]);
+    vec2 d = vec2(src.p[(pc.srcHead + i) % pc.srcCap]);
     bool ok = !isinf(d.x) && !isinf(d.y) && d.x == d.x && d.y == d.y;
     int cx = int(pc.u_scaleX.x + 0.5);
     int cy = int(pc.u_scaleY.x + 0.5);
@@ -354,12 +358,12 @@ layout(local_size_x = 256) in;
 layout(set = 0, binding = 0) readonly buffer Src64 { dvec2 p[]; } src;
 layout(set = 0, binding = 1) writeonly buffer Dst32 { vec2 p[]; } dst;
 
-layout(push_constant) uniform PC { uint n; } pc;
+layout(push_constant) uniform PC { uint n, srcHead, srcCap, pad; } pc;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.n) return;
-    dst.p[i] = vec2(src.p[i]);
+    dst.p[i] = vec2(src.p[(pc.srcHead + i) % pc.srcCap]);
 }
 )GLSL";
 
@@ -379,7 +383,9 @@ public:
                                        std::vector<float>& mn,
                                        std::vector<float>& mx) override;
     [[nodiscard]] bool convertF64ToF32(Cmd& cmd, GpuBuf src64,
-                                       GpuBuf dst32, uint32_t n) override;
+                                       GpuBuf dst32, uint32_t n,
+                                       uint32_t srcHead,
+                                       uint32_t srcCap) override;
     [[nodiscard]] bool transformPoints(Cmd& cmd, GpuBuf points,
                                        uint32_t count,
                                        const plot::Transform2D& t,
@@ -388,6 +394,7 @@ public:
                                        uint32_t* outBase) override;
     [[nodiscard]] bool transformPointsF64(Cmd& cmd, GpuBuf src64,
                                           uint32_t count,
+                                          uint32_t srcHead, uint32_t srcCap,
                                           const plot::Transform2D& t,
                                           plot::Rect2D rect,
                                           GpuBuf& out,
@@ -467,6 +474,7 @@ private:
     /// transform into this trace's disjoint region, RAW barrier, out.
     /// `pipe` selects the f32 or f64 shader variant.
     bool xformDispatch(vk::CommandBuffer c, GpuBuf src, uint32_t count,
+                       uint32_t srcHead, uint32_t srcCap,
                        const plot::Transform2D& t, plot::Rect2D rect,
                        vk::Pipeline pipe, GpuBuf& out, uint32_t* outBase);
     /// Device-resident pixel-space point arena (transform outputs,
@@ -703,7 +711,9 @@ bool GpuLineRendererVk::envelopeColumns(GpuBuf points, uint32_t count,
 }
 
 bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
-                                        GpuBuf dst32, uint32_t n) {
+                                        GpuBuf dst32, uint32_t n,
+                                        uint32_t srcHead,
+                                        uint32_t srcCap) {
     if (!inited_ || !src64 || !dst32 || !n || cvtState_ == 0)
         return false;
     const auto c = vkCmd(cmd);
@@ -725,7 +735,7 @@ bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
         cvtDescLayout_ = device_.createDescriptorSetLayoutUnique(dlci);
         vk::PushConstantRange pcr{};
         pcr.setStageFlags(vk::ShaderStageFlagBits::eCompute)
-           .setOffset(0).setSize(4);
+           .setOffset(0).setSize(16);
         vk::PipelineLayoutCreateInfo plci{};
         plci.setSetLayouts(cvtDescLayout_.get())
             .setPushConstantRanges(pcr);
@@ -766,8 +776,9 @@ bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
     c.bindPipeline(vk::PipelineBindPoint::eCompute, cvtPipe_.get());
     c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
                          cvtPipeLayout_.get(), 0, dit->second, {});
+    const uint32_t pc[4] = {n, srcHead, srcCap ? srcCap : n, 0};
     c.pushConstants(cvtPipeLayout_.get(),
-                    vk::ShaderStageFlagBits::eCompute, 0, 4, &n);
+                    vk::ShaderStageFlagBits::eCompute, 0, 16, pc);
     c.dispatch((n + 255) / 256, 1, 1);
     // The narrow writes the f32 point buffer — later compute passes in
     // the same submission (transformPoints, envelope) must see them.
@@ -832,12 +843,14 @@ bool GpuLineRendererVk::transformPoints(Cmd& cmd, GpuBuf points,
         xformPipe_ = std::move(res.value);
         xformState_ = 1;
     }
-    return xformDispatch(c, points, count, t, rect, xformPipe_.get(),
-                         out, outBase);
+    return xformDispatch(c, points, count, 0, count, t, rect,
+                         xformPipe_.get(), out, outBase);
 }
 
 bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
                                            uint32_t count,
+                                           uint32_t srcHead,
+                                           uint32_t srcCap,
                                            const plot::Transform2D& t,
                                            plot::Rect2D rect,
                                            GpuBuf& out, uint32_t* outBase) {
@@ -866,12 +879,14 @@ bool GpuLineRendererVk::transformPointsF64(Cmd& cmd, GpuBuf src64,
         xformPipe64_ = std::move(res.value);
         xform64State_ = 1;
     }
-    return xformDispatch(c, src64, count, t, rect, xformPipe64_.get(),
-                         out, outBase);
+    return xformDispatch(c, src64, count, srcHead,
+                         srcCap ? srcCap : count, t, rect,
+                         xformPipe64_.get(), out, outBase);
 }
 
 bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
                                       uint32_t count,
+                                      uint32_t srcHead, uint32_t srcCap,
                                       const plot::Transform2D& t,
                                       plot::Rect2D rect,
                                       vk::Pipeline pipe, GpuBuf& out,
@@ -920,14 +935,15 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
         float syCode, syP1, syP2, syPad;
         uint32_t n;
         uint32_t outBase;
-        uint32_t pad[2];
+        uint32_t srcHead;
+        uint32_t srcCap;
     } pc{t.view.x.min, t.view.y.min, t.view.x.span(), t.view.y.span(),
          float(rect.x), float(rect.y), float(rect.width), float(rect.height),
          float(int(t.codeX())), t.scaleX.param1, t.scaleX.param2,
          t.scaleX.param3,
          float(int(t.codeY())), t.scaleY.param1, t.scaleY.param2,
          t.scaleY.param3,
-         count, base, {0, 0}};
+         count, base, srcHead, srcCap};
     c.bindPipeline(vk::PipelineBindPoint::eCompute, pipe);
     c.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
                          xformPipeLayout_.get(), 0, dit->second, {});

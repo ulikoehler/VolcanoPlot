@@ -71,6 +71,11 @@ public:
     [[nodiscard]] uint32_t pointCount() const noexcept override { return count_; }
     void updatePoints(std::span<const plot::Point2D> points) override;
     bool updatePointsF64(std::span<const double> xy) override;
+    bool updatePointsF64Append(uint32_t drop,
+                               std::span<const double> tail) override;
+    void f64Ring(uint32_t& head, uint32_t& cap) const noexcept override {
+        head = f64Head_; cap = capacity64_ ? capacity64_ : count_;
+    }
     [[nodiscard]] GpuBuf pointBufferF64() const noexcept override {
         return GpuBuf(VkBuffer(pointBufferF64_.handle()));
     }
@@ -102,6 +107,7 @@ private:
     uint32_t count_ = 0;
     uint32_t capacity_ = 0;      ///< allocated point capacity
     uint32_t capacity64_ = 0;    ///< allocated f64 point capacity
+    uint32_t f64Head_ = 0;       ///< ring start of the logical window
     bool f64Pending_ = false;    ///< f64 data awaits GPU narrowing
     bool inited_ = false;
 };
@@ -244,9 +250,11 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
         d.hostVisible = true;   // in-place memcpy updates, GPU reads
         pointBufferF64_ = core::Buffer(allocator_, d);
         capacity64_ = n;
+        f64Head_ = 0;
     }
     std::memcpy(pointBufferF64_.mappedData(), xy.data(),
                 vk::DeviceSize(n) * 16);
+    f64Head_ = 0;   // full upload resets the ring to linear layout
     // The f32 buffer is written by the GPU narrowing pass — grow it
     // here so convertF64ToF32 always has a destination.
     if (n > capacity_) {
@@ -258,6 +266,31 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
         capacity_ = n;
     }
     count_ = n;
+    f64Pending_ = true;
+    return true;
+}
+
+bool LineRendererVk::updatePointsF64Append(uint32_t drop,
+                                           std::span<const double> tail) {
+    const uint32_t tailN = static_cast<uint32_t>(tail.size() / 2);
+    const uint32_t kept = count_ > drop ? count_ - drop : 0;
+    if (!tailN || !pointBufferF64_.handle() || !capacity64_ ||
+        kept + tailN > capacity64_)
+        return false;
+    // Append at the slot right after the current logical tail —
+    // (head + count) % cap — then move the head past the dropped
+    // points. Two memcpy chunks when the tail wraps the buffer end.
+    const uint32_t cap = capacity64_;
+    const uint32_t writeHead = (f64Head_ + count_) % cap;
+    auto* base = static_cast<char*>(pointBufferF64_.mappedData());
+    const uint32_t first = std::min(tailN, cap - writeHead);
+    std::memcpy(base + size_t(writeHead) * 16, tail.data(),
+                size_t(first) * 16);
+    if (first < tailN)
+        std::memcpy(base, tail.data() + size_t(first) * 2,
+                    size_t(tailN - first) * 16);
+    f64Head_ = (f64Head_ + drop) % cap;
+    count_ = kept + tailN;
     f64Pending_ = true;
     return true;
 }
