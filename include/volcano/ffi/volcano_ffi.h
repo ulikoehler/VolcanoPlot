@@ -36,9 +36,12 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
 /// the retained suffix is identical to the previous data (slide
 /// detection is the caller's job); any other change needs
 /// vp_trace_set.
-void vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
-                    const double* tail, size_t tail_n, uint32_t rgba8,
-                    float width, int style);
+/// Returns 1 when the slide was applied, 0 when it could not be (no
+/// live plot for `id` — the caller must then send a full
+/// vp_trace_set; a silent drop would lose the trace permanently).
+int vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
+                   const double* tail, size_t tail_n, uint32_t rgba8,
+                   float width, int style);
 
 /// Marker glyph at each data point — independent of `style`, so any
 /// line style can be combined with markers. `marker` is a

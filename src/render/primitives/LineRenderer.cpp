@@ -214,10 +214,20 @@ void LineRendererVk::upload(std::span<const plot::Point2D> points,
     width_ = width;
     count_ = static_cast<uint32_t>(points.size());
     capacity_ = count_;
+    capacity64_ = 0;
+    f64Head_ = 0;
+    f64Pending_ = false;
     externalBuf_ = 0;
 }
 
 void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
+    // An f32 upload replaces the point stream — the f64 ring no
+    // longer mirrors it. Invalidate so a later updatePointsF64Append
+    // can't write into stale ring state (head/capacity would
+    // desync), and so no pending narrow overwrites this data.
+    capacity64_ = 0;
+    f64Head_ = 0;
+    f64Pending_ = false;
     if (points.size() <= capacity_) {
         std::memcpy(pointBuffer_.mappedData(), points.data(),
                     points.size_bytes());
@@ -274,8 +284,10 @@ bool LineRendererVk::updatePointsF64Append(uint32_t drop,
                                            std::span<const double> tail) {
     const uint32_t tailN = static_cast<uint32_t>(tail.size() / 2);
     const uint32_t kept = count_ > drop ? count_ - drop : 0;
+    // drop >= count_ means the window outran the whole GPU buffer —
+    // ring positions no longer line up, must take the full-upload path.
     if (!tailN || !pointBufferF64_.handle() || !capacity64_ ||
-        kept + tailN > capacity64_)
+        drop >= count_ || kept + tailN > capacity64_)
         return false;
     // Append at the slot right after the current logical tail —
     // (head + count) % cap — then move the head past the dropped

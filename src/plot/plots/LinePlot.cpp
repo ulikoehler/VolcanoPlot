@@ -76,19 +76,27 @@ void LinePlot::slideDataF64(uint32_t drop,
     // Compact once the dead prefix outweighs a quarter of the stored
     // range — amortized O(N), keeps rawF64_ bounded on slides.
     if (rawFront_ && rawFront_ * 8 >= rawF64_.size()) {
+        if (slidePending_) slideTailOff_ -= rawFront_ * 2;
         rawF64_.erase(rawF64_.begin(),
                       rawF64_.begin() +
                           static_cast<std::ptrdiff_t>(rawFront_) * 2);
         rawFront_ = 0;
     }
-    slideTailOff_ = rawF64_.size();
-    slideTailLen_ = tailXY.size();
+    // Multiple slides can land before one prepare() — accumulate the
+    // drop and keep slideTailOff_ anchored at the FIRST pending slide
+    // so prepare() replays drop+tails atomically instead of only the
+    // last one (which would leave a stale prefix joined to the tail).
+    if (!slidePending_) {
+        slideTailOff_ = rawF64_.size();
+        slideDrop_ = 0;
+    }
+    slideDrop_ += drop;
     rawF64_.insert(rawF64_.end(), tailXY.begin(), tailXY.end());
+    slideTailLen_ = rawF64_.size() - slideTailOff_;
     useF64_ = true;
     cpuDirty_ = true;
     series_.points.clear();
     slidePending_ = true;
-    slideDrop_ = drop;
     dataDirty_ = true;
     ++dataVersion_;
     touch();
@@ -159,8 +167,14 @@ void LinePlot::prepare(render::Renderer& r) {
         return;
     }
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
+    // Upload only the LIVE window [rawFront_, end) — slides landing
+    // before the first prepare leave a dead prefix in rawF64_ that
+    // must not reach the GPU (it would stroke stale points joined
+    // to the newest data).
     if (useF64_ &&
-        renderer_->updatePointsF64(std::span<const double>{rawF64_})) {
+        renderer_->updatePointsF64(std::span<const double>{
+            rawF64_.data() + static_cast<std::ptrdiff_t>(rawFront_) * 2,
+            dataCount() * 2})) {
         renderer_->setStyle(series_.resolvedColor(), series_.lineWidth);
     } else {
         if (useF64_) f64Failed_ = true;
@@ -168,6 +182,9 @@ void LinePlot::prepare(render::Renderer& r) {
         renderer_->upload(std::span{series_.points},
                           series_.resolvedColor(), series_.lineWidth);
     }
+    // The full upload already reflects any pending slide — consuming
+    // it again would double-drop and re-append the tail.
+    slidePending_ = false;
     prepared_ = true;
     dataDirty_ = false;
 }

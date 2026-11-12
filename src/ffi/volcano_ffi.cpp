@@ -227,15 +227,18 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
     } catch (...) {}
 }
 
-void vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
-                    const double* tail, size_t tail_n, uint32_t rgba8,
-                    float width, int style) {
+int vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
+                   const double* tail, size_t tail_n, uint32_t rgba8,
+                   float width, int style) {
     try {
-        if (!fig) return;
+        if (!fig) return 0;
         auto td_it = fig->trace_data.find(id);
-        if (td_it == fig->trace_data.end()) return;
+        if (td_it == fig->trace_data.end()) return 0;
         auto it = fig->traces.find(id);
-        if (it == fig->traces.end()) return;
+        // The plot is gone (e.g. removed by an empty upload) — the
+        // caller must retry with a full vp_trace_set; reporting
+        // success here would silently lose the trace forever.
+        if (it == fig->traces.end()) return 0;
         auto& td = td_it->second;
         td.rgba8 = rgba8;
         td.width = width;
@@ -246,7 +249,10 @@ void vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
         lp->slideDataF64(
             drop, std::span<const double>{tail, 2 * tail_n});
         apply_trace_style(td, lp->series());
-    } catch (...) {}
+        return 1;
+    } catch (...) {
+        return 0;
+    }
 }
 
 void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
