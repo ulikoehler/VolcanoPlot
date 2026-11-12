@@ -71,7 +71,8 @@ void HeadlessBackend::createTargets() {
     createRenderPass();
     createFramebuffer();
     createCommandBuffer();
-    renderFence_ = ctx_.device.handle().createFenceUnique({});
+    for (auto& f : renderFences_)
+        f = ctx_.device.handle().createFenceUnique({});
 }
 
 HeadlessBackend::~HeadlessBackend() {
@@ -251,7 +252,7 @@ void HeadlessBackend::resize(uint32_t width, uint32_t height) {
     msaaImage_ = core::Image{};
     depthImage_ = core::Image{};
     blitImage_ = core::Image{};
-    stagingBuffer_ = core::Buffer{};
+    stagingBuffers_ = {};
     blitCaptured_ = false;
     createFramebuffer();
 }
@@ -260,13 +261,47 @@ void HeadlessBackend::createCommandBuffer() {
     vk::CommandBufferAllocateInfo ai{};
     ai.setCommandPool(ctx_.graphicsPool.handle())
        .setLevel(vk::CommandBufferLevel::ePrimary)
-       .setCommandBufferCount(1);
+       .setCommandBufferCount(2);
     auto cbs = ctx_.device.handle().allocateCommandBuffersUnique(ai);
-    commandBuffer_ = std::move(cbs.front());
+    commandBuffers_[0] = std::move(cbs[0]);
+    commandBuffers_[1] = std::move(cbs[1]);
+}
+
+void HeadlessBackend::waitSlot(uint32_t slot) {
+    auto dev = ctx_.device.handle();
+    // Poll instead of vkWaitForFences — the driver burns CPU spinning
+    // on some stacks; a short sleep keeps the wait ~free.
+    while (dev.getFenceStatus(renderFences_[slot].get()) == vk::Result::eNotReady)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+}
+
+int HeadlessBackend::presentSlot() {
+    if (submitted_ == 0) return -1;
+    uint32_t newest = uint32_t((submitted_ - 1) % 2);
+    if (deferredReadback_) {
+        // Prefer the newest frame when it already finished — zero
+        // added latency when the GPU is faster than the caller.
+        if (ctx_.device.handle().getFenceStatus(
+                renderFences_[newest].get()) == vk::Result::eSuccess)
+            return int(newest);
+        if (submitted_ >= 2) {
+            uint32_t prev = newest ^ 1;
+            waitSlot(prev);
+            return int(prev);
+        }
+    }
+    waitSlot(newest);
+    return int(newest);
 }
 
 std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
-    auto cb = commandBuffer_.get();
+    frameSlot_ = uint32_t(submitted_ % 2);
+    // This slot's previous submission (frame N-2) must have finished
+    // before its command buffer is re-recorded. First two frames have
+    // no prior submission on their slot — the fence is still
+    // unsignaled and would never return.
+    if (submitted_ >= 2) waitSlot(frameSlot_);
+    auto cb = commandBuffers_[frameSlot_].get();
     cb.reset();
     vk::CommandBufferBeginInfo bi{};
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
@@ -279,7 +314,7 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
 
 void HeadlessBackend::beginRenderPass() {
     if (!frameBegun_ || passBegun_) return;
-    auto cb = commandBuffer_.get();
+    auto cb = commandBuffers_[frameSlot_].get();
     // MSAA adds a resolve attachment at index 1, pushing depth to 2.
     bool msaa = samples_ != vk::SampleCountFlagBits::e1;
     std::array<vk::ClearValue, 3> clears{};
@@ -296,7 +331,8 @@ void HeadlessBackend::beginRenderPass() {
     passBegun_ = true;
 }
 
-void HeadlessBackend::ensureStaging() {
+void HeadlessBackend::ensureStaging(uint32_t slot) {
+    auto& stagingBuffer_ = stagingBuffers_[slot];
     vk::DeviceSize size = vk::DeviceSize(extent_.width) * extent_.height * 4;
     if (stagingBuffer_.handle() && stagingBuffer_.size() >= size) return;
     core::BufferDesc bdesc{};
@@ -311,14 +347,14 @@ void HeadlessBackend::endFrame() {
     if (!frameBegun_) return;
     beginRenderPass();   // frames that never opened the pass still
                          // submit a valid (clear-only) buffer
-    auto cb = commandBuffer_.get();
+    auto cb = commandBuffers_[frameSlot_].get();
     cb.endRenderPass();
 
     // A headless frame exists to be read back — record the
     // image→staging copy into this same submission. One submit + one
     // fence wait per frame (was: a second one-time command buffer with
     // its own submit + queue waitIdle, plus a per-frame VMA alloc).
-    ensureStaging();
+    ensureStaging(frameSlot_);
     vk::ImageMemoryBarrier barrier{};
     barrier.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
            .setDstAccessMask(vk::AccessFlagBits::eTransferRead)
@@ -347,24 +383,24 @@ void HeadlessBackend::endFrame() {
           .setImageExtent({extent_.width, extent_.height, 1});
     cb.copyImageToBuffer(colorImage_.handle(),
                          vk::ImageLayout::eTransferSrcOptimal,
-                         stagingBuffer_.handle(), region);
+                         stagingBuffers_[frameSlot_].handle(), region);
     cb.end();
     frameBegun_ = false;
     passBegun_ = false;
 
     auto dev = ctx_.device.handle();
-    dev.resetFences(renderFence_.get());
+    dev.resetFences(renderFences_[frameSlot_].get());
     vk::SubmitInfo si{};
     si.setCommandBuffers(cb);
-    ctx_.device.graphicsQueue().submit(si, renderFence_.get());
+    ctx_.device.graphicsQueue().submit(si, renderFences_[frameSlot_].get());
+    ++submitted_;
 
     // GPU-side execution of a large-trace frame takes real time
-    // (~4ms at 8x200k) and vkWaitForFences burns that time spinning
-    // in the driver on some stacks. Poll the fence status with a
-    // short sleep instead — same synchronous semantics, ~zero CPU.
-    while (dev.getFenceStatus(renderFence_.get()) == vk::Result::eNotReady) {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
+    // (~4ms at 8x200k). Sync mode waits here (poll — vkWaitForFences
+    // burns CPU spinning in the driver on some stacks); deferred mode
+    // leaves the wait to readback, which presents the newest
+    // *completed* frame and overlaps N's execution with the caller.
+    if (!deferredReadback_) waitSlot(frameSlot_);
 }
 
 // ─── Blitting (mpl restore_region) ──────────────────────────────────────────
@@ -409,7 +445,9 @@ bool HeadlessBackend::blitCapture() {
 std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
     if (!blitCaptured_ || !renderPassLoad_) return beginFrame();
 
-    auto cb = commandBuffer_.get();
+    frameSlot_ = uint32_t(submitted_ % 2);
+    if (submitted_ >= 2) waitSlot(frameSlot_);
+    auto cb = commandBuffers_[frameSlot_].get();
     cb.reset();
     vk::CommandBufferBeginInfo bi{};
     bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
@@ -443,8 +481,12 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
 }
 
 size_t HeadlessBackend::readbackRgba8Into(uint8_t* dst, size_t dstLen) {
-    // endFrame() already submitted render+copy and waited on the
-    // fence — stagingBuffer_ holds the finished frame.
+    // presentSlot() waits the right fence: sync mode already waited in
+    // endFrame(); deferred mode hands out the newest completed frame
+    // (N-1 while N is in flight — never the buffer being written).
+    int slot = presentSlot();
+    if (slot < 0) return 0;
+    auto& stagingBuffer_ = stagingBuffers_[slot];
     size_t size = size_t(extent_.width) * extent_.height * 4;
     if (!dst || dstLen < size || !stagingBuffer_.handle()) return 0;
     stagingBuffer_.invalidate();
@@ -454,6 +496,9 @@ size_t HeadlessBackend::readbackRgba8Into(uint8_t* dst, size_t dstLen) {
 
 const uint8_t* HeadlessBackend::rgba8View(size_t* outLen) {
     if (outLen) *outLen = 0;
+    int slot = presentSlot();
+    if (slot < 0) return nullptr;
+    auto& stagingBuffer_ = stagingBuffers_[slot];
     if (!stagingBuffer_.handle() || !stagingBuffer_.mappedData())
         return nullptr;
     stagingBuffer_.invalidate();

@@ -391,6 +391,10 @@ const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
     }
 }
 
+void vp_figure_set_deferred_present(VpFigure* fig, int on) {
+    if (fig && fig->backend) fig->backend->setDeferredReadback(on != 0);
+}
+
 int vp_figure_width(const VpFigure* fig) { return fig ? fig->w : 0; }
 int vp_figure_height(const VpFigure* fig) { return fig ? fig->h : 0; }
 

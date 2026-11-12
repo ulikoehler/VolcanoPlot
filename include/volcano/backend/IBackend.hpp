@@ -121,6 +121,12 @@ public:
         return nullptr;
     }
 
+    /// Deferred readback mode: endFrame submits without waiting, and
+    /// readback calls return the newest *completed* frame (frame N-1
+    /// while N is in flight). Trades one frame of present latency for
+    /// never blocking the caller on GPU execution. Default off.
+    virtual void setDeferredReadback(bool) {}
+
     /// Drain queued input events (screen backends translate windowing
     /// events during pollEvents; headless returns empty).
     virtual std::vector<InputEvent> takeEvents() { return {}; }

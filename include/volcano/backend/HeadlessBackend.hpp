@@ -28,6 +28,7 @@ public:
     std::vector<uint8_t> readbackRgba8() override;
     size_t readbackRgba8Into(uint8_t* dst, size_t dstLen) override;
     const uint8_t* rgba8View(size_t* outLen) override;
+    void setDeferredReadback(bool on) override { deferredReadback_ = on; }
     render::GpuServices& gpu() override;
 
     bool blitCapture() override;
@@ -65,7 +66,13 @@ private:
     void createTargets();
     /// Lazily (re)create the persistent readback staging buffer to
     /// fit the current extent.
-    void ensureStaging();
+    void ensureStaging(uint32_t slot);
+    /// Poll a slot's fence until its submission completes.
+    void waitSlot(uint32_t slot);
+    /// Slot of the newest *presentable* frame: the latest submission
+    /// once signaled, else (deferred only) the previous one after a
+    /// short wait. -1 when nothing has been submitted yet.
+    int presentSlot();
 
     BackendDesc desc_;
     GpuContext ctx_;
@@ -83,8 +90,16 @@ private:
     vk::Format depthFormat_ = vk::Format::eUndefined;
     vk::UniqueFramebuffer framebuffer_;
 
-    vk::UniqueCommandBuffer commandBuffer_;
-    vk::UniqueFence renderFence_;
+    /// Ping-pong frame slots: command buffer + fence + readback staging
+    /// per slot. Deferred readback records frame N into slot N%2 while
+    /// slot (N-1)%2 presents the previous frame — the caller never
+    /// blocks on GPU completion. Sync mode uses the same slots but
+    /// waits the just-submitted fence before endFrame returns.
+    std::array<vk::UniqueCommandBuffer, 2> commandBuffers_;
+    std::array<vk::UniqueFence, 2> renderFences_;
+    uint32_t frameSlot_ = 0;
+    uint64_t submitted_ = 0;
+    bool deferredReadback_ = false;
     bool frameBegun_ = false;
     /// Which pass beginRenderPass() opens: clear (false) or the
     /// blit-load variant (true). Set by beginFrame*/beginFrameLoad.
@@ -94,10 +109,12 @@ private:
     bool passBegun_ = false;
 
     /// Persistent host-visible readback target — the image→buffer
-    /// copy is recorded into `commandBuffer_` inside endFrame(), so a
-    /// frame is ONE submit + ONE fence wait instead of a second
-    /// one-time submit + queue wait + per-frame VMA alloc.
-    core::Buffer stagingBuffer_;
+    /// copy is recorded into `commandBuffers_[frameSlot_]` inside
+    /// endFrame(), so a frame is ONE submit + ONE fence wait instead
+    /// of a second one-time submit + queue wait + per-frame VMA alloc.
+    /// Double-buffered so a deferred frame's copy target is never the
+    /// buffer the caller is still reading.
+    std::array<core::Buffer, 2> stagingBuffers_;
 
     /// Blit state: eLoad-variant render pass + snapshot image.
     vk::UniqueRenderPass renderPassLoad_;

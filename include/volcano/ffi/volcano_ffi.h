@@ -77,6 +77,14 @@ size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len);
 /// has no view support; fall back to vp_render_rgba.
 const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len);
 
+/// Deferred readback (default off): renderFrame submits without
+/// blocking, and vp_render_rgba* returns the newest *completed* frame
+/// — frame N-1 while N is still on the GPU. One frame of present
+/// latency in exchange for never stalling the caller on the fence.
+/// The first frame renders synchronously so callers always get a
+/// valid image.
+void vp_figure_set_deferred_present(VpFigure* fig, int on);
+
 /// Current size after create/resize.
 int vp_figure_width(const VpFigure* fig);
 int vp_figure_height(const VpFigure* fig);
