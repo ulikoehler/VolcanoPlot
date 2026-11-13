@@ -422,6 +422,13 @@ void vp_set_background(VpFigure* fig, int white) {
             st.yAxis.gridLineWidth = 0.6f;
             if (fig->figure) fig->figure->style() = st;
             fig->axes->setStyle(st);
+            // egui parity: its plot frame stroke is a subtle border —
+            // the mpl styles' solid spine color reads as a bright bar
+            // across the top of each scope (esp. dark mode's white).
+            const auto spineGray = plot::Color::fromRgba8(
+                white ? 160 : 72, white ? 160 : 72, white ? 160 : 72, 255);
+            for (const char* side : {"left", "right", "bottom", "top"})
+                fig->axes->spine(side).color = spineGray;
             // setStyle wipes the labels — re-apply them.
             if (!fig->x_label.empty())
                 fig->axes->style().xAxis.label = fig->x_label;

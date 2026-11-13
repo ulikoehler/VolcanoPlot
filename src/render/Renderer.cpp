@@ -402,6 +402,15 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
             float edge = edgeFor(top);
             float d = top ? -1.0f : 1.0f;
             float tickEnd = edge + d * outLen;
+            // Overlap suppression: a label that would collide with the
+            // previously drawn one is skipped (egui_plot applies the
+            // same spacing-fit rule, just with its own metrics).
+            float prevRight = -std::numeric_limits<float>::infinity();
+            auto overlaps = [&](float left, float right) {
+                if (left <= prevRight + 1.0f) return true;
+                prevRight = right;
+                return false;
+            };
             for (float tick : xTicks) {
                 float px = rect.x + axes.dataToFraction({tick, 0.0f}).x * rect.width;
                 if (px < rect.x || px > rect.x + rect.width) { ++i; continue; }
@@ -417,16 +426,20 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                 float baseY = top ? tickEnd - kTickSpacing - m.height + m.ascent
                                   : tickEnd + kTickSpacing + m.ascent;
                 float x, y = baseY;
+                float left, right;
                 if (rot != 0.0f) {
                     // Rotated: anchor the baseline's right end at the tick
                     // (matplotlib's ha='right' for rotated xticklabels).
                     float cosR = std::cos(rot), sinR = std::sin(rot);
                     x = px - m.width * cosR;
                     y = baseY - m.width * sinR;
+                    left = x; right = px;
                 } else {
                     // Horizontal center at px; label outside the tick mark.
                     x = px - m.width * 0.5f;
+                    left = x; right = x + m.width;
                 }
+                if (overlaps(left, right)) continue;
                 drawRichText(cmd, fullRect, label, x, y, xTickColor, xTickScale,
                              rot, plot::HAlign::Left,
                              &style.xAxis.tickFont);
@@ -459,6 +472,7 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                     float x = px - m.width * 0.5f;
                     float y = top ? mEnd - mGap - m.height + m.ascent * 0.5f
                                   : mEnd + mGap + m.ascent;
+                    if (overlaps(x, x + m.width)) continue;
                     drawRichText(cmd, fullRect, label, x, y, xTickColor,
                                  mScale, 0.0f, plot::HAlign::Left,
                                  &style.xAxis.tickFont);
