@@ -86,6 +86,18 @@ public:
         return false;
     }
 
+    /// Synchronous variant of convertF64ToF32: records the narrow into
+    /// its own command buffer, submits and waits. Needed by paths that
+    /// consume the f32 point buffer via their own synchronous
+    /// submission (the readback envelope) — a narrow merely recorded
+    /// into the frame command buffer has not executed yet.
+    [[nodiscard]] virtual bool convertF64ToF32Sync(
+        GpuBuf src64, GpuBuf dst32, uint32_t n,
+        uint32_t srcHead = 0, uint32_t srcCap = 0) {
+        (void)src64; (void)dst32; (void)n; (void)srcHead; (void)srcCap;
+        return false;
+    }
+
     /// transformPoints reading a dvec2 (f64) source buffer directly —
     /// fuses the f64→f32 narrow into the data→pixel pass so the f32
     /// point buffer never materializes on the device. The shader

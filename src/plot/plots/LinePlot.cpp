@@ -426,9 +426,19 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         // reduced on-device into per-pixel-column min/max — works for
         // unsorted x too (atomics), and skips the O(n) host scan.
         // Falls back to the CPU pass on failure.
+        // The reduce submits and waits on its own commands, so it would
+        // race an f64 narrow only *recorded* into this frame's command
+        // buffer — narrow synchronously first to make the f32 point
+        // buffer current.
+        const bool f32Current = !useF64_ || f64Failed_ ||
+            gpu.convertF64ToF32Sync(renderer_->pointBufferF64(),
+                                    renderer_->pointBuffer(),
+                                    renderer_->pointCount(),
+                                    ringHead, ringCap);
         std::vector<float> mn, mx;
-        bool gpuOk = gpu.envelopeColumns(renderer_->pointBuffer(), renderer_->pointCount(),
-            ax, kx, 0, int(W) - 1, mn, mx);
+        bool gpuOk = f32Current &&
+            gpu.envelopeColumns(renderer_->pointBuffer(), renderer_->pointCount(),
+                ax, kx, 0, int(W) - 1, mn, mx);
         std::vector<Point2D> px;
         bool usedGpu = gpuOk && !mn.empty();
         if (!usedGpu) ensureCpuPoints();

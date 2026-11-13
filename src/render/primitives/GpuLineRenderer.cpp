@@ -514,6 +514,9 @@ public:
                                        GpuBuf dst32, uint32_t n,
                                        uint32_t srcHead,
                                        uint32_t srcCap) override;
+    [[nodiscard]] bool convertF64ToF32Sync(GpuBuf src64, GpuBuf dst32,
+                                           uint32_t n, uint32_t srcHead,
+                                           uint32_t srcCap) override;
     [[nodiscard]] bool transformPoints(Cmd& cmd, GpuBuf points,
                                        uint32_t count,
                                        const plot::Transform2D& t,
@@ -946,6 +949,16 @@ bool GpuLineRendererVk::convertF64ToF32(Cmd& cmd, GpuBuf src64,
     dep.setMemoryBarriers(bar);
     c.pipelineBarrier2(dep);
     return true;
+}
+
+bool GpuLineRendererVk::convertF64ToF32Sync(GpuBuf src64, GpuBuf dst32,
+                                            uint32_t n, uint32_t srcHead,
+                                            uint32_t srcCap) {
+    if (!inited_ || !src64 || !dst32 || !n) return false;
+    core::OneTimeCommands otc(device_, svcs_->computePool(),
+                              svcs_->computeQueue());
+    VkCmd c(otc.handle());
+    return convertF64ToF32(c, src64, dst32, n, srcHead, srcCap);
 }
 
 bool GpuLineRendererVk::ensureXformLayout() {
