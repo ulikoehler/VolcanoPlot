@@ -995,8 +995,11 @@ void TextRendererVk::uploadAtlas() {
         // submit from different worker threads.
         std::lock_guard lk(core::globalQueueMutex());
         queue.submit(submitInfo);
-        queue.waitIdle();
     }
+    // waitIdle needs no external sync — holding the queue mutex
+    // across it would freeze every other figure while the queue
+    // drains.
+    queue.waitIdle();
 
     // Free the command buffer.
     {

@@ -152,7 +152,12 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
 }
 
 ScreenBackend::~ScreenBackend() {
-    ctx_.device.waitIdle();
+    // waitIdle is result-checked (throws on device-lost) — an
+    // exception escaping a destructor is std::terminate.
+    try {
+        ctx_.device.waitIdle();
+    } catch (...) {
+    }
     {
         // Unique-buffer frees touch the (shared) command pool.
         std::lock_guard lk(core::globalQueueMutex());

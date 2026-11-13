@@ -76,7 +76,34 @@ void HeadlessBackend::createTargets() {
 }
 
 HeadlessBackend::~HeadlessBackend() {
-    ctx_.device.waitIdle();
+    if (wedged_) {
+        // The queue is wedged — a submission may legally still
+        // reference every object this backend owns. waitIdle would
+        // block forever and freeing would be use-after-free. Leak the
+        // Vulkan objects instead: the process is already losing this
+        // device, and a bounded leak beats a deadlock or a crash.
+        for (auto& cb : commandBuffers_) cb.release();
+        for (auto& f : renderFences_) f.release();
+        renderPass_.release();
+        renderPassLoad_.release();
+        framebuffer_.release();
+        colorView_.release();
+        msaaView_.release();
+        depthView_.release();
+        for (auto& b : stagingBuffers_) b.leak();
+        colorImage_.leak();
+        msaaImage_.leak();
+        depthImage_.leak();
+        blitImage_.leak();
+        gpuServices_.release();
+        return;
+    }
+    // waitIdle is result-checked (throws on device-lost) — an
+    // exception escaping a destructor is std::terminate.
+    try {
+        ctx_.device.waitIdle();
+    } catch (...) {
+    }
     // Unique-buffer frees touch the (shared) command pool — serialize
     // with allocations from other backends.
     std::lock_guard lk(core::globalQueueMutex());
@@ -280,13 +307,22 @@ void HeadlessBackend::createCommandBuffer() {
 void HeadlessBackend::waitSlot(uint32_t slot) {
     auto dev = ctx_.device.handle();
     // Poll instead of vkWaitForFences — the driver burns CPU spinning
-    // on some stacks; a short sleep keeps the wait ~free.
-    while (dev.getFenceStatus(renderFences_[slot].get()) == vk::Result::eNotReady)
+    // on some stacks; a short sleep keeps the wait ~free. BOUNDED: a
+    // submission that never completes (wedged queue, dead device)
+    // would otherwise pin this worker forever — past the cap we throw,
+    // which the FFI boundary turns into a render failure (the surface
+    // then rebuilds the figure instead of freezing on a stale frame).
+    for (uint32_t i = 0; i < 50000; ++i) {
+        if (dev.getFenceStatus(renderFences_[slot].get()) != vk::Result::eNotReady)
+            return;
         std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    wedged_ = true;
+    throw std::runtime_error("HeadlessBackend: queue submission never completed (wedged)");
 }
 
 int HeadlessBackend::presentSlot() {
-    if (submitted_ == 0) return -1;
+    if (wedged_ || submitted_ == 0) return -1;
     uint32_t newest = uint32_t((submitted_ - 1) % 2);
     if (deferredReadback_) {
         // Prefer the newest frame when it already finished — zero
@@ -305,6 +341,8 @@ int HeadlessBackend::presentSlot() {
 }
 
 std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
+    if (wedged_)
+        throw std::runtime_error("HeadlessBackend: wedged queue — refusing to record");
     frameSlot_ = uint32_t(submitted_ % 2);
     // This slot's previous submission (frame N-2) must have finished
     // before its command buffer is re-recorded. First two frames have
@@ -456,6 +494,8 @@ bool HeadlessBackend::blitCapture() {
 }
 
 std::unique_ptr<render::Cmd> HeadlessBackend::beginFrameLoad() {
+    if (wedged_)
+        throw std::runtime_error("HeadlessBackend: wedged queue — refusing to record");
     if (!blitCaptured_ || !renderPassLoad_) return beginFrame();
 
     frameSlot_ = uint32_t(submitted_ % 2);

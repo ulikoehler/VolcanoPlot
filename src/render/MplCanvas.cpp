@@ -183,8 +183,14 @@ MplCanvas::~MplCanvas() {
         // objects held by the renderers.
         auto& vg = static_cast<render::VulkanGpuServices&>(backend_->gpu());
         if (auto dev = vg.device()) {
-            std::lock_guard lk(core::globalQueueMutex());
-            dev.waitIdle();
+            // No external sync needed for vkDeviceWaitIdle — holding
+            // the queue mutex across it would freeze other figures
+            // while this device drains. It's result-checked (throws
+            // on device-lost): escaping a destructor is std::terminate.
+            try {
+                dev.waitIdle();
+            } catch (...) {
+            }
         }
     }
 }

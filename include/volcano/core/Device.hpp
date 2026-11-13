@@ -68,8 +68,15 @@ private:
         vk::Queue transferQueue = nullptr;
         ~Impl() {
             if (device) {
-                std::lock_guard lk(globalQueueMutex());
-                device->waitIdle();
+                // No external sync needed for vkDeviceWaitIdle — and
+                // holding globalQueueMutex here would freeze other
+                // figures while this device drains. The call is
+                // result-checked (throws on device-lost): escaping a
+                // destructor is std::terminate.
+                try {
+                    device->waitIdle();
+                } catch (...) {
+                }
             }
         }
     };

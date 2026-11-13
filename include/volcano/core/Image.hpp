@@ -35,6 +35,14 @@ public:
     [[nodiscard]] vk::Extent2D extent() const noexcept { return extent_; }
     [[nodiscard]] void* mappedData() const noexcept { return mapped_; }
 
+    /// Release ownership without destroying — wedged-queue teardown
+    /// only (see Buffer::leak).
+    void leak() noexcept {
+        allocator_ = VK_NULL_HANDLE;
+        allocation_ = VK_NULL_HANDLE;
+        image_ = VK_NULL_HANDLE;
+    }
+
     /// Transition image layout (records a barrier into the given command buffer).
     static void transitionLayout(vk::CommandBuffer cmd, vk::Image image,
                                  vk::Format format, vk::ImageLayout oldLayout,

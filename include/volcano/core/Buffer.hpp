@@ -56,6 +56,16 @@ public:
     /// Needed before reading host-cached buffers written by the GPU.
     void invalidate();
 
+    /// Release ownership without destroying — used only when the
+    /// queue is wedged and an in-flight submission may still legally
+    /// reference this buffer (freeing would be use-after-free; the
+    /// process is already losing the device anyway).
+    void leak() noexcept {
+        allocator_ = VK_NULL_HANDLE;
+        allocation_ = VK_NULL_HANDLE;
+        buffer_ = VK_NULL_HANDLE;
+    }
+
 private:
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;

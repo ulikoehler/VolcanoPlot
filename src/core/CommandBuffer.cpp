@@ -40,25 +40,33 @@ OneTimeCommands::OneTimeCommands(vk::Device device, vk::CommandPool pool, vk::Qu
 }
 
 OneTimeCommands::~OneTimeCommands() {
-    cb_.end();
-    vk::CommandBuffer cmd = cb_.handle();
-    vk::SubmitInfo si{};
-    si.setCommandBuffers(cmd);
-    vk::UniqueFence fence = device_.createFenceUnique({});
-    {
-        // Queue ops need external sync — shared-device backends
-        // submit from different worker threads.
-        std::lock_guard lk(globalQueueMutex());
-        queue_.submit(si, fence.get());
-    }
-    // vkQueueWaitIdle/vkWaitForFences spin in the driver on some stacks
-    // and bill the GPU execution time to this thread's CPU — which is
-    // the dominant per-frame CPU cost for live plots (the envelope
-    // readback runs this helper once per trace per frame). Poll the
-    // fence status with a short sleep instead: identical synchronous
-    // semantics, ~zero CPU.
-    while (device_.getFenceStatus(fence.get()) == vk::Result::eNotReady) {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    // Destructors must not throw — a failed submit (device lost,
+    // OOM under contention) escaping here is std::terminate, and
+    // when this dtor runs during unwind it's terminate *inside*
+    // terminate. A skipped one-shot command degrades; an abort
+    // kills the process.
+    try {
+        cb_.end();
+        vk::CommandBuffer cmd = cb_.handle();
+        vk::SubmitInfo si{};
+        si.setCommandBuffers(cmd);
+        vk::UniqueFence fence = device_.createFenceUnique({});
+        {
+            // Queue ops need external sync — shared-device backends
+            // submit from different worker threads.
+            std::lock_guard lk(globalQueueMutex());
+            queue_.submit(si, fence.get());
+        }
+        // vkQueueWaitIdle/vkWaitForFences spin in the driver on some
+        // stacks and bill the GPU execution time to this thread's CPU —
+        // which is the dominant per-frame CPU cost for live plots (the
+        // envelope readback runs this helper once per trace per frame).
+        // Poll the fence status with a short sleep instead: identical
+        // synchronous semantics, ~zero CPU.
+        while (device_.getFenceStatus(fence.get()) == vk::Result::eNotReady) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+    } catch (...) {
     }
 }
 

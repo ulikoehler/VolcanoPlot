@@ -100,6 +100,10 @@ private:
     uint32_t frameSlot_ = 0;
     uint64_t submitted_ = 0;
     bool deferredReadback_ = false;
+    /// Set when a slot's submission never completed — the queue is
+    /// wedged and further work is pointless. Frame entry points bail
+    /// out and teardown leaks rather than touching in-flight objects.
+    bool wedged_ = false;
     bool frameBegun_ = false;
     /// Which pass beginRenderPass() opens: clear (false) or the
     /// blit-load variant (true). Set by beginFrame*/beginFrameLoad.

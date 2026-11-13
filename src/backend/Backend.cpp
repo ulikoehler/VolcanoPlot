@@ -43,10 +43,17 @@ std::unique_ptr<IBackend> createHeadlessBackend(
 
 std::shared_ptr<GpuContext> sharedGpuContext() {
 #ifdef VOLCANO_HAS_HEADLESS_BACKEND
+    // Process-lifetime context, deliberately leaked (heap static —
+    // never destructed). Render workers are detached threads that can
+    // still be inside Vulkan calls during exit() / static teardown;
+    // if the context's instance/device were destroyed then, those
+    // threads would call into freed driver state (observed: SIGSEGV
+    // inside the driver at process exit). A leaked context keeps the
+    // device valid until the kernel reaps the threads.
+    static auto* ctx = new std::shared_ptr<GpuContext>();
     static std::mutex mu;
-    static std::weak_ptr<GpuContext> weak;
     std::lock_guard lk(mu);
-    if (auto s = weak.lock()) return s;
+    if (*ctx) return *ctx;
     auto c = std::make_shared<GpuContext>();
     core::InstanceDesc idesc{};
     idesc.applicationName = "VolcanoPlot Headless";
@@ -68,7 +75,7 @@ std::shared_ptr<GpuContext> sharedGpuContext() {
     c->computePool = core::CommandPool(
         c->device.handle(), c->device.computeFamily(),
         vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
-    weak = c;
+    *ctx = c;
     return c;
 #else
     return nullptr;

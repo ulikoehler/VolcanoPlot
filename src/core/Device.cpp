@@ -82,8 +82,10 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc) {
 }
 
 void Device::waitIdle() const {
+    // vkDeviceWaitIdle needs NO external sync — and must not hold
+    // globalQueueMutex: waiting for a slow queue while holding it
+    // freezes every other figure's submit behind the mutex.
     if (impl_ && impl_->device) {
-        std::lock_guard lk(globalQueueMutex());
         impl_->device->waitIdle();
     }
 }
