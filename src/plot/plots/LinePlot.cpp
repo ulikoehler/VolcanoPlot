@@ -309,6 +309,15 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     sp.cap = series_.capStyle;
     auto& gpu = r.gpu().gpuLine();
     if (!gpu.inited()) return;
+    // Point-buffer reallocs recycle VkBuffer handles — any cached
+    // descriptor set referencing the old object silently binds the
+    // wrong buffer (observed: envelope reduce reading f64 ring data
+    // as f32, emitting NaN/garbage columns). bufEpoch is bumped on
+    // every realloc, so steady-state frames keep their cached sets.
+    if (renderer_->bufEpoch() != lastBufEpoch_) {
+        gpu.invalidatePointSets();
+        lastBufEpoch_ = renderer_->bufEpoch();
+    }
     const float W = float(r.gpu().extent().width);
     const size_t huge =
         size_t(std::max(8192.0f, W * 4.0f));
@@ -413,7 +422,6 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
                                        key, sp, rc};
             return;
         }
-
         // GPU envelope with host readback: the uploaded point buffer is
         // reduced on-device into per-pixel-column min/max — works for
         // unsorted x too (atomics), and skips the O(n) host scan.

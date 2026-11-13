@@ -231,6 +231,7 @@ private:
     bool dataDirty_ = false;
     bool useF64_ = false;
     mutable bool cpuDirty_ = false;   ///< rawF64_ not yet in series_.points
-    bool f64Failed_ = false;          ///< device lacks the fp64 path
+    bool f64Failed_ = false;              ///< device lacks the fp64 path
+    uint64_t lastBufEpoch_ = 0;          ///< seen point-buffer generation
 };
 } // namespace volcano::plot

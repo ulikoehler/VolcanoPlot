@@ -537,6 +537,7 @@ public:
     [[nodiscard]] bool inited() const noexcept override { return inited_; }
     void endTransforms(Cmd& cmd) override;
     void endPreDraw(Cmd& cmd) override;
+    void invalidatePointSets() override;
     std::unique_ptr<MeshStore> createMeshStore() override;
     [[nodiscard]] uint64_t meshEpoch() const noexcept override {
         return meshEpoch_;
@@ -1220,7 +1221,6 @@ bool GpuLineRendererVk::envelopePolyline(Cmd& cmdRef, GpuBuf points,
         dep.setMemoryBarriers(bar);
         c.pipelineBarrier2(dep);
     }
-
     // Envelope reduce — src/dst bindings are identical to the
     // transform pass, so the same cached descriptor set binds.
     const uint64_t key = uint64_t(VkBuffer(svcs_->vkBufferOf(points)));
@@ -1618,6 +1618,17 @@ std::unique_ptr<GpuLineRenderer> makeGpuLineVk(VulkanGpuServices& svcs) {
     auto p = std::make_unique<GpuLineRendererVk>(svcs);
     p->init();
     return p;
+}
+
+void GpuLineRendererVk::invalidatePointSets() {
+    // Every cached descriptor that can reference a plot-owned point
+    // buffer must go — a recreated buffer may reuse a freed handle,
+    // and a stale set then silently reads/writes the wrong object.
+    cvtDsets_.clear();
+    xformDsets_.clear();
+    envEmitDset_ = vk::DescriptorSet{};
+    devSrc_ = vk::Buffer{};
+    devDst_ = vk::Buffer{};
 }
 
 } // namespace volcano::render::primitives

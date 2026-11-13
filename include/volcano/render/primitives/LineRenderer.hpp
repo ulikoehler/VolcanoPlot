@@ -59,6 +59,11 @@ public:
     }
     /// Opaque token for the f64 point buffer (dvec2 data).
     [[nodiscard]] virtual GpuBuf pointBufferF64() const noexcept { return 0; }
+    /// Bumped every time a point buffer is (re)allocated — consumers
+    /// that cache descriptors keyed by buffer handle must invalidate
+    /// on change, since a freed VkBuffer handle can be recycled for a
+    /// different buffer.
+    [[nodiscard]] virtual uint64_t bufEpoch() const noexcept { return 0; }
     /// True while an f64 upload is awaiting the GPU-side narrowing pass.
     [[nodiscard]] virtual bool f64Pending() const noexcept { return false; }
     virtual void clearF64Pending() noexcept {}

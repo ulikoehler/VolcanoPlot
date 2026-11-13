@@ -7,6 +7,8 @@
 #include "../shaders/TransformGlsl.hpp"
 #include <array>
 #include <cstring>
+#include <deque>
+#include <vector>
 #include <stdexcept>
 #include <string>
 #include <volcano/core/ShaderModule.hpp>
@@ -65,6 +67,9 @@ public:
     void draw(Cmd& cmd, plot::Rect2D rect,
               const plot::Transform2D& transform,
               uint32_t pointCount) const override;
+    [[nodiscard]] GpuBuf pointBufferF64() const noexcept override {
+        return GpuBuf(VkBuffer(pointBufferF64_.handle()));
+    }
     [[nodiscard]] GpuBuf pointBuffer() const noexcept override {
         return externalBuf_ ? externalBuf_ : GpuBuf(VkBuffer(pointBuffer_.handle()));
     }
@@ -76,9 +81,7 @@ public:
     void f64Ring(uint32_t& head, uint32_t& cap) const noexcept override {
         head = f64Head_; cap = capacity64_ ? capacity64_ : count_;
     }
-    [[nodiscard]] GpuBuf pointBufferF64() const noexcept override {
-        return GpuBuf(VkBuffer(pointBufferF64_.handle()));
-    }
+    uint64_t bufEpoch() const noexcept override { return bufEpoch_; }
     [[nodiscard]] bool f64Pending() const noexcept override {
         return f64Pending_;
     }
@@ -110,6 +113,19 @@ private:
     uint32_t f64Head_ = 0;       ///< ring start of the logical window
     bool f64Pending_ = false;    ///< f64 data awaits GPU narrowing
     bool inited_ = false;
+    uint64_t bufEpoch_ = 0;      ///< bumped on every buffer realloc
+    // Old buffers are retired, not destroyed — a command buffer from a
+    // recent frame may still reference them (the backend's ping-pong
+    // slots give two frames of slack). Three generations of retention
+    // keep every retired buffer alive past its last in-flight use.
+    std::deque<std::vector<core::Buffer>> retiredBufs_;
+    void retireBoundary() {
+        retiredBufs_.emplace_back();
+        while (retiredBufs_.size() > 3) retiredBufs_.pop_front();
+    }
+    void retire(core::Buffer& buf) {
+        if (buf.handle()) retiredBufs_.back().push_back(std::move(buf));
+    }
 };
 
 void LineRendererVk::init() {
@@ -207,6 +223,10 @@ void LineRendererVk::upload(std::span<const plot::Point2D> points,
     d.size = points.size_bytes();
     d.usage = core::BufferUsage::VertexStorage;
     d.hostVisible = true;   // dynamic data — in-place memcpy updates
+    retireBoundary();
+    retire(pointBuffer_);
+    retire(pointBufferF64_);
+    ++bufEpoch_;
     pointBuffer_ = core::Buffer(allocator, d);
     pointBuffer_.upload(device, queue, pool,
                         std::as_bytes(std::span{points.data(), points.size()}));
@@ -225,6 +245,7 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
     // longer mirrors it. Invalidate so a later updatePointsF64Append
     // can't write into stale ring state (head/capacity would
     // desync), and so no pending narrow overwrites this data.
+    retireBoundary();
     capacity64_ = 0;
     f64Head_ = 0;
     f64Pending_ = false;
@@ -238,6 +259,8 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
     d.size = points.size_bytes();
     d.usage = core::BufferUsage::VertexStorage;
     d.hostVisible = true;
+    retire(pointBuffer_);
+    ++bufEpoch_;
     pointBuffer_ = core::Buffer(allocator_, d);
     std::memcpy(pointBuffer_.mappedData(), points.data(),
                 points.size_bytes());
@@ -246,6 +269,7 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
 }
 
 bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
+    retireBoundary();
     const uint32_t n = static_cast<uint32_t>(xy.size() / 2);
     if (n == 0) {
         count_ = 0;
@@ -258,6 +282,8 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
         d.size = vk::DeviceSize(n) * 16;
         d.usage = core::BufferUsage::Storage;
         d.hostVisible = true;   // in-place memcpy updates, GPU reads
+        retire(pointBufferF64_);
+        ++bufEpoch_;
         pointBufferF64_ = core::Buffer(allocator_, d);
         capacity64_ = n;
         f64Head_ = 0;
@@ -272,6 +298,8 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
         d.size = vk::DeviceSize(n) * 8;
         d.usage = core::BufferUsage::VertexStorage;
         d.hostVisible = true;
+        retire(pointBuffer_);
+        ++bufEpoch_;
         pointBuffer_ = core::Buffer(allocator_, d);
         capacity_ = n;
     }
@@ -282,6 +310,7 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
 
 bool LineRendererVk::updatePointsF64Append(uint32_t drop,
                                            std::span<const double> tail) {
+    retireBoundary();
     const uint32_t tailN = static_cast<uint32_t>(tail.size() / 2);
     const uint32_t kept = count_ > drop ? count_ - drop : 0;
     // drop >= count_ means the window outran the whole GPU buffer —

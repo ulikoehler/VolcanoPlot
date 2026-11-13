@@ -57,6 +57,9 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
         if (evalCap_ < evalSamples_) {
             evalBuf_ = eval_->makeOutput(evalSamples_);
             evalCap_ = evalSamples_;
+            // The new eval buffer may recycle a freed VkBuffer handle —
+            // drop any descriptor sets still binding the old object.
+            r.gpu().gpuLine().invalidatePointSets();
         }
         eval_->eval(evalBuf_, xRange.min, xRange.max, evalSamples_);
         renderer_->bindExternalBuffer(evalBuf_, evalSamples_);

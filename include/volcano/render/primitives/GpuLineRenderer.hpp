@@ -182,6 +182,12 @@ public:
         return {};
     }
 
+    /// Drop every cached descriptor set that references a plot-owned
+    /// point buffer. Called when a trace's point buffer is recreated:
+    /// freed VkBuffer handles get recycled for other buffers, so any
+    /// cached set keyed by handle may silently bind the wrong object.
+    virtual void invalidatePointSets() {}
+
     /// Called once between the preDraw and preDraw2 loops when
     /// transforms were recorded with deferBarrier — emits the single
     /// compute-write→compute-read barrier covering every transform
