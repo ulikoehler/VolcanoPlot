@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -163,7 +164,24 @@ static bool init(VpFigure* f, int w, int h) {
 
 extern "C" {
 
+namespace {
+/// NVIDIA's driver (620.x series, observed via NVRM Xid 32 "corrupted
+/// push buffer stream" + eglcore faults) is not stable under
+/// concurrent device-level calls from many worker threads, even
+/// though the usage is spec-legal (submits are already mutex'd, pools
+/// are per-backend). Mesa/llvmpipe runs the same suite cleanly. This
+/// gate serializes every GPU-touching entry point — render, figure
+/// create/resize/destroy — so the driver only ever sees one caller.
+/// Trace/style setters are pure CPU (they only mutate plot state the
+/// next render reads) and stay parallel.
+std::mutex& renderGate() {
+    static std::mutex m;
+    return m;
+}
+} // namespace
+
 VpFigure* vp_figure_create(int width, int height) {
+    std::lock_guard gate(renderGate());
     try {
         // The column-envelope decimation is fully device-resident
         // (reduce + polyline emit stay in the frame's compute stream —
@@ -193,10 +211,12 @@ VpFigure* vp_figure_create(int width, int height) {
 }
 
 void vp_figure_destroy(VpFigure* fig) {
+    std::lock_guard gate(renderGate());
     try { delete fig; } catch (...) {}
 }
 
 int vp_figure_resize(VpFigure* fig, int width, int height) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig || width <= 0 || height <= 0) return 0;
         if (width == fig->w && height == fig->h) return 1;
@@ -207,6 +227,7 @@ int vp_figure_resize(VpFigure* fig, int width, int height) {
 }
 
 uint64_t vp_trace_add(VpFigure* fig) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return 0;
         uint64_t id = fig->next_id++;
@@ -223,6 +244,7 @@ uint64_t vp_trace_add(VpFigure* fig) {
 
 void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
                   uint32_t rgba8, float width, int style) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         auto td_it = fig->trace_data.find(id);
@@ -261,6 +283,7 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
 int vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
                    const double* tail, size_t tail_n, uint32_t rgba8,
                    float width, int style) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return 0;
         auto td_it = fig->trace_data.find(id);
@@ -288,6 +311,7 @@ int vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
 
 void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
                          float size) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         auto td_it = fig->trace_data.find(id);
@@ -303,6 +327,7 @@ void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
 }
 
 void vp_trace_remove(VpFigure* fig, uint64_t id) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         auto it = fig->traces.find(id);
@@ -316,6 +341,7 @@ void vp_trace_remove(VpFigure* fig, uint64_t id) {
 
 void vp_set_viewport(VpFigure* fig, double xmin, double xmax, double ymin,
                      double ymax) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig || !fig->axes) return;
         if (!(std::isnan(xmin) || std::isnan(xmax)))
@@ -326,6 +352,7 @@ void vp_set_viewport(VpFigure* fig, double xmin, double xmax, double ymin,
 }
 
 void vp_set_margins(VpFigure* f, float left, float right, float bottom, float top) {
+    std::lock_guard gate(renderGate());
     try {
         if (!f) return;
         f->margin_l = left; f->margin_r = right;
@@ -340,6 +367,7 @@ void vp_set_margins(VpFigure* f, float left, float right, float bottom, float to
 }
 
 void vp_set_background_rgba(VpFigure* fig, float r, float g, float b) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         fig->custom_bg = plot::Color::fromRgba8(
@@ -355,6 +383,7 @@ void vp_set_background_rgba(VpFigure* fig, float r, float g, float b) {
 
 void vp_set_axis_labels(VpFigure* fig, const char* x_label,
                         const char* y_label) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         if (x_label) fig->x_label = x_label;
@@ -368,6 +397,7 @@ void vp_set_axis_labels(VpFigure* fig, const char* x_label,
 
 void vp_set_ticks(VpFigure* fig, int axis, int count,
                   const float* positions, const char* const* labels) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig || axis < 0 || axis > 1) return;
         if (count <= 0 || !positions) {
@@ -395,6 +425,7 @@ void vp_set_ticks(VpFigure* fig, int axis, int count,
 }
 
 void vp_set_grid(VpFigure* fig, int on) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         fig->grid_on = on != 0;
@@ -406,6 +437,7 @@ void vp_set_grid(VpFigure* fig, int on) {
 }
 
 void vp_set_background(VpFigure* fig, int white) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
         fig->white_bg = white != 0;
@@ -439,6 +471,7 @@ void vp_set_background(VpFigure* fig, int white) {
 }
 
 size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig || !out) return 0;
         size_t need = static_cast<size_t>(fig->w) * fig->h * 4;
@@ -452,6 +485,7 @@ size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len) {
 }
 
 const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
+    std::lock_guard gate(renderGate());
     try {
         if (!fig || !out_len) return nullptr;
         *out_len = 0;
@@ -464,6 +498,7 @@ const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
 }
 
 void vp_figure_set_deferred_present(VpFigure* fig, int on) {
+    std::lock_guard gate(renderGate());
     if (fig && fig->backend) fig->backend->setDeferredReadback(on != 0);
 }
 

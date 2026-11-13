@@ -24,6 +24,7 @@
 #include <set>
 #include <format>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <ft2build.h>
@@ -987,22 +988,31 @@ void TextRendererVk::uploadAtlas() {
 
     cmd.end();
 
-    // Submit and wait.
+    // Submit with a fence and poll it — queue.waitIdle() has no
+    // timeout, so a wedged queue would block this thread forever.
     vk::SubmitInfo submitInfo{};
     submitInfo.setCommandBuffers(cmd);
+    vk::UniqueFence fence = device_.createFenceUnique({});
     {
         // Queue ops need external sync — shared-device backends
         // submit from different worker threads.
         std::lock_guard lk(core::globalQueueMutex());
-        queue.submit(submitInfo);
+        queue.submit(submitInfo, fence.get());
     }
-    // waitIdle needs no external sync — holding the queue mutex
-    // across it would freeze every other figure while the queue
-    // drains.
-    queue.waitIdle();
+    // Bounded poll — ~5s then give up; a stale atlas degrades to
+    // missing glyphs rather than a hung worker.
+    bool uploaded = false;
+    for (uint32_t i = 0; i < 50000; ++i) {
+        if (device_.getFenceStatus(fence.get()) != vk::Result::eNotReady) {
+            uploaded = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
 
-    // Free the command buffer.
-    {
+    // Free the command buffer — unless the queue is wedged, in which
+    // case the pending submission may still legally reference it.
+    if (uploaded) {
         std::lock_guard lk(core::globalQueueMutex());
         device_.freeCommandBuffers(pool, cmd);
     }

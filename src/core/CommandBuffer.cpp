@@ -62,8 +62,13 @@ OneTimeCommands::~OneTimeCommands() {
         // which is the dominant per-frame CPU cost for live plots (the
         // envelope readback runs this helper once per trace per frame).
         // Poll the fence status with a short sleep instead: identical
-        // synchronous semantics, ~zero CPU.
-        while (device_.getFenceStatus(fence.get()) == vk::Result::eNotReady) {
+        // synchronous semantics, ~zero CPU. Bounded — a wedged queue
+        // would otherwise pin this thread inside the destructor
+        // forever; a skipped wait degrades (caller reads stale data)
+        // but the process survives.
+        for (uint32_t i = 0; i < 50000; ++i) {
+            if (device_.getFenceStatus(fence.get()) != vk::Result::eNotReady)
+                break;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     } catch (...) {
