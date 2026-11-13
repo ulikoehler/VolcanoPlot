@@ -77,6 +77,11 @@ void HeadlessBackend::createTargets() {
 
 HeadlessBackend::~HeadlessBackend() {
     ctx_.device.waitIdle();
+    // Unique-buffer frees touch the (shared) command pool — serialize
+    // with allocations from other backends.
+    std::lock_guard lk(core::globalQueueMutex());
+    commandBuffers_[0].reset();
+    commandBuffers_[1].reset();
 }
 
 void HeadlessBackend::createRenderPass() {
@@ -242,7 +247,7 @@ void HeadlessBackend::createFramebuffer() {
 void HeadlessBackend::resize(uint32_t width, uint32_t height) {
     if (width == 0 || height == 0) return;
     if (width == extent_.width && height == extent_.height) return;
-    ctx_.device.handle().waitIdle();
+    ctx_.device.waitIdle();
     extent_ = vk::Extent2D{width, height};
     framebuffer_.reset();
     colorView_.reset();
@@ -262,7 +267,12 @@ void HeadlessBackend::createCommandBuffer() {
     ai.setCommandPool(ctx_.graphicsPool.handle())
        .setLevel(vk::CommandBufferLevel::ePrimary)
        .setCommandBufferCount(2);
-    auto cbs = ctx_.device.handle().allocateCommandBuffersUnique(ai);
+    std::vector<vk::UniqueCommandBuffer> cbs;
+    {
+        // Shared-device backends share the pool — alloc needs external sync.
+        std::lock_guard lk(core::globalQueueMutex());
+        cbs = ctx_.device.handle().allocateCommandBuffersUnique(ai);
+    }
     commandBuffers_[0] = std::move(cbs[0]);
     commandBuffers_[1] = std::move(cbs[1]);
 }
@@ -392,7 +402,10 @@ void HeadlessBackend::endFrame() {
     dev.resetFences(renderFences_[frameSlot_].get());
     vk::SubmitInfo si{};
     si.setCommandBuffers(cb);
-    ctx_.device.graphicsQueue().submit(si, renderFences_[frameSlot_].get());
+    {
+        std::lock_guard lk(core::globalQueueMutex());
+        ctx_.device.graphicsQueue().submit(si, renderFences_[frameSlot_].get());
+    }
     ++submitted_;
 
     // GPU-side execution of a large-trace frame takes real time

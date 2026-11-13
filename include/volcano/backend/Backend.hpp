@@ -48,14 +48,21 @@ struct GpuContext {
     /// A GpuContext whose members share this one's Vulkan objects —
     /// they die with the last holder. Lets many backends run on one
     /// device without paying instance/device creation per backend.
+    /// Command pools are NOT shared: pool operations (allocate,
+    /// record, reset) require external synchronization, so each
+    /// share gets its own pools on the shared device — per-backend
+    /// threads then race nothing.
     [[nodiscard]] GpuContext share() const {
         GpuContext c;
         c.instance = instance.share();
         c.physical = physical;
         c.device = device.share();
         c.allocator = allocator.share();
-        c.graphicsPool = graphicsPool.share();
-        c.computePool = computePool.share();
+        const auto cf = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        c.graphicsPool = core::CommandPool(c.device.handle(),
+                                           c.device.graphicsFamily(), cf);
+        c.computePool = core::CommandPool(c.device.handle(),
+                                          c.device.computeFamily(), cf);
         return c;
     }
 };

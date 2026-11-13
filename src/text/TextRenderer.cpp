@@ -948,8 +948,13 @@ void TextRendererVk::uploadAtlas() {
     cbai.setCommandPool(pool)
         .setLevel(vk::CommandBufferLevel::ePrimary)
         .setCommandBufferCount(1);
-    auto cmds = device_.allocateCommandBuffers(cbai);
-    vk::CommandBuffer cmd = cmds[0];
+    vk::CommandBuffer cmd;
+    {
+        // Pool alloc needs external sync — shared-device backends
+        // allocate from a common pool.
+        std::lock_guard lk(core::globalQueueMutex());
+        cmd = device_.allocateCommandBuffers(cbai)[0];
+    }
 
     vk::CommandBufferBeginInfo cbbi{};
     cbbi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
@@ -985,11 +990,19 @@ void TextRendererVk::uploadAtlas() {
     // Submit and wait.
     vk::SubmitInfo submitInfo{};
     submitInfo.setCommandBuffers(cmd);
-    queue.submit(submitInfo);
-    queue.waitIdle();
+    {
+        // Queue ops need external sync — shared-device backends
+        // submit from different worker threads.
+        std::lock_guard lk(core::globalQueueMutex());
+        queue.submit(submitInfo);
+        queue.waitIdle();
+    }
 
     // Free the command buffer.
-    device_.freeCommandBuffers(pool, cmd);
+    {
+        std::lock_guard lk(core::globalQueueMutex());
+        device_.freeCommandBuffers(pool, cmd);
+    }
 
     if (!atlasUploaded_) {
         // Update descriptor set (image/view are stable across re-uploads).

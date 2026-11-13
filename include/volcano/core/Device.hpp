@@ -6,9 +6,16 @@
 #include <vulkan/vulkan.hpp>
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace volcano::core {
+
+/// Process-wide mutex serializing vkQueueSubmit / vkQueueWaitIdle /
+/// vkDeviceWaitIdle. Queue operations require external
+/// synchronization; backends sharing one device
+/// (backend::sharedGpuContext) submit from different worker threads.
+[[nodiscard]] std::mutex& globalQueueMutex();
 
 struct DeviceDesc {
     std::vector<std::string> extensions;
@@ -59,7 +66,12 @@ private:
         vk::Queue graphicsQueue = nullptr;
         vk::Queue computeQueue = nullptr;
         vk::Queue transferQueue = nullptr;
-        ~Impl() { if (device) device->waitIdle(); }
+        ~Impl() {
+            if (device) {
+                std::lock_guard lk(globalQueueMutex());
+                device->waitIdle();
+            }
+        }
     };
     std::shared_ptr<Impl> impl_;
 };

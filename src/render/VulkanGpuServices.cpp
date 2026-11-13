@@ -455,7 +455,10 @@ void VulkanGpuServices::submitPrePass(std::unique_ptr<Cmd> /*cmd*/) {
     vk::SubmitInfo submit{};
     vk::CommandBuffer pcb = preCmd_->handle();
     submit.setCommandBuffers(pcb);
-    graphicsQueue().submit(submit, preFence_.get());
+    {
+        std::lock_guard lk(core::globalQueueMutex());
+        graphicsQueue().submit(submit, preFence_.get());
+    }
     // The compute pre-pass (line tessellation of every dirty trace)
     // can run for milliseconds — waitIdle() would spin in the driver
     // that whole time. Poll the fence status with a short sleep

@@ -182,7 +182,10 @@ MplCanvas::~MplCanvas() {
         // Let in-flight frames finish before tearing down Vulkan
         // objects held by the renderers.
         auto& vg = static_cast<render::VulkanGpuServices&>(backend_->gpu());
-        if (auto dev = vg.device()) dev.waitIdle();
+        if (auto dev = vg.device()) {
+            std::lock_guard lk(core::globalQueueMutex());
+            dev.waitIdle();
+        }
     }
 }
 

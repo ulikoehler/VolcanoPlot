@@ -148,7 +148,11 @@ static bool init(VpFigure* f, int w, int h) {
     f->desc.width = static_cast<uint32_t>(w);
     f->desc.height = static_cast<uint32_t>(h);
     f->desc.samples = vk::SampleCountFlagBits::e4;
-    f->backend = backend::createHeadlessBackend(f->desc);
+    // Shared GPU context: one instance/device/allocator process-wide —
+    // N figures no longer cost N devices (VRAM + driver threads), and
+    // parallel FFI tests stop tripping over per-device creation.
+    f->backend = backend::createHeadlessBackend(
+        f->desc, backend::sharedGpuContext());
     if (!f->backend) return false;
     f->renderer = std::make_unique<render::Renderer>(*f->backend);
     f->w = w;

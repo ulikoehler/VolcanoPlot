@@ -137,8 +137,11 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
     ai.setCommandPool(ctx_.graphicsPool.handle())
        .setLevel(vk::CommandBufferLevel::ePrimary)
        .setCommandBufferCount(MAX_FRAMES_IN_FLIGHT);
-    auto cbs = ctx_.device.handle().allocateCommandBuffersUnique(ai);
-    commandBuffers_ = std::move(cbs);
+    {
+        // Shared-device backends share the pool — alloc needs external sync.
+        std::lock_guard lk(core::globalQueueMutex());
+        commandBuffers_ = ctx_.device.handle().allocateCommandBuffersUnique(ai);
+    }
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         imageAvailableSem_.push_back(ctx_.device.handle().createSemaphoreUnique({}));
@@ -150,6 +153,11 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
 
 ScreenBackend::~ScreenBackend() {
     ctx_.device.waitIdle();
+    {
+        // Unique-buffer frees touch the (shared) command pool.
+        std::lock_guard lk(core::globalQueueMutex());
+        commandBuffers_.clear();
+    }
     if (surface_) ctx_.instance.handle().destroySurfaceKHR(surface_);
     if (window_) glfwDestroyWindow(window_);
     glfwTerminate();
@@ -664,7 +672,10 @@ void ScreenBackend::endFrame() {
        .setWaitDstStageMask(waitStage)
        .setCommandBuffers(cb)
        .setSignalSemaphores(renderFinishedSem_[currentFrame_].get());
-    ctx_.device.graphicsQueue().submit(si, inFlightFences_[currentFrame_].get());
+    {
+        std::lock_guard lk(core::globalQueueMutex());
+        ctx_.device.graphicsQueue().submit(si, inFlightFences_[currentFrame_].get());
+    }
 
     vk::PresentInfoKHR pi{};
     pi.setWaitSemaphores(renderFinishedSem_[currentFrame_].get())

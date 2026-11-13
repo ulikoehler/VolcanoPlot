@@ -7,6 +7,11 @@
 
 namespace volcano::core {
 
+std::mutex& globalQueueMutex() {
+    static std::mutex m;
+    return m;
+}
+
 namespace {
 
 std::vector<const char*> filterExtensions(const std::vector<std::string>& wanted,
@@ -77,7 +82,10 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc) {
 }
 
 void Device::waitIdle() const {
-    if (impl_ && impl_->device) impl_->device->waitIdle();
+    if (impl_ && impl_->device) {
+        std::lock_guard lk(globalQueueMutex());
+        impl_->device->waitIdle();
+    }
 }
 
 } // namespace volcano::core
