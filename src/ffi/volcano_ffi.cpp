@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,6 +52,15 @@ struct VpFigure {
     std::string x_label, y_label;
     bool white_bg = false;
     int w = 0, h = 0;
+
+    // Explicit tick positions + labels per axis (the caller mirrors
+    // its own locator/formatter — e.g. liveplot's egui-style clock
+    // labels). Empty `ticks_set` = automatic locator/formatter.
+    struct TickOverride {
+        std::vector<float> positions;
+        std::vector<std::string> labels;
+    };
+    std::optional<TickOverride> ticks[2];
 };
 
 static void apply_trace_style(const VpFigure::TraceData& td,
@@ -105,6 +115,13 @@ static void rebuild_figure(VpFigure* f) {
     f->axes->setStyle(st);
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
+    for (int a = 0; a < 2; ++a) {
+        if (!f->ticks[a]) continue;
+        auto& tc = a == 0 ? f->axes->style().xAxis.ticks
+                          : f->axes->style().yAxis.ticks;
+        tc.positions = f->ticks[a]->positions;
+        tc.labels = f->ticks[a]->labels;
+    }
     for (auto& [id, td] : f->trace_data) {
         if (td.xy.empty()) continue; // empty LinePlot crashes renderFrame
         auto lp = std::make_shared<plot::LinePlot>(plot::Series2D{});
@@ -341,6 +358,34 @@ void vp_set_axis_labels(VpFigure* fig, const char* x_label,
         if (fig->axes) {
             if (x_label) fig->axes->style().xAxis.label = x_label;
             if (y_label) fig->axes->style().yAxis.label = y_label;
+        }
+    } catch (...) {}
+}
+
+void vp_set_ticks(VpFigure* fig, int axis, int count,
+                  const float* positions, const char* const* labels) {
+    try {
+        if (!fig || axis < 0 || axis > 1) return;
+        if (count <= 0 || !positions) {
+            fig->ticks[axis].reset();
+        } else {
+            VpFigure::TickOverride t;
+            t.positions.assign(positions, positions + count);
+            t.labels.reserve(count);
+            for (int i = 0; i < count; ++i)
+                t.labels.emplace_back(labels && labels[i] ? labels[i] : "");
+            fig->ticks[axis] = std::move(t);
+        }
+        if (fig->axes) {
+            auto& tc = axis == 0 ? fig->axes->style().xAxis.ticks
+                                 : fig->axes->style().yAxis.ticks;
+            if (fig->ticks[axis]) {
+                tc.positions = fig->ticks[axis]->positions;
+                tc.labels = fig->ticks[axis]->labels;
+            } else {
+                tc.positions.reset();
+                tc.labels.reset();
+            }
         }
     } catch (...) {}
 }

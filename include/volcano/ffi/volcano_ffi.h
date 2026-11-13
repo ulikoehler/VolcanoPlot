@@ -61,6 +61,13 @@ void vp_set_viewport(VpFigure* fig, double xmin, double xmax,
 void vp_set_axis_labels(VpFigure* fig, const char* x_label,
                         const char* y_label);
 
+/// Explicit major-tick positions (data coords) and UTF-8 labels.
+/// `axis`: 0 = x, 1 = y. `count <= 0` or NULL positions restores the
+/// automatic locator/formatter. Labels must be a parallel array of
+/// `count` C strings (a NULL entry renders an unlabeled tick).
+void vp_set_ticks(VpFigure* fig, int axis, int count,
+                  const float* positions, const char* const* labels);
+
 /// Grid lines on both axes: 0 = off, 1 = on (default).
 void vp_set_grid(VpFigure* fig, int on);
 
