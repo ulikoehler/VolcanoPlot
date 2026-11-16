@@ -114,6 +114,14 @@ static void rebuild_figure(VpFigure* f) {
     st.yAxis.gridLineWidth = 0.6f;
     f->figure->style() = st;   // canvas/margins adopt the theme too
     f->axes->setStyle(st);
+    // egui parity: subtle frame border, not the mpl styles' bright
+    // solid spine — must match vp_set_background, or every figure
+    // rebuild (resize / backend re-init) brings the white bar back.
+    const auto spineGray = plot::Color::fromRgba8(
+        f->white_bg ? 160 : 72, f->white_bg ? 160 : 72,
+        f->white_bg ? 160 : 72, 255);
+    for (const char* side : {"left", "right", "bottom", "top"})
+        f->axes->spine(side).color = spineGray;
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
     for (int a = 0; a < 2; ++a) {
