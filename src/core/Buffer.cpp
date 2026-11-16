@@ -53,6 +53,9 @@ Buffer::Buffer(VmaAllocator allocator, const BufferDesc& desc)
     }
     buffer_ = buf;
     mapped_ = info.pMappedData;
+    VkMemoryPropertyFlags props = 0;
+    vmaGetAllocationMemoryProperties(allocator_, allocation_, &props);
+    coherent_ = (props & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 }
 
 Buffer::~Buffer() {
@@ -81,6 +84,7 @@ void Buffer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
                     std::span<const std::byte> data) {
     if (mapped_) {
         std::memcpy(mapped_, data.data(), data.size());
+        flush();
         return;
     }
     // Staging upload
@@ -90,6 +94,7 @@ void Buffer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
     stagingDesc.hostVisible = true;
     Buffer staging(allocator_, stagingDesc);
     std::memcpy(staging.mappedData(), data.data(), data.size());
+    staging.flush();
 
     bool ok = false;
     {
@@ -107,6 +112,11 @@ void Buffer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
 void Buffer::invalidate() {
     if (allocator_ && allocation_)
         vmaInvalidateAllocation(allocator_, allocation_, 0, VK_WHOLE_SIZE);
+}
+
+void Buffer::flush() {
+    if (allocator_ && allocation_ && mapped_ && !coherent_)
+        vmaFlushAllocation(allocator_, allocation_, 0, VK_WHOLE_SIZE);
 }
 
 } // namespace volcano::core

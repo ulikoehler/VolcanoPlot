@@ -174,6 +174,7 @@ std::vector<uint8_t> GpuPngEncoder::filterScanlines(std::span<const uint8_t> rgb
     inDesc.hostVisible = true;
     core::Buffer inBuf(allocator_, inDesc);
     std::memcpy(inBuf.mappedData(), rgba.data(), inSize);
+    inBuf.flush();
 
     core::BufferDesc outDesc{};
     outDesc.size = outSize;

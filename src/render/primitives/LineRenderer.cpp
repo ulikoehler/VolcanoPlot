@@ -264,6 +264,7 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
     if (points.size() <= capacity_) {
         std::memcpy(pointBuffer_.mappedData(), points.data(),
                     points.size_bytes());
+        pointBuffer_.flush();
         count_ = static_cast<uint32_t>(points.size());
         return;
     }
@@ -276,6 +277,7 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
     pointBuffer_ = core::Buffer(allocator_, d);
     std::memcpy(pointBuffer_.mappedData(), points.data(),
                 points.size_bytes());
+    pointBuffer_.flush();
     count_ = static_cast<uint32_t>(points.size());
     capacity_ = count_;
 }
@@ -302,6 +304,7 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
     }
     std::memcpy(pointBufferF64_.mappedData(), xy.data(),
                 vk::DeviceSize(n) * 16);
+    pointBufferF64_.flush();
     f64Head_ = 0;   // full upload resets the ring to linear layout
     // The f32 buffer is written by the GPU narrowing pass — grow it
     // here so convertF64ToF32 always has a destination.
@@ -342,6 +345,7 @@ bool LineRendererVk::updatePointsF64Append(uint32_t drop,
     if (first < tailN)
         std::memcpy(base, tail.data() + size_t(first) * 2,
                     size_t(tailN - first) * 16);
+    pointBufferF64_.flush();
     f64Head_ = (f64Head_ + drop) % cap;
     count_ = kept + tailN;
     f64Pending_ = true;

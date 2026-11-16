@@ -427,6 +427,9 @@ void PointRendererVk::updatePoints(std::span<const plot::Point2D> points,
                     colors.size_bytes());
         std::memcpy(sizeBuffer_.mappedData(), sizes.data(),
                     sizes.size_bytes());
+        pointBuffer_.flush();
+        colorBuffer_.flush();
+        sizeBuffer_.flush();
         count_ = static_cast<uint32_t>(points.size());
         return;
     }
@@ -441,6 +444,7 @@ void PointRendererVk::updatePoints(std::span<const plot::Point2D> points,
         d.hostVisible = true;
         buf = core::Buffer(allocator_, d);
         std::memcpy(buf.mappedData(), bytes.data(), bytes.size());
+        buf.flush();
     };
     reallocUpload(pointBuffer_, core::BufferUsage::VertexStorage,
                   std::as_bytes(points));

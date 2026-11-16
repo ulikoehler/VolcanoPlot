@@ -56,6 +56,13 @@ public:
     /// Needed before reading host-cached buffers written by the GPU.
     void invalidate();
 
+    /// Flush CPU writes to `mappedData()` so the GPU sees them —
+    /// required before any submission that reads the buffer. VMA may
+    /// pick non-coherent host-visible memory; without a flush the GPU
+    /// can read stale data (intermittently missing/wrong uploads).
+    /// No-op on coherent memory.
+    void flush();
+
     /// Release ownership without destroying — used only when the
     /// queue is wedged and an in-flight submission may still legally
     /// reference this buffer (freeing would be use-after-free; the
@@ -72,6 +79,7 @@ private:
     vk::Buffer buffer_ = VK_NULL_HANDLE;
     vk::DeviceSize size_ = 0;
     void* mapped_ = nullptr;
+    bool coherent_ = true;
 };
 
 } // namespace volcano::core

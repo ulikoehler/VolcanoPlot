@@ -943,6 +943,7 @@ void TextRendererVk::uploadAtlas() {
     sdesc.hostVisible = true;
     core::Buffer staging(allocator_, sdesc);
     std::memcpy(staging.mappedData(), atlas->pixels, pixelBytes);
+    staging.flush();
 
     // Use a one-time command buffer (OUTSIDE any render pass).
     vk::CommandBufferAllocateInfo cbai{};
@@ -1186,6 +1187,8 @@ void TextRendererVk::draw(render::Cmd& cmdRef, plot::Rect2D rect,
     // Advance ring buffer offsets.
     vbOffset_ += vertBytes;
     ibOffset_ += idxBytes;
+    scratchVB_.flush();
+    scratchIB_.flush();
 
     // Bind pipeline and descriptor set.
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());

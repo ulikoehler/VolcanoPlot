@@ -369,6 +369,7 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
                     rgbaMode_ ? static_cast<const void*>(grid.rgba.data())
                               : static_cast<const void*>(grid.values.data()),
                     bdesc.size);
+        staging.flush();
 
         bool ok = false;
         {
@@ -432,6 +433,7 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
         bdesc.hostVisible = true;
         core::Buffer staging(allocator, bdesc);
         std::memcpy(staging.mappedData(), lut.data(), lut.size());
+        staging.flush();
 
         bool ok = false;
         {

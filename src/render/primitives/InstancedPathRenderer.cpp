@@ -267,6 +267,7 @@ void InstancedPathRendererVk::drawInstanced(
 
     cmd.draw(templateVerts_, uint32_t(instances.size()), 0, 0);
 
+    scratchVB_.flush();
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
 }
 

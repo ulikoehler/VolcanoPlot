@@ -171,6 +171,7 @@ GpuYuvPlanes GpuYuvConverter::convert(std::span<const uint8_t> rgba,
     inDesc.hostVisible = true;
     core::Buffer inBuf(allocator_, inDesc);
     std::memcpy(inBuf.mappedData(), rgba.data(), inSize);
+    inBuf.flush();
 
     auto mkBuf = [&](size_t bytes) {
         core::BufferDesc d{};

@@ -321,6 +321,7 @@ void VulkanGpuServices::writeBuffer(GpuBuf buf, uint64_t offset,
     if (auto* b = bufferOf(buf); b && b->mappedData()) {
         std::memcpy(static_cast<char*>(b->mappedData()) + offset,
                     data.data(), data.size());
+        b->flush();
         return;
     }
     // Device-local: stage + copy via one-time submit.
@@ -330,6 +331,7 @@ void VulkanGpuServices::writeBuffer(GpuBuf buf, uint64_t offset,
     sd.hostVisible = true;
     core::Buffer staging(allocator(), sd);
     std::memcpy(staging.mappedData(), data.data(), data.size());
+    staging.flush();
     const vk::Buffer dst = vkBufferOf(buf);
     if (!oneTimeSubmit([&](vk::CommandBuffer c) {
             vk::BufferCopy region{0, offset, data.size()};
@@ -489,6 +491,7 @@ VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
     inDesc.hostVisible = true;
     core::Buffer inBuf(allocator(), inDesc);
     std::memcpy(inBuf.mappedData(), data.data(), data.size_bytes());
+    inBuf.flush();
 
     const vk::DeviceSize binsBytes = vk::DeviceSize(nBins) * 4;
     core::BufferDesc binDesc{};
@@ -560,6 +563,7 @@ VulkanGpuServices::kde1d(std::span<const float> data, float lo,
     sd.hostVisible = true;
     core::Buffer srcBuf(allocator(), sd);
     std::memcpy(srcBuf.mappedData(), data.data(), sd.size);
+    srcBuf.flush();
 
     core::BufferDesc dd{};
     dd.size = size_t(n) * 4;

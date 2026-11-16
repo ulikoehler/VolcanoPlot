@@ -1598,6 +1598,7 @@ GpuLineRendererVk::tessellateChunk(vk::CommandBuffer cmd,
     auto* dst = static_cast<char*>(inBuf_.mappedData()) +
                 inOff_ * 2 * sizeof(float);
     std::memcpy(dst, px.data(), n * sizeof(plot::Point2D));
+    inBuf_.flush();
 
     struct PC {
         uint32_t n, nSeg;

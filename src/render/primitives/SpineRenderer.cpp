@@ -288,6 +288,7 @@ void SpineRendererVk::drawLineStrip(Cmd& cmdRef, plot::Rect2D clip,
     cmd.draw(static_cast<uint32_t>(points.size()), 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
+    scratchVB_.flush();
 }
 
 void SpineRendererVk::drawRect(Cmd& cmd, plot::Rect2D clip,
@@ -346,6 +347,7 @@ void SpineRendererVk::drawFilledRect(Cmd& cmdRef, plot::Rect2D clip,
     cmd.draw(6, 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
+    scratchVB_.flush();
 }
 
 void SpineRendererVk::drawTriangles(Cmd& cmdRef, plot::Rect2D clip,
@@ -386,6 +388,7 @@ void SpineRendererVk::drawTriangles(Cmd& cmdRef, plot::Rect2D clip,
     cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
+    scratchVB_.flush();
 }
 
 void SpineRendererVk::drawTrianglesVC(
@@ -427,6 +430,7 @@ void SpineRendererVk::drawTrianglesVC(
     cmd.draw(static_cast<uint32_t>(count), 1, 0, 0);
 
     scratchOffset_ += (byteSize + 15) & ~size_t(15);
+    scratchVB_.flush();
 }
 
 void SpineRendererVk::drawTrianglesGpu(Cmd& cmdRef, plot::Rect2D clip,
