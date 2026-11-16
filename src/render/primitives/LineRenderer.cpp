@@ -1,5 +1,6 @@
 // volcano/render/primitives/LineRenderer.cpp
 #include "volcano/render/primitives/LineRenderer.hpp"
+#include "volcano/render/primitives/GpuLineRenderer.hpp"
 #include "../VkFactory.hpp"
 #include "../VulkanGpuServices.hpp"
 #include <volcano/core/PipelineCache.hpp>
@@ -86,6 +87,17 @@ public:
         return f64Pending_;
     }
     void clearF64Pending() noexcept override { f64Pending_ = false; }
+
+    [[nodiscard]] bool convertF64ToF32Sync(GpuBuf src64, GpuBuf dst32,
+                                           uint32_t n, uint32_t srcHead,
+                                           uint32_t srcCap) override {
+        if (svcs_->gpuLine().convertF64ToF32Sync(
+                src64, dst32, n, srcHead, srcCap)) {
+            f64Pending_ = false;
+            return true;
+        }
+        return false;
+    }
     void setStyle(plot::Color color, float width) override {
         color_ = color; width_ = width;
     }

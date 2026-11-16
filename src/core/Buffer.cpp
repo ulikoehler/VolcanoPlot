@@ -91,10 +91,17 @@ void Buffer::upload(vk::Device device, vk::Queue queue, vk::CommandPool pool,
     Buffer staging(allocator_, stagingDesc);
     std::memcpy(staging.mappedData(), data.data(), data.size());
 
-    OneTimeCommands cmd(device, pool, queue);
-    vk::BufferCopy region{};
-    region.setSize(data.size());
-    cmd.handle().copyBuffer(staging.handle(), buffer_, region);
+    bool ok = false;
+    {
+        OneTimeCommands cmd(device, pool, queue, &ok);
+        vk::BufferCopy region{};
+        region.setSize(data.size());
+        cmd.handle().copyBuffer(staging.handle(), buffer_, region);
+    }
+    // The copy wait is bounded — a wedged queue leaves it incomplete;
+    // surfacing the failure beats handing the GPU a stale buffer.
+    if (!ok)
+        throw std::runtime_error("Buffer::upload: staging copy never completed");
 }
 
 void Buffer::invalidate() {

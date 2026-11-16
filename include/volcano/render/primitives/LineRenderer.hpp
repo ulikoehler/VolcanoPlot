@@ -68,6 +68,19 @@ public:
     [[nodiscard]] virtual bool f64Pending() const noexcept { return false; }
     virtual void clearF64Pending() noexcept {}
 
+    /// Synchronously narrow pending f64 points into the f32 buffer via
+    /// its own command buffer, submits and waits — true only when the
+    /// submission actually completed. Needed by consumers that read the
+    /// f32 buffer through their own submission (GPU autoscale, readback
+    /// envelope); a narrow merely *recorded* into a later frame's
+    /// command buffer has not executed at reduce time.
+    [[nodiscard]] virtual bool convertF64ToF32Sync(
+        GpuBuf src64, GpuBuf dst32, uint32_t n,
+        uint32_t srcHead = 0, uint32_t srcCap = 0) {
+        (void)src64; (void)dst32; (void)n; (void)srcHead; (void)srcCap;
+        return false;
+    }
+
     /// Bind an externally-owned buffer (e.g. EvalRenderer output). The
     /// caller guarantees the buffer outlives this renderer's draws.
     virtual void bindExternalBuffer(GpuBuf buf, uint32_t count) = 0;

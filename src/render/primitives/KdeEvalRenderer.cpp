@@ -188,8 +188,9 @@ std::vector<float> KdeEvalRendererVk::eval(
     constexpr float kTwoPi = 6.28318530718f;
     pc.norm = 1.0f / (kTwoPi * bwX * bwY * float(samples.size()));
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(device_, computePool_, computeQueue_);
+        core::OneTimeCommands cmd(device_, computePool_, computeQueue_, &ok);
         auto cb = cmd.handle();
         cb.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline_.get());
         cb.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -204,6 +205,7 @@ std::vector<float> KdeEvalRendererVk::eval(
         cb.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
                            vk::PipelineStageFlagBits::eHost, {}, mb, {}, {});
     }
+    if (!ok) return {};
 
     std::vector<float> out(cells);
     std::memcpy(out.data(), gridBuf_.mappedData(),

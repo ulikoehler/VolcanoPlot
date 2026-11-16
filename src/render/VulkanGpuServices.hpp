@@ -76,7 +76,7 @@ public:
 
     /// One-shot command recording + submit on the graphics queue —
     /// the primitive impls' upload path (mirrors core::OneTimeCommands).
-    void oneTimeSubmit(std::function<void(vk::CommandBuffer)> fn);
+    [[nodiscard]] bool oneTimeSubmit(std::function<void(vk::CommandBuffer)> fn);
 
     // ── GpuServices ──────────────────────────────────────────────────
     [[nodiscard]] plot::Extent2D extent() const override { return extent_; }

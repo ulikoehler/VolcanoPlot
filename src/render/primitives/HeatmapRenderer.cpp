@@ -370,10 +370,12 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
                               : static_cast<const void*>(grid.values.data()),
                     bdesc.size);
 
-        core::OneTimeCommands cmd(device, pool, queue);
-        vk::BufferImageCopy region{};
-        region.setBufferOffset(0)
-              .setBufferRowLength(grid.width)
+        bool ok = false;
+        {
+            core::OneTimeCommands cmd(device, pool, queue, &ok);
+            vk::BufferImageCopy region{};
+            region.setBufferOffset(0)
+                  .setBufferRowLength(grid.width)
               .setBufferImageHeight(grid.height)
               .setImageSubresource(vk::ImageSubresourceLayers{}
                   .setAspectMask(vk::ImageAspectFlagBits::eColor)
@@ -387,9 +389,12 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
         cmd.handle().copyBufferToImage(staging.handle(), gridImage_.handle(),
             vk::ImageLayout::eTransferDstOptimal, region);
         // Transition to shader read
-        core::Image::transitionLayout(cmd.handle(), gridImage_.handle(),
-            gridFmt, vk::ImageLayout::eTransferDstOptimal,
-            vk::ImageLayout::eShaderReadOnlyOptimal);
+            core::Image::transitionLayout(cmd.handle(), gridImage_.handle(),
+                gridFmt, vk::ImageLayout::eTransferDstOptimal,
+                vk::ImageLayout::eShaderReadOnlyOptimal);
+        }
+        if (!ok)
+            throw std::runtime_error("HeatmapRenderer: grid upload never completed");
     }
     {
         vk::ImageViewCreateInfo vci{};
@@ -428,10 +433,12 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
         core::Buffer staging(allocator, bdesc);
         std::memcpy(staging.mappedData(), lut.data(), lut.size());
 
-        core::OneTimeCommands cmd(device, pool, queue);
-        vk::BufferImageCopy region{};
-        region.setBufferOffset(0)
-              .setBufferRowLength(kLutSize)
+        bool ok = false;
+        {
+            core::OneTimeCommands cmd(device, pool, queue, &ok);
+            vk::BufferImageCopy region{};
+            region.setBufferOffset(0)
+                  .setBufferRowLength(kLutSize)
               .setBufferImageHeight(1)
               .setImageSubresource(vk::ImageSubresourceLayers{}
                   .setAspectMask(vk::ImageAspectFlagBits::eColor)
@@ -443,9 +450,12 @@ void HeatmapRendererVk::upload(const plot::Grid2D& grid,
             vk::ImageLayout::eTransferDstOptimal);
         cmd.handle().copyBufferToImage(staging.handle(), cmapImage_.handle(),
             vk::ImageLayout::eTransferDstOptimal, region);
-        core::Image::transitionLayout(cmd.handle(), cmapImage_.handle(),
-            vk::Format::eR8G8B8A8Unorm, vk::ImageLayout::eTransferDstOptimal,
-            vk::ImageLayout::eShaderReadOnlyOptimal);
+            core::Image::transitionLayout(cmd.handle(), cmapImage_.handle(),
+                vk::Format::eR8G8B8A8Unorm, vk::ImageLayout::eTransferDstOptimal,
+                vk::ImageLayout::eShaderReadOnlyOptimal);
+        }
+        if (!ok)
+            throw std::runtime_error("HeatmapRenderer: LUT upload never completed");
     }
     {
         vk::ImageViewCreateInfo vci{};

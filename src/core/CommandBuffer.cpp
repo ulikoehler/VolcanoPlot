@@ -34,8 +34,9 @@ void CommandBuffer::reset() { buffer_.reset(); }
 
 // ---- OneTimeCommands ----
 
-OneTimeCommands::OneTimeCommands(vk::Device device, vk::CommandPool pool, vk::Queue queue)
-    : device_(device), pool_(pool), queue_(queue), cb_(device, pool) {
+OneTimeCommands::OneTimeCommands(vk::Device device, vk::CommandPool pool,
+                                 vk::Queue queue, bool* ok)
+    : device_(device), pool_(pool), queue_(queue), ok_(ok), cb_(device, pool) {
     cb_.begin(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
 }
 
@@ -64,11 +65,13 @@ OneTimeCommands::~OneTimeCommands() {
         // Poll the fence status with a short sleep instead: identical
         // synchronous semantics, ~zero CPU. Bounded — a wedged queue
         // would otherwise pin this thread inside the destructor
-        // forever; a skipped wait degrades (caller reads stale data)
-        // but the process survives.
+        // forever; the caller is told via `ok_` so it can fail the
+        // frame rather than trusting a half-written buffer.
         for (uint32_t i = 0; i < 50000; ++i) {
-            if (device_.getFenceStatus(fence.get()) != vk::Result::eNotReady)
+            if (device_.getFenceStatus(fence.get()) != vk::Result::eNotReady) {
+                if (ok_) *ok_ = true;
                 break;
+            }
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     } catch (...) {

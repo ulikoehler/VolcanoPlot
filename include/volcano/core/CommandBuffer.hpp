@@ -27,7 +27,13 @@ private:
 /// One-time command buffer + submit + wait helper.
 class OneTimeCommands {
 public:
-    OneTimeCommands(vk::Device device, vk::CommandPool pool, vk::Queue queue);
+    /// `ok` (optional) is set in the destructor: true once the
+    /// submitted work's fence signaled. The wait is bounded — on a
+    /// wedged queue the flag comes back false and callers that hand
+    /// the result to the GPU must treat the frame as failed rather
+    /// than trusting a half-written buffer.
+    OneTimeCommands(vk::Device device, vk::CommandPool pool, vk::Queue queue,
+                    bool* ok = nullptr);
     ~OneTimeCommands();
 
     OneTimeCommands(const OneTimeCommands&) = delete;
@@ -39,6 +45,7 @@ private:
     vk::Device device_;
     vk::CommandPool pool_;
     vk::Queue queue_;
+    bool* ok_ = nullptr;
     CommandBuffer cb_;
 };
 

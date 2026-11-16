@@ -1001,6 +1001,22 @@ void LinePlot::contributeToAutoscaleScaled(Viewport& v,
 }
 void LinePlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
+    // pointBuffer_ is only written by the frame-time narrow — a reduce
+    // submitted now (own command stream, submit+wait) would race it.
+    // With f64 data pending, narrow synchronously first; otherwise the
+    // first frame's reduce reads unwritten memory and returns a garbage
+    // viewport that clips the whole trace away.
+    if (useF64_ && !f64Failed_ && renderer_->f64Pending()) {
+        uint32_t ringHead = 0, ringCap = 0;
+        renderer_->f64Ring(ringHead, ringCap);
+        if (!renderer_->convertF64ToF32Sync(renderer_->pointBufferF64(),
+                                          renderer_->pointBuffer(),
+                                          renderer_->pointCount(),
+                                          ringHead, ringCap)) {
+            contributeToAutoscale(v);
+            return;
+        }
+    }
     auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(), renderer_->pointCount());
     if (!r) { contributeToAutoscale(v); return; }
     v.x.min = std::min(v.x.min, r->minX); v.x.max = std::max(v.x.max, r->maxX);

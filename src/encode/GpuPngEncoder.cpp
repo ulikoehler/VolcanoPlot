@@ -198,8 +198,9 @@ std::vector<uint8_t> GpuPngEncoder::filterScanlines(std::span<const uint8_t> rgb
              .setBufferInfo(outInfo);
     device_.updateDescriptorSets(writes, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(device_, pool_, queue_);
+        core::OneTimeCommands cmd(device_, pool_, queue_, &ok);
         cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
                                   impl_->pipeline.get());
         cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -210,6 +211,7 @@ std::vector<uint8_t> GpuPngEncoder::filterScanlines(std::span<const uint8_t> rgb
                                    vk::ShaderStageFlagBits::eCompute, 0, 8, pcv);
         cmd.handle().dispatch(h, 1, 1);
     }
+    if (!ok) return {};
 
     outBuf.invalidate();
     const auto* out = static_cast<const uint32_t*>(outBuf.mappedData());

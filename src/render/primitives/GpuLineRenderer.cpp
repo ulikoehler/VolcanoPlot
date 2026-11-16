@@ -827,8 +827,9 @@ bool GpuLineRendererVk::envelopeColumns(GpuBuf points, uint32_t count,
                  .setBufferInfo(infos[i]);
     device_.updateDescriptorSets(writes, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(device_, pool, queue);
+        core::OneTimeCommands cmd(device_, pool, queue, &ok);
         // Init: columns to ord(+inf) / ord(-inf) identities.
         cmd.handle().fillBuffer(outBuf.handle(), 0, vk::DeviceSize(W) * 4,
                                 kOrdPosInf);
@@ -855,7 +856,7 @@ bool GpuLineRendererVk::envelopeColumns(GpuBuf points, uint32_t count,
                                    20, &pcv);
         cmd.handle().dispatch((count + 255) / 256, 1, 1);
     } // submit + wait in ~OneTimeCommands
-
+    if (!ok) return false;   // wedged queue — caller falls back to CPU
     outBuf.invalidate();
     const auto* words = static_cast<const uint32_t*>(outBuf.mappedData());
     mn.resize(W);
@@ -955,10 +956,17 @@ bool GpuLineRendererVk::convertF64ToF32Sync(GpuBuf src64, GpuBuf dst32,
                                             uint32_t n, uint32_t srcHead,
                                             uint32_t srcCap) {
     if (!inited_ || !src64 || !dst32 || !n) return false;
-    core::OneTimeCommands otc(device_, svcs_->computePool(),
-                              svcs_->computeQueue());
-    VkCmd c(otc.handle());
-    return convertF64ToF32(c, src64, dst32, n, srcHead, srcCap);
+    bool ok = false;
+    {
+        core::OneTimeCommands otc(device_, svcs_->computePool(),
+                                  svcs_->computeQueue(), &ok);
+        VkCmd c(otc.handle());
+        if (!convertF64ToF32(c, src64, dst32, n, srcHead, srcCap))
+            return false;
+    }
+    // Only true when the narrow actually completed — a wedged queue
+    // leaves dst32 stale and the caller must fall back.
+    return ok;
 }
 
 bool GpuLineRendererVk::ensureXformLayout() {

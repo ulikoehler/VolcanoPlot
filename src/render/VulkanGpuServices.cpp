@@ -295,9 +295,13 @@ GpuBuf VulkanGpuServices::adoptBuffer(core::Buffer&& buf) {
     return token;
 }
 
-void VulkanGpuServices::oneTimeSubmit(std::function<void(vk::CommandBuffer)> fn) {
-    core::OneTimeCommands c(device(), graphicsPool(), graphicsQueue());
-    fn(c.handle());
+bool VulkanGpuServices::oneTimeSubmit(std::function<void(vk::CommandBuffer)> fn) {
+    bool ok = false;
+    {
+        core::OneTimeCommands c(device(), graphicsPool(), graphicsQueue(), &ok);
+        fn(c.handle());
+    }
+    return ok;
 }
 
 GpuBuf VulkanGpuServices::createBuffer(const GpuBufferDesc& desc) {
@@ -327,10 +331,11 @@ void VulkanGpuServices::writeBuffer(GpuBuf buf, uint64_t offset,
     core::Buffer staging(allocator(), sd);
     std::memcpy(staging.mappedData(), data.data(), data.size());
     const vk::Buffer dst = vkBufferOf(buf);
-    oneTimeSubmit([&](vk::CommandBuffer c) {
-        vk::BufferCopy region{0, offset, data.size()};
-        c.copyBuffer(staging.handle(), dst, region);
-    });
+    if (!oneTimeSubmit([&](vk::CommandBuffer c) {
+            vk::BufferCopy region{0, offset, data.size()};
+            c.copyBuffer(staging.handle(), dst, region);
+        }))
+        throw std::runtime_error("writeBuffer: staging copy never completed");
 }
 
 void VulkanGpuServices::destroyBuffer(GpuBuf buf) {
@@ -508,8 +513,9 @@ VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
         .setBufferInfo(oi);
     dev.updateDescriptorSets(w, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue());
+        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue(), &ok);
         cmd.handle().fillBuffer(binBuf.handle(), 0, binsBytes, 0);
         vk::MemoryBarrier2 bar{};
         bar.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
@@ -534,6 +540,7 @@ VulkanGpuServices::histBin(std::span<const float> data, uint32_t nBins,
             data.size(), size_t(64) * 1024));
         cmd.handle().dispatch((threads + 255) / 256, 1, 1);
     }
+    if (!ok) return {};   // wedged queue — caller falls back
     binBuf.invalidate();
     std::vector<uint32_t> out(nBins);
     std::memcpy(out.data(), binBuf.mappedData(), binsBytes);
@@ -577,8 +584,9 @@ VulkanGpuServices::kde1d(std::span<const float> data, float lo,
         .setBufferInfo(oi);
     dev.updateDescriptorSets(w, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue());
+        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue(), &ok);
         cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
                                   kde1dPipe_->pipe.get());
         cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -591,6 +599,7 @@ VulkanGpuServices::kde1d(std::span<const float> data, float lo,
                                    20, &pcv);
         cmd.handle().dispatch((n + 255) / 256, 1, 1);
     }
+    if (!ok) return std::nullopt;   // wedged queue — caller falls back
     dstBuf.invalidate();
     std::vector<float> out(n);
     std::memcpy(out.data(), dstBuf.mappedData(), dd.size);
@@ -653,8 +662,9 @@ bool VulkanGpuServices::pcmTessellate(
     }
     dev.updateDescriptorSets(writes, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue());
+        core::OneTimeCommands cmd(dev, graphicsPool(), graphicsQueue(), &ok);
         auto c = cmd.handle();
         c.bindPipeline(vk::PipelineBindPoint::eCompute,
                        pcmPipe_->pipe.get());
@@ -676,6 +686,7 @@ bool VulkanGpuServices::pcmTessellate(
                           {}, {}, barriers, {});
     }
 
+    if (!ok) return false;   // wedged queue — output buffers unusable
     posOut = adoptBuffer(std::move(posBuf));
     colOut = adoptBuffer(std::move(colBuf));
     return true;

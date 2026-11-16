@@ -315,8 +315,9 @@ std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
     // The OneTimeCommands must be destroyed (submitting + waiting) BEFORE
     // we read the host-visible output buffer, otherwise we read stale data
     // from the previous reduce call.
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(device_, computePool_, computeQueue_);
+        core::OneTimeCommands cmd(device_, computePool_, computeQueue_, &ok);
         auto cb = cmd.handle();
 
         vk::Buffer curIn = svcs_->vkBufferOf(pointBuffer);
@@ -340,6 +341,7 @@ std::optional<MinMax2D> ReduceRendererVk::reduceMinMax2D(GpuBuf pointBuffer,
                    /*isFinal=*/true, vec2Input);
         // cmd destructor ends, submits, and waits on the compute queue here.
     }
+    if (!ok) return std::nullopt;   // wedged queue — caller falls back
 
     // Now safe to read the device-written output.
     auto* out = static_cast<const float*>(output_.mappedData());

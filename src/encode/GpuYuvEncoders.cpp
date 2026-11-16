@@ -200,8 +200,9 @@ GpuYuvPlanes GpuYuvConverter::convert(std::span<const uint8_t> rgba,
                  .setBufferInfo(infos[i]);
     device_.updateDescriptorSets(writes, {});
 
+    bool ok = false;
     {
-        core::OneTimeCommands cmd(device_, pool_, queue_);
+        core::OneTimeCommands cmd(device_, pool_, queue_, &ok);
         cmd.handle().bindPipeline(vk::PipelineBindPoint::eCompute,
                                   impl_->pipeline.get());
         cmd.handle().bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -214,6 +215,7 @@ GpuYuvPlanes GpuYuvConverter::convert(std::span<const uint8_t> rgba,
         uint32_t threads = out.yw * out.yh / 16u; // 8×2 tile per thread
         cmd.handle().dispatch((threads + 63) / 64, 1, 1);
     }
+    if (!ok) return out;   // wedged queue — caller gets empty result
 
     auto pull = [](core::Buffer& b, std::vector<uint8_t>& dst, size_t bytes) {
         b.invalidate();
