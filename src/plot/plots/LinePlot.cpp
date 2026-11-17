@@ -76,7 +76,13 @@ void LinePlot::slideDataF64(uint32_t drop,
     // Compact once the dead prefix outweighs a quarter of the stored
     // range — amortized O(N), keeps rawF64_ bounded on slides.
     if (rawFront_ && rawFront_ * 8 >= rawF64_.size()) {
-        if (slidePending_) slideTailOff_ -= rawFront_ * 2;
+        if (slidePending_) {
+            // Drops can legally eat INTO the pending tail (points
+            // pushed and evicted before the next prepare) — clamp the
+            // anchor instead of underflowing into a wild span offset.
+            const size_t anchors = std::min(slideTailOff_, rawFront_ * 2);
+            slideTailOff_ -= anchors;
+        }
         rawF64_.erase(rawF64_.begin(),
                       rawF64_.begin() +
                           static_cast<std::ptrdiff_t>(rawFront_) * 2);
@@ -144,7 +150,9 @@ void LinePlot::prepare(render::Renderer& r) {
         if (dataDirty_) {
             bool ok = false;
             if (useF64_ && !f64Failed_) {
-                if (slidePending_)
+                if (slidePending_ &&
+                    slideTailOff_ <= rawF64_.size() &&
+                    slideTailLen_ <= rawF64_.size() - slideTailOff_)
                     ok = renderer_->updatePointsF64Append(
                         slideDrop_,
                         std::span<const double>{
