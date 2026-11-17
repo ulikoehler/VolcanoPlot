@@ -124,6 +124,13 @@ static void rebuild_figure(VpFigure* f) {
         f->axes->spine(side).color = spineGray;
     if (!f->x_label.empty()) f->axes->style().xAxis.label = f->x_label;
     if (!f->y_label.empty()) f->axes->style().yAxis.label = f->y_label;
+    // style()=st above reset faceColor to the theme default — re-apply
+    // the embedder's panel bg or every rebuild paints white margins.
+    if (f->has_custom_bg) {
+        f->figure->style().faceColor = f->custom_bg;
+        f->figure->style().edgeColor = f->custom_bg;
+        f->axes->style().faceColor = f->custom_bg;
+    }
     for (int a = 0; a < 2; ++a) {
         if (!f->ticks[a]) continue;
         auto& tc = a == 0 ? f->axes->style().xAxis.ticks
@@ -238,7 +245,10 @@ uint64_t vp_trace_add(VpFigure* fig) {
     std::lock_guard gate(renderGate());
     try {
         if (!fig) return 0;
-        uint64_t id = fig->next_id++;
+        // Skip ids already registered — vp_trace_set auto-registers
+        // unknown ids, which may be numerically ahead of next_id.
+        uint64_t id;
+        do { id = fig->next_id++; } while (fig->trace_data.count(id));
         fig->trace_data[id] = VpFigure::TraceData{};
         auto lp = std::make_shared<plot::LinePlot>(plot::Series2D{});
         auto* raw = lp.get();
@@ -255,9 +265,11 @@ void vp_trace_set(VpFigure* fig, uint64_t id, const double* xy, size_t n,
     std::lock_guard gate(renderGate());
     try {
         if (!fig) return;
-        auto td_it = fig->trace_data.find(id);
-        if (td_it == fig->trace_data.end()) return;
-        auto& td = td_it->second;
+        // Auto-register unknown ids instead of silently dropping the
+        // upload — a stale id after a figure rebuild used to no-op
+        // here while vp_trace_slide reported failure forever, leaving
+        // the scope permanently blank.
+        auto& td = fig->trace_data[id];
         td.rgba8 = rgba8;
         td.width = width;
         td.style = style;
