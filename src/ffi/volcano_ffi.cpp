@@ -398,6 +398,11 @@ void vp_set_background_rgba(VpFigure* fig, float r, float g, float b) {
             fig->figure->style().edgeColor = fig->custom_bg;
         }
         if (fig->axes) fig->axes->style().faceColor = fig->custom_bg;
+        // The default clear is WHITE — any rows the figure patch
+        // misses (driver quirk, missed rasterization) read back as a
+        // bright band. Clearing to the panel color makes stray
+        // unpainted rows invisible instead.
+        if (fig->backend) fig->backend->setClearColor(r, g, b, 1.0f);
     } catch (...) {}
 }
 
