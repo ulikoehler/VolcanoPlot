@@ -525,4 +525,15 @@ void vp_figure_set_deferred_present(VpFigure* fig, int on) {
 int vp_figure_width(const VpFigure* fig) { return fig ? fig->w : 0; }
 int vp_figure_height(const VpFigure* fig) { return fig ? fig->h : 0; }
 
+int vp_debug_xlim(const VpFigure* fig, float out_xlim[2],
+                  float out_ylim[2]) {
+    std::lock_guard gate(renderGate());
+    if (!fig || !fig->axes || !out_xlim || !out_ylim) return 0;
+    out_xlim[0] = fig->axes->xlim().min;
+    out_xlim[1] = fig->axes->xlim().max;
+    out_ylim[0] = fig->axes->ylim().min;
+    out_ylim[1] = fig->axes->ylim().max;
+    return 1;
+}
+
 } // extern "C"

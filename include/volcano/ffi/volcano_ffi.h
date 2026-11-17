@@ -99,6 +99,10 @@ void vp_figure_set_deferred_present(VpFigure* fig, int on);
 int vp_figure_width(const VpFigure* fig);
 int vp_figure_height(const VpFigure* fig);
 
+/// Diagnostics: copy the axes' current xlim/ylim (float, as rendered)
+/// into `out` — returns 1 when an axes exists, 0 otherwise.
+int vp_debug_xlim(const VpFigure* fig, float out_xlim[2], float out_ylim[2]);
+
 #ifdef __cplusplus
 }
 #endif
