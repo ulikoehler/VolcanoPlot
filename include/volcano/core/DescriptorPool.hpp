@@ -3,6 +3,7 @@
 
 #include <vulkan/vulkan.hpp>
 
+#include <mutex>
 #include <vector>
 
 namespace volcano::core {
@@ -22,8 +23,16 @@ public:
     [[nodiscard]] vk::DescriptorPool handle() const noexcept { return pool_.get(); }
 
     vk::DescriptorSet allocate(vk::DescriptorSetLayout layout);
+    /// Return a set to the pool. Only safe once no in-flight command
+    /// buffer references it — callers defer frees past the frame
+    /// overlap window.
+    void free(vk::DescriptorSet set);
 
 private:
+    /// Descriptor pools require external synchronization — shared by
+    /// allocate()/free() (a static because the pool is moveable).
+    static std::mutex& opMutex();
+
     vk::UniqueDescriptorPool pool_;
     vk::Device device_;
 };

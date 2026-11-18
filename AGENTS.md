@@ -325,6 +325,18 @@ The regression test system has found and verified fixes for:
   `{w,h,lw,pad,ox,oy}` and widening the push range to 24. When mixing
   `vec2`/`float` in a push block, always mirror the std430 member
   offsets on the C++ side — padding matters.
+- **Descriptor-set leak on point-buffer regrow** — `cvtDsets_`/
+  `xformDsets_`/`envEmitDset_` were cleared (`invalidatePointSets`,
+  `xformBuf_` regrow) without freeing the sets: a sliding-window trace
+  that keeps reallocating its buffer (live streaming) leaked ~2-4
+  storage-buffer sets per frame until the pool threw
+  `ErrorOutOfPoolMemory` — renders failed, the figure rebuilt, and the
+  cycle repeated (periodic flicker + a rebuilt frame every few
+  seconds). Sets are now retired through `retireSet()` and returned to
+  the pool in `resetScratch()` after `kDsetRetireFrames` (3) ticks —
+  frames are double-buffered, so a dropped set may still be referenced
+  by an in-flight submission. `DescriptorPool::free` serializes with
+  `allocate` via a shared mutex.
 - **Column-envelope decimation on parametric XY traces** — the huge-polyline
   fast path reduces each pixel column to its min/max and strokes the
   alternating envelope, which is only valid for x-monotonic series. For

@@ -18,16 +18,24 @@ DescriptorPool::DescriptorPool(vk::Device device, const std::vector<vk::Descript
 
 DescriptorPool::~DescriptorPool() = default;
 
+std::mutex& DescriptorPool::opMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
 vk::DescriptorSet DescriptorPool::allocate(vk::DescriptorSetLayout layout) {
     vk::DescriptorSetAllocateInfo ai{};
     ai.setDescriptorPool(pool_.get())
        .setSetLayouts(layout);
-    // Descriptor pools require external synchronization (primitive
-    // renderers init in parallel in Renderer::prepare).
-    static std::mutex allocMu;
-    std::lock_guard lock(allocMu);
+    std::lock_guard lock(opMutex());
     auto sets = device_.allocateDescriptorSets(ai);
     return sets.front();
+}
+
+void DescriptorPool::free(vk::DescriptorSet set) {
+    if (!set) return;
+    std::lock_guard lock(opMutex());
+    device_.freeDescriptorSets(pool_.get(), set);
 }
 
 } // namespace volcano::core

@@ -546,7 +546,11 @@ const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
         fig->renderer->prepare(*fig->figure);
         fig->renderer->renderFrame(*fig->figure);
         return fig->backend->rgba8View(out_len);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "volcano: render failed: %s\n", e.what());
+        return nullptr;
     } catch (...) {
+        std::fprintf(stderr, "volcano: render failed (unknown)\n");
         return nullptr;
     }
 }

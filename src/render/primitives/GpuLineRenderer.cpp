@@ -642,6 +642,19 @@ private:
     /// emit pass's {xformBuf_, xformBuf_} binding — rewritten on regrow.
     vk::DescriptorSet envEmitDset_{};
     vk::Buffer envEmitSrc_{};
+
+    /// Descriptor sets removed from the caches — a dropped set may
+    /// still be referenced by an in-flight submission (frames are
+    /// double-buffered), so it returns to the pool only after
+    /// kDsetRetireFrames resetScratch() ticks. Clearing without
+    /// retiring leaked ~2-4 storage-buffer sets per point-buffer
+    /// regrow and exhausted the shared pool mid-stream.
+    std::vector<std::pair<vk::DescriptorSet, uint32_t>> retiredDsets_;
+    uint32_t scratchTick_ = 0;
+    static constexpr uint32_t kDsetRetireFrames = 3;
+    void retireSet(vk::DescriptorSet s) {
+        if (s) retiredDsets_.emplace_back(s, scratchTick_);
+    }
     /// Lazily builds both envelope-device pipelines (compileGlsl can
     /// fail → envDevState_ = 0 and callers fall back to the CPU path).
     [[nodiscard]] bool ensureEnvDev();
@@ -776,6 +789,18 @@ void GpuLineRendererVk::resetScratch() {
     retiredIn_.clear();
     retiredOut_.clear();
     retiredXform_.clear();
+    // Age retired descriptor sets — freed only once no in-flight
+    // submission can still reference them.
+    ++scratchTick_;
+    for (size_t i = 0; i < retiredDsets_.size();) {
+        if (scratchTick_ - retiredDsets_[i].second >= kDsetRetireFrames) {
+            descPool_->free(retiredDsets_[i].first);
+            retiredDsets_[i] = retiredDsets_.back();
+            retiredDsets_.pop_back();
+        } else {
+            ++i;
+        }
+    }
 }
 
 namespace {
@@ -1085,7 +1110,9 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
         d.usage = core::BufferUsage::Storage;
         xformBuf_ = core::Buffer(allocator_, d);
         xformCap_ = uint32_t(cap);
+        for (auto& [k, s] : xformDsets_) retireSet(s);
         xformDsets_.clear();
+        retireSet(envEmitDset_);
         envEmitDset_ = vk::DescriptorSet{};
         devSrc_ = vk::Buffer{};   // force devDset_ rewrite
     }
@@ -1221,7 +1248,9 @@ bool GpuLineRendererVk::envelopePolyline(Cmd& cmdRef, GpuBuf points,
         d.usage = core::BufferUsage::Storage;
         xformBuf_ = core::Buffer(allocator_, d);
         xformCap_ = uint32_t(cap);
+        for (auto& [k, s] : xformDsets_) retireSet(s);
         xformDsets_.clear();
+        retireSet(envEmitDset_);
         envEmitDset_ = vk::DescriptorSet{};
         devSrc_ = vk::Buffer{};   // force devDset_ rewrite
     }
@@ -1646,6 +1675,11 @@ void GpuLineRendererVk::invalidatePointSets() {
     // Every cached descriptor that can reference a plot-owned point
     // buffer must go — a recreated buffer may reuse a freed handle,
     // and a stale set then silently reads/writes the wrong object.
+    // Retire, don't drop: freed sets may still be referenced by an
+    // in-flight submission, and dropping them leaked the pool empty.
+    for (auto& [k, s] : cvtDsets_) retireSet(s);
+    for (auto& [k, s] : xformDsets_) retireSet(s);
+    retireSet(envEmitDset_);
     cvtDsets_.clear();
     xformDsets_.clear();
     envEmitDset_ = vk::DescriptorSet{};
