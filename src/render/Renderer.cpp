@@ -24,6 +24,7 @@
 #include <future>
 #include <limits>
 #include <format>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -446,6 +447,16 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                                          m.height - m.ascent);
                     baseY = top ? tickEnd - kTickSpacing - ink.second
                                 : tickEnd + kTickSpacing - ink.first;
+                    static bool dbgX = std::getenv("LIVEPLOT_DEBUG_TICKS") != nullptr;
+                    static bool dbgOnce = false;
+                    if (dbgX && !dbgOnce && !top) {
+                        dbgOnce = true;
+                        fprintf(stderr,
+                            "xlabel dbg: edge=%.1f outLen=%.2f spacing=%.2f "
+                            "ink={%.2f,%.2f} ascent=%.2f height=%.2f baseY=%.1f\n",
+                            edge, outLen, kTickSpacing, ink.first, ink.second,
+                            m.ascent, m.height, baseY);
+                    }
                 } else {
                     baseY = top ? tickEnd - kTickSpacing - m.height + m.ascent
                                 : tickEnd + kTickSpacing + m.ascent;
@@ -622,6 +633,16 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                                      -m.ascent,
                                      m.height - m.ascent);
                 float baseY = py - (ink.first + ink.second) * 0.5f;
+                static bool dbgY = std::getenv("LIVEPLOT_DEBUG_TICKS") != nullptr;
+                static bool dbgYOnce = false;
+                if (dbgY && !dbgYOnce && !right) {
+                    dbgYOnce = true;
+                    fprintf(stderr,
+                        "ylabel dbg: py=%.1f ink={%.2f,%.2f} ascent=%.2f "
+                        "height=%.2f baseY=%.1f edge=%.1f outLen=%.2f\n",
+                        py, ink.first, ink.second, m.ascent, m.height,
+                        baseY, edge, outLen);
+                }
                 float x, y = baseY;
                 if (rot != 0.0f) {
                     // Rotated: anchor the baseline's edge at the tick mark,
