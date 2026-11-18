@@ -20,6 +20,7 @@
 #include "TickLayout.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <future>
 #include <limits>
@@ -1142,9 +1143,34 @@ void Renderer::drawGrid(render::Cmd& cmd, const plot::Axes& axes,
             drawSet(yAxis, toFrac(majors), as.gridColor, as.gridLineWidth,
                     as.gridLineStyle);
         if (as.gridWhich == "minor" || as.gridWhich == "both") {
-            auto minors = axisMinorTicks(tc, scale, lo, hi, majors);
-            drawSet(yAxis, toFrac(minors), as.minorGridColor,
-                    as.minorGridLineWidth, as.minorGridLineStyle);
+            const bool explicitStrengths =
+                !as.minorGridStrengths.empty() &&
+                as.minorGridStrengths.size() == as.minorGridPositions.size();
+            if (!as.minorGridPositions.empty() && explicitStrengths) {
+                // Per-line alpha fade (egui-style): bucket the
+                // strengths so each drawTriangles call still covers a
+                // whole set of lines.
+                std::array<std::vector<float>, 8> buckets;
+                for (size_t i = 0; i < as.minorGridPositions.size(); ++i) {
+                    const float s =
+                        std::clamp(as.minorGridStrengths[i], 0.0f, 1.0f);
+                    buckets[std::min(int(s * 7.999f), 7)]
+                        .push_back(as.minorGridPositions[i]);
+                }
+                for (size_t b = 0; b < buckets.size(); ++b) {
+                    if (buckets[b].empty()) continue;
+                    auto c = as.minorGridColor;
+                    c.a *= (float(b) + 0.5f) / float(buckets.size());
+                    drawSet(yAxis, toFrac(buckets[b]), c,
+                            as.minorGridLineWidth, as.minorGridLineStyle);
+                }
+            } else {
+                auto minors = !as.minorGridPositions.empty()
+                                  ? as.minorGridPositions
+                                  : axisMinorTicks(tc, scale, lo, hi, majors);
+                drawSet(yAxis, toFrac(minors), as.minorGridColor,
+                        as.minorGridLineWidth, as.minorGridLineStyle);
+            }
         }
     };
 

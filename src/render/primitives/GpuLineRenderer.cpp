@@ -623,10 +623,11 @@ private:
     /// src-buffer → descriptor set cache (dst is always xformBuf_;
     /// the map is cleared whenever xformBuf_ regrows).
     std::unordered_map<uint64_t, vk::DescriptorSet> xformDsets_;
-    /// tessellateDevice's (xformBuf_, outBuf_) binding — rewritten only
-    /// when either buffer regrows.
-    vk::DescriptorSet devDset_{};
-    vk::Buffer devSrc_{}, devDst_{};
+    /// tessellateDevice's (src, outBuf_) sets — keyed like cvtDsets_:
+    /// a set must be immutable once recorded, since a mid-frame
+    /// regrow rewriting it would silently re-target every earlier
+    /// dispatch at the NEW buffers (dead/garbled traces).
+    std::unordered_map<uint64_t, vk::DescriptorSet> devDsets_;
 
     /// Device-resident envelope→polyline chain (huge-trace decimation
     /// without a host readback): the reduce writes cmn/cmx words into
@@ -1114,7 +1115,8 @@ bool GpuLineRendererVk::xformDispatch(vk::CommandBuffer c, GpuBuf points,
         xformDsets_.clear();
         retireSet(envEmitDset_);
         envEmitDset_ = vk::DescriptorSet{};
-        devSrc_ = vk::Buffer{};   // force devDset_ rewrite
+        for (auto& [k, s] : devDsets_) retireSet(s);
+        devDsets_.clear();
     }
 
     const uint64_t key = uint64_t(VkBuffer(svcs_->vkBufferOf(points)));
@@ -1252,7 +1254,8 @@ bool GpuLineRendererVk::envelopePolyline(Cmd& cmdRef, GpuBuf points,
         xformDsets_.clear();
         retireSet(envEmitDset_);
         envEmitDset_ = vk::DescriptorSet{};
-        devSrc_ = vk::Buffer{};   // force devDset_ rewrite
+        for (auto& [k, s] : devDsets_) retireSet(s);
+        devDsets_.clear();
     }
 
     const vk::DeviceSize envByte = vk::DeviceSize(base) * 8;
@@ -1320,9 +1323,10 @@ bool GpuLineRendererVk::envelopePolyline(Cmd& cmdRef, GpuBuf points,
     // Emit — both bindings alias xformBuf_ (uint env words in, vec2
     // polyline out); the set is rewritten only on arena regrow.
     if (!envEmitDset_ || envEmitSrc_ != xformBuf_.handle()) {
-        if (!envEmitDset_)
-            envEmitDset_ =
-                descPool_->allocate(xformDescLayout_.get());
+        // Fresh set per arena generation — the retired one keeps the
+        // OLD xformBuf_ binding for emits recorded before the regrow.
+        retireSet(envEmitDset_);
+        envEmitDset_ = descPool_->allocate(xformDescLayout_.get());
         vk::DescriptorBufferInfo infos[2];
         for (uint32_t i = 0; i < 2; ++i)
             infos[i].setBuffer(xformBuf_.handle()).setOffset(0)
@@ -1401,23 +1405,25 @@ GpuLineRendererVk::recordDeviceTessellate(vk::CommandBuffer cmd,
     const uint32_t nSeg = count - 1;
     const size_t outVerts = size_t(nSeg) * kSegVerts +
                             size_t(count) * kJoinVerts;
-    // Rebind the (device-src, outBuf_) descriptor set only when a
-    // buffer regrew — steady-state frames reuse it as-is.
+    // One immutable set per (device-src, outBuf_) generation — see
+    // devDsets_ above. Retired arenas keep their own set alive so a
+    // regrow mid-frame leaves earlier dispatches self-consistent.
     const vk::Buffer src = svcs_->vkBufferOf(points);
-    if (src != devSrc_ || outBuf_.handle() != devDst_) {
-        if (!devDset_) devDset_ = descPool_->allocate(descLayout_.get());
+    const uint64_t key = (uint64_t(VkBuffer(src)) << 1) ^
+                         uint64_t(VkBuffer(outBuf_.handle()));
+    auto [dit, fresh] = devDsets_.try_emplace(key);
+    if (fresh) {
         vk::DescriptorBufferInfo infos[2];
         infos[0].setBuffer(src).setOffset(0).setRange(VK_WHOLE_SIZE);
         infos[1].setBuffer(outBuf_.handle()).setOffset(0)
                 .setRange(VK_WHOLE_SIZE);
         vk::WriteDescriptorSet writes[2];
+        dit->second = descPool_->allocate(descLayout_.get());
         for (uint32_t i = 0; i < 2; ++i)
-            writes[i].setDstSet(devDset_).setDstBinding(i)
+            writes[i].setDstSet(dit->second).setDstBinding(i)
                      .setDescriptorType(vk::DescriptorType::eStorageBuffer)
                      .setBufferInfo(infos[i]);
         device_.updateDescriptorSets(writes, {});
-        devSrc_ = src;
-        devDst_ = outBuf_.handle();
     }
     struct PC {
         uint32_t n, nSeg;
@@ -1432,7 +1438,7 @@ GpuLineRendererVk::recordDeviceTessellate(vk::CommandBuffer cmd,
          color.r, color.g, color.b, color.a};
     cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipe_.get());
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                           pipeLayout_.get(), 0, devDset_, {});
+                           pipeLayout_.get(), 0, dit->second, {});
     cmd.pushConstants(pipeLayout_.get(), vk::ShaderStageFlagBits::eCompute,
                       0, sizeof(PC), &pc);
     cmd.dispatch((count + nSeg + 255) / 256, 1, 1);
@@ -1574,6 +1580,10 @@ void GpuLineRendererVk::ensureOutCap(vk::DeviceSize totalVerts) {
 
 void GpuLineRendererVk::rebind() {
     if (!inBuf_.handle() || !outBuf_.handle()) return;
+    // Fresh set per generation — never rewrite a set earlier
+    // dispatches may still reference (same rule as devDsets_).
+    retireSet(dset_);
+    dset_ = descPool_->allocate(descLayout_.get());
     vk::DescriptorBufferInfo infos[2];
     infos[0].setBuffer(inBuf_.handle()).setOffset(0).setRange(inBuf_.size());
     infos[1].setBuffer(outBuf_.handle()).setOffset(0).setRange(outBuf_.size());
@@ -1683,8 +1693,8 @@ void GpuLineRendererVk::invalidatePointSets() {
     cvtDsets_.clear();
     xformDsets_.clear();
     envEmitDset_ = vk::DescriptorSet{};
-    devSrc_ = vk::Buffer{};
-    devDst_ = vk::Buffer{};
+    for (auto& [k, s] : devDsets_) retireSet(s);
+    devDsets_.clear();
 }
 
 } // namespace volcano::render::primitives

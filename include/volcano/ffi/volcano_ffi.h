@@ -77,6 +77,16 @@ void vp_set_ticks(VpFigure* fig, int axis, int count,
 /// Grid lines on both axes: 0 = off, 1 = on (default).
 void vp_set_grid(VpFigure* fig, int on);
 
+/// Explicit minor (sub-)grid lines on one axis, mirroring egui_plot's
+/// decade-level grid: `positions` are data coords (same shifted space
+/// as vp_set_ticks) and `strengths` is a parallel 0..1 alpha scale per
+/// line (egui fades each line by its spacing-derived strength). A NULL
+/// strengths array means full strength. `count <= 0` or NULL positions
+/// clears the axis' minor grid. Minor lines inherit the major grid
+/// color/width and only render while the grid is on.
+void vp_set_minor_grid(VpFigure* fig, int axis, int count,
+                       const float* positions, const float* strengths);
+
 /// Background: 0 = dark (default mpl), 1 = white.
 void vp_set_background(VpFigure* fig, int white);
 /// Set the canvas+axes background to an exact color (egui panel_fill).

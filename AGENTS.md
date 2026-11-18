@@ -345,6 +345,20 @@ The regression test system has found and verified fixes for:
   `Series2D::envelopeDecimate` (default true) opts out; the FFI exposes
   it as `vp_trace_set_xy` and liveplot sets it for XY scope pairs so the
   full polyline is stroked like the egui backend draws it.
+- **Mid-frame arena regrow corrupting recorded dispatches** — the shared
+  line-tessellation arenas (`inBuf_`/`outBuf_`/`xformBuf_`) bump-allocate
+  per frame and regrow on demand. Three bindings were *rewritten* on
+  regrow (`dset_`, `devDset_`, `envEmitDset_`), but a descriptor set's
+  contents resolve at *execution* time: every dispatch recorded before
+  the regrow silently re-targeted the NEW buffers, while its `Mesh`
+  handle still pointed at the OLD one — the pre-regrow trace vanished
+  or drew garbage (`volcano_ramp_bisect` dead trace, deterministic once
+  2 traces x 4200 pts crossed the 8192-pt initial `inBuf_` capacity).
+  Rule: a descriptor set must be immutable once recorded. `dset_` and
+  `envEmitDset_` now allocate a fresh set per generation (old retired
+  via `retireSet()`), and `devDsets_` is keyed by (src, dst) like
+  `cvtDsets_`/`xformDsets_`. `endPreDraw` already barriers every
+  retired `outBuf_` generation.
 
 ## Matplotlib Parity Rules
 

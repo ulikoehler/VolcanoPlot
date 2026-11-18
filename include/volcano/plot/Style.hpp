@@ -117,6 +117,15 @@ struct AxisStyle {
     Color minorGridColor = Color::fromRgba8(176, 176, 176);
     float minorGridLineWidth = 0.8f;
     std::string minorGridLineStyle = "-";
+    /// Explicit minor grid positions in data coordinates. When
+    /// non-empty they replace the minor locator entirely — an
+    /// embedder that computes its own minor marks (e.g. egui_plot's
+    /// decade-level fade) passes the exact set rather than an
+    /// AutoMinorLocator subdivision of the majors.
+    std::vector<float> minorGridPositions;
+    /// Optional per-position line strength (0..1), parallel to
+    /// minorGridPositions — scales minorGridColor's alpha per line.
+    std::vector<float> minorGridStrengths;
     /// Log scale.
     bool logScale = false;
     /// Space between the axis label and the tick labels, in points

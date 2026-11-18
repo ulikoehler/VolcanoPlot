@@ -63,7 +63,34 @@ struct VpFigure {
         std::vector<std::string> labels;
     };
     std::optional<TickOverride> ticks[2];
+
+    // Explicit minor grid lines per axis: data-space positions plus a
+    // per-line strength (0..1 alpha scale, egui_plot's decade-level
+    // fade). Empty positions = no minor grid on that axis.
+    struct MinorGrid {
+        std::vector<float> positions;
+        std::vector<float> strengths;
+    };
+    MinorGrid minor_grid[2];
 };
+
+/// Apply the stored minor-grid override to one axis' style: explicit
+/// positions+strengths ride in AxisStyle and Renderer::drawGrid
+/// buckets them into per-alpha draw sets. The minor color/width
+/// inherit the major grid styling (egui draws every grid line with
+/// the same pen, faded by strength).
+static void apply_minor_grid(const VpFigure::MinorGrid& g,
+                             plot::AxisStyle& as) {
+    as.minorGridPositions = g.positions;
+    as.minorGridStrengths = g.strengths;
+    if (g.positions.empty()) {
+        if (as.gridWhich == "both") as.gridWhich = "major";
+    } else {
+        as.gridWhich = "both";
+        as.minorGridColor = as.gridColor;
+        as.minorGridLineWidth = as.gridLineWidth;
+    }
+}
 
 static void apply_trace_style(const VpFigure::TraceData& td,
                               plot::Series2D& s) {
@@ -149,6 +176,8 @@ static void rebuild_figure(VpFigure* f) {
         tc.positions = f->ticks[a]->positions;
         tc.labels = f->ticks[a]->labels;
     }
+    apply_minor_grid(f->minor_grid[0], f->axes->style().xAxis);
+    apply_minor_grid(f->minor_grid[1], f->axes->style().yAxis);
     for (auto& [id, td] : f->trace_data) {
         if (td.xy.empty()) continue; // empty LinePlot crashes renderFrame
         auto lp = std::make_shared<plot::LinePlot>(plot::Series2D{});
@@ -175,6 +204,14 @@ static bool init(VpFigure* f, int w, int h) {
     f->desc.width = static_cast<uint32_t>(w);
     f->desc.height = static_cast<uint32_t>(h);
     f->desc.samples = vk::SampleCountFlagBits::e4;
+    // Cost knob: liveplot's dense live scopes rasterize a full
+    // envelope fill every frame — at 4x MSAA that is the dominant GPU
+    // cost. VP_MSAA={1,2,4} trades line smoothness for throughput.
+    if (const char* msaa = std::getenv("VP_MSAA")) {
+        f->desc.samples = msaa[0] == '1' ? vk::SampleCountFlagBits::e1
+                          : msaa[0] == '2' ? vk::SampleCountFlagBits::e2
+                                           : vk::SampleCountFlagBits::e4;
+    }
     // Shared GPU context: one instance/device/allocator process-wide —
     // N figures no longer cost N devices (VRAM + driver threads), and
     // parallel FFI tests stop tripping over per-device creation.
@@ -486,6 +523,30 @@ void vp_set_grid(VpFigure* fig, int on) {
     } catch (...) {}
 }
 
+void vp_set_minor_grid(VpFigure* fig, int axis, int count,
+                       const float* positions, const float* strengths) {
+    std::lock_guard gate(renderGate());
+    try {
+        if (!fig || axis < 0 || axis > 1) return;
+        auto& g = fig->minor_grid[axis];
+        if (count > 0 && positions) {
+            g.positions.assign(positions, positions + count);
+            if (strengths) {
+                g.strengths.assign(strengths, strengths + count);
+            } else {
+                g.strengths.assign(count, 1.0f);
+            }
+        } else {
+            g.positions.clear();
+            g.strengths.clear();
+        }
+        if (fig->axes) {
+            apply_minor_grid(g, axis == 0 ? fig->axes->style().xAxis
+                                        : fig->axes->style().yAxis);
+        }
+    } catch (...) {}
+}
+
 void vp_set_background(VpFigure* fig, int white) {
     std::lock_guard gate(renderGate());
     try {
@@ -520,6 +581,9 @@ void vp_set_background(VpFigure* fig, int white) {
                 fig->axes->style().xAxis.label = fig->x_label;
             if (!fig->y_label.empty())
                 fig->axes->style().yAxis.label = fig->y_label;
+            // … and the explicit minor-grid override.
+            apply_minor_grid(fig->minor_grid[0], fig->axes->style().xAxis);
+            apply_minor_grid(fig->minor_grid[1], fig->axes->style().yAxis);
         }
     } catch (...) {}
 }
