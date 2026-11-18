@@ -105,16 +105,6 @@ static void rebuild_figure(VpFigure* f) {
                           : plot::styles::darkBackground();
     st.xAxis.grid = f->grid_on;
     st.yAxis.grid = f->grid_on;
-    // egui parity: egui_plot draws no tick marks — only gridlines plus
-    // labels directly below/beside the axis edge. Zeroing the tick
-    // sizes also pulls the labels up to the axis; the reduced pad
-    // matches egui's ~4px label gap (mpl's 3.5pt lands ~9px out).
-    st.xAxis.ticks.majorSize = 0.0f;
-    st.xAxis.ticks.minorSize = 0.0f;
-    st.yAxis.ticks.majorSize = 0.0f;
-    st.yAxis.ticks.minorSize = 0.0f;
-    st.xAxis.ticks.majorPad = 1.5f;
-    st.yAxis.ticks.majorPad = 1.5f;
     // Subtle grid — muted against the plot bg.
     auto gc = f->white_bg ? plot::Color::fromRgba8(200, 200, 200, 110)
                           : plot::Color::fromRgba8(80, 80, 80, 110);
@@ -481,14 +471,6 @@ void vp_set_background(VpFigure* fig, int white) {
                             : plot::styles::darkBackground();
             st.xAxis.grid = fig->grid_on;
             st.yAxis.grid = fig->grid_on;
-            // egui parity: no tick marks, tighter label pad
-            // (see rebuild_figure).
-            st.xAxis.ticks.majorSize = 0.0f;
-            st.xAxis.ticks.minorSize = 0.0f;
-            st.yAxis.ticks.majorSize = 0.0f;
-            st.yAxis.ticks.minorSize = 0.0f;
-            st.xAxis.ticks.majorPad = 1.5f;
-            st.yAxis.ticks.majorPad = 1.5f;
             auto gc = white ? plot::Color::fromRgba8(200, 200, 200, 110)
                             : plot::Color::fromRgba8(80, 80, 80, 110);
             st.xAxis.gridColor = gc;

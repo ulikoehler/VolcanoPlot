@@ -431,6 +431,28 @@ TextRenderer::measureText(std::string_view text, float scale,
     return {maxWidth * scale, height * scale, ascent * scale};
 }
 
+std::pair<float, float>
+TextRenderer::measureInkY(std::string_view text, float scale,
+                          font_face* face) {
+    font_face* primary = face ? face : fontFace_;
+    if (!batch_ || !primary || text.empty()) return {0.0f, 0.0f};
+    // Shape at baseline y=0; the batch positions are reference-size
+    // pixel coords relative to that baseline — scaled at draw time.
+    if (!shapeText(text, 0.0f, 0.0f, 0xffffffffu,
+                   plot::HAlign::Left, primary)) {
+        return {0.0f, 0.0f};
+    }
+    auto* batch = static_cast<draw_list*>(batch_);
+    if (batch->vertices.empty()) return {0.0f, 0.0f};
+    float top = batch->vertices[0].pos[1];
+    float bot = top;
+    for (const auto& v : batch->vertices) {
+        top = std::min(top, v.pos[1]);
+        bot = std::max(bot, v.pos[1]);
+    }
+    return {top * scale, bot * scale};
+}
+
 TextRenderer::TextRenderer() = default;
 TextRenderer::~TextRenderer() {
     delete static_cast<draw_list*>(batch_);

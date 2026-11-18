@@ -93,6 +93,18 @@ public:
     TextMetrics measureText(std::string_view text, float scale = 1.0f,
                             font_face* face = nullptr);
 
+    /// Real ink bounds of the shaped glyphs, in pixels at `scale`,
+    /// relative to the baseline: {top, bottom} where `top` is negative
+    /// (glyphs rise above the baseline) and `bottom` positive below it.
+    /// Unlike measureText() — which returns the face's global
+    /// ascender/descender em-box metrics — this measures the actual
+    /// shaped quads, so label anchoring stays visually correct for any
+    /// system font (mpl anchors on the renderer-measured ink bbox the
+    /// same way). Returns {0,0} when nothing shapes or no batch exists.
+    std::pair<float, float> measureInkY(std::string_view text,
+                                        float scale = 1.0f,
+                                        font_face* face = nullptr);
+
     /// Serif face for the dejavuserif mathtext fontset (nullptr when the
     /// system has no DejaVu Serif). Shares the primary face's atlas.
     [[nodiscard]] font_face* serifFace() const noexcept { return serifFace_; }

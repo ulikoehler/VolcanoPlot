@@ -313,6 +313,21 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
         style.xAxis.ticks.labelColor.value_or(style.xAxis.color);
     const auto yTickColor =
         style.yAxis.ticks.labelColor.value_or(style.yAxis.color);
+    // Ink bounds relative to the baseline {top, bottom} — mpl anchors
+    // tick labels on the renderer-measured ink bbox, not the font's
+    // em-box metrics, so labels stay correctly placed/centered with
+    // any system font. Falls back to em metrics for mathtext and
+    // when nothing shapes.
+    auto inkBounds = [&](std::string_view s, float scale,
+                         const plot::FontProperties& font,
+                         float fbTop, float fbBot) {
+        if (text::containsMath(s)) return std::pair{fbTop, fbBot};
+        auto ink = gpu().text().measureInkY(
+            s, scale, richTextFace(font).face);
+        if (ink.first == 0.0f && ink.second == 0.0f)
+            return std::pair{fbTop, fbBot};
+        return ink;
+    };
 
     // Use the full framebuffer as the scissor rect so text outside the
     // axes rect (labels, title) is not clipped.
@@ -421,10 +436,20 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                 float rot = style.xAxis.tickFont.rotation;
                 tickLabelH = std::max(tickLabelH,
                     m.ascent + m.width * std::abs(std::sin(rot)));
-                // bottom: text top at tickEnd + spacing (y - ascent = top)
-                // top: text bottom at tickEnd - spacing (y+descent = bottom)
-                float baseY = top ? tickEnd - kTickSpacing - m.height + m.ascent
-                                  : tickEnd + kTickSpacing + m.ascent;
+                // bottom: ink top at tickEnd + spacing; top: ink bottom
+                // at tickEnd - spacing (mpl anchors on the ink bbox).
+                float baseY;
+                if (rot == 0.0f) {
+                    auto ink = inkBounds(label, xTickScale,
+                                         style.xAxis.tickFont,
+                                         -m.ascent,
+                                         m.height - m.ascent);
+                    baseY = top ? tickEnd - kTickSpacing - ink.second
+                                : tickEnd + kTickSpacing - ink.first;
+                } else {
+                    baseY = top ? tickEnd - kTickSpacing - m.height + m.ascent
+                                : tickEnd + kTickSpacing + m.ascent;
+                }
                 float x, y = baseY;
                 float left, right;
                 if (rot != 0.0f) {
@@ -589,8 +614,14 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
                 tickLabelW = std::max(tickLabelW,
                     m.width * std::abs(std::cos(rot)) +
                     m.height * std::abs(std::sin(rot)));
-                // Label sits outside the tick mark, vertically centered.
-                float baseY = py + m.ascent - m.height * 0.5f;
+                // Label sits outside the tick mark, ink box vertically
+                // centered on the tick (mpl centers the measured text
+                // extent, not the font em box).
+                auto ink = inkBounds(label, yTickScale,
+                                     style.yAxis.tickFont,
+                                     -m.ascent,
+                                     m.height - m.ascent);
+                float baseY = py - (ink.first + ink.second) * 0.5f;
                 float x, y = baseY;
                 if (rot != 0.0f) {
                     // Rotated: anchor the baseline's edge at the tick mark,
