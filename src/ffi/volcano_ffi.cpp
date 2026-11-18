@@ -112,6 +112,11 @@ static void rebuild_figure(VpFigure* f) {
     st.yAxis.gridColor = gc;
     st.xAxis.gridLineWidth = 0.6f;
     st.yAxis.gridLineWidth = 0.6f;
+    // egui parity: only the labeled (override) tick positions get
+    // marks — mpl's AutoMinorLocator would add unlabeled stubs
+    // between them that read as misaligned ticks.
+    st.xAxis.ticks.minor = false;
+    st.yAxis.ticks.minor = false;
     f->figure->style() = st;   // canvas/margins adopt the theme too
     f->axes->setStyle(st);
     // egui parity: subtle frame border, not the mpl styles' bright
@@ -477,6 +482,10 @@ void vp_set_background(VpFigure* fig, int white) {
             st.yAxis.gridColor = gc;
             st.xAxis.gridLineWidth = 0.6f;
             st.yAxis.gridLineWidth = 0.6f;
+            // egui parity: no unlabeled minor stubs between the
+            // labeled (override) tick positions.
+            st.xAxis.ticks.minor = false;
+            st.yAxis.ticks.minor = false;
             if (fig->figure) fig->figure->style() = st;
             fig->axes->setStyle(st);
             // egui parity: its plot frame stroke is a subtle border —
@@ -538,6 +547,17 @@ int vp_debug_xlim(const VpFigure* fig, float out_xlim[2],
     out_xlim[1] = fig->axes->xlim().max;
     out_ylim[0] = fig->axes->ylim().min;
     out_ylim[1] = fig->axes->ylim().max;
+    return 1;
+}
+
+int vp_debug_axes_rect(const VpFigure* fig, float out_rect[4]) {
+    std::lock_guard gate(renderGate());
+    if (!fig || !fig->axes || !out_rect) return 0;
+    const auto& r = fig->axes->rect;
+    out_rect[0] = float(r.x);
+    out_rect[1] = float(r.y);
+    out_rect[2] = float(r.x + r.width);
+    out_rect[3] = float(r.y + r.height);
     return 1;
 }
 

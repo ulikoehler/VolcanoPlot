@@ -103,6 +103,10 @@ int vp_figure_height(const VpFigure* fig);
 /// into `out` — returns 1 when an axes exists, 0 otherwise.
 int vp_debug_xlim(const VpFigure* fig, float out_xlim[2], float out_ylim[2]);
 
+/// Diagnostics: copy the axes' last-laid-out pixel rect as
+/// {x0, y0, x1, y1} into `out` — returns 1 when an axes exists.
+int vp_debug_axes_rect(const VpFigure* fig, float out_rect[4]);
+
 #ifdef __cplusplus
 }
 #endif
