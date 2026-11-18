@@ -232,7 +232,9 @@ void LineRendererVk::upload(std::span<const plot::Point2D> points,
     const VmaAllocator allocator = svcs_->allocator();
     allocator_ = allocator;
     core::BufferDesc d;
-    d.size = points.size_bytes();
+    const uint64_t cap = std::max<uint64_t>(points.size() * 2,
+                                          uint64_t(points.size()) + 65536);
+    d.size = cap * sizeof(plot::Point2D);
     d.usage = core::BufferUsage::VertexStorage;
     d.hostVisible = true;   // dynamic data — in-place memcpy updates
     retireBoundary();
@@ -245,7 +247,7 @@ void LineRendererVk::upload(std::span<const plot::Point2D> points,
     color_ = color;
     width_ = width;
     count_ = static_cast<uint32_t>(points.size());
-    capacity_ = count_;
+    capacity_ = uint32_t(std::min<uint64_t>(cap, UINT32_MAX));
     capacity64_ = 0;
     f64Head_ = 0;
     f64Pending_ = false;
@@ -269,7 +271,9 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
         return;
     }
     core::BufferDesc d;
-    d.size = points.size_bytes();
+    const uint64_t cap = std::max<uint64_t>(points.size() * 2,
+                                          uint64_t(points.size()) + 65536);
+    d.size = cap * sizeof(plot::Point2D);
     d.usage = core::BufferUsage::VertexStorage;
     d.hostVisible = true;
     retire(pointBuffer_);
@@ -279,7 +283,7 @@ void LineRendererVk::updatePoints(std::span<const plot::Point2D> points) {
                 points.size_bytes());
     pointBuffer_.flush();
     count_ = static_cast<uint32_t>(points.size());
-    capacity_ = count_;
+    capacity_ = uint32_t(std::min<uint64_t>(cap, UINT32_MAX));
 }
 
 bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
@@ -293,13 +297,18 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
     if (!allocator_) allocator_ = svcs_->allocator();
     if (n > capacity64_) {
         core::BufferDesc d;
-        d.size = vk::DeviceSize(n) * 16;
+        // Over-allocate: live traces grow by ring-append — an exact-fit
+        // capacity makes the very next append a full re-upload + two
+        // reallocs every frame.
+        const uint64_t cap = std::max<uint64_t>(uint64_t(n) * 2,
+                                                uint64_t(n) + 65536);
+        d.size = cap * 16;
         d.usage = core::BufferUsage::Storage;
         d.hostVisible = true;   // in-place memcpy updates, GPU reads
         retire(pointBufferF64_);
         ++bufEpoch_;
         pointBufferF64_ = core::Buffer(allocator_, d);
-        capacity64_ = n;
+        capacity64_ = uint32_t(std::min<uint64_t>(cap, UINT32_MAX));
         f64Head_ = 0;
     }
     std::memcpy(pointBufferF64_.mappedData(), xy.data(),
@@ -307,16 +316,19 @@ bool LineRendererVk::updatePointsF64(std::span<const double> xy) {
     pointBufferF64_.flush();
     f64Head_ = 0;   // full upload resets the ring to linear layout
     // The f32 buffer is written by the GPU narrowing pass — grow it
-    // here so convertF64ToF32 always has a destination.
+    // here so convertF64ToF32 always has a destination. Same headroom
+    // policy as the f64 buffer.
     if (n > capacity_) {
         core::BufferDesc d;
-        d.size = vk::DeviceSize(n) * 8;
+        const uint64_t cap = std::max<uint64_t>(uint64_t(n) * 2,
+                                                uint64_t(n) + 65536);
+        d.size = cap * 8;
         d.usage = core::BufferUsage::VertexStorage;
         d.hostVisible = true;
         retire(pointBuffer_);
         ++bufEpoch_;
         pointBuffer_ = core::Buffer(allocator_, d);
-        capacity_ = n;
+        capacity_ = uint32_t(std::min<uint64_t>(cap, UINT32_MAX));
     }
     count_ = n;
     f64Pending_ = true;

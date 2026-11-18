@@ -14,6 +14,7 @@
 #include <volcano/render/Renderer.hpp>
 
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -607,9 +608,29 @@ const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
     try {
         if (!fig || !out_len) return nullptr;
         *out_len = 0;
+        const bool dbgPerf = [] {
+            static const bool on = std::getenv("VP_DEBUG_PERF") != nullptr;
+            return on;
+        }();
+        auto t0 = std::chrono::steady_clock::now();
         fig->renderer->prepare(*fig->figure);
+        auto t1 = std::chrono::steady_clock::now();
         fig->renderer->renderFrame(*fig->figure);
-        return fig->backend->rgba8View(out_len);
+        auto t2 = std::chrono::steady_clock::now();
+        const uint8_t* v = fig->backend->rgba8View(out_len);
+        auto t3 = std::chrono::steady_clock::now();
+        if (dbgPerf) {
+            static int n = 0;
+            static double s0 = 0, s1 = 0, s2 = 0;
+            s0 += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            s1 += std::chrono::duration<double, std::milli>(t2 - t1).count();
+            s2 += std::chrono::duration<double, std::milli>(t3 - t2).count();
+            if (++n % 120 == 0)
+                std::fprintf(stderr,
+                             "perf: prepare=%.2fms render+wait=%.2fms readback=%.2fms\n",
+                             s0 / n, s1 / n, s2 / n);
+        }
+        return v;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "volcano: render failed: %s\n", e.what());
         return nullptr;
