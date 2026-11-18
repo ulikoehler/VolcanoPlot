@@ -331,6 +331,7 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
         size_t(std::max(8192.0f, W * 4.0f));
     const bool envelopeOk =
         !transform && dataCount() > huge &&
+        series_.envelopeDecimate &&
         !render::OffloadConfig::forceCpu(
             render::OffloadConfig::global().envelope) &&
         series_.drawStyle == DrawStyle::Default &&

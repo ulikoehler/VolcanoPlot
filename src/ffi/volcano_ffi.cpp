@@ -45,6 +45,7 @@ struct VpFigure {
         int style = 0;
         int marker = 40;        // plot::MarkerStyle::None
         float marker_size = 6.0f;
+        int xy_mode = 0;      // XY pair — no column-envelope decimation
     };
     std::unordered_map<uint64_t, TraceData> trace_data;
     std::unordered_map<uint64_t, plot::LinePlot*> traces;
@@ -80,6 +81,11 @@ static void apply_trace_style(const VpFigure::TraceData& td,
                    : (td.style == 3 ? plot::MarkerStyle::Circle
                                     : plot::MarkerStyle::None);
     if (td.marker != 40) s.size = td.marker_size;
+    // XY pairs are parametric curves — not x-monotonic — so the
+    // column-envelope decimation (a per-column min/max fill built for
+    // time traces) must not run on them; the egui backend draws the
+    // full polyline for XY too.
+    s.envelopeDecimate = !td.xy_mode;
 }
 
 static void rebuild_figure(VpFigure* f) {
@@ -347,6 +353,20 @@ void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
         auto it = fig->traces.find(id);
         if (it != fig->traces.end()) {
             apply_trace_style(td, it->second->series());
+        }
+    } catch (...) {}
+}
+
+void vp_trace_set_xy(VpFigure* fig, uint64_t id, int32_t on) {
+    std::lock_guard gate(renderGate());
+    try {
+        if (!fig) return;
+        auto td_it = fig->trace_data.find(id);
+        if (td_it == fig->trace_data.end()) return;
+        td_it->second.xy_mode = on ? 1 : 0;
+        auto it = fig->traces.find(id);
+        if (it != fig->traces.end()) {
+            it->second->series().envelopeDecimate = !on;
         }
     } catch (...) {}
 }

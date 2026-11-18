@@ -143,6 +143,13 @@ struct Series2D {
     /// matplotlib parity: plot()/scatter() consume the prop_cycle by
     /// default, so this is on unless the caller opts out.
     bool usePropCycle = true;
+    /// Per-pixel-column min/max envelope decimation of huge polylines.
+    /// The reduction assumes an x-monotonic series (time traces): for
+    /// parametric XY data every column's min/max would span all curve
+    /// passes through it and render as a solid fill. XY traces set
+    /// this false so the full polyline is stroked like every other
+    /// backend draws it.
+    bool envelopeDecimate = true;
 };
 
 /// A series of 3D points (3D scatter, surface).

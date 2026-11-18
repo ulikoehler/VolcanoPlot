@@ -50,6 +50,12 @@ int vp_trace_slide(VpFigure* fig, uint64_t id, uint32_t drop,
 void vp_trace_set_marker(VpFigure* fig, uint64_t id, int32_t marker,
                          float size);
 
+/// Mark a trace as an XY (parametric) pair. XY data is not
+/// x-monotonic, so the column-envelope decimation — which fills the
+/// per-column min/max range and is only valid for time traces — is
+/// disabled for it; the full polyline is stroked instead.
+void vp_trace_set_xy(VpFigure* fig, uint64_t id, int32_t on);
+
 void vp_trace_remove(VpFigure* fig, uint64_t id);
 
 /// Explicit viewport (data coords). Any axis may be left at autoscale by

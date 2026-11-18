@@ -312,6 +312,27 @@ The regression test system has found and verified fixes for:
   step in a fragment shader, producing stair-step lines misaligned with
   the ticks. Replaced by `Renderer::drawGrid`, which strokes line meshes
   at the real `axisTicks`/`axisMinorTicks` positions via `strokePolyline`.
+- **SpineRenderer push-constant layout mismatch** — the GLSL PC block
+  `{vec2 u_resolution; float u_lineWidth; vec2 u_off;}` places `u_off` at
+  byte 16 (vec2 is 8-byte aligned), but the C++ struct packed
+  `{w,h,lw,ox,oy}` into 20 bytes, so `u_off.y` read byte 20 — outside the
+  pushed range — and picked up stale push-constant bytes left by the
+  compute stroker's 48-byte push (`miterLimit` at byte 20). Every
+  spine-pipeline draw (patches, spines, gridlines, ticks, GPU line
+  meshes) shifted down by miterLimit pixels while text (different
+  pipeline, no `u_off`) stayed put. Symptom: all non-text geometry drawn
+  ~10px low. Fixed by padding the C++ PC struct to 24 bytes
+  `{w,h,lw,pad,ox,oy}` and widening the push range to 24. When mixing
+  `vec2`/`float` in a push block, always mirror the std430 member
+  offsets on the C++ side — padding matters.
+- **Column-envelope decimation on parametric XY traces** — the huge-polyline
+  fast path reduces each pixel column to its min/max and strokes the
+  alternating envelope, which is only valid for x-monotonic series. For
+  XY (parametric) data every column's min/max spans all curve passes
+  through it, rendering a solid filled blob instead of the curve.
+  `Series2D::envelopeDecimate` (default true) opts out; the FFI exposes
+  it as `vp_trace_set_xy` and liveplot sets it for XY scope pairs so the
+  full polyline is stroked like the egui backend draws it.
 
 ## Matplotlib Parity Rules
 

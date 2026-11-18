@@ -140,7 +140,7 @@ void SpineRendererVk::init() {
 
     vk::PushConstantRange pc{};
     pc.setStageFlags(vk::ShaderStageFlagBits::eVertex)
-       .setOffset(0).setSize(sizeof(float) * 5);
+       .setOffset(0).setSize(sizeof(float) * 6);
     vk::PipelineLayoutCreateInfo plci{};
     plci.setPushConstantRanges(pc);
     pipelineLayout_ = device.createPipelineLayoutUnique(plci);
@@ -271,8 +271,9 @@ void SpineRendererVk::drawLineStrip(Cmd& cmdRef, plot::Rect2D clip,
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
 
-    struct PC { float w, h, lw, ox, oy; } pc{
-        float(resolution.width), float(resolution.height), width, 0.0f, 0.0f};
+    struct PC { float w, h, lw, pad, ox, oy; } pc{
+        float(resolution.width), float(resolution.height), width, 0.0f,
+        0.0f, 0.0f};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
@@ -331,8 +332,9 @@ void SpineRendererVk::drawFilledRect(Cmd& cmdRef, plot::Rect2D clip,
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
-    struct PC { float w, h, lw, ox, oy; } pc{
-        float(resolution.width), float(resolution.height), 1.0f, 0.0f, 0.0f};
+    struct PC { float w, h, lw, pad, ox, oy; } pc{
+        float(resolution.width), float(resolution.height), 1.0f, 0.0f,
+        0.0f, 0.0f};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
@@ -372,8 +374,9 @@ void SpineRendererVk::drawTriangles(Cmd& cmdRef, plot::Rect2D clip,
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
-    struct PC { float w, h, lw, ox, oy; } pc{
-        float(resolution.width), float(resolution.height), 1.0f, 0.0f, 0.0f};
+    struct PC { float w, h, lw, pad, ox, oy; } pc{
+        float(resolution.width), float(resolution.height), 1.0f, 0.0f,
+        0.0f, 0.0f};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
@@ -414,8 +417,9 @@ void SpineRendererVk::drawTrianglesVC(
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
-    struct PC { float w, h, lw, ox, oy; } pc{
-        float(resolution.width), float(resolution.height), 1.0f, 0.0f, 0.0f};
+    struct PC { float w, h, lw, pad, ox, oy; } pc{
+        float(resolution.width), float(resolution.height), 1.0f, 0.0f,
+        0.0f, 0.0f};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
 
@@ -445,8 +449,8 @@ void SpineRendererVk::drawTrianglesGpu(Cmd& cmdRef, plot::Rect2D clip,
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, fillPipeline_.get());
 
-    struct PC { float w, h, lw, ox, oy; } pc{
-        float(resolution.width), float(resolution.height), 1.0f,
+    struct PC { float w, h, lw, pad, ox, oy; } pc{
+        float(resolution.width), float(resolution.height), 1.0f, 0.0f,
         offset.x, offset.y};
     cmd.pushConstants(pipelineLayout_.get(), vk::ShaderStageFlagBits::eVertex,
                       0, sizeof(PC), &pc);
