@@ -55,6 +55,11 @@ public:
     [[nodiscard]] vk::Queue graphicsQueue() const noexcept { return impl_ ? impl_->graphicsQueue : vk::Queue{}; }
     [[nodiscard]] vk::Queue computeQueue() const noexcept { return impl_ ? impl_->computeQueue : vk::Queue{}; }
     [[nodiscard]] vk::Queue transferQueue() const noexcept { return impl_ ? impl_->transferQueue : vk::Queue{}; }
+    /// Extension names the device was created with (for FFI queries —
+    /// a foreign device wrapper like wgpu-hal needs the exact list).
+    [[nodiscard]] const std::vector<std::string>& enabledExtensions() const noexcept {
+        return enabledExtensions_;
+    }
 
     /// Wait for all queues to be idle.
     void waitIdle() const;
@@ -81,6 +86,7 @@ private:
         }
     };
     std::shared_ptr<Impl> impl_;
+    std::vector<std::string> enabledExtensions_;
 };
 
 } // namespace volcano::core

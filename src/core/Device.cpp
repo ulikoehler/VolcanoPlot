@@ -75,6 +75,7 @@ Device::Device(PhysicalDevice physical, const DeviceDesc& desc) {
 
     impl_->device = impl_->physical.handle().createDeviceUnique(ci);
     VULKAN_HPP_DEFAULT_DISPATCHER.init(impl_->device.get());
+    enabledExtensions_.assign(exts.begin(), exts.end());
 
     impl_->graphicsQueue = impl_->device->getQueue(fam.graphics.value_or(0), 0);
     impl_->computeQueue  = impl_->device->getQueue(fam.compute.value_or(0), 0);

@@ -349,6 +349,44 @@ std::unique_ptr<render::Cmd> HeadlessBackend::beginFrame() {
     // no prior submission on their slot — the fence is still
     // unsignaled and would never return.
     if (submitted_ >= 2) waitSlot(frameSlot_);
+    if (shmMode_) {
+        // The slot's staging buffer is about to be overwritten by this
+        // frame's copy — wait until the shm consumer queued its read of
+        // the last render on this slot (submission order on the shared
+        // queue then guarantees no read/write race). Bounded wait: a
+        // dead consumer must not wedge the renderer forever.
+        const uint64_t need = shmRenders_[frameSlot_];
+        if (shmReleased_[frameSlot_].load(std::memory_order_acquire) < need) {
+            std::unique_lock lk(shmMu_);
+            // Bounded well under the UI-side JOB_TIMEOUT (5s): a dead
+            // or just slow consumer must not stall the render pipeline
+            // — overwriting the slot mid-read only risks one torn
+            // frame, while a 5s stall gets this worker declared dead.
+            bool ok = shmCv_.wait_for(lk, std::chrono::milliseconds(150),
+                                      [&] {
+                return shmReleased_[frameSlot_].load(
+                           std::memory_order_acquire) >= need;
+            });
+            if (!ok) {
+                // A release that never arrives (consumer died, result
+                // dropped, shm job fell back to CPU readback) would
+                // otherwise stall EVERY later render on this slot —
+                // resync the counters: overwrite-with-tearing is a
+                // one-frame artifact, a wedged pipeline is not.
+                shmReleased_[frameSlot_].store(
+                    shmRenders_[frameSlot_], std::memory_order_release);
+                static const bool dbgShm =
+                    std::getenv("LIVEPLOT_DEBUG_SHM") != nullptr;
+                if (dbgShm)
+                    fprintf(stderr,
+                            "[shm] consumer-release TIMEOUT slot=%u "
+                            "need=%llu have=%llu — resynced\n",
+                            frameSlot_, (unsigned long long)need,
+                            (unsigned long long)shmReleased_[frameSlot_]
+                                .load(std::memory_order_acquire));
+            }
+        }
+    }
     auto cb = commandBuffers_[frameSlot_].get();
     cb.reset();
     vk::CommandBufferBeginInfo bi{};
@@ -379,9 +417,16 @@ void HeadlessBackend::beginRenderPass() {
     passBegun_ = true;
 }
 
+/// Row pitch of the staging buffers — 256-byte aligned so the same
+/// buffer satisfies wgpu's COPY_BYTES_PER_ROW_ALIGNMENT when consumed
+/// GPU-side (shm mode). CPU readback copies row-by-row.
+static vk::DeviceSize stagingPitch(uint32_t w) {
+    return (vk::DeviceSize(w) * 4 + 255) & ~vk::DeviceSize(255);
+}
+
 void HeadlessBackend::ensureStaging(uint32_t slot) {
     auto& stagingBuffer_ = stagingBuffers_[slot];
-    vk::DeviceSize size = vk::DeviceSize(extent_.width) * extent_.height * 4;
+    vk::DeviceSize size = stagingPitch(extent_.width) * extent_.height;
     if (stagingBuffer_.handle() && stagingBuffer_.size() >= size) return;
     core::BufferDesc bdesc{};
     bdesc.size = size;
@@ -389,6 +434,7 @@ void HeadlessBackend::ensureStaging(uint32_t slot) {
     bdesc.hostVisible = true;
     bdesc.hostCached = true;
     stagingBuffer_ = core::Buffer(ctx_.allocator.handle(), bdesc);
+    ++stagingGen_[slot];
 }
 
 void HeadlessBackend::endFrame() {
@@ -422,7 +468,8 @@ void HeadlessBackend::endFrame() {
 
     vk::BufferImageCopy region{};
     region.setBufferOffset(0)
-          .setBufferRowLength(extent_.width)
+          .setBufferRowLength(
+              static_cast<uint32_t>(stagingPitch(extent_.width) / 4))
           .setBufferImageHeight(extent_.height)
           .setImageSubresource(vk::ImageSubresourceLayers{}
               .setAspectMask(vk::ImageAspectFlagBits::eColor)
@@ -432,6 +479,26 @@ void HeadlessBackend::endFrame() {
     cb.copyImageToBuffer(colorImage_.handle(),
                          vk::ImageLayout::eTransferSrcOptimal,
                          stagingBuffers_[frameSlot_].handle(), region);
+    if (shmMode_) {
+        // A foreign consumer (wgpu, same queue) reads this buffer in a
+        // LATER submission — execution order comes free, but memory
+        // visibility needs this TRANSFER_WRITE → TRANSFER_READ
+        // dependency recorded inside our submission.
+        vk::BufferMemoryBarrier bb{};
+        bb.setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
+          .setDstAccessMask(vk::AccessFlagBits::eTransferRead |
+                            vk::AccessFlagBits::eMemoryRead)
+          .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+          .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+          .setBuffer(stagingBuffers_[frameSlot_].handle())
+          .setOffset(0)
+          .setSize(VK_WHOLE_SIZE);
+        cb.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                           vk::PipelineStageFlagBits::eTransfer |
+                               vk::PipelineStageFlagBits::eAllCommands,
+                           {}, {}, bb, {});
+        ++shmRenders_[frameSlot_];
+    }
     cb.end();
     frameBegun_ = false;
     passBegun_ = false;
@@ -543,7 +610,16 @@ size_t HeadlessBackend::readbackRgba8Into(uint8_t* dst, size_t dstLen) {
     size_t size = size_t(extent_.width) * extent_.height * 4;
     if (!dst || dstLen < size || !stagingBuffer_.handle()) return 0;
     stagingBuffer_.invalidate();
-    std::memcpy(dst, stagingBuffer_.mappedData(), size);
+    const size_t pitch = static_cast<size_t>(stagingPitch(extent_.width));
+    const size_t rowBytes = size_t(extent_.width) * 4;
+    const auto* src = static_cast<const uint8_t*>(stagingBuffer_.mappedData());
+    if (pitch == rowBytes) {
+        std::memcpy(dst, src, size);
+    } else {
+        for (uint32_t y = 0; y < extent_.height; ++y)
+            std::memcpy(dst + size_t(y) * rowBytes,
+                        src + size_t(y) * pitch, rowBytes);
+    }
     return size;
 }
 
@@ -557,6 +633,10 @@ const uint8_t* HeadlessBackend::rgba8View(size_t* outLen) {
     stagingBuffer_.invalidate();
     size_t size = size_t(extent_.width) * extent_.height * 4;
     if (stagingBuffer_.size() < size) return nullptr;
+    // A borrowed view is only contiguous when the row pitch is tight —
+    // callers fall back to readbackRgba8Into otherwise.
+    if (stagingPitch(extent_.width) != size_t(extent_.width) * 4)
+        return nullptr;
     if (outLen) *outLen = size;
     return static_cast<const uint8_t*>(stagingBuffer_.mappedData());
 }

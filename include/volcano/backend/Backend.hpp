@@ -44,6 +44,13 @@ struct GpuContext {
     core::Allocator allocator;
     core::CommandPool graphicsPool;
     core::CommandPool computePool;
+    /// True when the context was created in extended-sharing mode:
+    /// surface-capable instance extensions, every supported device
+    /// extension and feature enabled — enough for a foreign consumer
+    /// (wgpu-hal device_from_raw) to wrap this VkDevice.
+    bool extendedSharing = false;
+    /// Enumerated Vulkan instance version at creation.
+    uint32_t apiVersion = VK_API_VERSION_1_3;
 
     /// A GpuContext whose members share this one's Vulkan objects —
     /// they die with the last holder. Lets many backends run on one
@@ -63,6 +70,8 @@ struct GpuContext {
                                            c.device.graphicsFamily(), cf);
         c.computePool = core::CommandPool(c.device.handle(),
                                           c.device.computeFamily(), cf);
+        c.extendedSharing = extendedSharing;
+        c.apiVersion = apiVersion;
         return c;
     }
 };
@@ -80,6 +89,14 @@ std::unique_ptr<IBackend> createHeadlessBackend(
 /// vkInstance/vkDevice shared by all headless backends created with
 /// the overload above. Created lazily on first call.
 std::shared_ptr<GpuContext> sharedGpuContext();
+/// Variant of sharedGpuContext for embedding alongside a foreign
+/// Vulkan consumer (wgpu): the process-wide context is created in
+/// extended-sharing mode (surface-capable instance extensions, all
+/// supported device extensions + features). If the context already
+/// exists in normal mode, the existing context is returned and its
+/// `extendedSharing` flag stays false — call this before the first
+/// figure creation.
+std::shared_ptr<GpuContext> sharedGpuContextExtended();
 
 /// Find a supported depth format for the given physical device.
 /// Tries D32Sfloat, D32SfloatS8Uint, D24UnormS8Uint in order.

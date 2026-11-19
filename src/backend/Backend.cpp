@@ -41,7 +41,8 @@ std::unique_ptr<IBackend> createHeadlessBackend(
 #endif
 }
 
-std::shared_ptr<GpuContext> sharedGpuContext() {
+namespace {
+std::shared_ptr<GpuContext> sharedGpuContextImpl(bool extended) {
 #ifdef VOLCANO_HAS_HEADLESS_BACKEND
     // Process-lifetime context, deliberately leaked (heap static —
     // never destructed). Render workers are detached threads that can
@@ -55,16 +56,63 @@ std::shared_ptr<GpuContext> sharedGpuContext() {
     std::lock_guard lk(mu);
     if (*ctx) return *ctx;
     auto c = std::make_shared<GpuContext>();
+    c->extendedSharing = extended;
     core::InstanceDesc idesc{};
     idesc.applicationName = "VolcanoPlot Headless";
+    if (extended) {
+        // A foreign Vulkan consumer (wgpu-hal wrapping this instance)
+        // needs the surface + device-property extensions it checks
+        // for to be enabled up front. Availability-filtered inside
+        // core::Instance, so listing all platforms is safe.
+        // (string literals — the VK_KHR_*_surface macros are gated
+        // behind VK_USE_PLATFORM_* defines we don't set)
+        idesc.extraExtensions = std::vector<std::string>{
+            "VK_KHR_surface",
+            "VK_KHR_xcb_surface",
+            "VK_KHR_xlib_surface",
+            "VK_KHR_wayland_surface",
+            "VK_KHR_get_surface_capabilities2",
+            "VK_EXT_surface_maintenance1",
+            "VK_EXT_swapchain_colorspace",
+            "VK_KHR_get_physical_device_properties2",
+        };
+    }
     c->instance = core::Instance(idesc);
+    c->apiVersion = VK_API_VERSION_1_3;
+    if (vk::enumerateInstanceVersion(&c->apiVersion) != vk::Result::eSuccess)
+        c->apiVersion = VK_API_VERSION_1_3;
     c->physical =
         core::PhysicalDevice(c->instance.handle(), nullptr);
     core::DeviceDesc ddesc{};
+    // hasSurface=false suppresses only the auto-swapchain extension —
+    // in extended mode swapchain is still requested explicitly
+    // because wgpu's swapchain will live on this device.
     ddesc.hasSurface = false;
-    ddesc.features.features.wideLines = VK_TRUE;
-    if (c->physical.handle().getFeatures().shaderFloat64)
-        ddesc.features.features.shaderFloat64 = VK_TRUE;
+    if (extended) {
+        // Enable every device extension the physical device offers so
+        // wgpu's required_device_extensions list is trivially
+        // satisfied (device_from_raw accepts a superset), plus every
+        // supported feature via a features2 chain — wgpu declares
+        // what it will use, we merely must have enabled it.
+        ddesc.extensions = c->physical.supportedExtensions();
+        static vk::PhysicalDeviceFeatures2 f2;
+        static vk::PhysicalDeviceVulkan11Features f11;
+        static vk::PhysicalDeviceVulkan12Features f12;
+        static vk::PhysicalDeviceVulkan13Features f13;
+        f2 = vk::PhysicalDeviceFeatures2{};
+        f11 = vk::PhysicalDeviceVulkan11Features{};
+        f12 = vk::PhysicalDeviceVulkan12Features{};
+        f13 = vk::PhysicalDeviceVulkan13Features{};
+        f11.pNext = &f12;
+        f12.pNext = &f13;
+        f2.pNext = &f11;
+        c->physical.handle().getFeatures2(&f2);
+        ddesc.pNextChain = &f2;
+    } else {
+        ddesc.features.features.wideLines = VK_TRUE;
+        if (c->physical.handle().getFeatures().shaderFloat64)
+            ddesc.features.features.shaderFloat64 = VK_TRUE;
+    }
     c->device = core::Device(c->physical, ddesc);
     c->allocator = core::Allocator(c->instance.handle(),
                                  c->physical.handle(),
@@ -80,6 +128,15 @@ std::shared_ptr<GpuContext> sharedGpuContext() {
 #else
     return nullptr;
 #endif
+}
+} // namespace
+
+std::shared_ptr<GpuContext> sharedGpuContext() {
+    return sharedGpuContextImpl(false);
+}
+
+std::shared_ptr<GpuContext> sharedGpuContextExtended() {
+    return sharedGpuContextImpl(true);
 }
 
 vk::Format findDepthFormat(vk::PhysicalDevice phys) {

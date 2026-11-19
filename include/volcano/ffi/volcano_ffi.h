@@ -12,6 +12,57 @@ extern "C" {
 
 typedef struct VpFigure VpFigure;
 
+/// Shared-device query: raw Vulkan handles of the process-wide GPU
+/// context so a foreign consumer (wgpu-hal) can wrap the same
+/// VkInstance/VkDevice. Call BEFORE the first vp_figure_create to get
+/// the extended-sharing context (all supported extensions + features
+/// enabled); if a figure was already created, the context exists in
+/// normal mode and `shared_capable` reports 0 — the caller should
+/// then fall back to the CPU readback path.
+typedef struct {
+    uint64_t vk_instance;          /* VkInstance */
+    uint64_t vk_physical_device;   /* VkPhysicalDevice */
+    uint64_t vk_device;            /* VkDevice */
+    uint32_t api_version;          /* vkEnumerateInstanceVersion */
+    uint32_t graphics_family;      /* queue family index wgpu should use */
+    uint32_t shared_capable;       /* 1 = extended-sharing context */
+} VpSharedGpuInfo;
+
+/// Create-or-return the shared GPU context and fill `out`. Returns 1
+/// on success, 0 on failure (no Vulkan).
+int vp_shared_gpu_info(VpSharedGpuInfo* out);
+
+/// Enabled extension names on the shared device/instance. Returns the
+/// count and sets `*names_out` to a stable array (context lifetime).
+/// Must be called after vp_shared_gpu_info.
+int vp_shared_device_exts(const char*** names_out);
+int vp_shared_instance_exts(const char*** names_out);
+
+/// Shared-memory frame: the VkBuffer backing the newest submitted
+/// slot's staging buffer. The consumer reads it GPU-side (e.g. a
+/// wgpu copy_buffer_to_texture) — any such submission must be queued
+/// on the shared queue AFTER vp_render_shm returned (submission order
+/// is the execution ordering; a TRANSFER_WRITE→READ barrier inside
+/// the frame's submission provides memory visibility). Once the
+/// consumer's reads are queued, call vp_shm_release so the slot's
+/// buffer may be overwritten by a later render.
+typedef struct {
+    uint64_t buffer;        /* VkBuffer */
+    uint64_t byte_size;     /* row_pitch * height */
+    uint64_t row_pitch;     /* bytes/row — 256-aligned */
+    uint32_t slot;          /* 0..1 */
+    uint32_t generation;    /* bumps when the buffer is re-created */
+    uint32_t width;
+    uint32_t height;
+} VpShmFrame;
+
+/// Render and return the shared staging frame. Figures must run on
+/// the extended shared context (see vp_shared_gpu_info). Returns 1 on
+/// success; on failure the consumer keeps the previous frame.
+int vp_render_shm(VpFigure* fig, VpShmFrame* out);
+/// Consumer→backend signal: reads of `slot`'s buffer are queued.
+void vp_shm_release(VpFigure* fig, uint32_t slot);
+
 /// Create a headless figure surface. Returns NULL on failure.
 VpFigure* vp_figure_create(int width, int height);
 void vp_figure_destroy(VpFigure* fig);

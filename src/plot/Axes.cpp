@@ -1039,7 +1039,11 @@ void Axes::autoscale() {
 
 void Axes::autoscaleGpu(render::primitives::ReduceRenderer& reducer) {
     if (manualX_ && manualY_) {
-        // Still collect the z range for the colorbar.
+        // The z range only feeds the colorbar — and only when it's
+        // visible. Scanning every layer's points for it is an O(N)
+        // CPU pass per frame that dominates live-plot workloads where
+        // x/y are manually driven (e.g. liveplot sliding windows).
+        if (!style_.colorbar.visible) return;
         for (const auto& p : plots_) {
             Viewport zv{ std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
                          std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),

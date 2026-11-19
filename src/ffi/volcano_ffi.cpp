@@ -7,6 +7,7 @@
 #include "volcano/ffi/volcano_ffi.h"
 
 #include <volcano/backend/Backend.hpp>
+#include <volcano/backend/HeadlessBackend.hpp>
 #include <volcano/plot/Axes.hpp>
 #include <volcano/plot/Style.hpp>
 #include <volcano/plot/plots/LinePlot.hpp>
@@ -73,6 +74,11 @@ struct VpFigure {
         std::vector<float> strengths;
     };
     MinorGrid minor_grid[2];
+
+    // Scratch for vp_render_rgba_view when the staging rows are pitched
+    // (non-contiguous view) — readback lands here and the pointer is
+    // valid until the next render on this figure.
+    std::vector<uint8_t> rgba_view_scratch;
 };
 
 /// Apply the stored minor-grid override to one axis' style: explicit
@@ -277,6 +283,98 @@ VpFigure* vp_figure_create(int width, int height) {
 void vp_figure_destroy(VpFigure* fig) {
     std::lock_guard gate(renderGate());
     try { delete fig; } catch (...) {}
+}
+
+int vp_shared_gpu_info(VpSharedGpuInfo* out) {
+    std::lock_guard gate(renderGate());
+    try {
+        if (!out) return 0;
+        auto ctx = backend::sharedGpuContextExtended();
+        if (!ctx) return 0;
+        out->vk_instance = reinterpret_cast<uint64_t>(
+            static_cast<VkInstance>(ctx->instance.handle()));
+        out->vk_physical_device = reinterpret_cast<uint64_t>(
+            static_cast<VkPhysicalDevice>(ctx->physical.handle()));
+        out->vk_device = reinterpret_cast<uint64_t>(
+            static_cast<VkDevice>(ctx->device.handle()));
+        out->api_version = ctx->apiVersion;
+        out->graphics_family = ctx->device.graphicsFamily();
+        out->shared_capable = ctx->extendedSharing ? 1u : 0u;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int vp_shared_device_exts(const char*** names_out) {
+    try {
+        if (!names_out) return 0;
+        auto ctx = backend::sharedGpuContextExtended();
+        if (!ctx) return 0;
+        static std::vector<const char*> names;
+        if (names.empty())
+            for (const auto& e : ctx->device.enabledExtensions())
+                names.push_back(e.c_str());
+        *names_out = names.data();
+        return static_cast<int>(names.size());
+    } catch (...) {
+        return 0;
+    }
+}
+
+int vp_shared_instance_exts(const char*** names_out) {
+    try {
+        if (!names_out) return 0;
+        auto ctx = backend::sharedGpuContextExtended();
+        if (!ctx) return 0;
+        static std::vector<const char*> names;
+        if (names.empty())
+            for (const auto& e : ctx->instance.enabledExtensions())
+                names.push_back(e.c_str());
+        *names_out = names.data();
+        return static_cast<int>(names.size());
+    } catch (...) {
+        return 0;
+    }
+}
+
+int vp_render_shm(VpFigure* fig, VpShmFrame* out) {
+    std::lock_guard gate(renderGate());
+    try {
+        if (!fig || !out) return 0;
+        auto* hb = dynamic_cast<backend::HeadlessBackend*>(
+            fig->backend.get());
+        if (!hb) return 0;
+        // Enable the shm copy barrier + consumer-release gating.
+        hb->setShmMode(true);
+        fig->renderer->prepare(*fig->figure);
+        fig->renderer->renderFrame(*fig->figure);
+        const int slot = hb->lastSubmittedSlot();
+        if (slot < 0) return 0;
+        out->buffer = reinterpret_cast<uint64_t>(
+            static_cast<VkBuffer>(hb->stagingBuffer(
+                static_cast<uint32_t>(slot))));
+        out->slot = static_cast<uint32_t>(slot);
+        out->generation = hb->stagingGeneration(
+            static_cast<uint32_t>(slot));
+        out->row_pitch = static_cast<uint64_t>(hb->rowPitch());
+        out->width = static_cast<uint32_t>(fig->w);
+        out->height = static_cast<uint32_t>(fig->h);
+        out->byte_size = out->row_pitch * out->height;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+void vp_shm_release(VpFigure* fig, uint32_t slot) {
+    try {
+        if (!fig) return;
+        auto* hb = dynamic_cast<backend::HeadlessBackend*>(
+            fig->backend.get());
+        if (hb) hb->shmRelease(slot);
+    } catch (...) {
+    }
 }
 
 int vp_figure_resize(VpFigure* fig, int width, int height) {
@@ -595,6 +693,12 @@ size_t vp_render_rgba(VpFigure* fig, uint8_t* out, size_t out_len) {
         if (!fig || !out) return 0;
         size_t need = static_cast<size_t>(fig->w) * fig->h * 4;
         if (out_len < need) return 0;
+        // CPU-readback renders don't produce a shm frame — without
+        // this they'd still bump shmRenders_ and permanently lag the
+        // consumer-release counters behind.
+        if (auto* hb = dynamic_cast<backend::HeadlessBackend*>(
+                fig->backend.get()))
+            hb->setShmMode(false);
         fig->renderer->prepare(*fig->figure);
         fig->renderer->renderFrame(*fig->figure);
         return fig->backend->readbackRgba8Into(out, need) == need ? need : 0;
@@ -612,12 +716,24 @@ const uint8_t* vp_render_rgba_view(VpFigure* fig, size_t* out_len) {
             static const bool on = std::getenv("VP_DEBUG_PERF") != nullptr;
             return on;
         }();
+        if (auto* hb = dynamic_cast<backend::HeadlessBackend*>(
+                fig->backend.get()))
+            hb->setShmMode(false);
         auto t0 = std::chrono::steady_clock::now();
         fig->renderer->prepare(*fig->figure);
         auto t1 = std::chrono::steady_clock::now();
         fig->renderer->renderFrame(*fig->figure);
         auto t2 = std::chrono::steady_clock::now();
         const uint8_t* v = fig->backend->rgba8View(out_len);
+        if (!v) {
+            // Pitched staging rows → no contiguous view; un-pitch into
+            // the figure scratch and borrow that instead.
+            auto& px = fig->rgba_view_scratch;
+            px.resize(fig->w > 0 && fig->h > 0 ? size_t(fig->w) * fig->h * 4 : 0);
+            const size_t got = fig->backend->readbackRgba8Into(px.data(), px.size());
+            px.resize(got);
+            if (got > 0) { v = px.data(); *out_len = got; }
+        }
         auto t3 = std::chrono::steady_clock::now();
         if (dbgPerf) {
             static int n = 0;
