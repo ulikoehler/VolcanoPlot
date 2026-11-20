@@ -83,22 +83,34 @@ struct VpFigure {
 
 /// Apply the stored minor-grid override to one axis' style: explicit
 /// positions+strengths ride in AxisStyle and Renderer::drawGrid
-/// buckets them into per-alpha draw sets. The minor color follows
-/// egui's grid rule — `text_color` faded by per-line strength — not
-/// the major gridColor: with egui-style strengths (~0.1 for dense
-/// minor marks) the dim major-grid color lands below visibility.
-/// The axis color (`as.color`) is the VolcanoPlot analogue of egui's
-/// `text_color` for both themes.
+/// buckets them into per-alpha draw sets. Minors keep the majors' own
+/// `gridColor` family so they can never out-contrast them — but the raw
+/// egui spacing strengths are remapped into [0.40, 0.70]: below ~0.40
+/// dense marks fade under the visibility floor (the original
+/// invisible-sub-grid bug), and the ceiling keeps even the strongest
+/// minor clearly under major intensity (the inverted-intensity bug).
+/// The gradient is preserved, just compressed.
 static void apply_minor_grid(const VpFigure::MinorGrid& g,
                              plot::AxisStyle& as) {
     as.minorGridPositions = g.positions;
     as.minorGridStrengths = g.strengths;
+    for (float& s : as.minorGridStrengths) {
+        s = std::clamp(0.40f + 0.30f * s, 0.0f, 1.0f);
+    }
     if (g.positions.empty()) {
         if (as.gridWhich == "both") as.gridWhich = "major";
     } else {
         as.gridWhich = "both";
-        as.minorGridColor = as.color;
+        as.minorGridColor = as.gridColor;
         as.minorGridLineWidth = as.gridLineWidth;
+        // Minors share the majors' color family, so with the subtle
+        // default major alpha (~110/255) the strongest minor reads
+        // almost as bright as a major. Lift the major alpha so majors
+        // stay clearly dominant, and pin the minor base to the
+        // original alpha — both are idempotent (this runs on every
+        // minor-grid upload, after gridColor may already be lifted).
+        as.minorGridColor.a = std::min(as.minorGridColor.a, 110.0f / 255.0f);
+        as.gridColor.a = std::max(as.gridColor.a, 200.0f / 255.0f);
     }
 }
 
