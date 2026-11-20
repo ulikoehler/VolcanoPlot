@@ -83,9 +83,12 @@ struct VpFigure {
 
 /// Apply the stored minor-grid override to one axis' style: explicit
 /// positions+strengths ride in AxisStyle and Renderer::drawGrid
-/// buckets them into per-alpha draw sets. The minor color/width
-/// inherit the major grid styling (egui draws every grid line with
-/// the same pen, faded by strength).
+/// buckets them into per-alpha draw sets. The minor color follows
+/// egui's grid rule — `text_color` faded by per-line strength — not
+/// the major gridColor: with egui-style strengths (~0.1 for dense
+/// minor marks) the dim major-grid color lands below visibility.
+/// The axis color (`as.color`) is the VolcanoPlot analogue of egui's
+/// `text_color` for both themes.
 static void apply_minor_grid(const VpFigure::MinorGrid& g,
                              plot::AxisStyle& as) {
     as.minorGridPositions = g.positions;
@@ -94,7 +97,7 @@ static void apply_minor_grid(const VpFigure::MinorGrid& g,
         if (as.gridWhich == "both") as.gridWhich = "major";
     } else {
         as.gridWhich = "both";
-        as.minorGridColor = as.gridColor;
+        as.minorGridColor = as.color;
         as.minorGridLineWidth = as.gridLineWidth;
     }
 }
