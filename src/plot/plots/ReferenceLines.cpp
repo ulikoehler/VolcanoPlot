@@ -191,7 +191,9 @@ void Vlines::prepare(render::Renderer& r) {
         segs.push_back({x, yMax_});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
-    renderer_->upload(std::span{segs.data(), segs.size()}, color_, width_);
+    if (vertexCount_)  // empty input → nothing to draw
+        renderer_->upload(std::span{segs.data(), segs.size()}, color_,
+                          width_);
     prepared_ = true;
 }
 
@@ -226,7 +228,9 @@ void Hlines::prepare(render::Renderer& r) {
         segs.push_back({xMax_, y});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
-    renderer_->upload(std::span{segs.data(), segs.size()}, color_, width_);
+    if (vertexCount_)  // empty input → nothing to draw
+        renderer_->upload(std::span{segs.data(), segs.size()}, color_,
+                          width_);
     prepared_ = true;
 }
 

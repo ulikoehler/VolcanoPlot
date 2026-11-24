@@ -217,6 +217,14 @@ public:
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;
 
+    /// Replace the line positions and span (e.g. for live updates).
+    void setData(std::vector<float> xPositions, float yMin, float yMax) {
+        xPositions_ = std::move(xPositions);
+        yMin_ = yMin;
+        yMax_ = yMax;
+    }
+    void setColor(Color c) { color_ = c; }
+
 private:
     std::vector<float> xPositions_;
     float yMin_, yMax_;
