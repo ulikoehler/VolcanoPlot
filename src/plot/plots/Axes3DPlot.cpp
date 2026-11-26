@@ -175,12 +175,15 @@ void Axes3DPlot::prepare(render::Renderer& r) {
     if (!lineSegs_.empty()) {
         if (!lineRenderer_) lineRenderer_ = r.gpu().createLineSegmentRenderer();
         lineRenderer_->upload3D(std::span{lineSegs_}, config_.edgeColor,
-                                config_.lineWidth, vp_);
+                                config_.lineWidth *
+                                    (owner() ? owner()->dpi() : 72.0f) /
+                                    72.0f, vp_);
     }
     if (!axisSegs_.empty()) {
         if (!axisRenderer_) axisRenderer_ = r.gpu().createLineSegmentRenderer();
         axisRenderer_->upload(std::span{axisSegs_}, config_.axisColor,
-                             config_.lineWidth);
+                             config_.lineWidth *
+                                 (owner() ? owner()->dpi() : 72.0f) / 72.0f);
     }
     prepared_ = true;
 }

@@ -21,10 +21,10 @@ void SpyPlot::buildGeometry() {
     fillPositions_.clear();
     fillColors_.clear();
 
-    // Matrix is rendered with row 0 at the top.
-    // Data coordinates: x = [0, ncols], y = [0, nrows].
-    // Row j (0-indexed from top) maps to y = [nrows - j - 1, nrows - j].
-    // Column i maps to x = [i, i+1].
+    // mpl spy (imshow style): cell (i,j) is centered on the data
+    // coordinates (i, j) — extent [-0.5, ncols-0.5] x
+    // [-0.5, nrows-0.5]. Row 0 lands at the top through the inverted
+    // y limits that Axes::spy() installs (origin='upper').
 
     float ms = std::clamp(config_.markerSize, 0.0f, 1.0f);
     float inset = (1.0f - ms) * 0.5f;
@@ -37,11 +37,10 @@ void SpyPlot::buildGeometry() {
             Color color = isNonZero ? config_.color : config_.zeroColor;
             if (color.a == 0.0f) continue;  // skip transparent cells
 
-            float x0 = i + inset;
-            float x1 = i + 1 - inset;
-            // Row 0 at top: y = nrows - j - 1 (bottom) to nrows - j (top).
-            float y0 = static_cast<float>(nrows_ - j - 1) + inset;
-            float y1 = static_cast<float>(nrows_ - j) - inset;
+            float x0 = float(i) - 0.5f + inset;
+            float x1 = float(i) + 0.5f - inset;
+            float y0 = float(j) - 0.5f + inset;
+            float y1 = float(j) + 0.5f - inset;
 
             Point2D bl{x0, y0}, br{x1, y0}, tl{x0, y1}, tr{x1, y1};
             fillPositions_.push_back(bl);
@@ -73,10 +72,11 @@ void SpyPlot::draw(render::Cmd& cmd, render::Renderer& r,
 }
 
 void SpyPlot::contributeToAutoscale(Viewport& v) const {
-    v.x.min = std::min(v.x.min, 0.0f);
-    v.x.max = std::max(v.x.max, static_cast<float>(ncols_));
-    v.y.min = std::min(v.y.min, 0.0f);
-    v.y.max = std::max(v.y.max, static_cast<float>(nrows_));
+    // mpl imshow extent: half a cell past the outer index centers.
+    v.x.min = std::min(v.x.min, -0.5f);
+    v.x.max = std::max(v.x.max, static_cast<float>(ncols_) - 0.5f);
+    v.y.min = std::min(v.y.min, -0.5f);
+    v.y.max = std::max(v.y.max, static_cast<float>(nrows_) - 0.5f);
 }
 
 } // namespace volcano::plot

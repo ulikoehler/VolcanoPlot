@@ -98,7 +98,7 @@ struct Series2D {
     std::optional<Color> markerFaceColor;
     /// mpl `markeredgecolor` (same auto/none/color scheme).
     std::optional<Color> markerEdgeColor;
-    /// mpl `markeredgewidth` (pixels).
+    /// mpl `markeredgewidth` (points).
     float markerEdgeWidth = 1.0f;
     /// mpl `markevery` (None = a marker at every point). Only the
     /// marker positions are subsampled — the line itself is untouched.
@@ -122,14 +122,15 @@ struct Series2D {
         markevery = std::move(indices);
     }
     LineStyle lineStyle = LineStyle::Solid;
-    /// Custom dash tuple (on, off, ...) in pixels. Empty → derived from
-    /// lineStyle via dashPattern().
+    /// Custom dash tuple (on, off, ...) in points (mpl set_dashes).
+    /// Empty → derived from lineStyle via dashPattern().
     std::vector<float> dashes;
+    /// mpl dash offset, in points.
     float dashOffset = 0.0f;
-    /// <=0 → auto: resolved to `lines.linewidth` of the axes' style in
-    /// Axes::addPlot (mpl: rcParams['lines.linewidth'] is the Line2D
-    /// default; an explicit lw= always wins, prop_cycle entries override
-    /// the rcParam).
+    /// mpl `linewidth` in points. <=0 → auto: resolved to
+    /// `lines.linewidth` of the axes' style in Axes::addPlot (mpl:
+    /// rcParams['lines.linewidth'] is the Line2D default; an explicit
+    /// lw= always wins, prop_cycle entries override the rcParam).
     float lineWidth = -1.0f;
     DrawStyle drawStyle = DrawStyle::Default;
     JoinStyle joinStyle = JoinStyle::Round;

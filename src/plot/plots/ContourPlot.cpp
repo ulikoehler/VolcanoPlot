@@ -269,7 +269,8 @@ void ContourPlot::prepare(render::Renderer& r) {
     if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
         renderer_->upload(std::span{segments_}, config_.lineColor,
-                         config_.lineWidth);
+                         config_.lineWidth *
+                             (owner() ? owner()->dpi() : 72.0f) / 72.0f);
     }
     prepared_ = true;
 }
@@ -324,12 +325,14 @@ void ContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
     float lMin = config_.levels.front(), lMax = config_.levels.back();
     float lRange = std::max(1e-9f, lMax - lMin);
     StrokeParams sp;
-    sp.width = config_.lineWidth;
+    const float widthPx = config_.lineWidth * axes.dpi() / 72.0f;
+    sp.width = widthPx;
     for (const auto& [level, idx] : byLevel) {
         // mpl: negative contour levels are dashed by default.
         sp.dashes.clear();
-        if (level < 0.0f)
-            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        // mpl: dashed negatives only for monochrome (colors=) contours.
+        if (level < 0.0f && !config_.cmap)
+            sp.dashes = dashPattern(LineStyle::Dashed, widthPx);
         auto boxIt = labelBoxes.find(level);
         const Rect2Df* box = boxIt != labelBoxes.end() ? &boxIt->second
                                                        : nullptr;
@@ -400,15 +403,17 @@ void ContourPlot::drawGpuTess(render::Cmd& cmd, render::Renderer& r,
     // mpl dashes negative contour levels; the device path walks each
     // segment with the same pattern the CPU stroker uses.
     std::vector<float> dashes(config_.levels.size() * 2, 0.0f);
-    const auto dash = dashPattern(LineStyle::Dashed, config_.lineWidth);
+    const float widthPx = config_.lineWidth * axes.dpi() / 72.0f;
+    const auto dash = dashPattern(LineStyle::Dashed, widthPx);
     for (size_t i = 0; i < config_.levels.size(); ++i) {
-        if (config_.levels[i] >= 0.0f || dash.size() < 2) continue;
+        if (config_.levels[i] >= 0.0f || dash.size() < 2 ||
+            config_.cmap) continue;
         dashes[i * 2] = dash[0];
         dashes[i * 2 + 1] = dash[1];
     }
     if (!r.gpu().contourTessellate(
             grid_.values, grid_.width, grid_.height, config_.levels,
-            colors, bx, ax, by, ay, config_.lineWidth, dashes,
+            colors, bx, ax, by, ay, widthPx, dashes,
             gpuSoup_, gpuCount_))
         return;
     r.gpu().spine().drawTrianglesGpuIndirect(
@@ -489,7 +494,7 @@ void ContourPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     }
     render::VectorCanvas::Pen pen;
     pen.color = config_.lineColor;
-    pen.width = config_.lineWidth;
+    pen.width = config_.lineWidth * axes.dpi() / 72.0f;
     for (size_t i = 0; i + 1 < segments_.size(); i += 2) {
         if (config_.cmap && !config_.levels.empty()) {
             float t = (segLevels_[i / 2] - config_.levels.front()) /

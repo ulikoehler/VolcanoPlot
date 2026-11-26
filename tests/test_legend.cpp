@@ -508,13 +508,14 @@ TEST(FigureLegend, AnchorsToCanvasEdge) {
     lf.figure.legend("upper right");   // figure-space anchor
     auto img = lf.render();
 
-    // The figure legend hugs the canvas top-right corner — its black
-    // frame edge sits at the canvas edge (x≈255), unlike an axes legend
-    // which would stay inside the axes rect (x<230).
+    // The figure legend hugs the canvas top-right corner — its frame
+    // edge (mpl legend.edgecolor '0.8' → #ccc) sits at the canvas edge
+    // (x≈255), unlike an axes legend which stays inside the axes rect
+    // (x<230).
     auto bb = img.boundingBox(kRed, 40);
     ASSERT_TRUE(bb.found);
     EXPECT_LT(bb.y0, 60u);    // near the top edge
-    EXPECT_GT(img.countColorInRegion(Pixel{0, 0, 0, 255},
+    EXPECT_GT(img.countColorInRegion(Pixel{204, 204, 204, 255},
                                      248, 5, 256, 60, 60), 0u)
         << "legend frame does not reach the canvas edge";
 }

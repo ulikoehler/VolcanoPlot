@@ -60,6 +60,9 @@ void XCorrPlot::computeCorrelation() {
 }
 
 void XCorrPlot::prepare(render::Renderer& r) {
+
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     // GPU path: one invocation per lag computes the shifted dot
     // product on the device (eventual delivery — the CPU loop covers
     // the first frame and any declined request).
@@ -118,7 +121,7 @@ void XCorrPlot::prepare(render::Renderer& r) {
     if (!stemRenderer_) stemRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!stemSegments_.empty()) {
         stemRenderer_->upload(std::span{stemSegments_}, config_.color,
-                             config_.lineWidth);
+                             config_.lineWidth * kPtPx);
     }
 
     if (config_.markers && !markerPoints_.empty()) {

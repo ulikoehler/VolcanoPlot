@@ -94,11 +94,13 @@ TEST(MatshowRegression, AutoscaleMatchesMatrixDimensions) {
     cf.axes->addPlot(std::make_unique<MatshowPlot>(std::move(data), 2, 2));
     cf.render();
 
+    // mpl imshow extent: cells centered at integer coords →
+    // [-0.5, n-0.5] on both axes (tight autoscale, no margin).
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, 0.0f, 0.05f);
-    EXPECT_NEAR(av.x.max, 2.0f, 0.05f);
-    EXPECT_NEAR(av.y.min, 0.0f, 0.05f);
-    EXPECT_NEAR(av.y.max, 2.0f, 0.05f);
+    EXPECT_NEAR(av.x.min, -0.5f, 0.05f);
+    EXPECT_NEAR(av.x.max, 1.5f, 0.05f);
+    EXPECT_NEAR(av.y.min, -0.5f, 0.05f);
+    EXPECT_NEAR(av.y.max, 1.5f, 0.05f);
 }
 
 TEST(MatshowRegression, RowZeroAtTop) {
@@ -110,22 +112,19 @@ TEST(MatshowRegression, RowZeroAtTop) {
     };
     MatshowConfig cfg;
     cfg.cmap = &colormaps::viridis();
-    cf.axes->addPlot(std::make_unique<MatshowPlot>(std::move(data), 2, 3, cfg));
+    cf.axes->matshow(std::move(data), 2, 3, cfg);
     auto img = cf.render();
 
-    // Set viewport for predictable positions.
-    Viewport vp;
-    vp.x = {0, 3}; vp.y = {0, 2}; vp.z = {0, 1};
-    cf.axes->setViewport(vp);
-    auto img2 = cf.render();
+    // mpl wiring: cells centered at integer coords, viewport
+    // x={-0.5, 2.5}, y={1.5, -0.5} (inverted → row 0 at top).
+    const auto vp = cf.axes->viewport();
 
-    // Row 0 (top) maps to y=[1,2] → upper part of image.
-    // Row 1 (bottom) maps to y=[0,1] → lower part.
-    // Check that top and bottom have different colors (different values).
-    auto [tx, ty] = dataToPixel(vp, cf.axes->rect, 1.5f, 1.5f);  // row 0 center
-    auto [bx, by] = dataToPixel(vp, cf.axes->rect, 1.5f, 0.5f);  // row 1 center
-    Pixel top = img2.get(static_cast<uint32_t>(tx), static_cast<uint32_t>(ty));
-    Pixel bottom = img2.get(static_cast<uint32_t>(bx), static_cast<uint32_t>(by));
+    // Row 0 center at data (1, 0) → upper part; row 1 center at
+    // data (1, 1) → lower part. Different values → different colors.
+    auto [tx, ty] = dataToPixel(vp, cf.axes->rect, 1.0f, 0.0f);
+    auto [bx, by] = dataToPixel(vp, cf.axes->rect, 1.0f, 1.0f);
+    Pixel top = img.get(static_cast<uint32_t>(tx), static_cast<uint32_t>(ty));
+    Pixel bottom = img.get(static_cast<uint32_t>(bx), static_cast<uint32_t>(by));
     EXPECT_FALSE(top.approx(bottom, 30))
         << "Top and bottom rows should have different colors";
 }
@@ -223,20 +222,18 @@ TEST(MatshowRegression, NaNCellsSkipped) {
     };
     MatshowConfig cfg;
     cfg.cmap = &colormaps::viridis();
-    cf.axes->addPlot(std::make_unique<MatshowPlot>(std::move(data), 2, 2, cfg));
+    cf.axes->matshow(std::move(data), 2, 2, cfg);
     auto img = cf.render();
 
     // NaN cell should be skipped (transparent), so fewer pixels than
     // a full 2x2 matrix.
     size_t filledCount = countPixels(img, isNotWhite);
     EXPECT_GT(filledCount, 100u) << "Non-NaN cells should render";
-    // The NaN cell (top-right) should be white.
-    Viewport vp;
-    vp.x = {0, 2}; vp.y = {0, 2}; vp.z = {0, 1};
-    cf.axes->setViewport(vp);
-    auto img2 = cf.render();
-    auto [px, py] = dataToPixel(vp, cf.axes->rect, 1.5f, 1.5f);  // top-right
-    Pixel p = img2.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
+    // The NaN cell (row0, col1 → data (1,0)) is top-right under the
+    // inverted y viewport {-0.5,1.5} x {1.5,-0.5}.
+    const auto vp = cf.axes->viewport();
+    auto [px, py] = dataToPixel(vp, cf.axes->rect, 1.0f, 0.0f);
+    Pixel p = img.get(static_cast<uint32_t>(px), static_cast<uint32_t>(py));
     // Should be white or close to white (NaN cell skipped).
     EXPECT_TRUE(p.approx(Pixel::white(), 40))
         << "NaN cell should be white (skipped)";

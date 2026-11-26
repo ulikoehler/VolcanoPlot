@@ -59,9 +59,10 @@ void MatshowPlot::buildGeometry() {
     float vspan = valueRange_.span();
     if (vspan <= 0.0f) vspan = 1.0f;
 
-    // Matrix convention: row 0 at top.
-    // Row j (0-indexed from top) maps to y = [nrows - j - 1, nrows - j].
-    // Column i maps to x = [i, i+1].
+    // mpl matshow (imshow origin='upper'): cell (i,j) centered on data
+    // coords (i, j) — extent [-0.5, ncols-0.5] x [-0.5, nrows-0.5].
+    // Row 0 lands at the top through the inverted y limits that
+    // Axes::matshow() installs.
     for (uint32_t j = 0; j < nrows_; ++j) {
         for (uint32_t i = 0; i < ncols_; ++i) {
             float val = data_[j * ncols_ + i];
@@ -75,10 +76,10 @@ void MatshowPlot::buildGeometry() {
             Color color = cmap.sample(t);
             if (color.a == 0.0f) continue;
 
-            float x0 = static_cast<float>(i);
-            float x1 = static_cast<float>(i + 1);
-            float y0 = static_cast<float>(nrows_ - j - 1);
-            float y1 = static_cast<float>(nrows_ - j);
+            float x0 = float(i) - 0.5f;
+            float x1 = float(i) + 0.5f;
+            float y0 = float(j) - 0.5f;
+            float y1 = float(j) + 0.5f;
 
             Point2D bl{x0, y0}, br{x1, y0}, tl{x0, y1}, tr{x1, y1};
             fillPositions_.push_back(bl);
@@ -110,10 +111,11 @@ void MatshowPlot::draw(render::Cmd& cmd, render::Renderer& r,
 }
 
 void MatshowPlot::contributeToAutoscale(Viewport& v) const {
-    v.x.min = std::min(v.x.min, 0.0f);
-    v.x.max = std::max(v.x.max, static_cast<float>(ncols_));
-    v.y.min = std::min(v.y.min, 0.0f);
-    v.y.max = std::max(v.y.max, static_cast<float>(nrows_));
+    // mpl imshow extent: half a cell past the outer index centers.
+    v.x.min = std::min(v.x.min, -0.5f);
+    v.x.max = std::max(v.x.max, static_cast<float>(ncols_) - 0.5f);
+    v.y.min = std::min(v.y.min, -0.5f);
+    v.y.max = std::max(v.y.max, static_cast<float>(nrows_) - 0.5f);
 }
 
 } // namespace volcano::plot

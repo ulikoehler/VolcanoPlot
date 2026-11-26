@@ -32,6 +32,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return lineWidth_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -66,9 +67,17 @@ public:
     void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
+    /// mpl stairs: the baseline y=0 is a sticky edge — autoscale pads
+    /// toward it but never past it (like bar).
+    [[nodiscard]] StickyEdges stickyEdges() const override {
+        StickyEdges e;
+        e.y.push_back(0.0f);
+        return e;
+    }
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return lineWidth_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,

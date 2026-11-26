@@ -165,7 +165,7 @@ void ScatterPlot::draw(render::Cmd& cmd, render::Renderer& r,
                    series_.markerEdgeColor->a > 0.0f;
     if (series_.markerPath || !series_.markerTex.empty() || clip ||
         transform || !pathEffects.empty() || hasEdge) {
-        const float dpi = axes.style().dpi;
+        const float dpi = axes.dpi();
         std::vector<Point2D> px;
         std::vector<size_t> kept;  // source index per kept point
         px.reserve(series_.points.size());
@@ -198,7 +198,7 @@ void ScatterPlot::draw(render::Cmd& cmd, render::Renderer& r,
                 psCache_.push_back(allS[i]);
             }
         }
-        const float mew = std::max(series_.markerEdgeWidth, 0.5f);
+        const float mew = std::max(series_.markerEdgeWidth * dpi / 72.0f, 0.5f);
         auto normalPass = [&](Point2D off) {
             if (off.x || off.y)
                 for (auto& p : px) { p.x += off.x; p.y += off.y; }
@@ -308,7 +308,7 @@ void ScatterPlot::draw(render::Cmd& cmd, render::Renderer& r,
 
 void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                              Rect2D rect) {
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     auto baseMapper = pxMapper(axes, rect);
     auto toPx = [&](Point2D p) -> Point2D {
         return transform ? transform->apply(p) : baseMapper(p);
@@ -391,7 +391,7 @@ void ScatterPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         if (series_.markerEdgeColor &&
             series_.markerEdgeColor->a > 0.0f)
             passColored({}, series_.applyAlpha(series_.markerEdgeColor),
-                        std::max(series_.markerEdgeWidth, 0.5f));
+                        std::max(series_.markerEdgeWidth * dpi / 72.0f, 0.5f));
         else
             passColored({}, std::nullopt, mew);
         return;

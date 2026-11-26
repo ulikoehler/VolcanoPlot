@@ -64,9 +64,10 @@ void StepPlot::buildStepPoints() {
 
 void StepPlot::prepare(render::Renderer& r) {
     buildStepPoints();
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
     if (!stepPoints_.empty()) {
-        renderer_->upload(std::span{stepPoints_}, color_, lineWidth_);
+        renderer_->upload(std::span{stepPoints_}, color_, lineWidth_ * kPtPx);
     }
     prepared_ = true;
 }
@@ -89,7 +90,7 @@ void StepPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     for (auto p : stepPoints_) px.push_back(toPx(p));
     render::VectorCanvas::Pen pen;
     pen.color = color_;
-    pen.width = lineWidth_;
+    pen.width = lineWidth_ * axes.dpi() / 72.0f;
     c.polyline(px, pen);
 }
 
@@ -142,7 +143,9 @@ void StairsPlot::prepare(render::Renderer& r) {
 
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (!stepPoints_.empty()) {
-        lineRenderer_->upload(std::span{stepPoints_}, color_, lineWidth_);
+        const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+        lineRenderer_->upload(std::span{stepPoints_}, color_,
+                              lineWidth_ * kPtPx);
     }
 
     // Build fill triangles if requested.
@@ -212,7 +215,7 @@ void StairsPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         for (auto p : stepPoints_) px.push_back(toPx(p));
         render::VectorCanvas::Pen pen;
         pen.color = color_;
-        pen.width = lineWidth_;
+        pen.width = lineWidth_ * axes.dpi() / 72.0f;
         c.polyline(px, pen);
     }
 }
@@ -226,11 +229,10 @@ void StairsPlot::contributeToAutoscale(Viewport& v) const {
         v.y.min = std::min(v.y.min, val);
         v.y.max = std::max(v.y.max, val);
     }
-    // If filling, y=0 is also part of the data.
-    if (fill_) {
-        v.y.min = std::min(v.y.min, 0.0f);
-        v.y.max = std::max(v.y.max, 0.0f);
-    }
+    // mpl stairs with the default baseline=0 adds (edges[0], 0) to the
+    // datalim and marks y=0 sticky — the lower margin never crosses it.
+    v.y.min = std::min(v.y.min, 0.0f);
+    v.y.max = std::max(v.y.max, 0.0f);
 }
 
 } // namespace volcano::plot

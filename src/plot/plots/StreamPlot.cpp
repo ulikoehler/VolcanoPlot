@@ -266,6 +266,7 @@ bool StreamPlot::adoptGpuTraces(render::Renderer& r) {
 /// Convert the streamline set to line segments (pairs for eLineList)
 /// and upload them.
 void StreamPlot::uploadSegments(render::Renderer& r) {
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     std::vector<Point2D> segments;
     for (uint32_t s = 0; s < streamlineStarts_.size(); ++s) {
         const uint32_t start = streamlineStarts_[s];
@@ -277,7 +278,7 @@ void StreamPlot::uploadSegments(render::Renderer& r) {
     }
     if (!segments.empty()) {
         lineRenderer_->upload(std::span{segments}, config_.color,
-                              config_.lineWidth);
+                              config_.lineWidth * kPtPx);
     }
 }
 

@@ -81,7 +81,7 @@ TEST(StyleGgplot, Has7ColorCycle) {
 
 TEST(StyleGgplot, AxesFaceColorE5E5E5) {
     auto s = styles::ggplotStyle();
-    expectColorHex(s.faceColor, "E5E5E5");
+    expectColorHex(s.axesFaceColor, "E5E5E5");
 }
 
 TEST(StyleGgplot, GridOn) {
@@ -121,7 +121,7 @@ TEST(StyleSeaborn, Has6ColorCycle) {
 
 TEST(StyleSeaborn, AxesFaceColorEAEAF2) {
     auto s = styles::seabornStyle();
-    expectColorHex(s.faceColor, "EAEAF2");
+    expectColorHex(s.axesFaceColor, "EAEAF2");
 }
 
 TEST(StyleSeaborn, GridOn) {
@@ -166,13 +166,13 @@ TEST(StyleSeaborn, TickMajorSize0) {
 TEST(StyleSeabornDarkgrid, SameAsDefault) {
     auto s1 = styles::seabornStyle();
     auto s2 = styles::seabornDarkgrid();
-    EXPECT_EQ(s1.faceColor.r, s2.faceColor.r);
+    EXPECT_EQ(s1.axesFaceColor.r, s2.axesFaceColor.r);
     EXPECT_TRUE(s2.xAxis.grid);
 }
 
 TEST(StyleSeabornWhitegrid, WhiteBackground) {
     auto s = styles::seabornWhitegrid();
-    EXPECT_NEAR(s.faceColor.r, 1.0f, 0.01f);
+    EXPECT_NEAR(s.axesFaceColor.r, 1.0f, 0.01f);
     EXPECT_TRUE(s.xAxis.grid);
     // grid color = .8 = (204, 204, 204)
     EXPECT_NEAR(s.xAxis.gridColor.r, 204/255.0f, 0.02f);
@@ -182,13 +182,13 @@ TEST(StyleSeabornDark, GridOff) {
     auto s = styles::seabornDark();
     EXPECT_FALSE(s.xAxis.grid);
     EXPECT_FALSE(s.yAxis.grid);
-    expectColorHex(s.faceColor, "EAEAF2");
+    expectColorHex(s.axesFaceColor, "EAEAF2");
 }
 
 TEST(StyleSeabornWhite, GridOff) {
     auto s = styles::seabornWhite();
     EXPECT_FALSE(s.xAxis.grid);
-    EXPECT_NEAR(s.faceColor.r, 1.0f, 0.01f);
+    EXPECT_NEAR(s.axesFaceColor.r, 1.0f, 0.01f);
     // edgecolor = .15
     EXPECT_NEAR(s.xAxis.color.r, 38/255.0f, 0.02f);
 }
@@ -281,7 +281,7 @@ TEST(StyleGrayscale, FaceColorWhite) {
     // mpl's grayscale.mplstyle: axes.facecolor is white
     // (0.75 is figure.facecolor, overridden by savefig anyway).
     auto s = styles::grayscaleStyle();
-    EXPECT_NEAR(s.faceColor.r, 1.0f, 0.02f);
+    EXPECT_NEAR(s.axesFaceColor.r, 1.0f, 0.02f);
 }
 
 // ─── bmh ──────────────────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ TEST(StyleBmh, Has10ColorCycle) {
 
 TEST(StyleBmh, AxesFaceColorEEEEEE) {
     auto s = styles::bmhStyle();
-    expectColorHex(s.faceColor, "EEEEEE");
+    expectColorHex(s.axesFaceColor, "EEEEEE");
 }
 
 TEST(StyleBmh, GridOn) {
@@ -324,7 +324,10 @@ TEST(StyleFivethirtyeight, Has6ColorCycle) {
 
 TEST(StyleFivethirtyeight, FaceColorF0F0F0) {
     auto s = styles::fivethirtyeightStyle();
+    // mpl fivethirtyeight sets both figure.facecolor and
+    // axes.facecolor to f0f0f0.
     expectColorHex(s.faceColor, "F0F0F0");
+    expectColorHex(s.axesFaceColor, "F0F0F0");
 }
 
 TEST(StyleFivethirtyeight, LineWidth4) {
@@ -358,7 +361,8 @@ TEST(StyleSolarize, FaceColorEEE8D5) {
     // mpl's Solarize_Light2: axes.facecolor is base2 (#eee8d5);
     // #fdf6e3 (base3) is figure.facecolor.
     auto s = styles::solarizeLight2Style();
-    expectColorHex(s.faceColor, "EEE8D5");
+    expectColorHex(s.axesFaceColor, "EEE8D5");
+    expectColorHex(s.faceColor, "FDF6E3");
 }
 
 TEST(StyleSolarize, Has8ColorCycle) {

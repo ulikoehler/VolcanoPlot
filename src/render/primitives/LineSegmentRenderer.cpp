@@ -5,6 +5,7 @@
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 #include <string>
@@ -145,7 +146,8 @@ void LineSegmentRendererVk::init() {
     cbsci.setAttachments(att);
 
     std::vector<vk::DynamicState> dyn = {
-        vk::DynamicState::eViewport, vk::DynamicState::eScissor
+        vk::DynamicState::eViewport, vk::DynamicState::eScissor,
+        vk::DynamicState::eLineWidth,
     };
     vk::PipelineDynamicStateCreateInfo dsci;
     dsci.setDynamicStates(dyn);
@@ -240,6 +242,10 @@ void LineSegmentRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
 
     std::array<vk::Buffer, 1> buf = {pointBuffer_.handle()};
     std::array<vk::DeviceSize, 1> off = {0};
+    // Hardware line width is clamped by the device (wideLines range);
+    // widths beyond it would need tessellation.
+    cmd.setLineWidth(
+        std::clamp(width_, 1.0f, svcs_->maxLineWidth()));
     cmd.bindVertexBuffers(0, buf, off);
     cmd.draw(vertexCount, 1, 0, 0);
 }

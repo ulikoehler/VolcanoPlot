@@ -280,7 +280,7 @@ void SpineRendererVk::drawLineStrip(Cmd& cmdRef, plot::Rect2D clip,
                           float(resolution.height), 0, 1};
     cmd.setViewport(0, viewport);
     cmd.setScissor(0, vkScissor(clip));
-    cmd.setLineWidth(width);
+    cmd.setLineWidth(std::clamp(width, 1.0f, svcs_->maxLineWidth()));
 
     cmd.draw(static_cast<uint32_t>(points.size()), 1, 0, 0);
 

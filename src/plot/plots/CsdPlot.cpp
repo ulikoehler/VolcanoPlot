@@ -211,6 +211,9 @@ void CsdPlot::computeCsd(render::Renderer* r) {
 void CsdPlot::prepare(render::Renderer& r) {
     computeCsd(&r);
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     linePoints_.clear();
     for (size_t i = 0; i < freqs_.size(); ++i)
         linePoints_.push_back({freqs_[i], values_[i]});
@@ -218,7 +221,7 @@ void CsdPlot::prepare(render::Renderer& r) {
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (!linePoints_.empty()) {
         lineRenderer_->upload(std::span{linePoints_}, config_.color,
-                             config_.lineWidth);
+                             config_.lineWidth * kPtPx);
     }
     prepared_ = true;
 }

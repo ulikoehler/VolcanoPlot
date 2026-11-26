@@ -303,6 +303,9 @@ void BoxPlot::prepare(render::Renderer& r) {
     // Build geometry.
     buildGeometry();
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     // Initialize renderers.
     if (cfg_.fillBox && boxFillCount_ >= 3) {
         if (!boxFillRenderer_) boxFillRenderer_ = r.gpu().createFillRenderer();
@@ -313,19 +316,19 @@ void BoxPlot::prepare(render::Renderer& r) {
     if (boxEdgeCount_ >= 2) {
         if (!boxEdgeRenderer_) boxEdgeRenderer_ = r.gpu().createLineSegmentRenderer();
         boxEdgeRenderer_->upload(std::span{boxEdgeSegs_.data(), boxEdgeSegs_.size()},
-            cfg_.whiskerColor, cfg_.lineWidth);
+            cfg_.whiskerColor, cfg_.lineWidth * kPtPx);
     }
 
     if (medianCount_ >= 2) {
         if (!medianRenderer_) medianRenderer_ = r.gpu().createLineSegmentRenderer();
         medianRenderer_->upload(std::span{medianSegs_.data(), medianSegs_.size()},
-            cfg_.medianColor, cfg_.medianWidth);
+            cfg_.medianColor, cfg_.medianWidth * kPtPx);
     }
 
     if (cfg_.showMeans && meanCount_ >= 2) {
         if (!meanRenderer_) meanRenderer_ = r.gpu().createLineSegmentRenderer();
         meanRenderer_->upload(std::span{meanSegs_.data(), meanSegs_.size()},
-            cfg_.meanColor, cfg_.medianWidth);
+            cfg_.meanColor, cfg_.medianWidth * kPtPx);
     }
 
     if (cfg_.showOutliers && outlierCount_ > 0) {

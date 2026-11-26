@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace volcano::plot {
@@ -25,6 +26,18 @@ public:
     tickValuesD(double vmin, double vmax) const {
         const auto f = tickValues(float(vmin), float(vmax));
         return {f.begin(), f.end()};
+    }
+    /// mpl Locator.view_limits(dmin, dmax): the bounds the locator
+    /// prefers for the (already margin-padded) data range, applied by
+    /// autoscale_view when not tight. With
+    /// axes.autolimit_mode='round_numbers' locators expand to their
+    /// outer edge ticks / decade bounds; the base implementation is
+    /// mpl's nonsingular passthrough.
+    [[nodiscard]] virtual std::pair<float, float>
+    viewLimits(float vmin, float vmax, bool roundNumbers) const {
+        (void)roundNumbers;
+        if (vmax < vmin) std::swap(vmin, vmax);
+        return {vmin, vmax};
     }
 };
 
@@ -124,6 +137,7 @@ public:
     [[nodiscard]] const std::vector<float>& steps() const { return steps_; }
     /// mpl `integer`: ticks take only integer values.
     void setInteger(bool v) { integer_ = v; }
+    [[nodiscard]] bool integer() const { return integer_; }
     /// mpl `symmetric`: the located range is symmetrized about zero.
     void setSymmetric(bool v) { symmetric_ = v; }
     /// mpl `prune`: "lower"/"upper"/"both" drop the edge tick(s);
@@ -132,6 +146,10 @@ public:
     /// mpl `min_n_ticks`: relax the step until ≥ n ticks are emitted.
     void setMinNTicks(int n) { minNTicks_ = n < 1 ? 1 : n; }
     [[nodiscard]] int minNTicks() const { return minNTicks_; }
+    /// mpl MaxNLocator.view_limits: 'round_numbers' expands the padded
+    /// range to the outer edge ticks of _raw_ticks.
+    [[nodiscard]] std::pair<float, float>
+    viewLimits(float vmin, float vmax, bool roundNumbers) const override;
 
 private:
     /// mpl _raw_ticks: edge-inclusive ticks spanning [vmin, vmax].
@@ -167,6 +185,10 @@ public:
     /// Minor positions: subs × decade within the range (2,3,...,9 × 10^e).
     [[nodiscard]] std::vector<float> minorValues(float vmin, float vmax,
                                                  std::span<const float> subs = {}) const;
+    /// mpl LogLocator.view_limits: 'round_numbers' snaps to decade
+    /// bounds covering the range.
+    [[nodiscard]] std::pair<float, float>
+    viewLimits(float vmin, float vmax, bool roundNumbers) const override;
 private:
     float base_;
     int numticks_;
@@ -181,6 +203,10 @@ public:
         : linthresh_(linthresh), base_(base), subs_(std::move(subs)) {}
     [[nodiscard]] std::vector<float> tickValues(float vmin,
                                                 float vmax) const override;
+    /// mpl SymmetricalLogLocator.view_limits: 'round_numbers' snaps to
+    /// decade bounds covering the range.
+    [[nodiscard]] std::pair<float, float>
+    viewLimits(float vmin, float vmax, bool roundNumbers) const override;
 private:
     float linthresh_;
     float base_;

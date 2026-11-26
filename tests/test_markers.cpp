@@ -382,7 +382,7 @@ TEST(LineStyleRegression, CustomDashTuple) {
     CraftedFigure cf(128);
     Series2D s;
     s.color = Color::black();
-    s.dashes = {20.0f, 20.0f};   // custom (on, off) in px
+    s.dashes = {14.4f, 14.4f};   // custom (on, off) in pt → 20px at 100dpi
     s.lineWidth = 2.0f;
     s.points = {{0.0f, 0.5f}, {1.0f, 0.5f}};
     cf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
@@ -399,7 +399,7 @@ TEST(LineStyleRegression, GapColorFillsDashGaps) {
     CraftedFigure cf(128);
     Series2D s;
     s.color = Color::black();
-    s.dashes = {16.0f, 16.0f};
+    s.dashes = {11.5f, 11.5f};   // in pt → ~16px at 100dpi
     s.gapColor = Color::red();
     s.lineWidth = 3.0f;
     s.points = {{0.0f, 0.5f}, {1.0f, 0.5f}};

@@ -150,7 +150,8 @@ void BarbsPlot::draw(render::Cmd& cmd, render::Renderer& r,
         if (r.gpu().barbsTess(x_, y_, u_, v_, axes.transform(), rect,
                               config_.length, config_.flip, segs, verts) &&
             renderer_->drawSegmentsGpu(cmd, fullRect, t, segs, verts,
-                                       config_.color, config_.lineWidth))
+                                       config_.color,
+                                       config_.lineWidth * axes.dpi() / 72.0f))
             return;
     }
 
@@ -161,7 +162,8 @@ void BarbsPlot::draw(render::Cmd& cmd, render::Renderer& r,
 
     // Upload segments. We need to upload every frame since the segments
     // depend on the viewport. This is acceptable for barbs (small data).
-    renderer_->upload(std::span{segments_}, config_.color, config_.lineWidth);
+    renderer_->upload(std::span{segments_}, config_.color,
+                         config_.lineWidth * axes.dpi() / 72.0f);
 
     renderer_->draw(cmd, fullRect, t, static_cast<uint32_t>(segments_.size()));
 }

@@ -56,6 +56,7 @@ public:
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.markerColor; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return config_.lineWidth; }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
                     Rect2D rect) override;

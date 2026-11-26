@@ -549,13 +549,14 @@ void PatchCollection::draw(render::Cmd& cmd, render::Renderer& r,
         for (auto& sp : subs)
             for (auto& pt : sp.points) pt = toPx(axes, rect, pt);
         std::vector<float> dash = p.style.dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
         if (dash.empty())
-            dash = dashPattern(p.style.lineStyle, p.style.lineWidth);
+            dash = dashPattern(p.style.lineStyle, p.style.lineWidth * axes.dpi() / 72.0f);
         drawSubpathsFx(cmd, r, clip, res, subs, p.style.face, p.style.edge,
-                       p.style.lineWidth, dash, p.style.hatch,
+                       p.style.lineWidth * axes.dpi() / 72.0f, dash, p.style.hatch,
                        p.style.hatchSpacing, axes.style().sketchScale,
                        axes.style().sketchLength, ring,
-                       pathEffects, axes.style().dpi);
+                       pathEffects, axes.dpi());
     }
 }
 
@@ -631,16 +632,17 @@ void PathCollection::draw(render::Cmd& cmd, render::Renderer& r,
                     scaled = transforms[i]->apply(scaled);
                 pt = {center.x + scaled.x * ppu, center.y - scaled.y * ppv};
             }
-        float lw = at(lineWidths, i, 1.0f);
-        std::vector<float> dash =
-            dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        float lw = at(lineWidths, i, 1.0f) * axes.dpi() / 72.0f;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         Color face = at(faceColors, i, defFace);
         if (strokeOnly) face.a = 0.0f;
         drawSubpathsFx(cmd, r, clip, res, subs, face,
                        at(edgeColors, i, defEdge), lw, dash, hatch,
                        hatchSpacing, axes.style().sketchScale,
                        axes.style().sketchLength, ring,
-                       pathEffects, axes.style().dpi);
+                       pathEffects, axes.dpi());
     }
 }
 
@@ -658,14 +660,15 @@ void LineCollection::draw(render::Cmd& cmd, render::Renderer& r,
     auto& spine = r.gpu().spine();
     auto ring = clipRingPx(axes, rect);
     Color def{0.121f, 0.466f, 0.705f, 1};
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     for (size_t i = 0; i < segments.size(); ++i) {
         std::vector<Point2D> px;
         px.reserve(segments[i].size());
         for (auto p : segments[i]) px.push_back(toPx(axes, rect, p));
-        float lw = at(lineWidths, i, 1.5f);
-        std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
-                                                 : dashes;
+        float lw = at(lineWidths, i, 1.5f) * axes.dpi() / 72.0f;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         Color c = at(edgeColors, i, def);
         // mpl patheffects: one pass per effect (offset/color/width
         // overrides), plus the normal pass after `withX` effects.
@@ -728,14 +731,15 @@ void PolyCollection::draw(render::Cmd& cmd, render::Renderer& r,
         sp.closed = true;
         sp.points.reserve(polys[i].size());
         for (auto p : polys[i]) sp.points.push_back(toPx(axes, rect, p));
-        float lw = at(lineWidths, i, 1.0f);
-        std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
-                                                 : dashes;
+        float lw = at(lineWidths, i, 1.0f) * axes.dpi() / 72.0f;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         drawSubpathsFx(cmd, r, clip, res, {sp},
                        at(faceColors, i, defFace), at(edgeColors, i, defEdge),
                        lw, dash, hatch, hatchSpacing,
                        axes.style().sketchScale, axes.style().sketchLength,
-                       ring, pathEffects, axes.style().dpi);
+                       ring, pathEffects, axes.dpi());
     }
 }
 
@@ -1017,12 +1021,13 @@ void PatchCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
         for (auto& sp : subs)
             for (auto& pt : sp.points) pt = toPx(axes, rect, pt);
         std::vector<float> dash = p.style.dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
         if (dash.empty())
-            dash = dashPattern(p.style.lineStyle, p.style.lineWidth);
+            dash = dashPattern(p.style.lineStyle, p.style.lineWidth * axes.dpi() / 72.0f);
         emitSubpathsFx(c, subs, p.style.face, p.style.edge,
-                       p.style.lineWidth, dash, p.style.hatch,
+                       p.style.lineWidth * axes.dpi() / 72.0f, dash, p.style.hatch,
                        p.style.hatchSpacing, ring, pathEffects,
-                       axes.style().dpi);
+                       axes.dpi());
     }
 }
 
@@ -1050,14 +1055,15 @@ void PathCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
                     scaled = transforms[i]->apply(scaled);
                 pt = {center.x + scaled.x * ppu, center.y - scaled.y * ppv};
             }
-        float lw = at(lineWidths, i, 1.0f);
-        std::vector<float> dash =
-            dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        float lw = at(lineWidths, i, 1.0f) * axes.dpi() / 72.0f;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         Color face = at(faceColors, i, defFace);
         if (strokeOnly) face.a = 0.0f;
         emitSubpathsFx(c, subs, face, at(edgeColors, i, defEdge), lw, dash,
                        hatch, hatchSpacing, ring, pathEffects,
-                       axes.style().dpi);
+                       axes.dpi());
     }
 }
 
@@ -1065,15 +1071,16 @@ void LineCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
                                 Rect2D rect) {
     Color def{0.121f, 0.466f, 0.705f, 1};
     auto ring = clipRingPx(axes, rect);
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     for (size_t i = 0; i < segments.size(); ++i) {
         std::vector<Point2D> px;
         px.reserve(segments[i].size());
         for (auto p : segments[i]) px.push_back(toPx(axes, rect, p));
-        float lw = at(lineWidths, i, 1.5f);
+        float lw = at(lineWidths, i, 1.5f) * axes.dpi() / 72.0f;
         Color col = at(edgeColors, i, def);
-        std::vector<float> dash =
-            dashes.empty() ? dashPattern(lineStyle, lw) : dashes;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         auto pass = [&](Point2D off, Color pc, float plw) {
             std::vector<Point2D> pxs = px;
             for (auto& q : pxs) { q.x += off.x; q.y += off.y; }
@@ -1123,12 +1130,13 @@ void PolyCollection::emitVector(render::VectorCanvas& c, const Axes& axes,
         sp.closed = true;
         sp.points.reserve(polys[i].size());
         for (auto p : polys[i]) sp.points.push_back(toPx(axes, rect, p));
-        float lw = at(lineWidths, i, 1.0f);
-        std::vector<float> dash = dashes.empty() ? dashPattern(lineStyle, lw)
-                                                 : dashes;
+        float lw = at(lineWidths, i, 1.0f) * axes.dpi() / 72.0f;
+        std::vector<float> dash = dashes;
+        for (auto& v : dash) v *= axes.dpi() / 72.0f;
+        if (dash.empty()) dash = dashPattern(lineStyle, lw);
         emitSubpathsFx(c, {sp}, at(faceColors, i, defFace),
                        at(edgeColors, i, defEdge), lw, dash, hatch,
-                       hatchSpacing, ring, pathEffects, axes.style().dpi);
+                       hatchSpacing, ring, pathEffects, axes.dpi());
     }
 }
 

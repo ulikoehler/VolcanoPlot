@@ -67,12 +67,17 @@ public:
     [[nodiscard]] virtual Color legendColor() const { return Color::black(); }
     /// Legend marker shape (default: filled square).
     [[nodiscard]] virtual LegendMarker legendMarker() const { return LegendMarker::Square; }
+    /// mpl: line handles inherit the artist's linewidth (points).
+    /// 0 → renderer default. Only used for LegendMarker::Line handles.
+    [[nodiscard]] virtual float legendLineWidthPt() const { return 0.0f; }
     /// Legend entries. Default: a single handle from label()/legendColor()/
     /// legendMarker() when label() is non-empty; plots with several legend
     /// items (per-series) override to return multiple handles.
     [[nodiscard]] virtual std::vector<LegendHandle> legendEntries() const {
         if (label().empty()) return {};
-        return {{label(), legendColor(), legendMarker()}};
+        LegendHandle h{label(), legendColor(), legendMarker()};
+        h.lineWidthPt = legendLineWidthPt();
+        return {h};
     }
     /// mpl "sticky edges": image/quadmesh-style artists disable the 5%
     /// autoscale margin (imshow/pcolormesh/hist2d/hexbin request tight

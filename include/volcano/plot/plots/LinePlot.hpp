@@ -30,9 +30,10 @@ public:
 
     void applyStyleDefaults(const FigureStyle& s) override {
         // mpl: rcParams['lines.linewidth'] (points) is the Line2D
-        // default; Series2D::lineWidth is in pixels → scale by dpi/72.
+        // default; Series2D::lineWidth is in points — the pt→px
+        // conversion happens at render time via the effective dpi.
         if (series_.lineWidth <= 0.0f)
-            series_.lineWidth = s.lines.lineWidth * s.dpi / 72.0f;
+            series_.lineWidth = s.lines.lineWidth;
     }
     bool applyCycleProps(const CycleProps& p) override {
         if (!series_.usePropCycle) return false;
@@ -53,11 +54,13 @@ public:
         return consumed;
     }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return series_.lineWidth; }
     /// mpl Line2D legend handle: the segment gets `numpoints` markers
     /// only when the line actually has markers (marker=None → bare line).
     [[nodiscard]] std::vector<LegendHandle> legendEntries() const override {
         if (label().empty()) return {};
         LegendHandle h{label(), legendColor(), LegendMarker::Line};
+        h.lineWidthPt = legendLineWidthPt();
         h.points = (series_.marker != MarkerStyle::None ||
                     series_.markerPath || !series_.markerTex.empty())
                        ? -2 : 0;
@@ -84,7 +87,7 @@ public:
                            axes.rect.y + (1.0f - f.y) * float(axes.rect.height)};
         };
         auto q = px(pt);
-        float tol = series_.lineWidth * 0.5f + 2.0f;
+        float tol = series_.lineWidth * axes.dpi() / 144.0f + 2.0f;
         for (size_t i = 0; i + 1 < series_.points.size(); ++i) {
             auto a = px(series_.points[i]);
             auto b = px(series_.points[i + 1]);

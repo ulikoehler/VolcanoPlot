@@ -26,8 +26,9 @@ struct SpyConfig {
 ///
 /// Non-zero elements are rendered as filled cells (or markers within cells),
 /// zero elements are either skipped or rendered with `zeroColor`.
-/// The matrix is rendered with row 0 at the top (matching matplotlib's
-/// convention where the first row is at the top).
+/// Cells are centered on integer data coordinates (mpl imshow extent,
+/// -0.5 … n-0.5); `Axes::spy()` applies the full mpl wiring (inverted y
+/// → row 0 on top, aspect='equal', integer index locators).
 class SpyPlot : public IPlot {
 public:
     /// Construct from a 2D matrix (row-major, nrows × ncols).

@@ -35,7 +35,8 @@ void AxhLine::draw(render::Cmd& cmd, render::Renderer& r,
     // Clip to the axes patch (matplotlib clips these lines to the axes).
     Rect2D clip = clipRectVk(rect, r.gpu().extent());
     r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
-                                    std::span{pts, 2}, color_, width_);
+                                    std::span{pts, 2}, color_,
+                                    width_ * axes.dpi() / 72.0f);
 }
 
 void AxhLine::contributeToAutoscale(Viewport& v) const {
@@ -64,7 +65,8 @@ void AxvLine::draw(render::Cmd& cmd, render::Renderer& r,
     };
     Rect2D clip = clipRectVk(rect, r.gpu().extent());
     r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
-                                    std::span{pts, 2}, color_, width_);
+                                    std::span{pts, 2}, color_,
+                                    width_ * axes.dpi() / 72.0f);
 }
 
 void AxvLine::contributeToAutoscale(Viewport& v) const {
@@ -105,7 +107,8 @@ void AxLine::draw(render::Cmd& cmd, render::Renderer& r,
     };
     Rect2D clip = clipRectVk(rect, r.gpu().extent());
     r.gpu().spine().drawLineStrip(cmd, clip, r.gpu().extent(),
-                                    std::span{pts, 2}, color_, width_);
+                                    std::span{pts, 2}, color_,
+                                    width_ * axes.dpi() / 72.0f);
 }
 
 void AxLine::contributeToAutoscale(Viewport& v) const {
@@ -191,9 +194,10 @@ void Vlines::prepare(render::Renderer& r) {
         segs.push_back({x, yMax_});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     if (vertexCount_)  // empty input → nothing to draw
         renderer_->upload(std::span{segs.data(), segs.size()}, color_,
-                          width_);
+                          width_ * kPtPx);
     prepared_ = true;
 }
 
@@ -228,9 +232,10 @@ void Hlines::prepare(render::Renderer& r) {
         segs.push_back({xMax_, y});
     }
     vertexCount_ = static_cast<uint32_t>(segs.size());
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     if (vertexCount_)  // empty input → nothing to draw
         renderer_->upload(std::span{segs.data(), segs.size()}, color_,
-                          width_);
+                          width_ * kPtPx);
     prepared_ = true;
 }
 
@@ -260,7 +265,7 @@ void AxhLine::emitVector(render::VectorCanvas& c, const Axes& axes,
     float py = rect.y +
         (1.0f - axes.dataToFraction({0.0f, y_}).y) * float(rect.height);
     render::VectorCanvas::Pen pen;
-    pen.color = color_; pen.width = width_;
+    pen.color = color_; pen.width = width_ * axes.dpi() / 72.0f;
     Point2D seg[2] = {{float(rect.x), py}, {float(rect.x + rect.width), py}};
     c.polyline(seg, pen);
 }
@@ -270,7 +275,7 @@ void AxvLine::emitVector(render::VectorCanvas& c, const Axes& axes,
     float px = rect.x +
         axes.dataToFraction({x_, 0.0f}).x * float(rect.width);
     render::VectorCanvas::Pen pen;
-    pen.color = color_; pen.width = width_;
+    pen.color = color_; pen.width = width_ * axes.dpi() / 72.0f;
     Point2D seg[2] = {{px, float(rect.y)}, {px, float(rect.y + rect.height)}};
     c.polyline(seg, pen);
 }
@@ -302,7 +307,7 @@ void AxLine::emitVector(render::VectorCanvas& c, const Axes& axes,
     Point2D seg[2] = {{p1.x + t0 * dx, p1.y + t0 * dy},
                       {p1.x + t1 * dx, p1.y + t1 * dy}};
     render::VectorCanvas::Pen pen;
-    pen.color = color_; pen.width = width_;
+    pen.color = color_; pen.width = width_ * axes.dpi() / 72.0f;
     c.polyline(seg, pen);
 }
 
@@ -337,7 +342,7 @@ void Vlines::emitVector(render::VectorCanvas& c, const Axes& axes,
                         Rect2D rect) {
     auto toPx = pxMapper(axes, rect);
     render::VectorCanvas::Pen pen;
-    pen.color = color_; pen.width = width_;
+    pen.color = color_; pen.width = width_ * axes.dpi() / 72.0f;
     for (float x : xPositions_) {
         Point2D seg[2] = {toPx({x, yMin_}), toPx({x, yMax_})};
         c.polyline(seg, pen);
@@ -348,7 +353,7 @@ void Hlines::emitVector(render::VectorCanvas& c, const Axes& axes,
                         Rect2D rect) {
     auto toPx = pxMapper(axes, rect);
     render::VectorCanvas::Pen pen;
-    pen.color = color_; pen.width = width_;
+    pen.color = color_; pen.width = width_ * axes.dpi() / 72.0f;
     for (float y : yPositions_) {
         Point2D seg[2] = {toPx({xMin_, y}), toPx({xMax_, y})};
         c.polyline(seg, pen);
@@ -385,6 +390,7 @@ void EventPlot::buildRows() {
 void EventPlot::prepare(render::Renderer& r) {
     buildRows();
     groups_.clear();
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     // Rows sharing (color, width) concatenate into one buffer/upload.
     std::map<std::tuple<float, float, float, float, float>, size_t> gidx;
     std::vector<std::vector<Point2D>> gverts;
@@ -404,7 +410,7 @@ void EventPlot::prepare(render::Renderer& r) {
     }
     for (size_t g = 0; g < gverts.size(); ++g) {
         auto sr = r.gpu().createLineSegmentRenderer();
-        sr->upload(std::span{gverts[g]}, gstyle[g].first, gstyle[g].second);
+        sr->upload(std::span{gverts[g]}, gstyle[g].first, gstyle[g].second * kPtPx);
         groups_.push_back({std::move(sr), uint32_t(gverts[g].size())});
     }
     prepared_ = true;
@@ -426,7 +432,7 @@ void EventPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     for (size_t i = 0; i < rowSegs_.size(); ++i) {
         render::VectorCanvas::Pen pen;
         pen.color = rowColors_[i];
-        pen.width = rowWidths_[i];
+        pen.width = rowWidths_[i] * axes.dpi() / 72.0f;
         for (size_t k = 0; k + 1 < rowSegs_[i].size(); k += 2) {
             Point2D seg[2] = {toPx(rowSegs_[i][k]), toPx(rowSegs_[i][k + 1])};
             c.polyline(seg, pen);

@@ -51,6 +51,12 @@ public:
         return ctx_.device.physical().getProperties()
             .limits.pointSizeRange[1];
     }
+    /// Largest supported hardware line width (line renderers clamp to
+    /// this; wider strokes must be tessellated).
+    [[nodiscard]] float maxLineWidth() const {
+        return ctx_.device.physical().getProperties()
+            .limits.lineWidthRange[1];
+    }
     [[nodiscard]] vk::CommandPool computePool() const {
         return ctx_.computePool.handle();
     }

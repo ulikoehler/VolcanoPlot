@@ -46,6 +46,16 @@ public:
         return consumed;
     }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Circle; }
+    // mpl: the PathCollection legend handle copies the collection's
+    // edgecolor and linewidth (e.g. classic mode's force_edgecolor).
+    [[nodiscard]] std::vector<LegendHandle> legendEntries() const override {
+        LegendHandle h{label(), legendColor(), legendMarker()};
+        if (series_.markerEdgeColor && series_.markerEdgeColor->a > 0.0f) {
+            h.edgeColor = *series_.markerEdgeColor;
+            h.lineWidthPt = series_.markerEdgeWidth;
+        }
+        return {h};
+    }
 
     /// Fraction of series points inside the data-space box (loc="best").
     [[nodiscard]] float occupancy(Range xr, Range yr) const override {

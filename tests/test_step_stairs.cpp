@@ -188,7 +188,7 @@ TEST(StepRegression, StairsAutoscaleMatchesData) {
     const auto& av = cf.axes->viewport();
     EXPECT_NEAR(av.x.min, -0.5f, 0.1f);
     EXPECT_NEAR(av.x.max, 10.5f, 0.1f);
-    // Y includes 0 (baseline) and max value 4.
-    EXPECT_NEAR(av.y.min, -0.2f, 0.1f);
+    // mpl stairs: y has a sticky edge at 0 (baseline), so no margin below.
+    EXPECT_NEAR(av.y.min, 0.0f, 0.01f);
     EXPECT_NEAR(av.y.max, 4.2f, 0.1f);
 }

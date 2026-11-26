@@ -5,6 +5,7 @@
 #include <volcano/core/PipelineCache.hpp>
 #include <volcano/plot/Transform.hpp>
 #include "../shaders/TransformGlsl.hpp"
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <stdexcept>
@@ -254,7 +255,8 @@ void LineRendererVk::draw(Cmd& cmdRef, plot::Rect2D rect,
     pc.width = width_;
 
     cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_.get());
-    cmd.setLineWidth(std::max(width_, 1.0f));
+    cmd.setLineWidth(
+        std::clamp(width_, 1.0f, svcs_->maxLineWidth()));
     cmd.pushConstants(pipelineLayout_.get(),
                       vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
                       0, sizeof(PC), &pc);

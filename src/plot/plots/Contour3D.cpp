@@ -185,7 +185,7 @@ void Contour3D::prepare(render::Renderer& r) {
 }
 
 void Contour3D::draw(render::Cmd& cmd, render::Renderer& r,
-                     const Axes&, Rect2D rect) {
+                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || segments_.empty()) return;
     // mpl colors each contour level from the colormap (default
     // image.cmap = viridis) and dashes negative levels.
@@ -205,11 +205,13 @@ void Contour3D::draw(render::Cmd& cmd, render::Renderer& r,
     float lMin = config_.levels.front(), lMax = config_.levels.back();
     float lRange = std::max(1e-9f, lMax - lMin);
     StrokeParams sp;
-    sp.width = config_.lineWidth;
+    const float widthPx = config_.lineWidth * axes.dpi() / 72.0f;
+    sp.width = widthPx;
     for (const auto& [level, idx] : byLevel) {
         sp.dashes.clear();
-        if (level < 0.0f)
-            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        // mpl: dashed negatives only for monochrome (colors=) contours.
+        if (level < 0.0f && !config_.cmap)
+            sp.dashes = dashPattern(LineStyle::Dashed, widthPx);
         std::vector<Point2D> tris;
         for (size_t i : idx) {
             Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};

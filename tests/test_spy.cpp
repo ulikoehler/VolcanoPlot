@@ -2,6 +2,7 @@
 #include "PlotTestHarness.hpp"
 
 #include <volcano/plot/plots/SpyPlot.hpp>
+#include <volcano/plot/Ticks.hpp>
 
 #include <gtest/gtest.h>
 
@@ -99,32 +100,30 @@ TEST(SpyRegression, IdentityMatrixHasDiagonal) {
     };
     SpyConfig cfg;
     cfg.color = Color::blue();
-    cf.axes->addPlot(std::make_unique<SpyPlot>(std::move(data), 3, 3, cfg));
+    cf.axes->spy(std::move(data), 3, 3, cfg);
     auto img = cf.render();
 
-    // Set viewport for predictable positions.
-    Viewport vp;
-    vp.x = {0, 3}; vp.y = {0, 3}; vp.z = {0, 1};
-    cf.axes->setViewport(vp);
-    auto img2 = cf.render();
+    // mpl wiring: cells centered at integer index coords, viewport
+    // x={-0.5, 2.5}, y={2.5, -0.5} (inverted → row 0 at top).
+    const auto vp = cf.axes->viewport();
 
-    // Row 0 is at top (y=2 to y=3), col 0 is at left (x=0 to x=1).
-    // So (0,0) element is at top-left, (1,1) at center, (2,2) at bottom-right.
-    auto [tlx, tly] = dataToPixel(vp, cf.axes->rect, 0.5f, 2.5f);
-    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 1.5f, 1.5f);
-    auto [brx, bry] = dataToPixel(vp, cf.axes->rect, 2.5f, 0.5f);
+    // (row0,col0) center at data (0,0) → top-left;
+    // (1,1) at center; (2,2) at bottom-right.
+    auto [tlx, tly] = dataToPixel(vp, cf.axes->rect, 0.0f, 0.0f);
+    auto [cx, cy] = dataToPixel(vp, cf.axes->rect, 1.0f, 1.0f);
+    auto [brx, bry] = dataToPixel(vp, cf.axes->rect, 2.0f, 2.0f);
 
-    EXPECT_TRUE(isBlue(img2.get(static_cast<uint32_t>(tlx), static_cast<uint32_t>(tly))))
+    EXPECT_TRUE(isBlue(img.get(static_cast<uint32_t>(tlx), static_cast<uint32_t>(tly))))
         << "Top-left (0,0) should be blue";
-    EXPECT_TRUE(isBlue(img2.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy))))
+    EXPECT_TRUE(isBlue(img.get(static_cast<uint32_t>(cx), static_cast<uint32_t>(cy))))
         << "Center (1,1) should be blue";
-    EXPECT_TRUE(isBlue(img2.get(static_cast<uint32_t>(brx), static_cast<uint32_t>(bry))))
+    EXPECT_TRUE(isBlue(img.get(static_cast<uint32_t>(brx), static_cast<uint32_t>(bry))))
         << "Bottom-right (2,2) should be blue";
 
     // Off-diagonal should be white.
-    auto [ox, oy] = dataToPixel(vp, cf.axes->rect, 2.5f, 2.5f);
-    EXPECT_FALSE(isBlue(img2.get(static_cast<uint32_t>(ox), static_cast<uint32_t>(oy))))
-        << "Top-right (0,2) should be white (zero element)";
+    auto [ox, oy] = dataToPixel(vp, cf.axes->rect, 2.0f, 0.0f);
+    EXPECT_FALSE(isBlue(img.get(static_cast<uint32_t>(ox), static_cast<uint32_t>(oy))))
+        << "Top-right (row0, col2) should be white (zero element)";
 }
 
 TEST(SpyRegression, AllZeroMatrixRendersNothing) {
@@ -160,11 +159,42 @@ TEST(SpyRegression, AutoscaleMatchesMatrixDimensions) {
     cf.axes->addPlot(std::make_unique<SpyPlot>(std::move(data), 2, 2));
     cf.render();
 
+    // mpl imshow extent: cells centered at integer coords →
+    // [-0.5, n-0.5] on both axes (tight autoscale, no margin).
     const auto& av = cf.axes->viewport();
-    EXPECT_NEAR(av.x.min, 0.0f, 0.05f);
-    EXPECT_NEAR(av.x.max, 2.0f, 0.05f);
-    EXPECT_NEAR(av.y.min, 0.0f, 0.05f);
-    EXPECT_NEAR(av.y.max, 2.0f, 0.05f);
+    EXPECT_NEAR(av.x.min, -0.5f, 0.05f);
+    EXPECT_NEAR(av.x.max, 1.5f, 0.05f);
+    EXPECT_NEAR(av.y.min, -0.5f, 0.05f);
+    EXPECT_NEAR(av.y.max, 1.5f, 0.05f);
+}
+
+TEST(SpyRegression, AxesSpyMplWiring) {
+    // Axes::spy() must wire the axes the way mpl's spy() does:
+    // aspect='equal', extent [-0.5, n-0.5] with inverted y, x ticks
+    // on top with marks both sides, integer index locators.
+    SpyFigure cf(256);
+    const uint32_t n = 6;
+    std::vector<float> data(n * n, 0.0f);
+    data[0] = 1.0f;
+    cf.axes->spy(std::move(data), n, n);
+
+    EXPECT_EQ(cf.axes->aspect(), AspectMode::Equal);
+    const auto& av = cf.axes->viewport();
+    EXPECT_NEAR(av.x.min, -0.5f, 1e-5f);
+    EXPECT_NEAR(av.x.max, n - 0.5f, 1e-5f);
+    EXPECT_NEAR(av.y.min, n - 0.5f, 1e-5f);   // inverted (row 0 top)
+    EXPECT_NEAR(av.y.max, -0.5f, 1e-5f);
+    // tick_top + set_ticks_position('both') → marks both, labels top.
+    EXPECT_EQ(cf.axes->xTicksPosition(), "unknown");
+    const auto* xl = dynamic_cast<const MaxNLocator*>(
+        cf.axes->xLocator().get());
+    const auto* yl = dynamic_cast<const MaxNLocator*>(
+        cf.axes->yLocator().get());
+    ASSERT_NE(xl, nullptr);
+    ASSERT_NE(yl, nullptr);
+    EXPECT_TRUE(xl->integer());
+    EXPECT_TRUE(yl->integer());
+    EXPECT_NEAR(cf.axes->style().title.y, 1.05f, 1e-5f);
 }
 
 TEST(SpyRegression, PrecisionThreshold) {

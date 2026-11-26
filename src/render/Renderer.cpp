@@ -329,7 +329,11 @@ void Renderer::drawText(render::Cmd& cmd, const plot::Axes& axes,
         // Position above the axes: text bottom at rect.y - padding.
         // text bottom = y + descent = y + (height - ascent)
         // So y = rect.y - pad - (height - ascent) = rect.y - pad - height + ascent
-        float cy = float(rect.y) - style.title.pad * figDpi / 72.0f -
+        // mpl title.set_y: the anchor sits at title.y axes fraction
+        // (extra (y-1)*H above the top edge).
+        float cy = float(rect.y)
+                   - (style.title.y - 1.0f) * float(rect.height)
+                   - style.title.pad * figDpi / 72.0f -
                    m.height + m.ascent;
         auto tm = richTextFace(style.title.font);
         drawRichText(cmd, fullRect,
@@ -833,7 +837,8 @@ void Renderer::drawSpines(render::Cmd& cmd, const plot::Axes& axes,
     // mpl frame_on=False: the spine frame is removed while tick marks
     // and labels keep drawing.
     auto spineColor = style.xAxis.color;
-    float t = std::max(style.xAxis.lineWidth, 1.0f);
+    // mpl axes.linewidth is in points — convert to px at the figure dpi.
+    float t = std::max(style.xAxis.lineWidth * figDpi / 72.0f, 1.0f);
     float x0 = float(rect.x), y0 = float(rect.y);
     float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
     const auto& sp = axes.spines();
@@ -858,7 +863,10 @@ void Renderer::drawSpines(render::Cmd& cmd, const plot::Axes& axes,
             const auto& s = sp.side(side);
             if (!s.visible) return;
             plot::Color c = s.color.value_or(spineColor);
-            float sw = std::max(s.lineWidth.value_or(t), 1.0f);
+            float sw = std::max(
+                s.lineWidth.value_or(style.xAxis.lineWidth) *
+                    figDpi / 72.0f,
+                1.0f);
             // mpl arc spines (set_patch_arc): stroke an arc through
             // `scale(radius*0.5).translate(center) + transAxes`.
             if (s.arc) {
@@ -1481,19 +1489,21 @@ Renderer::collectLegendEntries(const plot::Axes& axes) {
     std::vector<LegendEntry> entries;
     if (lg.explicitHandles) {
         for (auto& h : *lg.explicitHandles)
-            entries.push_back({h.label, h.color, h.marker, h.points});
+            entries.push_back(
+                {h.label, h.color, h.marker, h.points, h.lineWidthPt,
+                 h.edgeColor});
     } else {
         for (auto& plot : axes.plots()) {
             if (auto it = lg.handlerMap.find(std::type_index(typeid(*plot)));
                 it != lg.handlerMap.end()) {
                 for (auto& h : it->second(*plot))
-                    entries.push_back(
-                        {std::move(h.label), h.color, h.marker, h.points});
+                    entries.push_back({std::move(h.label), h.color, h.marker,
+                                       h.points, h.lineWidthPt, h.edgeColor});
                 continue;
             }
             for (auto& h : plot->legendEntries())
-                entries.push_back(
-                    {std::move(h.label), h.color, h.marker, h.points});
+                entries.push_back({std::move(h.label), h.color, h.marker,
+                                   h.points, h.lineWidthPt, h.edgeColor});
         }
     }
     for (size_t i = 0; i < lg.explicitLabels.size() && i < entries.size();
@@ -1529,6 +1539,7 @@ Renderer::LegendLayout
 Renderer::measureLegend(const std::vector<LegendEntry>& entries,
                         const plot::LegendStyle& lg, float dpi) {
     LegendLayout L;
+    L.dpi = dpi;
     // Font scale: same points→pixels mapping as the rest of the text
     // pipeline (16px atlas reference at 72dpi).
     L.scale = lg.font.size * dpi / (72.0f * 16.0f);
@@ -1653,7 +1664,9 @@ plot::Rect2D Renderer::paintLegendBox(
         auto bg = lg.faceColor;
         bg.a *= lg.frameAlpha;
         gpu().spine().drawFilledRect(cmd, fullRect, ext, boxRect, bg);
-        gpu().spine().drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor, 1.0f);
+        // mpl legend frame: patch.linewidth (0.8pt) → px.
+        gpu().spine().drawRect(cmd, fullRect, ext, boxRect, lg.edgeColor,
+                               0.8f * L.dpi / 72.0f);
     }
 
     // mpl alignment: the entry block + title align left/center/right
@@ -1727,7 +1740,10 @@ plot::Rect2D Renderer::paintLegendBox(
 
             if (e.marker == plot::LegendMarker::Line) {
                 plot::Point2D pts[] = {{hX, midY}, {hX + handleW, midY}};
-                gpu().spine().drawLineStrip(cmd, fullRect, ext, pts, e.color, 2.0f);
+                // mpl: the handle inherits the artist's linewidth (pt→px).
+                const float hwPx = e.lineWidthPt > 0.0f
+                    ? e.lineWidthPt * L.dpi / 72.0f : 2.0f;
+                gpu().spine().drawLineStrip(cmd, fullRect, ext, pts, e.color, hwPx);
                 // mpl numpoints: markers evenly spaced on the segment.
                 const float rad = markerSize * 0.3f;
                 for (int p = 0; p < npts; ++p) {
@@ -1738,11 +1754,19 @@ plot::Rect2D Renderer::paintLegendBox(
             } else if (e.marker == plot::LegendMarker::Circle) {
                 // mpl scatterpoints: discs spread across the handle.
                 const float rad = markerSize * (npts > 1 ? 0.35f : 0.5f);
+                // mpl: handle markers carry the collection's edgecolor/
+                // linewidth — stroke straddles the path edge.
+                const float edgePx = e.edgeColor.a > 0.0f
+                    ? (e.lineWidthPt > 0.0f ? e.lineWidthPt * L.dpi / 72.0f
+                                          : 2.0f) * 0.5f
+                    : 0.0f;
                 for (int p = 0; p < npts; ++p) {
                     const float fx = npts == 1 ? 0.5f
                         : float(p) / float(npts - 1);
-                    disc(hX + handleW * 0.15f + fx * handleW * 0.7f,
-                         midY, rad, e.color);
+                    const float cx = hX + handleW * 0.15f + fx * handleW * 0.7f;
+                    if (edgePx > 0.0f)
+                        disc(cx, midY, rad + edgePx, e.edgeColor);
+                    disc(cx, midY, rad - edgePx, e.color);
                 }
             } else {
                 // Filled square centered in the handle area.
@@ -1995,7 +2019,7 @@ void Renderer::renderFrameSubset(plot::Figure& figure, DrawSubset subset) {
         if (subset != DrawSubset::AnimatedOnly && graphicsReady_ &&
             p->axes->axison() && p->axes->frameOn()) {
             // mpl Axes.set_alpha scales the patch alpha.
-            auto fc = p->axes->style().faceColor;
+            auto fc = p->axes->style().axesFaceColor;
             if (auto a = p->axes->alpha()) fc.a *= *a;
             if (fc.a > 0.0f)
                 gpu().spine().drawFilledRect(cmd, vrect, ext, rect, fc);
@@ -2816,8 +2840,8 @@ std::vector<uint8_t> Renderer::savefigPixels(plot::Figure& figure,
     if (opts.transparent) {
         savedAxFc.reserve(figure.placements().size());
         for (auto& p : figure.placements()) {
-            savedAxFc.push_back(p.axes->style().faceColor);
-            p.axes->style().faceColor.a = 0.0f;
+            savedAxFc.push_back(p.axes->style().axesFaceColor);
+            p.axes->style().axesFaceColor.a = 0.0f;
         }
     }
     if (opts.facecolor) {
@@ -2843,7 +2867,7 @@ std::vector<uint8_t> Renderer::savefigPixels(plot::Figure& figure,
         size_t i = 0;
         for (auto& p : figure.placements()) {
             if (i >= savedAxFc.size()) break;
-            p.axes->style().faceColor = savedAxFc[i++];
+            p.axes->style().axesFaceColor = savedAxFc[i++];
         }
     }
 
@@ -3024,15 +3048,15 @@ bool Renderer::savefigVector(plot::Figure& figure,
     if (options.transparent) {
         savedAxFc.reserve(figure.placements().size());
         for (auto& p : figure.placements()) {
-            savedAxFc.push_back(p.axes->style().faceColor);
-            p.axes->style().faceColor.a = 0.0f;
+            savedAxFc.push_back(p.axes->style().axesFaceColor);
+            p.axes->style().axesFaceColor.a = 0.0f;
         }
     }
     auto restoreAxFc = [&] {
         size_t i = 0;
         for (auto& p : figure.placements()) {
             if (i >= savedAxFc.size()) break;
-            p.axes->style().faceColor = savedAxFc[i++];
+            p.axes->style().axesFaceColor = savedAxFc[i++];
         }
     };
 
@@ -3225,13 +3249,14 @@ void Renderer::drawInsetIndicators(render::Cmd& cmd,
         gpu().spine().drawRect(cmd, fullRect, ext,
             {int32_t(std::lround(L.rect.x)), int32_t(std::lround(L.rect.y)),
              uint32_t(std::lround(L.rect.w)),
-             uint32_t(std::lround(L.rect.h))}, edge, ind.lineWidth);
+             uint32_t(std::lround(L.rect.h))}, edge,
+            ind.lineWidth * axes.dpi() / 72.0f);
         for (int i = 0; i < 4; ++i) {
             if (!L.connVisible[i]) continue;
             plot::Point2D seg[2] = {L.connectors[i].first,
                                     L.connectors[i].second};
             gpu().spine().drawLineStrip(cmd, fullRect, ext,
-                std::span{seg}, edge, ind.lineWidth);
+                std::span{seg}, edge, ind.lineWidth * axes.dpi() / 72.0f);
         }
     }
 }

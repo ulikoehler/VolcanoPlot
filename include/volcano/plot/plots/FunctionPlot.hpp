@@ -26,6 +26,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return lineWidth_; }
 
     /// Re-evaluate the function on the GPU for the given x range.
     /// Called when the (manual) viewport changes — infinite zoom.

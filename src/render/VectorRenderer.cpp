@@ -272,7 +272,7 @@ void VectorRenderer::emitAxes(const plot::Axes& axes, Rect2D rect,
     const auto& style = axes.style();
     // Axes facecolor patch — mpl draws it iff axison && frameon.
     if (axes.axison() && axes.frameOn()) {
-        auto fc = style.faceColor;
+        auto fc = style.axesFaceColor;
         if (auto a = axes.alpha()) fc.a *= *a;
         if (fc.a > 0.0f) fillRect(c, rect, fc);
     }
@@ -383,7 +383,9 @@ void VectorRenderer::emitSpinesTicks(const plot::Axes& axes, Rect2D rect,
 
     float x0 = float(rect.x), y0 = float(rect.y);
     float x1 = x0 + float(rect.width), y1 = y0 + float(rect.height);
-    Pen sp = penOf(style.xAxis.color, std::max(style.xAxis.lineWidth, 1.0f));
+    // mpl axes.linewidth is in points — convert to px at the figure dpi.
+    Pen sp = penOf(style.xAxis.color,
+                   std::max(style.xAxis.lineWidth * figDpi / 72.0f, 1.0f));
     // mpl frame_on=False removes the spine frame; tick marks remain.
     const auto& spv = axes.spines();
     if (axes.frameOn()) {
@@ -395,7 +397,8 @@ void VectorRenderer::emitSpinesTicks(const plot::Axes& axes, Rect2D rect,
             auto g = axes.spineLine(side, rect);
             Pen pen = sp;
             if (s.color) pen.color = *s.color;
-            if (s.lineWidth) pen.width = std::max(*s.lineWidth, 1.0f);
+            if (s.lineWidth)
+                pen.width = std::max(*s.lineWidth * figDpi / 72.0f, 1.0f);
             // mpl set_linestyle/set_dashes on a spine.
             if (!s.dashes.empty()) pen.dashes = s.dashes;
             else if (s.lineStyle && *s.lineStyle != plot::LineStyle::Solid)
@@ -564,7 +567,9 @@ void VectorRenderer::emitLabels(const plot::Axes& axes, Rect2D rect,
     if (!style.title.text.empty()) {
         auto m = measure(style.title.text, titleScale);
         float tx = rect.x + rect.width / 2.0f - m.width / 2.0f;
-        float ty = y0 - style.title.pad * figDpi / 72.0f - m.height + m.ascent;
+        // mpl title.set_y: anchor at title.y axes fraction above bottom.
+        float ty = y0 - (style.title.y - 1.0f) * float(rect.height)
+                 - style.title.pad * figDpi / 72.0f - m.height + m.ascent;
         richText(c, style.title.text, tx, ty,
                  style.title.color, titleScale, style.title.font.rotation,
                  plot::HAlign::Center);
@@ -1021,12 +1026,14 @@ void VectorRenderer::emitInsetIndicators(const plot::Axes& axes,
                         {L.rect.x, L.rect.y}};
         if (face.a > 0.0f)
             c.polygon(std::span{q, 4}, face);
-        c.polyline(std::span{q, 5}, penOf(edge, ind.lineWidth));
+        c.polyline(std::span{q, 5},
+                   penOf(edge, ind.lineWidth * axes.dpi() / 72.0f));
         for (int i = 0; i < 4; ++i) {
             if (!L.connVisible[i]) continue;
             Point2D seg[2] = {L.connectors[i].first,
                               L.connectors[i].second};
-            c.polyline(std::span{seg}, penOf(edge, ind.lineWidth));
+            c.polyline(std::span{seg},
+                       penOf(edge, ind.lineWidth * axes.dpi() / 72.0f));
         }
     }
 }
@@ -1076,6 +1083,10 @@ struct VectorRenderer::LegendVecEntry {
     plot::Color color;
     plot::LegendMarker marker;
     int points = -1;
+    /// LegendHandle::edgeColor — marker edge ring (alpha 0 = none).
+    plot::Color edgeColor = plot::Color::transparent();
+    /// LegendHandle::lineWidthPt — marker edge width in points.
+    float lineWidthPt = 0.0f;
 };
 
 std::vector<VectorRenderer::LegendVecEntry>
@@ -1084,19 +1095,22 @@ VectorRenderer::collectVecLegendEntries(const plot::Axes& axes) {
     std::vector<LegendVecEntry> entries;
     if (lg.explicitHandles) {
         for (auto& h : *lg.explicitHandles)
-            entries.push_back({h.label, h.color, h.marker, h.points});
+            entries.push_back({h.label, h.color, h.marker, h.points,
+                               h.edgeColor, h.lineWidthPt});
     } else {
         for (auto& plot : axes.plots()) {
             if (auto it = lg.handlerMap.find(std::type_index(typeid(*plot)));
                 it != lg.handlerMap.end()) {
                 for (auto& h : it->second(*plot))
                     entries.push_back(
-                        {std::move(h.label), h.color, h.marker, h.points});
+                        {std::move(h.label), h.color, h.marker, h.points,
+                         h.edgeColor, h.lineWidthPt});
                 continue;
             }
             for (auto& h : plot->legendEntries())
                 entries.push_back(
-                    {std::move(h.label), h.color, h.marker, h.points});
+                    {std::move(h.label), h.color, h.marker, h.points,
+                     h.edgeColor, h.lineWidthPt});
         }
     }
     for (size_t i = 0; i < lg.explicitLabels.size() && i < entries.size();
@@ -1369,11 +1383,20 @@ void VectorRenderer::emitLegendBox(VectorCanvas& c,
                 }
             } else if (e.marker == plot::LegendMarker::Circle) {
                 const float rad = markerSize * (npts > 1 ? 0.35f : 0.5f);
+                // mpl: handle markers carry the collection's edgecolor/
+                // linewidth — stroke straddles the path edge.
+                const float edgePx = e.edgeColor.a > 0.0f
+                    ? (e.lineWidthPt > 0.0f ? e.lineWidthPt * dpi / 72.0f
+                                          : 2.0f) * 0.5f
+                    : 0.0f;
                 for (int p = 0; p < npts; ++p) {
                     const float fx = npts == 1 ? 0.5f
                         : float(p) / float(npts - 1);
-                    disc(hX + handleW * 0.15f + fx * handleW * 0.7f,
-                         midY, rad, e.color);
+                    const float cx = hX + handleW * 0.15f
+                                   + fx * handleW * 0.7f;
+                    if (edgePx > 0.0f)
+                        disc(cx, midY, rad + edgePx, e.edgeColor);
+                    disc(cx, midY, rad - edgePx, e.color);
                 }
             } else {
                 const float sx = hX + (handleW - markerSize) / 2.0f;

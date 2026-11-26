@@ -49,6 +49,7 @@ void FunctionPlot::prepare(render::Renderer& r) {
 
 void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
                               uint32_t canvasWidth) {
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     xRange_ = xRange;
     evalRange_ = xRange;
     evalSamples_ = std::max(samples_, canvasWidth * 2); // 2 samples per px
@@ -60,7 +61,7 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
         }
         eval_->eval(evalBuf_, xRange.min, xRange.max, evalSamples_);
         renderer_->bindExternalBuffer(evalBuf_, evalSamples_);
-        renderer_->setStyle(color_, lineWidth_);
+        renderer_->setStyle(color_, lineWidth_ * kPtPx);
         return;
     }
 
@@ -71,7 +72,7 @@ void FunctionPlot::reevaluate(render::Renderer& r, Range xRange,
         float x = xRange.min + t * xRange.span();
         points[i] = {x, evalCpu(glslBody_, x)};
     }
-    renderer_->upload(std::span{points}, color_, lineWidth_);
+    renderer_->upload(std::span{points}, color_, lineWidth_ * kPtPx);
 }
 
 void FunctionPlot::draw(render::Cmd& cmd, render::Renderer& r,

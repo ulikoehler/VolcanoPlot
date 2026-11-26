@@ -33,10 +33,27 @@ std::pair<bool, bool> IPlot::feedsData(const Axes& axes) const {
 
 Figure::~Figure() = default;
 
-Figure::Figure() : grid_(std::make_shared<GridSpec>(1, 1)), style_(rc::params()) {}
+namespace {
+/// mpl: the top-level GridSpec is built from the figure.subplot.* rc
+/// params of the style in effect at Figure construction.
+void applySubplotGrid(GridSpec& g, const FigureStyle& s) {
+    g.left = s.subplotLeft;
+    g.right = s.subplotRight;
+    g.bottom = s.subplotBottom;
+    g.top = s.subplotTop;
+    g.wspace = s.subplotWspace;
+    g.hspace = s.subplotHspace;
+}
+} // namespace
+
+Figure::Figure() : grid_(std::make_shared<GridSpec>(1, 1)), style_(rc::params()) {
+    applySubplotGrid(*grid_, style_);
+}
 
 Figure::Figure(uint32_t rows, uint32_t cols)
-    : grid_(std::make_shared<GridSpec>(rows, cols)), style_(rc::params()) {}
+    : grid_(std::make_shared<GridSpec>(rows, cols)), style_(rc::params()) {
+    applySubplotGrid(*grid_, style_);
+}
 
 Figure::Figure(std::shared_ptr<GridSpec> grid)
     : grid_(std::move(grid)), style_(rc::params()) {}
@@ -144,7 +161,7 @@ Axes* Figure::twinx(Axes& parent) {
     raw->setYTicksRight(true);
     // matplotlib twin axes have an invisible patch so the parent's
     // artists stay visible underneath the overlay.
-    raw->style().faceColor = Color::transparent();
+    raw->style().axesFaceColor = Color::transparent();
     AxesPlacement p;
     p.axes = std::move(a);
     p.mode = PlacementMode::Overlay;
@@ -159,7 +176,7 @@ Axes* Figure::twiny(Axes& parent) {
     raw->setFigure(this);
     parent.shareY(*raw);
     raw->setXTicksTop(true);
-    raw->style().faceColor = Color::transparent();
+    raw->style().axesFaceColor = Color::transparent();
     AxesPlacement p;
     p.axes = std::move(a);
     p.mode = PlacementMode::Overlay;

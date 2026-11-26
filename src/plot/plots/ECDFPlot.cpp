@@ -81,13 +81,16 @@ void ECDFPlot::buildStepPoints() {
 
 void ECDFPlot::prepare(render::Renderer& r) {
     computeECDF(r.gpu());
+
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     buildStepPoints();
 
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
 
     if (!stepPoints_.empty()) {
         lineRenderer_->upload(std::span{stepPoints_}, config_.color,
-                             config_.lineWidth);
+                             config_.lineWidth * kPtPx);
     }
 
     // Build fill triangles if requested.

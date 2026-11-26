@@ -77,7 +77,9 @@ void Quiver3D::prepare(render::Renderer& r) {
     if (!shaftRenderer_) shaftRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!shaftSegments_.empty()) {
         shaftRenderer_->upload3D(std::span{shaftSegments_}, config_.color,
-                                 config_.lineWidth, vp_);
+                                 config_.lineWidth *
+                                     (owner() ? owner()->dpi() : 72.0f) /
+                                     72.0f, vp_);
     }
 
     if (config_.filledHeads && !headPositions_.empty()) {

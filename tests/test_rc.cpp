@@ -131,7 +131,7 @@ TEST(RcFile, LoadMplstyleFile) {
     ASSERT_TRUE(rc::loadFile(path));
     std::remove(path);
 
-    expectColorHex(rc::params().faceColor, "EAEAF2");
+    expectColorHex(rc::params().axesFaceColor, "EAEAF2");
     EXPECT_TRUE(rc::params().xAxis.grid);
     EXPECT_FLOAT_EQ(rc::params().lines.lineWidth, 2.5f);
     ASSERT_EQ(rc::params().colorCycle.colors.size(), 2u);

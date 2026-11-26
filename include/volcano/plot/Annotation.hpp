@@ -397,7 +397,7 @@ struct InsetIndicator {
     Color edgeColor{0.5f, 0.5f, 0.5f, 1.0f};
     /// mpl alpha (multiplies both colors).
     float alpha = 0.5f;
-    /// Connector line width in px (mpl linewidth, patch default 1.0).
+    /// Connector line width in points (mpl linewidth, patch default 1.0).
     float lineWidth = 1.0f;
     /// Per-corner connector visibility [LL, UL, LR, UR]; nullopt = auto
     /// (mpl picks the two corners that don't overlap the inset box).

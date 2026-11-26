@@ -149,8 +149,10 @@ FigureStyle defaultStyle() {
     s.patch.edgeColor = Color::black();
     s.patch.lineWidth = 1.0f;
     s.legend.frameOn = true;
-    s.legend.faceColor = Color::fromRgba8(255, 255, 255, 200);
-    s.legend.edgeColor = Color::black();
+    // mpl legend.facecolor 'inherit' → axes.facecolor (white); the
+    // frame's alpha comes from legend.framealpha (0.8) at draw time.
+    // mpl legend.edgecolor '0.8' → #ccc (LegendStyle default).
+    s.legend.faceColor = Color::white();
     return s;
 }
 
@@ -212,7 +214,38 @@ FigureStyle classicStyle() {
     s.patch.edgeColor = Color::black();
     s.patch.lineWidth = 1.0f;
     s.patch.forceEdgeColor = true;
+    // mpl classic: axes.xmargin/ymargin 0 + axes.autolimit_mode
+    // 'round_numbers' (view limits snap to outer edge ticks) and
+    // _internal.classic_mode (locator steps [1,2,5,10], scatter
+    // margins restore).
+    s.xMargin = 0.0f;
+    s.yMargin = 0.0f;
+    s.autolimitMode = "round_numbers";
+    s.classicMode = true;
+    // mpl classic figure.subplot.bottom/top: 0.1/0.9.
+    s.subplotBottom = 0.1f;
+    s.subplotTop = 0.9f;
+    // mpl classic: axes.formatter.limits [-7,7], image.cmap jet,
+    // axes.titlepad/labelpad 5.
+    s.formatterLimits = {-7, 7};
+    s.colorbar.colormap = "jet";
+    s.title.pad = 5.0f;
+    s.xAxis.labelPad = 5.0f;
+    s.yAxis.labelPad = 5.0f;
     s.legend.frameOn = true;
+    // mpl classic legend: fancybox off, loc 'upper right', numpoints 2,
+    // facecolor/edgecolor 'inherit' → axes.facecolor w / axes.edgecolor
+    // k, framealpha None → opaque.
+    s.legend.fancyBox = false;
+    s.legend.location = "upper right";
+    s.legend.numpoints = 2;
+    s.legend.scatterpoints = 3;
+    s.legend.faceColor = Color::white();
+    s.legend.edgeColor = Color::black();
+    s.legend.frameAlpha = 1.0f;
+    // mpl classic grid.linestyle ':' (grid off by default).
+    s.xAxis.gridLineStyle = ":";
+    s.yAxis.gridLineStyle = ":";
     return s;
 }
 
@@ -230,7 +263,7 @@ FigureStyle ggplotStyle() {
         hex("E24A33"), hex("348ABD"), hex("988ED5"), hex("777777"),
         hex("FBC15E"), hex("8EBA42"), hex("FFB5B8"),
     };
-    s.faceColor = hex("E5E5E5"); // axes.facecolor
+    s.axesFaceColor = hex("E5E5E5");
     s.xAxis.color = Color::white();   // axes.edgecolor
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 1.0f;
@@ -258,6 +291,8 @@ FigureStyle ggplotStyle() {
     s.patch.edgeColor = hex("EEEEEE");
     s.patch.lineWidth = 0.5f;
     s.legend.frameOn = true;
+    // mpl legend.facecolor 'inherit' → axes.facecolor (E5E5E5).
+    s.legend.faceColor = hex("E5E5E5");
     return s;
 }
 
@@ -277,10 +312,8 @@ FigureStyle seabornStyle() {
     s.yAxis.gridLineWidth = 1.0f;
     s.xAxis.gridLineStyle = "-";
     s.yAxis.gridLineStyle = "-";
-    // axes facecolor = EAEAF2 (light gray-blue)
-    // We represent axes facecolor via xAxis.faceColor but the renderer uses
-    // figure faceColor for the axes background. Set it there.
-    s.faceColor = hex("EAEAF2");
+    // axes.facecolor = EAEAF2 (light gray-blue); figure stays white.
+    s.axesFaceColor = hex("EAEAF2");
     s.xAxis.color = Color::white();
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 0.0f;
@@ -311,7 +344,7 @@ FigureStyle seabornDarkgrid() {
     s.yAxis.gridColor = Color::white();
     s.xAxis.gridLineStyle = "-";
     s.yAxis.gridLineStyle = "-";
-    s.faceColor = hex("EAEAF2");
+    s.axesFaceColor = hex("EAEAF2");
     s.xAxis.color = Color::white();
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 0.0f;
@@ -329,7 +362,7 @@ FigureStyle seabornWhitegrid() {
     s.styleName = "seaborn-v0_8-whitegrid";
     s.xAxis.grid = true;
     s.yAxis.grid = true;
-    s.faceColor = Color::white();
+    s.axesFaceColor = Color::white();
     s.xAxis.color = gray(0.8f);
     s.yAxis.color = gray(0.8f);
     s.xAxis.lineWidth = 1.0f;
@@ -351,7 +384,7 @@ FigureStyle seabornDark() {
     s.styleName = "seaborn-v0_8-dark";
     s.xAxis.grid = false;
     s.yAxis.grid = false;
-    s.faceColor = hex("EAEAF2");
+    s.axesFaceColor = hex("EAEAF2");
     s.xAxis.color = Color::white();
     s.yAxis.color = Color::white();
     s.xAxis.lineWidth = 0.0f;
@@ -369,7 +402,7 @@ FigureStyle seabornWhite() {
     s.styleName = "seaborn-v0_8-white";
     s.xAxis.grid = false;
     s.yAxis.grid = false;
-    s.faceColor = Color::white();
+    s.axesFaceColor = Color::white();
     s.xAxis.color = gray(0.15f);
     s.yAxis.color = gray(0.15f);
     s.xAxis.lineWidth = 1.25f;
@@ -496,6 +529,7 @@ FigureStyle darkBackground() {
     FigureStyle s;
     s.styleName = "dark_background";
     s.faceColor = Color::black();
+    s.axesFaceColor = Color::black();
     s.edgeColor = Color::black();
     s.textColor = Color::white();
     s.axisBelow = false;
@@ -521,8 +555,9 @@ FigureStyle darkBackground() {
     s.lines.solidCapStyle = "projecting";
     s.patch.faceColor = hex("8dd3c7");
     s.patch.edgeColor = Color::white();
-    s.legend.faceColor = Color::fromRgba8(40, 40, 40, 200);
-    s.legend.edgeColor = Color::white();
+    // mpl dark_background doesn't set legend colors: facecolor
+    // 'inherit' → axes.facecolor (black), edgecolor '0.8' (#ccc).
+    s.legend.faceColor = Color::black();
     s.legend.frameOn = true;
     return s;
 }
@@ -534,6 +569,7 @@ FigureStyle grayscaleStyle() {
     // mpl: axes.facecolor white; figure.facecolor 0.75 is overridden by
     // savefig.facecolor white on save — the rendered PNG is all-white.
     s.faceColor = Color::white();
+    s.axesFaceColor = Color::white();
     s.edgeColor = Color::white();
     s.textColor = Color::black();
     s.colorCycle.colors = {
@@ -554,7 +590,7 @@ FigureStyle grayscaleStyle() {
 FigureStyle bmhStyle() {
     FigureStyle s;
     s.styleName = "bmh";
-    s.faceColor = hex("EEEEEE");
+    s.axesFaceColor = hex("EEEEEE");
     s.edgeColor = Color::white();
     s.textColor = Color::black();
     s.axisBelow = false;
@@ -582,6 +618,8 @@ FigureStyle bmhStyle() {
     s.patch.edgeColor = hex("EEEEEE");
     s.patch.lineWidth = 0.5f;
     s.legend.frameOn = true;
+    // mpl legend.facecolor 'inherit' → axes.facecolor (EEEEEE).
+    s.legend.faceColor = hex("EEEEEE");
     // mpl axes.titlesize 'x-large'=1.44*10, axes.labelsize 'large'=1.2*10.
     s.title.font.size = 14.4f;
     s.xAxis.labelFont.size = 12.0f;
@@ -594,6 +632,7 @@ FigureStyle fivethirtyeightStyle() {
     FigureStyle s;
     s.styleName = "fivethirtyeight";
     s.faceColor = hex("F0F0F0");
+    s.axesFaceColor = hex("F0F0F0");
     s.edgeColor = hex("F0F0F0");
     s.textColor = Color::black();
     s.axisBelow = true;
@@ -623,6 +662,12 @@ FigureStyle fivethirtyeightStyle() {
     s.patch.edgeColor = hex("F0F0F0");
     s.patch.lineWidth = 0.5f;
     s.legend.frameOn = true;
+    // mpl legend.facecolor 'inherit' → axes.facecolor (F0F0F0).
+    s.legend.faceColor = hex("F0F0F0");
+    // mpl figure.subplot.* (top stays at the 0.88 default).
+    s.subplotLeft = 0.08f;
+    s.subplotRight = 0.95f;
+    s.subplotBottom = 0.07f;
     // mpl: axes.titlesize 'x-large'=1.44*font.size(14), labelsize 'large',
     // tick labels 'medium'=font.size.
     s.title.font.size = 20.16f;
@@ -637,9 +682,9 @@ FigureStyle fivethirtyeightStyle() {
 FigureStyle solarizeLight2Style() {
     FigureStyle s;
     s.styleName = "Solarize_Light2";
-    // mpl: axes.facecolor EEE8D5, figure.facecolor FDF6E3 (edgeColor).
-    s.faceColor = hex("EEE8D5");
-    s.edgeColor = hex("FDF6E3");
+    // mpl: figure.facecolor FDF6E3, axes.facecolor EEE8D5.
+    s.faceColor = hex("FDF6E3");
+    s.axesFaceColor = hex("EEE8D5");
     s.textColor = hex("657B83");
     s.axisBelow = true;
     s.colorCycle.colors = {
@@ -671,6 +716,8 @@ FigureStyle solarizeLight2Style() {
     s.lines.solidCapStyle = "butt";
     s.patch.faceColor = hex("268BD2");
     s.patch.edgeColor = hex("EEE8D5");
+    // mpl legend.facecolor 'inherit' → axes.facecolor (EEE8D5).
+    s.legend.faceColor = hex("EEE8D5");
     return s;
 }
 

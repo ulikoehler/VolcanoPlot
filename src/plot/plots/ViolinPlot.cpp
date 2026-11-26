@@ -217,6 +217,9 @@ void ViolinPlot::buildGeometry(render::Renderer* r) {
 void ViolinPlot::prepare(render::Renderer& r) {
     buildGeometry(&r);
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     if (!fillRenderer_) fillRenderer_ = r.gpu().createFillRenderer();
     if (!bodyFillPos_.empty()) {
         fillRenderer_->upload(std::span{bodyFillPos_}, std::span{bodyFillColors_});
@@ -225,13 +228,13 @@ void ViolinPlot::prepare(render::Renderer& r) {
     if (!edgeRenderer_) edgeRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!bodyEdgeSegs_.empty()) {
         edgeRenderer_->upload(std::span{bodyEdgeSegs_}, cfg_.edgeColor,
-                             cfg_.lineWidth);
+                             cfg_.lineWidth * kPtPx);
     }
 
     if (!innerRenderer_) innerRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!innerSegs_.empty()) {
         innerRenderer_->upload(std::span{innerSegs_}, cfg_.whiskerColor,
-                              cfg_.lineWidth);
+                              cfg_.lineWidth * kPtPx);
     }
 
     prepared_ = true;

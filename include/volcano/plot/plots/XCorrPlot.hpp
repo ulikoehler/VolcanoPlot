@@ -51,6 +51,7 @@ public:
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.color; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return config_.lineWidth; }
 
     /// Access computed lags (valid after prepare()).
     [[nodiscard]] const std::vector<float>& lags() const { return lags_; }

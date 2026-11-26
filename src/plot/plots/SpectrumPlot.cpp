@@ -205,6 +205,9 @@ void SpectrumPlot::computeSpectrum(render::Renderer* r) {
 void SpectrumPlot::prepare(render::Renderer& r) {
     computeSpectrum(&r);
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     // Build line points.
     linePoints_.clear();
     for (size_t i = 0; i < freqs_.size(); ++i)
@@ -213,7 +216,7 @@ void SpectrumPlot::prepare(render::Renderer& r) {
     if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
     if (!linePoints_.empty()) {
         lineRenderer_->upload(std::span{linePoints_}, config_.color,
-                             config_.lineWidth);
+                             config_.lineWidth * kPtPx);
     }
     prepared_ = true;
 }

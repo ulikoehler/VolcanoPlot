@@ -660,6 +660,11 @@ public:
     [[nodiscard]] const FigureStyle& style() const noexcept { return style_; }
     [[nodiscard]] FigureStyle& style() noexcept { return style_; }
 
+    /// Effective render dpi for pt→px conversions: the owning figure's
+    /// dpi when attached (mpl figure.dpi is the single render dpi used
+    /// for every artist), else the axes' own style dpi.
+    [[nodiscard]] float dpi() const noexcept;
+
     /// mpl `ax.set_sketch_params(scale, length, randomness)`: xkcd-style
     /// wobble for this axes' stroked artists. `scale` ≤ 0 or unset
     /// disables the sketch effect (mpl default). `length`/`randomness`
@@ -757,6 +762,22 @@ public:
         std::string_view interpolation = "nearest",
         std::string_view aspect = "equal",
         std::string_view origin = "upper");
+
+    /// mpl `ax.spy(Z)`: sparsity pattern. Wires the axes the way mpl's
+    /// image-style spy does: imshow extent (-0.5 … n-0.5), inverted y
+    /// (row 0 on top), aspect='equal', integer index locators,
+    /// x ticks on top (marks on both sides), title y=1.05.
+    class SpyPlot& spy(std::vector<float> data, uint32_t nrows,
+                       uint32_t ncols);
+    class SpyPlot& spy(std::vector<float> data, uint32_t nrows,
+                       uint32_t ncols, struct SpyConfig config);
+    /// mpl `ax.matshow(A)`: matrix display — same axes wiring as spy()
+    /// (imshow origin='upper'/aspect equal, integer index ticks,
+    /// x ticks on top, title y=1.05).
+    class MatshowPlot& matshow(std::vector<float> data, uint32_t nrows,
+                               uint32_t ncols);
+    class MatshowPlot& matshow(std::vector<float> data, uint32_t nrows,
+                               uint32_t ncols, struct MatshowConfig config);
 
     // ── Specialized (§15) ──
     /// Word cloud: `ax.wordcloud({{"word", weight}, …})` — words packed
@@ -1016,6 +1037,16 @@ private:
                            const std::vector<float>& stickyY) const;
     /// Collect sorted sticky-edge values from all (visible) layers.
     [[nodiscard]] StickyEdges collectStickyEdges() const;
+    /// Apply style-level autoscale state: margins from
+    /// axes.xmargin/ymargin and, in mpl classic_mode, the default
+    /// MaxNLocator(nbins=9, steps=[1,2,5,10]) on linear axes without a
+    /// user locator/positions (mpl installs AutoLocator at axis init).
+    void applyStyleAutoscale();
+    /// mpl autoscale_view → locator.view_limits on the padded range:
+    /// axes.autolimit_mode='round_numbers' snaps the limits to the
+    /// locator's outer edge ticks / decade bounds.
+    void applyViewLimits(Range& r, const TickConfig& tc,
+                         const AxisScale& s) const;
     /// Install a converter's axisInfo defaults on 'x' or 'y'.
     void applyAxisInfo(const UnitConverter& conv, char axis);
     /// Reinstall FixedLocator/FixedFormatter for the category list.

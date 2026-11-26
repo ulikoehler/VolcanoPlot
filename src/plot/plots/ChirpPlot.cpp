@@ -41,9 +41,12 @@ void ChirpPlot::evaluate() {
 void ChirpPlot::prepare(render::Renderer& r) {
     evaluate();
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
     if (points_.size() >= 2) {
-        renderer_->upload(std::span{points_}, config_.color, config_.lineWidth);
+        renderer_->upload(std::span{points_}, config_.color, config_.lineWidth * kPtPx);
     }
     prepared_ = true;
 }

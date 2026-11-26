@@ -61,7 +61,9 @@ void Line3DCollection::prepare(render::Renderer& r) {
         // We use the default color; per-segment colors are stored but
         // not used by the current renderer.
         renderer_->upload3D(std::span{projected_}, config_.color,
-                            config_.lineWidth, vp_);
+                            config_.lineWidth *
+                                (owner() ? owner()->dpi() : 72.0f) / 72.0f,
+                            vp_);
     }
 
     prepared_ = true;

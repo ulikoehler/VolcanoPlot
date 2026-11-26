@@ -291,7 +291,9 @@ void plotBox(GalleryCtx& ctx) {
     cfg.labels = {"G1", "G2", "G3", "G4"};
     cfg.fillBox = false;  // mpl boxplot default: patch_artist=False
     ax->addPlot(std::make_unique<BoxPlot>(std::move(groups), cfg));
-    ax->setXCategories({"G1", "G2", "G3", "G4"});  // mpl labels=
+    // mpl boxplot labels= : tick labels at the 1-based box positions.
+    ax->style().xAxis.ticks.positions = {1.0f, 2.0f, 3.0f, 4.0f};
+    ax->style().xAxis.ticks.labels = {"G1", "G2", "G3", "G4"};
     ctx.render(fig, "box");
 }
 
@@ -382,6 +384,7 @@ void plotErrorbar(GalleryCtx& ctx) {
     }
     ErrorbarConfig cfg;
     cfg.yerr = yerr;
+    cfg.errorbarColor = Color::black();  // mpl ecolor="black"
     cfg.markerSize = 16.7f;  // mpl markersize=6pt → 16.7 px at 200 dpi
     cfg.capSize = 8.3f;      // mpl capsize=3pt → 8.3 px at 200 dpi
     cfg.drawCaps = true;
@@ -988,7 +991,7 @@ void plotSpy(GalleryCtx& ctx) {
     }
     m[2 * n + 18] = 1.0f; m[20 * n + 5] = 1.0f;    // a few outliers
     SpyConfig cfg; cfg.color = Color::black();     // mpl spy default
-    ax->addPlot(std::make_unique<SpyPlot>(std::move(m), n, n, cfg));
+    ax->spy(std::move(m), n, n, cfg);
     ctx.render(fig, "spy");
 }
 
@@ -1002,7 +1005,7 @@ void plotMatshow(GalleryCtx& ctx) {
             m[j * n + i] = std::sin(float(i) * 0.5f) * std::cos(float(j) * 0.5f);
     MatshowConfig cfg;
     cfg.cmap = &colormaps::viridis();
-    ax->addPlot(std::make_unique<MatshowPlot>(std::move(m), n, n, cfg));
+    ax->matshow(std::move(m), n, n, cfg);
     ctx.render(fig, "matshow");
 }
 

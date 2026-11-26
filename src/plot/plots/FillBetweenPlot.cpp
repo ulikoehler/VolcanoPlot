@@ -290,7 +290,7 @@ void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
 
     // transform=/patheffects need pixel-space geometry (the GPU path
     // bakes data coords into the vertex buffer).
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     auto baseMap = pxMapper(axes, rect);
     auto toPx = [&](Point2D p) {
         return transform ? transform->apply(p) : baseMap(p);
@@ -353,7 +353,7 @@ void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
 
 void FillBetweenPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                                  Rect2D rect) {
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     auto baseMap = pxMapper(axes, rect);
     auto toPx = [&](Point2D p) {
         return transform ? transform->apply(p) : baseMap(p);

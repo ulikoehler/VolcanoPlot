@@ -273,6 +273,9 @@ private:
         plot::Color color;
         plot::LegendMarker marker;
         int points = -1;  ///< LegendHandle::points (handle marker count)
+        float lineWidthPt = 0.0f;  ///< LegendHandle::lineWidthPt
+        /// LegendHandle::edgeColor — marker edge ring (alpha 0 = none).
+        plot::Color edgeColor = plot::Color::transparent();
     };
     /// Measured legend layout (mpl VPacker/HPacker packing).
     struct LegendLayout {
@@ -282,6 +285,7 @@ private:
         float hAbove = 0, hBelow = 0, hBoxH = 0;
         float titleH = 0, titleScale = 1;
         float firstAbove = 0;
+        float dpi = 72.0f;
         int rows = 0, cols = 0;
         std::vector<float> colW;
         std::vector<float> itemW, itemAbove, itemBelow;

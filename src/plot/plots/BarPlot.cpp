@@ -19,7 +19,7 @@ void BarPlot::draw(render::Cmd& cmd, render::Renderer& r, const Axes& axes, Rect
     if (!pathEffects.empty()) {
         auto& spine = r.gpu().spine();
         Extent2D res = r.gpu().extent();
-        const float dpi = axes.style().dpi;
+        const float dpi = axes.dpi();
         auto toPx = [&](Point2D p) {
             auto f = axes.dataToFraction(p);
             return Point2D{rect.x + f.x * float(rect.width),
@@ -110,7 +110,7 @@ void BarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         Color col = i < data_.colors.size() ? data_.colors[i]
                                             : Color::fromRgba8(31,119,180);
         Point2D q[4] = {{a.x, a.y}, {b.x, a.y}, {b.x, b.y}, {a.x, b.y}};
-        const float dpi = axes.style().dpi;
+        const float dpi = axes.dpi();
         auto pass = [&](Point2D off, Color fc, Color ec, float elw) {
             Point2D s[4] = {{q[0].x + off.x, q[0].y + off.y},
                             {q[1].x + off.x, q[1].y + off.y},

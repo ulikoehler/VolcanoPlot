@@ -363,7 +363,9 @@ void HistPlot::prepare(render::Renderer& r) {
             auto sr = r.gpu().createLineSegmentRenderer();
             Color c = d < cfg_.colors.size() ? cfg_.colors[d] : cfg_.color;
             c.a = 1.0f; // step outlines are opaque (matplotlib)
-            sr->upload(std::span{stepSegs_[d]}, c, cfg_.stepLineWidth);
+            sr->upload(std::span{stepSegs_[d]}, c,
+                       cfg_.stepLineWidth *
+                           (owner() ? owner()->dpi() : 72.0f) / 72.0f);
             stepCounts_.push_back(uint32_t(stepSegs_[d].size()));
             stepRenderers_.push_back(std::move(sr));
         }
@@ -422,7 +424,7 @@ void HistPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
             col.a = 1.0f;
             render::VectorCanvas::Pen pen;
             pen.color = col;
-            pen.width = cfg_.stepLineWidth;
+            pen.width = cfg_.stepLineWidth * axes.dpi() / 72.0f;
             for (size_t i = 0; i + 1 < stepSegs_[d].size(); i += 2) {
                 Point2D seg[2] = {toPx(stepSegs_[d][i]),
                                   toPx(stepSegs_[d][i + 1])};

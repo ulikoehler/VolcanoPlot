@@ -28,7 +28,7 @@ TEST(Style, GgplotHasGrayBackground) {
     using namespace volcano::plot;
     auto s = styles::ggplotStyle();
     // matplotlib ggplot: axes.facecolor = E5E5E5 = (229,229,229)
-    EXPECT_NEAR(s.faceColor.r, 229/255.0f, 0.01f);
+    EXPECT_NEAR(s.axesFaceColor.r, 229/255.0f, 0.01f);
     // ggplot has a color cycle with 7 colors
     EXPECT_EQ(s.colorCycle.size(), 7u);
     // first color is E24A33 = (226, 74, 51)

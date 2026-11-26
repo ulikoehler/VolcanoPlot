@@ -146,6 +146,9 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
     // Build error bar segments.
     buildErrorSegments();
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+
     // Initialize connecting line renderer.
     if (cfg_.drawLine && x_.size() >= 2) {
         if (!lineRenderer_) lineRenderer_ = r.gpu().createLineRenderer();
@@ -154,7 +157,7 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
         for (size_t i = 0; i < x_.size(); ++i)
             linePoints.push_back({x_[i], y_[i]});
         lineRenderer_->upload(std::span{linePoints.data(), linePoints.size()},
-                             cfg_.color, cfg_.lineWidth);
+                             cfg_.color, cfg_.lineWidth * kPtPx);
     }
 
     // Initialize error bar segment renderer.
@@ -162,7 +165,7 @@ void ErrorbarPlot::prepare(render::Renderer& r) {
         if (!errorRenderer_) errorRenderer_ = r.gpu().createLineSegmentRenderer();
         errorRenderer_->upload(std::span{errorSegments_.data(),
                                         errorSegments_.size()},
-                              cfg_.errorbarColor, cfg_.errorbarWidth);
+                              cfg_.errorbarColor, cfg_.errorbarWidth * kPtPx);
     }
 
     // Initialize point renderer for markers.
@@ -242,10 +245,11 @@ void ErrorbarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
     if (errorSegments_.empty() && hasErrors_ == false)
         buildErrorSegments();
     auto toPx = pxMapper(axes, rect);
+    const float kPtPx = axes.dpi() / 72.0f;
     // Error bars + caps (line-segment soup, pairs of points).
     render::VectorCanvas::Pen ep;
     ep.color = cfg_.errorbarColor;
-    ep.width = cfg_.errorbarWidth;
+    ep.width = cfg_.errorbarWidth * kPtPx;
     for (size_t i = 0; i + 1 < errorSegments_.size(); i += 2) {
         Point2D seg[2] = {toPx(errorSegments_[i]),
                           toPx(errorSegments_[i + 1])};
@@ -259,7 +263,7 @@ void ErrorbarPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
             px.push_back(toPx({x_[i], y_[i]}));
         render::VectorCanvas::Pen lp;
         lp.color = cfg_.color;
-        lp.width = cfg_.lineWidth;
+        lp.width = cfg_.lineWidth * kPtPx;
         c.polyline(px, lp);
     }
     // Caps as '_' / '|' markers (px-exact, like mpl).

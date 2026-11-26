@@ -150,8 +150,12 @@ struct LegendStyle {
     FontProperties font{.size = 10.0f};
     /// Label color override; nullopt → inherit style text color.
     std::optional<Color> labelColor;
-    Color faceColor = Color::fromRgba8(255, 255, 255, 200);
-    Color edgeColor = Color::black();
+    /// mpl legend.facecolor: default 'inherit' → axes.facecolor
+    /// (opaque); the frame's transparency comes from frameAlpha at
+    /// draw time (faceColor.a * frameAlpha).
+    Color faceColor = Color::white();
+    /// mpl legend.edgecolor = '0.8' (gray), drawn at patch.linewidth 0.8pt.
+    Color edgeColor = Color::fromRgba8(204, 204, 204, 255);
     float frameAlpha = 0.8f;
     /// Whether to draw a frame around the legend.
     bool frameOn = true;
@@ -176,8 +180,9 @@ struct LegendStyle {
     /// Markers on a Line handle (mpl legend.numpoints; only when the
     /// source artist carries markers — see LegendHandle::points).
     int numpoints = 1;
-    /// Marker count on scatter/Circle handles (mpl legend.scatterpoints).
-    int scatterpoints = 3;
+    /// Marker count on scatter/Circle handles (mpl legend.scatterpoints;
+    /// rcdefault 1, classic style sets 3).
+    int scatterpoints = 1;
     /// Scale applied to handle markers (mpl legend.markerscale).
     float markerScale = 1.0f;
     /// Handle left of the label (mpl legend.markerfirst). False → label
@@ -301,6 +306,9 @@ struct TitleStyle {
     FontProperties font{.size = 12.0f};
     Color color = Color::black();
     float pad = 6.0f;
+    /// mpl title.set_y: vertical anchor in axes-fraction coordinates
+    /// (1.0 = axes top; spy/matshow use 1.05).
+    float y = 1.0f;
     /// Font weight for the title (e.g. "normal", "bold").
     std::string weight = "normal";
 };
@@ -344,12 +352,35 @@ struct ColorCycleStyle {
 
 /// Overall figure style (matplotlib rcParams subset).
 struct FigureStyle {
+    /// mpl figure.facecolor — canvas background under everything.
     Color faceColor = Color::white();
+    /// mpl axes.facecolor — the patch behind each axes' artists.
+    /// Kept separate from faceColor: styles like ggplot/bmh/seaborn set
+    /// the axes background but leave the figure white.
+    Color axesFaceColor = Color::white();
     Color edgeColor = Color::white();
     /// mpl `figure.frameon` — when false the figure patch isn't drawn
     /// (the canvas stays at the clear color).
     bool frameOn = true;
     float dpi = 100.0f;
+    /// mpl figure.subplot.* — GridSpec margins/spacing for the top-level
+    /// grid. Figure applies these to its GridSpec at construction.
+    float subplotLeft = 0.125f, subplotRight = 0.9f;
+    float subplotBottom = 0.11f, subplotTop = 0.88f;
+    float subplotWspace = 0.2f, subplotHspace = 0.2f;
+    /// mpl `axes.xmargin`/`axes.ymargin` — autoscale padding fraction
+    /// applied to the data limits (default 0.05). Read at Axes
+    /// construction (mpl reads them in Axes.__init__/cla).
+    float xMargin = 0.05f, yMargin = 0.05f;
+    /// mpl `axes.autolimit_mode`: "data" (default) or "round_numbers" —
+    /// the latter snaps autoscaled view limits to the major locator's
+    /// outer edge ticks (mpl Locator.view_limits).
+    std::string autolimitMode = "data";
+    /// mpl `_internal.classic_mode` (set by the "classic" sheet): the
+    /// default linear locator becomes MaxNLocator(nbins=9,
+    /// steps=[1,2,5,10]) and scatter() restores a >=0.05 margin to make
+    /// room for the finite marker size.
+    bool classicMode = false;
     std::string styleName = "default"; // ggplot, seaborn, default, ...
     TitleStyle title;
     LegendStyle legend;

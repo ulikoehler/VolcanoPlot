@@ -231,6 +231,7 @@ private:
 inline plot::FigureStyle flatTestStyle() {
     plot::FigureStyle s;
     s.faceColor = plot::Color::white();
+    s.axesFaceColor = plot::Color::white();
     s.xAxis.grid = false;
     s.yAxis.grid = false;
     s.xAxis.visible = false;
@@ -242,6 +243,7 @@ inline plot::FigureStyle flatTestStyle() {
 inline plot::FigureStyle flatTestStyle(plot::Color bg) {
     plot::FigureStyle s;
     s.faceColor = bg;
+    s.axesFaceColor = bg;
     s.xAxis.grid = false;
     s.yAxis.grid = false;
     s.xAxis.visible = false;

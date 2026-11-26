@@ -154,7 +154,8 @@ void TriContourPlot::prepare(render::Renderer& r) {
     if (!renderer_) renderer_ = r.gpu().createLineSegmentRenderer();
     if (!segments_.empty()) {
         renderer_->upload(std::span{segments_}, config_.lineColor,
-                         config_.lineWidth);
+                         config_.lineWidth *
+                             (owner() ? owner()->dpi() : 72.0f) / 72.0f);
     }
     prepared_ = true;
 }
@@ -205,16 +206,18 @@ void TriContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
                         (levels_[i] - lMin) / lRange, 0.0f, 1.0f));
             }
             std::vector<float> dashes(levels_.size() * 2, 0.0f);
+            const float widthPx = config_.lineWidth * axes.dpi() / 72.0f;
             const auto dash = dashPattern(LineStyle::Dashed,
-                                          config_.lineWidth);
+                                          widthPx);
             for (size_t i = 0; i < levels_.size(); ++i) {
-                if (levels_[i] >= 0.0f || dash.size() < 2) continue;
+                if (levels_[i] >= 0.0f || dash.size() < 2 ||
+                    config_.cmap) continue;
                 dashes[i * 2] = dash[0];
                 dashes[i * 2 + 1] = dash[1];
             }
             if (r.gpu().triContourTessellate(
                     xyzPacked_, trisPacked_, levels_, colors,
-                    bx, ax, by, ay, config_.lineWidth, dashes, 0,
+                    bx, ax, by, ay, widthPx, dashes, 0,
                     gpuSoup_, gpuCount_)) {
                 r.gpu().spine().drawTrianglesGpuIndirect(
                     cmd, clipRectVk(rect, r.gpu().extent()),
@@ -243,11 +246,13 @@ void TriContourPlot::draw(render::Cmd& cmd, render::Renderer& r,
     float lMin = levels_.front(), lMax = levels_.back();
     float lRange = std::max(1e-9f, lMax - lMin);
     StrokeParams sp;
-    sp.width = config_.lineWidth;
+    const float widthPx = config_.lineWidth * axes.dpi() / 72.0f;
+    sp.width = widthPx;
     for (const auto& [level, idx] : byLevel) {
         sp.dashes.clear();
-        if (level < 0.0f)
-            sp.dashes = dashPattern(LineStyle::Dashed, config_.lineWidth);
+        // mpl: dashed negatives only for monochrome (colors=) contours.
+        if (level < 0.0f && !config_.cmap)
+            sp.dashes = dashPattern(LineStyle::Dashed, widthPx);
         std::vector<Point2D> tris;
         for (size_t i : idx) {
             Point2D seg[2] = {toPx(segments_[i]), toPx(segments_[i + 1])};

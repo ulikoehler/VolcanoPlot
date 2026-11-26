@@ -7,6 +7,9 @@
 #include "volcano/plot/plots/HeatmapPlot.hpp"
 #include "volcano/plot/plots/QuiverKeyPlot.hpp"
 #include "volcano/plot/plots/LinePlot.hpp"
+#include "volcano/plot/plots/ScatterPlot.hpp"
+#include "volcano/plot/plots/SpyPlot.hpp"
+#include "volcano/plot/plots/MatshowPlot.hpp"
 #include "volcano/plot/plots/PiePlot.hpp"
 #include "volcano/plot/plots/BoxPlot.hpp"
 #include "volcano/plot/Plot.hpp"
@@ -23,7 +26,10 @@
 
 namespace volcano::plot {
 
-Axes::Axes() : style_(rc::params()) { reseedCycler(); }
+Axes::Axes() : style_(rc::params()) {
+    reseedCycler();
+    applyStyleAutoscale();
+}
 
 void Axes::touch() noexcept {
     stale_ = true;
@@ -36,8 +42,35 @@ void IPlot::touch() noexcept {
 
 void Axes::setStyle(FigureStyle s) {
     style_ = std::move(s);
+    // mpl figure.dpi is a single global rcParam, not a per-axes knob —
+    // a style's dpi applies to the whole figure.
+    if (figure_) figure_->style().dpi = style_.dpi;
     reseedCycler();
+    applyStyleAutoscale();
     touch();
+}
+
+void Axes::applyStyleAutoscale() {
+    // mpl Axes.__init__ reads axes.xmargin/ymargin into the axes.
+    marginX_ = style_.xMargin;
+    marginY_ = style_.yMargin;
+    // mpl _internal.classic_mode: the default AutoLocator becomes
+    // MaxNLocator(nbins=9, steps=[1,2,5,10]). Only installed when the
+    // axis still uses the implicit default (no user locator/positions).
+    if (!style_.classicMode) return;
+    auto install = [](TickConfig& tc, const AxisScale& s) {
+        if (tc.locator || tc.positions ||
+            s.kind != ScaleKind::Linear) return;
+        auto loc = std::make_shared<MaxNLocator>(9);
+        loc->setSteps({1.0f, 2.0f, 5.0f, 10.0f});
+        tc.locator = std::move(loc);
+    };
+    install(style_.xAxis.ticks, xScale_);
+    install(style_.yAxis.ticks, yScale_);
+}
+
+float Axes::dpi() const noexcept {
+    return figure_ ? figure_->dpi() : style_.dpi;
 }
 
 void Axes::reseedCycler() {
@@ -63,6 +96,20 @@ IPlot* Axes::addPlot(std::shared_ptr<IPlot> plot) {
     // Style-level defaults (e.g. lines.linewidth) fill anything the
     // caller and the prop cycle left at auto.
     raw->applyStyleDefaults(style_);
+    // mpl Axes.scatter (classic mode only): margins are raised to
+    // >=0.05 to make room for the finite marker size.
+    if (style_.classicMode)
+        if (auto* sc = dynamic_cast<ScatterPlot*>(raw);
+            sc && !sc->series().points.empty()) {
+            if (marginX_ < 0.05f) marginX_ = 0.05f;
+            if (marginY_ < 0.05f) marginY_ = 0.05f;
+        }
+    // mpl patch.force_edgecolor (classic): a collection with no
+    // explicit edgecolors draws edges in patch.edgecolor.
+    if (style_.patch.forceEdgeColor)
+        if (auto* sc = dynamic_cast<ScatterPlot*>(raw);
+            sc && !sc->series().markerEdgeColor)
+            sc->series().markerEdgeColor = style_.patch.edgeColor;
     plots_.push_back(std::move(plot));
     // mpl: artist add merges into dataLim eagerly (update_datalim).
     auto [fx, fy] = raw->feedsData(*this);
@@ -575,6 +622,56 @@ HeatmapPlot& Axes::imshow(Grid2D grid, const Colormap& cmap,
     return h;
 }
 
+namespace {
+/// mpl Axes.spy/Axes.matshow axes wiring: imshow with origin='upper'
+/// sets the extent [-0.5,nc-0.5] x [nr-0.5,-0.5] (inverted y → row 0
+/// on top), aspect='equal', integer index locators (MaxNLocator
+/// nbins=9, steps [1,2,5,10]), x ticks on top with marks on both
+/// sides, and the title anchored at y=1.05.
+void matrixAxesSetup(Axes& ax, uint32_t ncols, uint32_t nrows) {
+    ax.setAspect(AspectMode::Equal);
+    ax.setXlim(-0.5f, float(ncols) - 0.5f);
+    ax.setYlim(float(nrows) - 0.5f, -0.5f);
+    ax.xaxisTickTop();
+    ax.setXTicksPosition("both");
+    auto integerLoc = [] {
+        auto l = std::make_shared<MaxNLocator>(9);
+        l->setSteps({1.0f, 2.0f, 5.0f, 10.0f});
+        l->setInteger(true);
+        return l;
+    };
+    ax.setXLocator(integerLoc());
+    ax.setYLocator(integerLoc());
+    ax.style().title.y = 1.05f;
+}
+} // namespace
+
+SpyPlot& Axes::spy(std::vector<float> data, uint32_t nrows,
+                   uint32_t ncols) {
+    return spy(std::move(data), nrows, ncols, SpyConfig{});
+}
+
+SpyPlot& Axes::spy(std::vector<float> data, uint32_t nrows,
+                   uint32_t ncols, SpyConfig config) {
+    auto& p = addOwned<SpyPlot>(*this, std::move(data), nrows, ncols,
+                                std::move(config));
+    matrixAxesSetup(*this, ncols, nrows);
+    return p;
+}
+
+MatshowPlot& Axes::matshow(std::vector<float> data, uint32_t nrows,
+                           uint32_t ncols) {
+    return matshow(std::move(data), nrows, ncols, MatshowConfig{});
+}
+
+MatshowPlot& Axes::matshow(std::vector<float> data, uint32_t nrows,
+                           uint32_t ncols, MatshowConfig config) {
+    auto& p = addOwned<MatshowPlot>(*this, std::move(data), nrows, ncols,
+                                    std::move(config));
+    matrixAxesSetup(*this, ncols, nrows);
+    return p;
+}
+
 QuiverKeyPlot& Axes::quiverKey(const QuiverPlot& ref, float x, float y,
                                float u, std::string label,
                                std::string_view labelPos,
@@ -736,7 +833,59 @@ void Axes::finalizeAutoscale(Viewport& v, bool tight,
     if (!tight) {
         padAxis(v.x, xScale_, marginX_, stickyX);
         padAxis(v.y, yScale_, marginY_, stickyY);
+        // mpl autoscale_view: when not tight, the major locator's
+        // view_limits may expand the padded range (round_numbers).
+        applyViewLimits(v.x, style_.xAxis.ticks, xScale_);
+        applyViewLimits(v.y, style_.yAxis.ticks, yScale_);
     }
+}
+
+void Axes::applyViewLimits(Range& r, const TickConfig& tc,
+                           const AxisScale& s) const {
+    const bool roundNumbers = style_.autolimitMode == "round_numbers";
+    const Locator* loc = tc.locator.get();
+    std::shared_ptr<Locator> resolved;
+    if (loc) {
+        // mpl nbins='auto' resolves via tick space (capped at 9); use
+        // the standalone default — the axes rect isn't final here.
+        if (const auto* mnl = dynamic_cast<const MaxNLocator*>(loc);
+            mnl && mnl->autoNbins()) {
+            auto copy = std::make_shared<MaxNLocator>(*mnl);
+            copy->setNbins(9);
+            resolved = std::move(copy);
+            loc = resolved.get();
+        }
+    } else if (!tc.positions) {
+        // mpl's default major locator by scale: AutoLocator on linear
+        // (classic_mode: nbins=9, steps=[1,2,5,10]), LogLocator on log,
+        // SymmetricalLogLocator on symlog, LogitLocator on logit.
+        switch (s.kind) {
+        case ScaleKind::Log:
+        case ScaleKind::FunctionLog:
+            resolved = std::make_shared<LogLocator>(
+                s.param1 > 0.0f ? s.param1 : 10.0f);
+            break;
+        case ScaleKind::Symlog:
+            resolved = std::make_shared<SymmetricalLogLocator>(
+                s.param1, s.param3 > 1.0f ? s.param3 : 10.0f);
+            break;
+        case ScaleKind::Logit:
+            resolved = std::make_shared<LogitLocator>();
+            break;
+        default: {
+            auto mnl = std::make_shared<MaxNLocator>(9);
+            if (style_.classicMode)
+                mnl->setSteps({1.0f, 2.0f, 5.0f, 10.0f});
+            else
+                mnl->setSteps({1.0f, 2.0f, 2.5f, 5.0f, 10.0f});
+            resolved = std::move(mnl);
+        }}
+        loc = resolved.get();
+    }
+    // Explicit positions → mpl FixedLocator (identity view_limits).
+    if (!loc) return;
+    auto [lo, hi] = loc->viewLimits(r.min, r.max, roundNumbers);
+    r.min = lo; r.max = hi;
 }
 
 StickyEdges Axes::collectStickyEdges() const {
@@ -908,7 +1057,9 @@ void Axes::clear() {
                 -std::numeric_limits<float>::infinity()};
     manualLim_.reset();
     manualX_ = manualY_ = false;
-    marginX_ = marginY_ = 0.05f;
+    // mpl cla() re-reads axes.xmargin/ymargin from rcParams.
+    marginX_ = style_.xMargin;
+    marginY_ = style_.yMargin;
     xScale_ = yScale_ = AxisScale{};
     rgrids_.clear();
     thetagrids_.clear();

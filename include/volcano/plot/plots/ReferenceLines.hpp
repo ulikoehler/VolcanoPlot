@@ -36,6 +36,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return width_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -67,6 +68,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return width_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -100,6 +102,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return width_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -212,6 +215,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return width_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -255,6 +259,7 @@ public:
     [[nodiscard]] std::string label() const override { return label_; }
     [[nodiscard]] Color legendColor() const override { return color_; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return width_; }
     void setLabel(std::string l) { label_ = std::move(l); }
     [[nodiscard]] bool canEmitVector() const override { return true; }
     void emitVector(render::VectorCanvas& c, const Axes& axes,
@@ -295,7 +300,7 @@ public:
     std::vector<float> lineoffsets;
     /// Per-row full segment length (default 1).
     std::vector<float> linelengths;
-    /// Per-row line width in px (default `lineWidth`).
+    /// Per-row line width in points (default `lineWidth`).
     std::vector<float> linewidths;
     /// Per-row colors (default `color`, cycling mpl-style when empty).
     std::vector<Color> colors;
@@ -315,6 +320,7 @@ public:
     [[nodiscard]] LegendMarker legendMarker() const override {
         return LegendMarker::Line;
     }
+    [[nodiscard]] float legendLineWidthPt() const override { return lineWidth; }
     void setLabel(std::string l) { label_ = std::move(l); }
     bool applyCycleProps(const CycleProps& p) override {
         if (p.color) color = *p.color;

@@ -52,12 +52,16 @@ float QuiverPlot::effectiveScale(const Axes& axes) const {
 }
 
 float QuiverPlot::shaftWidthPx(float axesWidthPx) const {
+    // mpl `width` is in arrow units — with units='width' (the default)
+    // it is a fraction of the axes width, so shaft px = width * span_px.
     // mpl default shaft width: 0.06 * span / clip(sqrt(N), 8, 25).
     float snW = std::clamp(std::sqrt(float(std::max(x_.size(), size_t{1}))),
                            8.0f, 25.0f);
-    return cfg_.width > 0.0f ? cfg_.width
-         : cfg_.lineWidth != 1.0f ? cfg_.lineWidth
-         : 0.06f * axesWidthPx / snW;
+    if (cfg_.width > 0.0f) return cfg_.width * axesWidthPx;
+    if (cfg_.lineWidth != 1.0f)
+        return cfg_.lineWidth *
+               (owner() ? owner()->dpi() : 72.0f) / 72.0f;
+    return 0.06f * axesWidthPx / snW;
 }
 
 void QuiverPlot::buildGeometry(const Axes& axes, Rect2D rect) {
@@ -171,7 +175,8 @@ void QuiverPlot::prepare(render::Renderer& r) {
     // Upload dummy data so renderers are ready. Actual geometry is built
     // in draw() since it depends on the viewport.
     Point2D dummy[] = {{0, 0}, {1, 1}};
-    shaftRenderer_->upload(std::span{dummy, 2}, cfg_.color, cfg_.lineWidth);
+    shaftRenderer_->upload(std::span{dummy, 2}, cfg_.color,
+        cfg_.lineWidth * (owner() ? owner()->dpi() : 72.0f) / 72.0f);
     Point2D dPos[] = {{0, 0}, {1, 0}, {0, 1}};
     Color dCol[] = {cfg_.color, cfg_.color, cfg_.color};
     headRenderer_->upload(std::span{dPos, 3}, std::span{dCol, 3});

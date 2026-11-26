@@ -68,6 +68,7 @@ public:
     [[nodiscard]] std::string label() const override { return config_.label; }
     [[nodiscard]] Color legendColor() const override { return config_.color; }
     [[nodiscard]] LegendMarker legendMarker() const override { return LegendMarker::Line; }
+    [[nodiscard]] float legendLineWidthPt() const override { return config_.lineWidth; }
 
 private:
     Grid2D gridU_, gridV_;

@@ -58,17 +58,15 @@ void StemPlot::buildGeometry() {
 void StemPlot::prepare(render::Renderer& r) {
     buildGeometry();
 
+    // mpl linewidths are in points — convert with the effective dpi.
+    const float kPtPx = (owner() ? owner()->dpi() : 72.0f) / 72.0f;
     if (!stemRenderer_) stemRenderer_ = r.gpu().createLineSegmentRenderer();
     if (!stemSegments_.empty()) {
         stemRenderer_->upload(std::span{stemSegments_}, config_.lineColor,
-                             config_.lineWidth);
+                             config_.lineWidth * kPtPx);
     }
 
-    if (config_.showBaseline && !baselineSegments_.empty()) {
-        if (!baselineRenderer_) baselineRenderer_ = r.gpu().createLineSegmentRenderer();
-        baselineRenderer_->upload(std::span{baselineSegments_}, config_.baselineColor,
-                                  config_.baselineWidth);
-    }
+    // The baseline is drawn in pixel space in draw() (mpl axhline).
 
     if (config_.markers && !markerPoints_.empty()) {
         if (!markerRenderer_) markerRenderer_ = r.gpu().createPointRenderer();
@@ -85,8 +83,21 @@ void StemPlot::draw(render::Cmd& cmd, render::Renderer& r,
     Transform2D t = axes.transform();
     Rect2D vrect = clipRectVk(rect, r.gpu().extent());
 
-    if (config_.showBaseline && !baselineSegments_.empty())
-        baselineRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(baselineSegments_.size()));
+    if (config_.showBaseline && !baselineSegments_.empty()) {
+        // mpl draws the stem baseline as axhline — it spans the axes
+        // xlim, not just the data x range. Draw in pixel space.
+        float py = rect.y +
+            (1.0f - axes.dataToFraction({0.0f, config_.baseline}).y) *
+                float(rect.height);
+        Point2D pts[] = {
+            {float(rect.x) - 10.0f, py},
+            {float(rect.x + rect.width) + 10.0f, py}
+        };
+        r.gpu().spine().drawLineStrip(cmd, vrect, r.gpu().extent(),
+                                      std::span{pts, 2}, config_.baselineColor,
+                                      config_.baselineWidth * axes.dpi() /
+                                          72.0f);
+    }
 
     stemRenderer_->draw(cmd, vrect, t, static_cast<uint32_t>(stemSegments_.size()));
 
@@ -112,19 +123,22 @@ void StemPlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                           Rect2D rect) {
     if (stemSegments_.empty() && !x_.empty()) buildGeometry();
     auto toPx = pxMapper(axes, rect);
+    const float kPtPx = axes.dpi() / 72.0f;
     render::VectorCanvas::Pen pen;
     pen.color = config_.lineColor;
-    pen.width = config_.lineWidth;
+    pen.width = config_.lineWidth * kPtPx;
     for (size_t i = 0; i + 1 < stemSegments_.size(); i += 2) {
         Point2D seg[2] = {toPx(stemSegments_[i]), toPx(stemSegments_[i + 1])};
         c.polyline(seg, pen);
     }
     if (config_.showBaseline && baselineSegments_.size() >= 2) {
+        // mpl baseline is an axhline: spans the axes xlim.
         render::VectorCanvas::Pen bp;
         bp.color = config_.baselineColor;
-        bp.width = config_.baselineWidth;
-        Point2D seg[2] = {toPx(baselineSegments_[0]),
-                          toPx(baselineSegments_[1])};
+        bp.width = config_.baselineWidth * kPtPx;
+        float py = toPx({0.0f, config_.baseline}).y;
+        Point2D seg[2] = {{float(rect.x), py},
+                          {float(rect.x + rect.width), py}};
         c.polyline(seg, bp);
     }
     if (config_.markers && !markerPoints_.empty()) {

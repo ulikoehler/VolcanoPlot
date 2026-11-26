@@ -141,6 +141,13 @@ struct LegendHandle {
     ///        markers, e.g. a marked Line2D)
     ///   >=0 = explicit count.
     int points = -1;
+    /// Handle segment width in points (mpl: the handle is drawn with the
+    /// artist's own linewidth). 0 → renderer default.
+    float lineWidthPt = 0.0f;
+    /// Marker edge ring color (mpl: PathCollection legend markers copy
+    /// the collection's edgecolor/linewidth — e.g. classic mode's
+    /// force_edgecolor). Alpha 0 → no ring.
+    Color edgeColor = Color::transparent();
 };
 
 /// Default color cycle (matplotlib's "tab10" palette).

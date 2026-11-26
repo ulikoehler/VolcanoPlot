@@ -47,7 +47,8 @@ void LinePlot::prepare(render::Renderer& r) {
         return;
     }
     if (!renderer_) renderer_ = r.gpu().createLineRenderer();
-    renderer_->upload(std::span{series_.points}, series_.resolvedColor(), series_.lineWidth);
+    renderer_->upload(std::span{series_.points}, series_.resolvedColor(),
+                      series_.lineWidth);
     prepared_ = true;
     dataDirty_ = false;
 }
@@ -155,16 +156,21 @@ void LinePlot::preDraw(render::Cmd& cmd, render::Renderer& r,
     // device from per-point cumulative arc lengths, so a dashed line no
     // longer costs a host-side stroke expansion every frame. The
     // `dashes` offload switch pins them back to the CPU when wanted.
+    const float kPtPx = axes.dpi() / 72.0f;
     StrokeParams sp;
-    sp.width = series_.lineWidth;
+    sp.width = series_.lineWidth * kPtPx;
     sp.dashes = series_.dashes.empty()
-                    ? dashPattern(series_.lineStyle, series_.lineWidth)
-                    : series_.dashes;
+                    ? dashPattern(series_.lineStyle, sp.width)
+                    : [&] {
+                          auto d = series_.dashes;
+                          for (auto& v : d) v *= kPtPx;
+                          return d;
+                      }();
     if (!sp.dashes.empty() &&
         (render::OffloadConfig::forceCpu(
              render::OffloadConfig::global().dashes) ||
          !r.gpu().gpuLine().supportsDashes())) return;
-    sp.dashOffset = series_.dashOffset;
+    sp.dashOffset = series_.dashOffset * kPtPx;
     sp.join = series_.joinStyle;
     sp.cap = series_.capStyle;
     auto& gpu = r.gpu().gpuLine();
@@ -269,7 +275,7 @@ noDecimate:
 void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
                     const Axes& axes, Rect2D rect) {
     if (!prepared_ || series_.points.empty()) return;
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     if (series_.points.size() < 2 ||
         series_.lineStyle == LineStyle::None) {
         // Marker-only (linestyle 'None') still draws markers.
@@ -285,7 +291,7 @@ void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
             case PathEffect::Kind::Stroke:
                 mfx.edge = fx.foreground.value_or(series_.resolvedColor());
                 mfx.edgeWidth = fx.strokeWidthPx(
-                    std::max(series_.markerEdgeWidth, 0.5f), dpi);
+                    std::max(series_.markerEdgeWidth * dpi / 72.0f, 0.5f), dpi);
                 break;
             case PathEffect::Kind::LineShadow:
             case PathEffect::Kind::PatchShadow: {
@@ -320,12 +326,17 @@ void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
         return *pxHold;
     };
 
+    const float kPtPx = dpi / 72.0f;
     StrokeParams sp;
-    sp.width = series_.lineWidth;
+    sp.width = series_.lineWidth * kPtPx;
     sp.dashes = series_.dashes.empty()
-                    ? dashPattern(series_.lineStyle, series_.lineWidth)
-                    : series_.dashes;
-    sp.dashOffset = series_.dashOffset;
+                    ? dashPattern(series_.lineStyle, sp.width)
+                    : [&] {
+                          auto d = series_.dashes;
+                          for (auto& v : d) v *= kPtPx;
+                          return d;
+                      }();
+    sp.dashOffset = series_.dashOffset * kPtPx;
     sp.join = series_.joinStyle;
     sp.cap = series_.capStyle;
 
@@ -389,13 +400,13 @@ void LinePlot::draw(render::Cmd& cmd, render::Renderer& r,
         case PathEffect::Kind::Stroke: {
             // mpl Stroke: same path, gc overrides (linewidth/foreground).
             StrokeParams s2 = sp;
-            s2.width = fx.strokeWidthPx(series_.lineWidth, dpi);
+            s2.width = fx.strokeWidthPx(series_.lineWidth * dpi / 72.0f, dpi);
             Color fc = fx.foreground.value_or(series_.resolvedColor());
             if (fx.alpha) fc.a = *fx.alpha;
             linePass(s2, fc, off);
             mfx.edge = fc;
             mfx.edgeWidth = fx.strokeWidthPx(
-                std::max(series_.markerEdgeWidth, 0.5f), dpi);
+                std::max(series_.markerEdgeWidth * dpi / 72.0f, 0.5f), dpi);
             break;
         }
         case PathEffect::Kind::LineShadow:
@@ -452,7 +463,7 @@ void LinePlot::drawMarkersAtPoints(render::Cmd& cmd,
     }
     const float mew = fx && fx->edgeWidth >= 0.0f
         ? fx->edgeWidth
-        : std::max(series_.markerEdgeWidth, 0.5f);
+        : std::max(series_.markerEdgeWidth * axes.dpi() / 72.0f, 0.5f);
     Color lineC = series_.resolvedColor();
     auto face = series_.applyAlpha(series_.markerFaceColor);
     auto edge = series_.applyAlpha(series_.markerEdgeColor);
@@ -486,7 +497,7 @@ void LinePlot::drawMarkersAtPoints(render::Cmd& cmd,
 void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
                           Rect2D rect) {
     if (series_.points.empty()) return;
-    const float dpi = axes.style().dpi;
+    const float dpi = axes.dpi();
     auto toPx = [&](Point2D p) {
         if (transform) return transform->apply(p);
         auto f = axes.dataToFraction(p);
@@ -510,20 +521,25 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
         for (auto p : pts) out.push_back({p.x + off.x, p.y + off.y});
         return out;
     };
+    const float kPtPx = dpi / 72.0f;
     render::VectorCanvas::Pen pen;
     pen.color = series_.resolvedColor();
-    pen.width = series_.lineWidth;
+    pen.width = series_.lineWidth * kPtPx;
     pen.dashes = series_.dashes.empty()
-        ? dashPattern(series_.lineStyle, series_.lineWidth)
-        : series_.dashes;
-    pen.dashOffset = series_.dashOffset;
+        ? dashPattern(series_.lineStyle, pen.width)
+        : [&] {
+              auto d = series_.dashes;
+              for (auto& v : d) v *= kPtPx;
+              return d;
+          }();
+    pen.dashOffset = series_.dashOffset * kPtPx;
     pen.join = series_.joinStyle;
     pen.cap = series_.capStyle;
 
     // Marker geometry shared by all passes.
     MarkerGeom mg{};
     bool drawMarkers = series_.size > 0;
-    const float mew = std::max(series_.markerEdgeWidth, 0.5f);
+    const float mew = std::max(series_.markerEdgeWidth * kPtPx, 0.5f);
     if (drawMarkers) {
         if (series_.markerPath) mg = markerGeom(*series_.markerPath);
         else if (series_.marker != MarkerStyle::None)
@@ -622,7 +638,7 @@ void LinePlot::emitVector(render::VectorCanvas& c, const Axes& axes,
             Color fc = fx.foreground.value_or(pen.color);
             if (hasLine) {
                 auto s2 = pen;
-                s2.width = fx.strokeWidthPx(series_.lineWidth, dpi);
+                s2.width = fx.strokeWidthPx(series_.lineWidth * dpi / 72.0f, dpi);
                 s2.color = fc;
                 c.polyline(shifted(px, off), s2);
             }

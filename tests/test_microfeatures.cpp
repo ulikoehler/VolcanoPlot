@@ -356,7 +356,7 @@ TEST(MicroGrid, AxisBelowPutsGridUnderArtists) {
 
 TEST(MicroAxes, FacecolorFillsAxesRect) {
     MfFigure tf(256);
-    tf.axes->style().faceColor = Color::fromRgba8(200, 220, 255);
+    tf.axes->style().axesFaceColor = Color::fromRgba8(200, 220, 255);
     auto img = tf.render();
     Pixel center = img.get(uint32_t(tf.rect.x + int32_t(tf.rect.width) / 2),
                            uint32_t(tf.rect.y + int32_t(tf.rect.height) / 2));
@@ -457,7 +457,7 @@ TEST(MicroTwin, OverlayKeepsParentArtists) {
     s.color = Color::blue();
     tf.axes->addPlot(std::make_unique<LinePlot>(std::move(s)));
     auto* ax2 = tf.figure.twinx(*tf.axes);
-    EXPECT_EQ(ax2->style().faceColor.a, 0.0f)
+    EXPECT_EQ(ax2->style().axesFaceColor.a, 0.0f)
         << "twin axes must not paint over the parent's artists";
     auto img = tf.render();
     size_t blue = countIn(img, tf.rect, [](Pixel p) {

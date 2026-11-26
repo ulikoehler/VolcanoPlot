@@ -238,8 +238,11 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
     }
 
     // ── figure ──
-    if (key == "figure.facecolor" || key == "axes.facecolor") {
+    if (key == "figure.facecolor") {
         auto c = parseColor(value); if (!c) return false; s.faceColor = *c; return true;
+    }
+    if (key == "axes.facecolor") {
+        auto c = parseColor(value); if (!c) return false; s.axesFaceColor = *c; return true;
     }
     if (key == "figure.edgecolor") {
         auto c = parseColor(value); if (!c) return false; s.edgeColor = *c; return true;
@@ -247,6 +250,13 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
     if (key == "figure.dpi" || key == "savefig.dpi") {
         float f; if (!parseFloat(value, f)) return false; s.dpi = f; return true;
     }
+    // mpl figure.subplot.* → top-level GridSpec geometry.
+    if (key == "figure.subplot.left")   { float f; if (!parseFloat(value, f)) return false; s.subplotLeft = f; return true; }
+    if (key == "figure.subplot.right")  { float f; if (!parseFloat(value, f)) return false; s.subplotRight = f; return true; }
+    if (key == "figure.subplot.bottom") { float f; if (!parseFloat(value, f)) return false; s.subplotBottom = f; return true; }
+    if (key == "figure.subplot.top")    { float f; if (!parseFloat(value, f)) return false; s.subplotTop = f; return true; }
+    if (key == "figure.subplot.wspace") { float f; if (!parseFloat(value, f)) return false; s.subplotWspace = f; return true; }
+    if (key == "figure.subplot.hspace") { float f; if (!parseFloat(value, f)) return false; s.subplotHspace = f; return true; }
 
     // ── axes ──
     if (key == "axes.edgecolor" || key == "axes.spines.color") {
@@ -274,6 +284,21 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
         float f; if (!parseFontSize(value, s.fontSize, f)) return false;
         s.xAxis.labelFont.size = f; s.yAxis.labelFont.size = f; return true;
     }
+    if (key == "axes.labelpad") {
+        float f; if (!parseFloat(value, f)) return false;
+        s.xAxis.labelPad = f; s.yAxis.labelPad = f; return true;
+    }
+    if (key == "axes.xmargin" || key == "axes.ymargin") {
+        float f; if (!parseFloat(value, f)) return false;
+        (key[5] == 'x' ? s.xMargin : s.yMargin) = f; return true;
+    }
+    if (key == "axes.autolimit_mode") {
+        s.autolimitMode = std::string(value); return true;
+    }
+    if (key == "_internal.classic_mode") {
+        if (!isBoolValue(value)) return false;
+        s.classicMode = parseBool(value); return true;
+    }
     if (key == "axes.prop_cycle") {
         auto cyc = parsePropCycle(value);
         if (cyc.empty()) return false;
@@ -295,6 +320,10 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
     if (key == "axes.titleweight" || key == "figure.titleweight") {
         s.title.weight = std::string(value);
         s.title.font.weight = std::string(value); return true;
+    }
+    if (key == "axes.titlepad") {
+        float f; if (!parseFloat(value, f)) return false;
+        s.title.pad = f; return true;
     }
 
     // ── text / font ──
@@ -343,6 +372,14 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
     if (key == "xtick.color" || key == "ytick.color") {
         auto c = parseColor(value); if (!c) return false;
         (key[0] == 'x' ? s.xAxis : s.yAxis).labelColor = *c; return true;
+    }
+    if (key == "xtick.major.pad" || key == "ytick.major.pad") {
+        float f; if (!parseFloat(value, f)) return false;
+        (key[0] == 'x' ? s.xAxis : s.yAxis).ticks.majorPad = f; return true;
+    }
+    if (key == "xtick.minor.pad" || key == "ytick.minor.pad") {
+        float f; if (!parseFloat(value, f)) return false;
+        (key[0] == 'x' ? s.xAxis : s.yAxis).ticks.minorPad = f; return true;
     }
     if (key == "xtick.minor.visible" || key == "ytick.minor.visible") {
         bool on = value == "True" || value == "true" || value == "1" ||
@@ -436,16 +473,35 @@ bool applyRcParam(FigureStyle& s, std::string_view key, std::string_view value) 
         s.legend.frameOn = parseBool(value); return true;
     }
     if (key == "legend.framealpha") {
+        // mpl 'None' → the frame draws opaque (no alpha applied).
+        if (value == "None" || value == "none") {
+            s.legend.frameAlpha = 1.0f; return true;
+        }
         float f; if (!parseFloat(value, f)) return false;
-        s.legend.frameAlpha = f; s.legend.faceColor.a = f; return true;
+        s.legend.frameAlpha = f; return true;
     }
     if (key == "legend.facecolor") {
+        // mpl 'inherit' → axes.facecolor.
+        if (value == "inherit") { s.legend.faceColor = s.axesFaceColor; return true; }
         auto c = parseColor(value); if (!c) return false;
         s.legend.faceColor = *c; return true;
     }
     if (key == "legend.edgecolor") {
+        // mpl 'inherit' → axes.edgecolor.
+        if (value == "inherit") { s.legend.edgeColor = s.xAxis.color; return true; }
         auto c = parseColor(value); if (!c) return false;
         s.legend.edgeColor = *c; return true;
+    }
+    if (key == "legend.numpoints" || key == "legend.scatterpoints" ||
+        key == "legend.markerscale" || key == "legend.handleheight" ||
+        key == "legend.labelspacing") {
+        float f; if (!parseFloat(value, f)) return false;
+        if (key == "legend.numpoints")          s.legend.numpoints = int(f);
+        else if (key == "legend.scatterpoints") s.legend.scatterpoints = int(f);
+        else if (key == "legend.markerscale")   s.legend.markerScale = f;
+        else if (key == "legend.handleheight")  s.legend.handleHeight = f;
+        else s.legend.labelSpacing = f;
+        return true;
     }
     if (key == "legend.fontsize") {
         float f; if (!parseFontSize(value, s.fontSize, f)) return false;

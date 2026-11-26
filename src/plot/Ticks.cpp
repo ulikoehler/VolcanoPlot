@@ -60,6 +60,21 @@ struct EdgeInteger {
     }
 };
 
+/// matplotlib ticker._decade_less_equal / _decade_greater_equal: the
+/// power of `base` just below/above x (inclusive).
+double decadeLE(double x, double b);
+double decadeGE(double x, double b);
+double decadeLE(double x, double b) {
+    if (x == 0.0) return 0.0;
+    if (x < 0.0) return -decadeGE(-x, b);
+    return std::pow(b, std::floor(std::log(x) / std::log(b)));
+}
+double decadeGE(double x, double b) {
+    if (x == 0.0) return 0.0;
+    if (x < 0.0) return -decadeLE(-x, b);
+    return std::pow(b, std::ceil(std::log(x) / std::log(b)));
+}
+
 /// Trim trailing zeros / decimal point: "1.500" → "1.5".
 std::string trimZeros(std::string s) {
     if (s.find('.') == std::string::npos) return s;
@@ -266,6 +281,40 @@ std::vector<float> MaxNLocator::rawTicks(double vmin, double vmax) const {
     return ticks;
 }
 
+std::pair<float, float> MaxNLocator::viewLimits(float vmin, float vmax,
+                                                bool roundNumbers) const {
+    double dmin = vmin, dmax = vmax;
+    // mpl MaxNLocator.view_limits: symmetric about zero first, then
+    // mtransforms.nonsingular(expander=1e-12, tiny=1e-13).
+    if (symmetric_) {
+        dmax = std::max(std::abs(dmin), std::abs(dmax));
+        dmin = -dmax;
+    }
+    if (dmax < dmin) std::swap(dmin, dmax);
+    if (!std::isfinite(dmin) || !std::isfinite(dmax)) {
+        dmin = -1e-12; dmax = 1e-12;
+    } else {
+        constexpr double kTiny = 1e-13, kExpand = 1e-12;
+        const double maxabs = std::max(std::abs(dmin), std::abs(dmax));
+        if (maxabs == 0.0 ||
+            maxabs < 1e6 / kTiny * std::numeric_limits<double>::min()) {
+            dmin = -kExpand; dmax = kExpand;
+        } else if (dmax - dmin <= maxabs * kTiny) {
+            if (dmax == 0.0)      dmin -= kExpand;
+            else if (dmin == 0.0) dmax += kExpand;
+            else {
+                dmin -= kExpand * std::abs(dmin);
+                dmax += kExpand * std::abs(dmax);
+            }
+        }
+    }
+    if (!roundNumbers) return {float(dmin), float(dmax)};
+    // mpl: _raw_ticks(dmin, dmax)[[0, -1]] — the outer edge ticks.
+    auto locs = rawTicks(dmin, dmax);
+    if (locs.empty()) return {float(dmin), float(dmax)};
+    return {locs.front(), locs.back()};
+}
+
 std::vector<float> LogLocator::tickValues(float vmin, float vmax) const {
     std::vector<float> out;
     float lo = std::min(vmin, vmax), hi = std::max(vmin, vmax);
@@ -304,6 +353,22 @@ std::vector<float> LogLocator::minorValues(float vmin, float vmax,
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::pair<float, float> LogLocator::viewLimits(float vmin, float vmax,
+                                               bool roundNumbers) const {
+    // mpl LogLocator.view_limits: nonsingular, then (round_numbers)
+    // _decade_less_equal/_decade_greater_equal.
+    if (vmax < vmin) std::swap(vmin, vmax);
+    if (!roundNumbers) return {vmin, vmax};
+    if (!std::isfinite(vmin) || !std::isfinite(vmax)) return {1.0f, 10.0f};
+    // mpl falls back to the axis minpos for nonpositive bounds; the
+    // padded range can dip to <=0 when data hugs a decade edge.
+    double lo = double(vmin), hi = double(vmax);
+    if (!(lo > 0.0)) lo = hi > 0.0 ? decadeLE(hi, base_) * 1e-3
+                                   : 1.0;
+    if (!(hi > 0.0)) hi = 10.0;
+    return {float(decadeLE(lo, base_)), float(decadeGE(hi, base_))};
 }
 
 std::vector<float> SymmetricalLogLocator::tickValues(float vmin,
@@ -357,6 +422,24 @@ std::vector<float> SymmetricalLogLocator::tickValues(float vmin,
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
+}
+
+std::pair<float, float> SymmetricalLogLocator::viewLimits(
+        float vmin, float vmax, bool roundNumbers) const {
+    // mpl SymmetricalLogLocator.view_limits: swap, then (round_numbers)
+    // decade snap, then nonsingular.
+    if (vmax < vmin) std::swap(vmin, vmax);
+    if (!roundNumbers) return {vmin, vmax};
+    if (!std::isfinite(vmin) || !std::isfinite(vmax))
+        return {vmin, vmax};
+    double lo = decadeLE(double(vmin), double(base_));
+    double hi = decadeGE(double(vmax), double(base_));
+    if (lo == hi) {
+        // mpl: vmin == vmax → expand by one decade on each side.
+        lo = decadeLE(lo / base_, base_);
+        hi = decadeGE(hi * base_, base_);
+    }
+    return {float(lo), float(hi)};
 }
 
 std::vector<float> LogitLocator::tickValues(float vmin, float vmax) const {
