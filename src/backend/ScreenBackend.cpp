@@ -184,6 +184,9 @@ void ScreenBackend::createSwapchain() {
        .setPreTransform(caps.currentTransform)
        .setCompositeAlpha(vk::CompositeAlphaFlagBitsKHR::eOpaque)
        .setPresentMode(pickPresentMode(modes))
+       // A fullscreen/resize transition replaces an existing swapchain.
+       // Supplying it lets the WSI release the native window atomically.
+       .setOldSwapchain(swapchain_.get())
        .setClipped(true);
 
     swapchain_ = ctx_.device.handle().createSwapchainKHRUnique(ci);
@@ -335,6 +338,16 @@ void ScreenBackend::createFramebuffers() {
 
 void ScreenBackend::recreateSwapchain() {
     ctx_.device.waitIdle();
+
+    // These objects refer to images from the old swapchain and must be gone
+    // before that swapchain is replaced.
+    framebuffers_.clear();
+    swapchainViews_.clear();
+    msaaView_.reset();
+    msaaColor_ = {};
+    depthView_.reset();
+    depthImage_ = {};
+
     createSwapchain();
     createRenderPass();
     createFramebuffers();
@@ -663,7 +676,9 @@ void ScreenBackend::endFrame() {
     pi.setWaitSemaphores(renderFinishedSem_[currentFrame_].get())
        .setSwapchains(swapchain_.get())
        .setImageIndices(imageIndex_);
-    auto result = ctx_.device.graphicsQueue().presentKHR(pi);
+    // Use Vulkan-Hpp's pointer overload here. Its enhanced reference overload
+    // throws on eErrorOutOfDateKHR before we can recreate the swapchain.
+    const auto result = ctx_.device.graphicsQueue().presentKHR(&pi);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || resized_) {
         recreateSwapchain();
     }
