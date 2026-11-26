@@ -159,65 +159,93 @@ Median `savefig` wall time, milliseconds (smaller = better).
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_100 | 80.6 | 95.5 | 15.3 | 0.84× | 5.28× |
-| line_2k + scatter + legend | 97.1 | 69.5 | 16.3 | 1.40× | 5.96× |
-| scatter_100 | 49.1 | 72.0 | 14.7 | 0.68× | 3.34× |
-| bar_10 | 48.2 | 70.0 | 14.2 | 0.69× | 3.40× |
-| errorbar_50 | 46.7 | 62.5 | 11.9 | 0.75× | 3.93× |
-| boxplot_6 | 47.4 | 71.5 | 13.9 | 0.66× | 3.40× |
-| text_50 | 105.9 | 55.4 | 13.3 | 1.91× | 7.98× |
-| pie_4 | 21.3 | 19.6 | 13.1 | 1.09× | 1.63× |
-| **50 figures × line_2k** (ms/fig) | 71.0 | 169.9 | 5.9 | 0.42× | 12.10× |
+| line_100 | 148.5 | 79.1 | 25.5 | 1.88× | 5.83× |
+| line_2k + scatter + legend | 178.9 | 88.4 | 17.8 | 2.02× | 10.04× |
+| scatter_100 | 101.1 | 65.1 | 15.0 | 1.55× | 6.72× |
+| bar_10 | 93.1 | 51.1 | 15.6 | 1.82× | 5.96× |
+| errorbar_50 | 151.5 | 65.8 | 13.4 | 2.30× | 11.32× |
+| boxplot_6 | 107.1 | 65.9 | 14.2 | 1.62× | 7.53× |
+| text_50 | 285.9 | 67.8 | 20.9 | 4.22× | 13.65× |
+| pie_4 | 44.5 | 24.5 | 20.6 | 1.81× | 2.16× |
+| **50 figures × line_2k** (ms/fig) | 80.0 | 219.5 | 6.5 | 0.36× | 12.30× |
 
 ### Medium
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_10k | 70.3 | 53.0 | 13.9 | 1.33× | 5.07× |
-| line_100k | 73.9 | 69.2 | 14.1 | 1.07× | 5.22× |
-| multiline_20×100k | 245.1 | 134.9 | 46.2 | 1.82× | 5.31× |
-| scatter_10k | 222.2 | 111.2 | 37.8 | 2.00× | 5.88× |
-| scatter_50k | 903.5 | 112.6 | 38.4 | 8.02× | 23.55× |
-| hist_100k | 67.2 | 80.8 | 14.3 | 0.83× | 4.70× |
-| bar_1k | 257.9 | 242.7 | 14.0 | 1.06× | 18.47× |
-| bar_5k | 1118.8 | 1148.0 | 16.2 | 0.97× | 69.26× |
-| contourf_100 | 48.9 | 73.9 | 18.3 | 0.66× | 2.67× |
-| quiver_30×30 | 71.3 | 68.7 | 13.9 | 1.04× | 5.13× |
-| step_50k | 73.3 | 61.9 | 13.1 | 1.18× | 5.60× |
-| fill_100k | 81.4 | 68.3 | 39.3 | 1.19× | 2.07× |
-| eventplot_2k | 1079.1 | 1077.4 | 16.9 | 1.00× | 63.79× |
-| stackplot_5×1k | 146.4 | 64.1 | 14.3 | 2.28× | 10.24× |
-| errorbar_5k | 149.2 | 67.4 | 12.5 | 2.21× | 11.91× |
-| violin_8×2k | 104.5 | 83.8 | 27.5 | 1.25× | 3.80× |
-| stem_2k | 167.5 | 70.1 | 15.6 | 2.39× | 10.77× |
+| line_10k | 276.8 | 70.8 | 14.8 | 3.91× | 18.65× |
+| line_100k | 164.9 | 67.7 | 21.9 | 2.44× | 7.51× |
+| multiline_20×100k | 631.8 | 181.2 | 40.3 | 3.49× | 15.66× |
+| scatter_10k | 663.2 | 89.7 | 32.9 | 7.39× | 20.18× |
+| scatter_50k | 1924.3 | 146.4 | 40.0 | 13.14× | 48.15× |
+| hist_100k | 190.6 | 67.4 | 12.9 | 2.83× | 14.77× |
+| bar_1k | 585.4 | 254.4 | 11.8 | 2.30× | 49.48× |
+| bar_5k | 1138.5 | 1155.5 | 12.1 | 0.99× | 94.34× |
+| contourf_100 | 48.6 | 108.0 | 30.5 | 0.45× | 1.60× |
+| quiver_30×30 | 78.0 | 83.6 | 30.4 | 0.93× | 2.56× |
+| step_50k | 59.6 | 101.6 | 15.6 | 0.59× | 3.81× |
+| fill_100k | 67.2 | 77.3 | 41.4 | 0.87× | 1.62× |
+| eventplot_2k | 1056.0 | 1199.5 | 16.4 | 0.88× | 64.29× |
+| stackplot_5×1k | 175.6 | 111.7 | 13.3 | 1.57× | 13.22× |
+| errorbar_5k | 111.3 | 175.8 | 12.4 | 0.63× | 9.00× |
+| violin_8×2k | 62.0 | 126.1 | 20.5 | 0.49× | 3.03× |
+| stem_2k | 125.6 | 116.2 | 12.0 | 1.08× | 10.45× |
 
 ### Large
 
 | case | mpl (Agg) | mpl+VP | native | VP | nat |
 |---|---:|---:|---:|---:|---:|
-| line_1M | 174.0 | 77.2 | 19.5 | 2.25× | 8.94× |
-| line_10M | 1111.6 | 1726.6 | 83.2 | 0.64× | 13.36× |
-| line_10M @ dpi300 | 1552.5 | 914.5 | 83.7 | 1.70× | 18.56× |
-| scatter_200k | 4214.4 | 182.1 | 43.0 | 23.15× | 98.06× |
-| scatter_200k @ dpi300 | 8743.1 | 745.0 | 69.7 | 11.74× | 125.37× |
-| scatter_1M | 12902.9 | 491.6 | 65.2 | 26.25× | 197.94× |
-| scatter_2M @ dpi400 | 3987.0 | 519.6 | 81.3 | 7.67× | 49.01× |
-| scatter_sz_200k (per-point s,c) | 3688.1 | 156.0 | 49.0 | 23.65× | 75.25× |
-| scatter_sz_1M @ dpi400 | 41948.5 | 929.6 | 114.1 | 45.12× | 367.70× |
-| markers_100k (`plot('o')`) | 117.5 | 52.2 | 19.8 | 2.25× | 5.94× |
-| hist_10M | 80.3 | 84.3 | 82.1 | 0.95× | 0.98× |
-| fill_1M | 205.7 | 89.1 | 36.9 | 2.31× | 5.58× |
-| fill_1M @ dpi300 | 410.5 | 198.4 | 59.0 | 2.07× | 6.96× |
-| bar_50k | 9001.0 | 11061.8 | 15.4 | 0.81× | 584.35× |
-| eventplot_20k | 3999.6 | 6658.1 | 17.1 | 0.60× | 233.79× |
-| pcolormesh_2M | 802.3 | 251.3 | 38.4 | 3.19× | 20.89× |
-| pcolormesh_2M @ dpi300 | 1074.5 | 479.7 | 68.2 | 2.24× | 15.75× |
-| pcolormesh_7M @ dpi400 | 3769.9 | 6814.3 | 94.8 | 0.55× | 39.78× |
-| quadmesh_1M @ dpi400 | 921.9 | 732.2 | 64.0 | 1.26× | 14.40× |
-| imshow_4M none @ dpi300 | 2253.9 | 726.9 | 114.9 | 3.10× | 19.61× |
-| imshow_16M none @ dpi400 | 4403.6 | 2155.3 | 270.5 | 2.04× | 16.28× |
-| imshow_9M bilinear | 1719.2 | 3379.3 | 177.4 | 0.51× | 9.69× |
-| contourf_400 | 53.6 | 64.2 | 71.9 | 0.83× | 0.75× |
+| line_1M | 129.1 | 93.3 | 15.9 | 1.38× | 8.11× |
+| line_10M | 865.4 | 418.1 | 54.4 | 2.07× | 15.92× |
+| line_10M @ dpi300 | 2714.4 | 773.8 | 86.2 | 3.51× | 31.48× |
+| scatter_200k | 7359.9 | 280.6 | 54.5 | 26.23× | 135.00× |
+| scatter_200k @ dpi300 | 7190.3 | 886.8 | 69.2 | 8.11× | 103.92× |
+| scatter_1M | 19281.3 | 527.2 | 66.3 | 36.58× | 290.71× |
+| scatter_2M @ dpi400 | 6796.9 | 653.5 | 86.6 | 10.40× | 78.48× |
+| scatter_sz_200k (per-point s,c) | 4927.5 | 236.8 | 42.5 | 20.81× | 116.00× |
+| scatter_sz_1M @ dpi400 | 52229.5 | 1159.1 | 123.2 | 45.06× | 424.05× |
+| markers_100k (`plot('o')`) | 152.4 | 85.0 | 27.6 | 1.79× | 5.52× |
+| hist_10M | 115.3 | 133.6 | 98.0 | 0.86× | 1.18× |
+| fill_1M | 213.3 | 149.5 | 74.2 | 1.43× | 2.88× |
+| fill_1M @ dpi300 | 479.9 | 272.5 | 93.9 | 1.76× | 5.11× |
+| bar_50k | 12031.8 | 13390.8 | 25.8 | 0.90× | 465.73× |
+| eventplot_20k | 4625.7 | 13651.7 | 33.1 | 0.34× | 139.92× |
+| pcolormesh_2M | 941.8 | 502.9 | 39.9 | 1.87× | 23.61× |
+| pcolormesh_2M @ dpi300 | 1375.4 | 957.2 | 82.0 | 1.44× | 16.77× |
+| pcolormesh_7M @ dpi400 | 4108.8 | 3652.2 | 104.0 | 1.13× | 39.49× |
+| quadmesh_1M @ dpi400 | 1134.4 | 1033.9 | 68.0 | 1.10× | 16.69× |
+| imshow_4M none @ dpi300 | 713.6 | 825.5 | 91.1 | 0.86× | 7.83× |
+| imshow_16M none @ dpi400 | 2323.5 | 3651.2 | 232.1 | 0.64× | 10.01× |
+| imshow_9M bilinear | 1114.0 | 6024.0 | 143.8 | 0.18× | 7.75× |
+| contourf_400 | 72.1 | 173.0 | 110.7 | 0.42× | 0.65× |
+
+### 3D (mplot3d)
+
+Both mpl stacks run real `mpl_toolkits.mplot3d`: the Python-side
+`proj3d` transform dominates `Agg` and *caps* `mpl+VP` — our GPU only
+replaces the rasterization half of that stack. The native stack runs
+the whole 3D pipeline (projection, primitive expansion, rasterization)
+on the C++/Vulkan side, which is where the largest margins of the whole
+matrix are.
+
+| case | mpl (Agg) | mpl+VP | native | VP | nat |
+|---|---:|---:|---:|---:|---:|
+| scatter3d_100k | 14487.4 | 1512.5 | 38.9 | 9.58× | 372.37× |
+| scatter3d_500k | 32347.0 | 6644.9 | 50.3 | 4.87× | 642.70× |
+| plot3d_500k | 174.5 | 103.3 | 24.8 | 1.69× | 7.04× |
+| trisurf_2k | 711.2 | 4588.2 | 18.4 | 0.16× | 38.69× |
+| surface_100 | 444.6 | 2283.9 | 23.9 | 0.19× | 18.64× |
+| bar3d_1k | 820.9 | 792.7 | 16.9 | 1.04× | 48.69× |
+| voxels_20 | 3666.5 | 2711.8 | 23.8 | 1.35× | 153.77× |
+| quiver3d_20 | 695.1 | 533.4 | 18.3 | 1.30× | 38.09× |
+| errorbar3d_1k | 458.2 | 170.8 | 17.6 | 2.68× | 25.97× |
+| contour3d_100 | 241.4 | 130.6 | 21.6 | 1.85× | 11.18× |
+
+`trisurf_2k`/`surface_100` are the two cases where mpl+VP *loses* to
+Agg: mplot3d expands faces into a `Poly3DCollection` and our
+per-face artist translation is heavier than Agg's collection
+rasterizer. Every 3D scatter/voxel/bar/quiver case is a win, and the
+native stack is faster than Agg on every single 3D case — 7×–643×.
 
 ---
 
@@ -232,7 +260,7 @@ backend translates matplotlib draw calls into batched GPU operations:
   carrying position, color, and pixel size; a fragment shader evaluates the
   shape analytically (circles, squares, triangles, stars — the full mpl
   marker set). Agg rasterizes each marker as a filled polygon: at 1M points
-  that is ~0.6 s vs ~11 s. The win is largest with per-point `s=`/`c=`
+  that is ~66 ms vs ~19 s. The win is largest with per-point `s=`/`c=`
   arrays (`scatter_sz_*`), which ride along as vertex attributes.
 
 - **Lines → instanced GPU polylines + data-space decimation.** Before
@@ -263,9 +291,10 @@ backend translates matplotlib draw calls into batched GPU operations:
 ## When mpl+VP loses to Agg — and why
 
 - **Small figures.** A frame pays Vulkan command recording, submission, and
-  synchronization overhead that Agg's in-process C rasterizer doesn't. On
-  `line_100`-scale work this makes mpl+VP ~10–40 % slower — a few
-  milliseconds on an already-fast operation.
+  synchronization overhead that Agg's in-process C rasterizer doesn't.
+  Whether this wins or loses at `line_100` scale depends on how much
+  Python-side artist work the figure has: the current run comes out
+  1.5–4.2× *ahead*, but the margin is only a few tens of ms either way.
 
 - **`bar`, `eventplot`, `stem` — matplotlib-side artist storms.** mpl
   creates one `Rectangle` patch per bar and one `LineCollection` per
@@ -289,11 +318,17 @@ backend translates matplotlib draw calls into batched GPU operations:
   threads for large grids); Agg's scanline filler is still lighter for
   this geometry. Expect ~2–4× slower — a known optimization target.
 
+- **`trisurf`/`plot_surface` 3D faces.** mplot3d expands the mesh into a
+  `Poly3DCollection` — thousands of individual 3D polygons — and our
+  per-face artist translation is heavier than Agg's collection
+  rasterizer (0.16–0.19×). The native `TrisurfPlot`/`SurfacePlot` path
+  has no such per-face objects and is 19–39× *ahead* of Agg.
+
 - **Hatches, dashed paths, disjointed path soups** bypass the batching fast
   paths by design (draw-order correctness comes first) and pay per-path
   overhead.
 
-- **Repeated many-figure workloads** (`multi_50x_line2k`: 0.67×): per-figure
+- **Repeated many-figure workloads** (`multi_50x_line2k`: 0.36×): per-figure
   canvas setup costs a few ms more than Agg's, so batch figure generation of
   *small* plots is slower even though per-draw wins exist.
 
@@ -303,13 +338,19 @@ The native API skips matplotlib entirely: no `Artist` objects, no transform
 stack per element, no Python draw loop — NumPy → GPU buffer directly. It is
 fastest exactly where mpl's frontend is the bottleneck:
 
-- **`bar_50k` / `eventplot_20k`**: ~40–90 ms native vs 2.4–6.4 s on the mpl
-  stacks — mpl spends nearly all of that creating and drawing individual
-  artists, which no backend choice can bypass.
+- **`bar_50k` / `eventplot_20k`**: ~26–33 ms native vs 4.6–13.4 s on the
+  mpl stacks — mpl spends nearly all of that creating and drawing
+  individual artists, which no backend choice can bypass.
+- **3D**: mplot3d does the `proj3d` transform in Python on every draw,
+  then feeds projected 2D artists to the backend. The native 3D plots
+  (`Scatter3D`, `Trisurf`, `Voxels`, `Bar3D`, …) keep the entire
+  pipeline C++/GPU — `scatter3d_500k` is the single biggest win of the
+  whole matrix at 643×, `scatter3d_100k` 372×, `voxels_20` 154×, and
+  every 3D case lands 7×+ ahead of Agg.
 - **`hist`, `text`, `pie`, medium `bar`/`errorbar`/`boxplot`-adjacent work**:
   no frontend overhead, so even modest data sizes land ahead.
 - **`imshow` interpolated**: native samples the texture on the GPU — the
-  `bilinear` case mpl+VP loses to Agg (0.83×) is a 2× *win* natively,
+  `bilinear` case mpl+VP loses to Agg (0.18×) is a 7.8× *win* natively,
   because there is no mpl-side resample in front of it.
 
 The flip side: **native is a different API.** It is intentionally
@@ -321,13 +362,14 @@ than trusting this table.
 ## When native loses
 
 - **`contourf`** (see above — CPU tessellation, row-parallel but still
-  behind Agg's scanline filler, ~0.75×).
+  behind Agg's scanline filler, ~0.65×).
 - **`hist` on huge inputs**: `np.histogram`-scale binning is already
-  C-fast. Our binning uses `minmax`/`nth_element` quantiles and parallel
-  counting above 1M samples — parity at 10M (~0.98×). A compute-shader
-  binner exists but is opt-in (`VOLCANO_GPU_HIST=1`): uploading the
-  samples to a host-visible buffer costs more than the CPU count on
-  discrete GPUs; it may win on unified-memory/integrated setups.
+  C-fast, and our `minmax`/`nth_element` quantiles plus parallel
+  counting above 1M samples are only slightly ahead at 10M (~1.18×).
+  A compute-shader binner exists but is opt-in (`VOLCANO_GPU_HIST=1`):
+  uploading the samples to a host-visible buffer costs more than the
+  CPU count on discrete GPUs; it may win on unified-memory/integrated
+  setups.
 - **`quadmesh`/`pcolormesh` on irregular grids** — only uniform grids
   take the texture path; irregular edges still tessellate per cell
   (6 verts/cell uploads dominate at multi-million cells).

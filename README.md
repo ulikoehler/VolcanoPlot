@@ -88,6 +88,27 @@ the *shape*, not the spec. See `docs/PERFORMANCE.md` for details.
 | imshow_9M bilinear | 1114.0 | 6024.0 | 143.8 | 0.18x | 7.75x |
 | contourf_400 | 72.1 | 173.0 | 110.7 | 0.42x | 0.65x |
 
+### 3D (mplot3d)
+
+The mpl stacks run real `mpl_toolkits.mplot3d` — the Python-side proj3d
+transform dominates `Agg` and caps `mpl+VP`, whose GPU only replaces the
+rasterization half. The C++ stack does the whole 3D pipeline
+(projection, expansion, rasterization) natively — this is where the
+largest margins are.
+
+| case | Agg | mpl+VP | VP (C++) | VP | nat |
+|---|---:|---:|---:|---:|---:|
+| scatter3d_100k | 14487.4 | 1512.5 | 38.9 | 9.58x | 372.37x |
+| scatter3d_500k | 32347.0 | 6644.9 | 50.3 | 4.87x | 642.70x |
+| plot3d_500k | 174.5 | 103.3 | 24.8 | 1.69x | 7.04x |
+| trisurf_2k | 711.2 | 4588.2 | 18.4 | 0.16x | 38.69x |
+| surface_100 | 444.6 | 2283.9 | 23.9 | 0.19x | 18.64x |
+| bar3d_1k | 820.9 | 792.7 | 16.9 | 1.04x | 48.69x |
+| voxels_20 | 3666.5 | 2711.8 | 23.8 | 1.35x | 153.77x |
+| quiver3d_20 | 695.1 | 533.4 | 18.3 | 1.30x | 38.09x |
+| errorbar3d_1k | 458.2 | 170.8 | 17.6 | 2.68x | 25.97x |
+| contour3d_100 | 241.4 | 130.6 | 21.6 | 1.85x | 11.18x |
+
 ### When VolcanoPlot wins / loses
 
 **mpl+VP faster than Agg:** scatter ≥10k (7.4–45×), per-point `s=`/`c=`
@@ -100,9 +121,14 @@ scatter (21–45×), `pcolormesh`/`quadmesh` (1.1–24×), `line` plots
 `imshow` (0.18–0.86×, resampling/encoding is matplotlib-side), `step`,
 `errorbar`, `violin`, `quiver`, `fill_100k` (0.5–0.9×), `hist_10M`
 (0.86×), repeated figures (`multi_50x` 0.36× — per-figure mpl churn).
+In 3D, `trisurf`/`plot_surface` (0.16–0.19×) — mpl builds one
+`Poly3DCollection` per face and our per-face artist translation is
+heavier than Agg's rasterizer.
 
-**VP (C++) faster than Agg** on virtually everything — biggest wins where
-matplotlib's per-element artist objects dominate: `bar_50k` 466×,
+**VP (C++) faster than Agg** on virtually everything — biggest in 3D
+where mplot3d's Python proj3d transform has no counterpart at all:
+`scatter3d_500k` 643×, `scatter3d_100k` 372×, `voxels_20` 154×; then
+where matplotlib's per-element artist objects dominate: `bar_50k` 466×,
 `scatter_sz_1M` 424×, `scatter_1M` 291×, `eventplot_20k` 140×; the
 repeated-figure case hits 12× via `savefigAsync` encode overlap.
 Exceptions: dense `contourf` (0.65×, CPU-bound tessellation).

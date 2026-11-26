@@ -38,6 +38,16 @@
 #include <volcano/plot/plots/StackPlot.hpp>
 #include <volcano/plot/plots/PiePlot.hpp>
 #include <volcano/plot/plots/ReferenceLines.hpp>
+#include <volcano/plot/plots/Axes3DPlot.hpp>
+#include <volcano/plot/plots/Scatter3D.hpp>
+#include <volcano/plot/plots/Plot3D.hpp>
+#include <volcano/plot/plots/TrisurfPlot.hpp>
+#include <volcano/plot/plots/Bar3D.hpp>
+#include <volcano/plot/plots/VoxelsPlot.hpp>
+#include <volcano/plot/plots/Quiver3D.hpp>
+#include <volcano/plot/plots/Errorbar3D.hpp>
+#include <volcano/plot/plots/Contour3D.hpp>
+#include <volcano/plot/Triangulation.hpp>
 #include <volcano/encode/ImageEncoder.hpp>
 
 #include <algorithm>
@@ -48,8 +58,9 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <cstdio>
+#include <format>
 #include <numeric>
-#include <print>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -127,8 +138,8 @@ static Npy loadNpy(const fs::path& p) {
         }
     }
     if (out.dims.empty()) out.dims.push_back(1);
-    if (out.dims.size() > 2)
-        throw std::runtime_error("npy >2D unsupported: " + p.string());
+    if (out.dims.size() > 3)
+        throw std::runtime_error("npy >3D unsupported: " + p.string());
     size_t n = std::accumulate(out.dims.begin(), out.dims.end(), 1ull,
                                std::multiplies<>());
     out.data.resize(n);
@@ -476,6 +487,189 @@ static void b_multi(plot::Axes& ax, const CaseData& d, float) {
                 d.v(std::format("plot{}.1", j)));
 }
 
+// ── 3d cases ─────────────────────────────────────────────────────────
+// The mpl stacks run real mplot3d (Python-side proj3d transform feeding
+// 2D artists); the native leg uses the 3D plot types with the mpl
+// view_init default camera (elev=30, azim=-60) on the 6.4x4.8in canvas.
+
+static plot::Viewport range3(const std::vector<float>& xs,
+                             const std::vector<float>& ys,
+                             const std::vector<float>& zs) {
+    plot::Viewport v;
+    auto set = [](plot::Range& r, const std::vector<float>& a) {
+        auto [mn, mx] = std::ranges::minmax(a);
+        r.min = mn; r.max = mx;
+    };
+    set(v.x, xs); set(v.y, ys); set(v.z, zs);
+    return v;
+}
+
+/// mpl view_init default camera + the mplot3d pane box (added first so
+/// the panes sit behind the data plots).
+static plot::Camera3D camFor3d(plot::Axes& ax, const plot::Viewport& v) {
+    auto cam = plot::Camera3D::viewInit(30.f, -60.f, 0.f);
+    cam.aspect = 6.4f / 4.8f;
+    cam.dataMin = {v.x.min, v.y.min, v.z.min};
+    cam.dataMax = {v.x.max, v.y.max, v.z.max};
+    ax.addPlot(std::make_unique<plot::Axes3DPlot>(cam, v));
+    return cam;
+}
+
+static void b_scatter3d_100k(plot::Axes& ax, const CaseData& d,
+                             float dpi) {
+    auto x = d.v("scatter0.0"), y = d.v("scatter0.1"),
+         z = d.v("scatter0.2");
+    auto c = d.v("scatter0.c");
+    const auto& cm = plot::colormaps::viridis();
+    auto [cmn, cmx] = std::ranges::minmax(c);
+    std::vector<plot::Color> colors(c.size());
+    for (size_t i = 0; i < c.size(); ++i)
+        colors[i] = cm.sample(cmx > cmn ? (c[i] - cmn) / (cmx - cmn) : 0.f);
+    plot::Scatter3DConfig cfg;
+    cfg.size = std::sqrt(4.0f) * dpi / 72.0f;
+    auto p = std::make_unique<plot::Scatter3D>(std::move(x), std::move(y),
+                                               std::move(z),
+                                               std::move(colors), cfg);
+    p->setCamera(camFor3d(ax, range3(
+        d.v("scatter0.0"), d.v("scatter0.1"), d.v("scatter0.2"))));
+    ax.addPlot(std::move(p));
+}
+
+static void b_scatter3d_500k(plot::Axes& ax, const CaseData& d,
+                             float dpi) {
+    auto x = d.v("scatter0.0"), y = d.v("scatter0.1"),
+         z = d.v("scatter0.2");
+    auto v = range3(x, y, z);
+    plot::Scatter3DConfig cfg;
+    cfg.size = std::sqrt(2.0f) * dpi / 72.0f;
+    auto p = std::make_unique<plot::Scatter3D>(std::move(x), std::move(y),
+                                               std::move(z), cfg);
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
+static void b_plot3d_500k(plot::Axes& ax, const CaseData& d, float) {
+    auto x = d.v("plot0.0"), y = d.v("plot0.1"), z = d.v("plot0.2");
+    auto v = range3(x, y, z);
+    auto p = std::make_unique<plot::Plot3D>(std::move(x), std::move(y),
+                                            std::move(z));
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
+static void b_trisurf_2k(plot::Axes& ax, const CaseData& d, float) {
+    auto x = d.v("plot_trisurf0.0"), y = d.v("plot_trisurf0.1"),
+         z = d.v("plot_trisurf0.2");
+    auto v = range3(x, y, z);
+    plot::TrisurfConfig cfg;
+    cfg.cmap = &plot::colormaps::viridis();
+    auto p = std::make_unique<plot::TrisurfPlot>(std::move(x),
+                                                 std::move(y),
+                                                 std::move(z), cfg);
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
+static void b_surface_100(plot::Axes& ax, const CaseData& d, float) {
+    Npy xs = d.a("plot_surface0.0"), ys = d.a("plot_surface0.1"),
+        zs = d.a("plot_surface0.2");
+    const uint32_t ny = zs.dims[0], nx = zs.dims[1];
+    // Expand the quad grid into triangle soup (2 tris/cell) like mpl's
+    // Poly3DCollection, then hand it to TrisurfPlot.
+    std::vector<float> px(xs.data), py(ys.data), pz(zs.data);
+    std::vector<plot::Triangle> tris;
+    tris.reserve((nx - 1) * (ny - 1) * 2);
+    for (uint32_t j = 0; j + 1 < ny; ++j)
+        for (uint32_t i = 0; i + 1 < nx; ++i) {
+            uint32_t a = j * nx + i, b = a + 1, cc = a + nx, dd = cc + 1;
+            tris.push_back({a, cc, b});
+            tris.push_back({b, cc, dd});
+        }
+    plot::TrisurfConfig cfg;
+    cfg.cmap = &plot::colormaps::viridis();
+    auto p = std::make_unique<plot::TrisurfPlot>(std::move(px),
+                                                 std::move(py),
+                                                 std::move(pz),
+                                                 std::move(tris), cfg);
+    p->setCamera(camFor3d(ax, range3(xs.data, ys.data, zs.data)));
+    ax.addPlot(std::move(p));
+}
+
+static void b_bar3d_1k(plot::Axes& ax, const CaseData& d, float) {
+    auto x = d.v("bar3d0.0"), y = d.v("bar3d0.1"), z = d.v("bar3d0.2");
+    auto dz = d.v("bar3d0.5");
+    std::vector<float> ztop(z.size());
+    for (size_t i = 0; i < z.size(); ++i) ztop[i] = z[i] + dz[i];
+    auto v = range3(x, y, ztop);
+    auto p = std::make_unique<plot::Bar3D>(std::move(x), std::move(y),
+                                           std::move(z), d.v("bar3d0.3"),
+                                           d.v("bar3d0.4"), std::move(dz));
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
+static void b_voxels_20(plot::Axes& ax, const CaseData& d, float) {
+    Npy v = d.a("voxels0.0");
+    std::vector<uint8_t> filled(v.data.begin(), v.data.end());
+    plot::Viewport vp;
+    vp.x = {0, float(v.dims[0])};
+    vp.y = {0, float(v.dims[1])};
+    vp.z = {0, float(v.dims[2])};
+    auto p = std::make_unique<plot::VoxelsPlot>(std::move(filled),
+                                                v.dims[0], v.dims[1],
+                                                v.dims[2]);
+    p->setCamera(camFor3d(ax, vp));
+    ax.addPlot(std::move(p));
+}
+
+static void b_quiver3d_20(plot::Axes& ax, const CaseData& d, float) {
+    auto x = d.v("quiver0.0"), y = d.v("quiver0.1"), z = d.v("quiver0.2");
+    auto u = d.v("quiver0.3"), vv = d.v("quiver0.4"),
+         w = d.v("quiver0.5");
+    auto p = std::make_unique<plot::Quiver3D>(x, y, z, std::move(u),
+                                              std::move(vv),
+                                              std::move(w));
+    std::vector<float> x2(x), y2(y), z2(z);
+    p->setCamera(camFor3d(ax, range3(std::move(x2), std::move(y2),
+                                     std::move(z2))));
+    ax.addPlot(std::move(p));
+}
+
+static void b_errorbar3d_1k(plot::Axes& ax, const CaseData& d, float) {
+    auto x = d.v("errorbar0.0"), y = d.v("errorbar0.1"),
+         z = d.v("errorbar0.2");
+    auto v = range3(x, y, z);
+    plot::Errorbar3DConfig cfg;
+    cfg.zerr = d.v("errorbar0.zerr");
+    auto p = std::make_unique<plot::Errorbar3D>(std::move(x),
+                                                std::move(y),
+                                                std::move(z), cfg);
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
+static void b_contour3d_100(plot::Axes& ax, const CaseData& d, float) {
+    Npy xs = d.a("contour0.0"), ys = d.a("contour0.1"),
+        zs = d.a("contour0.2");
+    plot::Grid2D g;
+    g.values = zs.data;
+    g.width = zs.dims[1];
+    g.height = zs.dims[0];
+    g.xRange = {xs.data.front(), xs.data.back()};
+    g.yRange = {ys.data.front(), ys.data.back()};
+    plot::Viewport v;
+    v.x = g.xRange; v.y = g.yRange;
+    auto [zmn, zmx] = std::ranges::minmax(zs.data);
+    v.z = {zmn, zmx};
+    plot::Contour3DConfig cfg;
+    cfg.numLevels = 15;
+    cfg.levelsAsZ = true;  // mpl Axes3D.contour draws each line at its z
+    cfg.cmap = &plot::colormaps::viridis();
+    auto p = std::make_unique<plot::Contour3D>(std::move(g), cfg);
+    p->setCamera(camFor3d(ax, v));
+    ax.addPlot(std::move(p));
+}
+
 static const std::unordered_map<std::string, Builder> BUILDERS = {
     {"line_100", b_line_100},
     {"line_2k", b_line_2k},
@@ -522,6 +716,16 @@ static const std::unordered_map<std::string, Builder> BUILDERS = {
     {"imshow_4M_none", b_imshow_none},
     {"imshow_16M_none", b_imshow_none},
     {"imshow_9M_bilinear", b_imshow_bilinear},
+    {"scatter3d_100k", b_scatter3d_100k},
+    {"scatter3d_500k", b_scatter3d_500k},
+    {"plot3d_500k", b_plot3d_500k},
+    {"trisurf_2k", b_trisurf_2k},
+    {"surface_100", b_surface_100},
+    {"bar3d_1k", b_bar3d_1k},
+    {"voxels_20", b_voxels_20},
+    {"quiver3d_20", b_quiver3d_20},
+    {"errorbar3d_1k", b_errorbar3d_1k},
+    {"contour3d_100", b_contour3d_100},
 };
 
 // ── backend/renderer pool (mirrors the binding's per-size pooling) ────
@@ -587,9 +791,24 @@ static double warmup(const fs::path& outdir) {
 int main(int argc, char** argv) {
     fs::path outdir = argc > 1 ? argv[1] : "gallery/benchmark";
     int repeats = 3;
+    std::string caseSpec;  // --cases: comma-separated name-substring or
+                           // exact-category filter (mirrors bench_matrix.py)
     for (int i = 2; i + 1 < argc; ++i)
         if (std::string(argv[i]) == "--repeats")
             repeats = std::stoi(argv[++i]);
+        else if (std::string(argv[i]) == "--cases")
+            caseSpec = argv[++i];
+    auto caseMatch = [&](const std::string& name,
+                         const std::string& cat) {
+        if (caseSpec.empty()) return true;
+        std::istringstream ss(caseSpec);
+        std::string tok;
+        while (std::getline(ss, tok, ','))
+            if (!tok.empty() &&
+                (name.find(tok) != std::string::npos || cat == tok))
+                return true;
+        return false;
+    };
     fs::path datadir = outdir / "data";
     fs::create_directories(outdir);
 
@@ -602,9 +821,11 @@ int main(int argc, char** argv) {
     {
         std::ifstream mf(datadir / "manifest.tsv");
         if (!mf) {
-            std::print(stderr, "no manifest at {} — run "
-                               "bench_matrix.py dump first\n",
-                       (datadir / "manifest.tsv").string());
+            std::fputs(std::format("no manifest at {} — run "
+                                  "bench_matrix.py dump first\n",
+                                  (datadir / "manifest.tsv").string())
+                           .c_str(),
+                       stderr);
             return 1;
         }
         std::string line;
@@ -623,7 +844,10 @@ int main(int argc, char** argv) {
     }
 
     double initMs = warmup(outdir);
-    std::print("[cpp   ] _init                  {:9.1f} ms\n", initMs);
+    std::fputs(std::format("[cpp   ] _init                  {:9.1f} ms\n",
+                           initMs)
+                   .c_str(),
+               stdout);
     std::fflush(stdout);
 
     std::ostringstream js;
@@ -644,10 +868,14 @@ int main(int argc, char** argv) {
 
     for (const Case& c : cases) {
         if (c.name == "multi_50x_line2k") continue;  // handled below
+        if (!caseMatch(c.name, c.cat)) continue;
         auto bit = BUILDERS.find(c.data);
         if (bit == BUILDERS.end()) {
             emit(c, 0, "unsupported");
-            std::print("[cpp   ] {:<22} ERR unsupported\n", c.name);
+            std::fputs(std::format("[cpp   ] {:<22} ERR unsupported\n",
+                                   c.name)
+                           .c_str(),
+                       stdout);
             continue;
         }
         const uint32_t w = uint32_t(6.4 * c.dpi + 0.5);
@@ -670,22 +898,29 @@ int main(int argc, char** argv) {
             }
         } catch (const std::exception& e) {
             err = "exception";
-            std::print(stderr, "  {}: {}\n", c.name, e.what());
+            std::fputs(std::format("  {}: {}\n", c.name, e.what())
+                           .c_str(),
+                       stderr);
         }
         if (err) {
             emit(c, 0, err);
-            std::print("[cpp   ] {:<22} ERR {}\n", c.name, err);
+            std::fputs(std::format("[cpp   ] {:<22} ERR {}\n", c.name, err)
+                           .c_str(),
+                       stdout);
         } else {
             std::ranges::sort(ts);
             double med = ts[ts.size() / 2];
             emit(c, med, nullptr);
-            std::print("[cpp   ] {:<22} {:9.1f} ms\n", c.name, med);
+            std::fputs(std::format("[cpp   ] {:<22} {:9.1f} ms\n", c.name,
+                                   med)
+                           .c_str(),
+                       stdout);
         }
         std::fflush(stdout);
     }
 
     // multi-figure workload: 50 figures, total/50 — amortized cost
-    {
+    if (caseMatch("multi_50x_line2k", "multi")) {
         Case multi{"multi_50x_line2k", "multi_line2k", "multi", 100};
         auto t0 = Clock::now();
         CaseData cd{datadir / "multi_line2k"};
@@ -703,10 +938,18 @@ int main(int argc, char** argv) {
         for (auto& f : pending) (void)f.get();
         double per = ms(t0) / 50.0;
         emit(multi, per, nullptr);
-        std::print("[cpp   ] {:<22} {:9.1f} ms/plot\n", multi.name, per);
+        std::fputs(std::format("[cpp   ] {:<22} {:9.1f} ms/plot\n",
+                               multi.name, per)
+                       .c_str(),
+                   stdout);
     }
 
     js << "\n}\n";
-    std::ofstream(outdir / "bench_matrix_cpp.json") << js.str();
+    // Filtered runs write an incremental file which bench_matrix.py
+    // merges into bench_matrix_cpp.json (same as the Python stacks).
+    std::ofstream(outdir / (caseSpec.empty()
+                                ? "bench_matrix_cpp.json"
+                                : "bench_matrix_cpp_incr.json"))
+        << js.str();
     return 0;
 }

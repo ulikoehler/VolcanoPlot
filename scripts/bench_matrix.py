@@ -331,6 +331,78 @@ def c_contourf_400(ax):
                 cmap="viridis")
 
 
+# ── 3d: mplot3d (Python-side proj3d transform) vs native 3D plots ─────
+# figkw projection="3d" — mpl Axes3D on agg AND on the vp backend (the
+# backend rasterizes mplot3d's projected 2D artists); the C++ stack uses
+# the native 3D plot types with a Camera3D::viewInit(30,-60,0) camera.
+
+def c_scatter3d_100k(ax):
+    r = _rng(20)
+    ax.scatter(r.random(100_000), r.random(100_000), r.random(100_000),
+               s=4, c=r.random(100_000), cmap="viridis")
+
+
+def c_scatter3d_500k(ax):
+    r = _rng(21)
+    ax.scatter(r.random(500_000), r.random(500_000), r.random(500_000),
+               s=2, c="tab:blue")
+
+
+def c_plot3d_500k(ax):
+    t = np.linspace(0, 100, 500_000)
+    ax.plot(t, np.sin(t), np.cos(3 * t))
+
+
+def c_trisurf_2k(ax):
+    r = _rng(22)
+    n = 2500
+    z = r.uniform(-1, 1, n)
+    th = r.uniform(0, 2 * np.pi, n)
+    rr = np.sqrt(1 - z * z)
+    ax.plot_trisurf(rr * np.cos(th), rr * np.sin(th), z, cmap="viridis")
+
+
+def c_surface_100(ax):
+    y, x = np.mgrid[0:1:100j, 0:1:100j]
+    ax.plot_surface(x, y, np.sin(x * 12) * np.cos(y * 12),
+                    cmap="viridis")
+
+
+def c_bar3d_1k(ax):
+    r = _rng(23)
+    n = 1000
+    ax.bar3d(r.integers(0, 100, n).astype(float),
+             r.integers(0, 100, n).astype(float),
+             np.zeros(n), np.full(n, 1.0), np.full(n, 1.0),
+             r.random(n) * 10)
+
+
+def c_voxels_20(ax):
+    # uint8 (not bool) so the C++ .npy loader reads the same array.
+    ax.voxels((_rng(24).random((20, 20, 20)) > 0.8).astype(np.uint8))
+
+
+def c_quiver3d_20(ax):
+    z, y, x = np.mgrid[0:1:10j, 0:1:10j, 0:1:10j]
+    ax.quiver(x.ravel(), y.ravel(), z.ravel(),
+              (-y).ravel(), x.ravel(), np.full(z.size, 0.5),
+              length=0.08)
+
+
+def c_errorbar3d_1k(ax):
+    r = _rng(25)
+    x = np.linspace(0, 10, 1000)
+    ax.errorbar(x, np.sin(x), np.cos(x), zerr=0.1 + r.random(1000) * 0.1)
+
+
+def c_contour3d_100(ax):
+    y, x = np.mgrid[0:1:100j, 0:1:100j]
+    ax.contour(x, y, np.sin(x * 12) * np.cos(y * 12), levels=15,
+               cmap="viridis")
+
+
+P3D = {"projection": "3d"}
+
 CASES = [
     # name                  fn                 figkw    category
     ("line_100",            c_line_100,        {},               "small"),
@@ -381,18 +453,32 @@ CASES = [
     ("imshow_16M_none_dpi400", c_imshow_16M_none, {"dpi": 400},  "large"),
     ("imshow_9M_bilinear",  c_imshow_9M_bilinear, {"dpi": 200},  "large"),
     ("contourf_400",        c_contourf_400,    {},               "large"),
+    ("scatter3d_100k",      c_scatter3d_100k,  P3D,              "3d"),
+    ("scatter3d_500k",      c_scatter3d_500k,  P3D,              "3d"),
+    ("plot3d_500k",         c_plot3d_500k,     P3D,              "3d"),
+    ("trisurf_2k",          c_trisurf_2k,      P3D,              "3d"),
+    ("surface_100",         c_surface_100,     P3D,              "3d"),
+    ("bar3d_1k",            c_bar3d_1k,        P3D,              "3d"),
+    ("voxels_20",           c_voxels_20,       P3D,              "3d"),
+    ("quiver3d_20",         c_quiver3d_20,     P3D,              "3d"),
+    ("errorbar3d_1k",       c_errorbar3d_1k,   P3D,              "3d"),
+    ("contour3d_100",       c_contour3d_100,   P3D,              "3d"),
 ]
 
 NMULTI = 50
 
 
-def _new_fig_ax(stack, dpi):
+def _new_fig_ax(stack, kw):
+    dpi = kw.get("dpi", 100)
+    proj = kw.get("projection")
     if stack == "native":
         import volcanoplot as vp
         fig = vp.figure(figsize=(6.4, 4.8), dpi=dpi)
         return fig, vp.gca()
     import matplotlib.pyplot as plt
     fig = plt.figure(figsize=(6.4, 4.8), dpi=dpi)
+    if proj:
+        return fig, fig.add_subplot(111, projection=proj)
     return fig, fig.add_subplot(111)
 
 
@@ -409,7 +495,7 @@ def _warmup(stack, outdir):
     """One mixed-primitive figure: brings up the Vulkan instance/device,
     font atlas and the common render pipelines. Its savefig wall time is
     reported as the per-stack "_init" metric and never added to a case."""
-    fig, ax = _new_fig_ax(stack, 100)
+    fig, ax = _new_fig_ax(stack, {})
     x = np.linspace(0, 1, 100)
     r = _rng(0)
     ax.plot(x, x)
@@ -424,7 +510,13 @@ def _warmup(stack, outdir):
     return dt * 1e3
 
 
-def run(stack, outdir, repeats=3):
+def _case_match(spec, name, cat):
+    """--cases filter: comma-separated tokens matching a case name
+    substring or the category exactly (e.g. '3d' or 'scatter,surface')."""
+    return any(t in name or t == cat for t in spec.split(",") if t)
+
+
+def run(stack, outdir, repeats=3, case_spec=None):
     os.makedirs(outdir, exist_ok=True)
     if stack == "native":
         import volcanoplot as vp  # noqa: F401
@@ -442,11 +534,13 @@ def run(stack, outdir, repeats=3):
           flush=True)
 
     for name, fn, kw, cat in CASES:
+        if case_spec and not _case_match(case_spec, name, cat):
+            continue
         ts = []
         err = None
         # rep 0 is an untimed warm-up (pipeline compile, font glyphs, …)
         for rep in range(repeats + 1):
-            fig, ax = _new_fig_ax(stack, kw.get("dpi", 100))
+            fig, ax = _new_fig_ax(stack, kw)
             try:
                 fn(ax)
             except Exception as e:  # unsupported in native API etc.
@@ -472,19 +566,32 @@ def run(stack, outdir, repeats=3):
               f"{'ms' if ts else err or ''}", flush=True)
 
     # same-config multi-figure workload (amortized setup)
-    t0 = time.perf_counter()
-    for _ in range(NMULTI):
-        fig, ax = _new_fig_ax(stack, 100)
-        c_multi_line2k(ax)
-        fig.savefig(os.path.join(outdir, f"multi_50x_line2k_{stack}.png"))
-        _close(stack, fig)
-    dt = time.perf_counter() - t0
-    out["multi_50x_line2k"] = {"cat": "multi", "ms": dt / NMULTI * 1e3,
-                               "min_ms": dt / NMULTI * 1e3, "err": None}
-    print(f"[{stack:6}] multi_50x_line2k      {dt / NMULTI * 1e3:9.1f} "
-          f"ms/plot", flush=True)
+    if not case_spec or _case_match(case_spec, "multi_50x_line2k",
+                                    "multi"):
+        t0 = time.perf_counter()
+        for _ in range(NMULTI):
+            fig, ax = _new_fig_ax(stack, {})
+            c_multi_line2k(ax)
+            fig.savefig(os.path.join(outdir,
+                                     f"multi_50x_line2k_{stack}.png"))
+            _close(stack, fig)
+        dt = time.perf_counter() - t0
+        out["multi_50x_line2k"] = {"cat": "multi",
+                                   "ms": dt / NMULTI * 1e3,
+                                   "min_ms": dt / NMULTI * 1e3,
+                                   "err": None}
+        print(f"[{stack:6}] multi_50x_line2k      "
+              f"{dt / NMULTI * 1e3:9.1f} ms/plot", flush=True)
 
-    with open(os.path.join(outdir, f"bench_matrix_{stack}.json"), "w") as f:
+    # A filtered run only re-measures a subset — merge into the existing
+    # results file instead of dropping the other cases.
+    jpath = os.path.join(outdir, f"bench_matrix_{stack}.json")
+    if case_spec and os.path.isfile(jpath):
+        with open(jpath) as f:
+            prev = json.load(f)
+        prev.update(out)
+        out = prev
+    with open(jpath, "w") as f:
         json.dump(out, f, indent=1)
     return out
 
@@ -547,7 +654,7 @@ def dump_data(outdir):
 # C++ stack
 # -------------------------------------------------------------------
 
-def run_cpp(outdir):
+def run_cpp(outdir, case_spec=None):
     if not os.path.isfile(os.path.join(outdir, "data", "manifest.tsv")):
         dump_data(outdir)
     if not os.path.isfile(CPP_BENCH):
@@ -555,7 +662,24 @@ def run_cpp(outdir):
             ["cmake", "--build", "build",
              "--target", "example_bench_matrix", "-j4"],
             cwd=ROOT_DIR, check=True)
-    subprocess.run([CPP_BENCH, outdir], cwd=ROOT_DIR, check=True)
+    cmd = [CPP_BENCH, outdir]
+    if case_spec:
+        cmd += ["--cases", case_spec]
+    subprocess.run(cmd, cwd=ROOT_DIR, check=True)
+    if case_spec:
+        # The binary writes bench_matrix_cpp_incr.json for filtered runs —
+        # merge it into the main results like the Python stacks do.
+        incr = os.path.join(outdir, "bench_matrix_cpp_incr.json")
+        base = os.path.join(outdir, "bench_matrix_cpp.json")
+        with open(incr) as f:
+            new = json.load(f)
+        merged = {}
+        if os.path.isfile(base):
+            with open(base) as f:
+                merged = json.load(f)
+        merged.update(new)
+        with open(base, "w") as f:
+            json.dump(merged, f, indent=1)
 
 
 # -------------------------------------------------------------------
@@ -607,7 +731,7 @@ def report(outdir):
              "Median `savefig` wall time in ms (warm; init excluded — "
              "steady-state '100 plots' metric).", "",
              f"Init (measured separately): {init}", ""]
-    for cat in ("small", "medium", "large", "multi"):
+    for cat in ("small", "medium", "large", "3d", "multi"):
         rows = [n for n, *_ in CASES if dict((nm, c) for nm, _, _, c in
                 CASES)[n] == cat] or (["multi_50x_line2k"]
                                       if cat == "multi" else [])
@@ -655,18 +779,21 @@ def main():
                              "dump", "report"])
     ap.add_argument("--outdir", default=DEFAULT_OUTDIR)
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--cases", default=None,
+                    help="comma-separated filter: case-name substring or "
+                         "category (e.g. '3d', 'scatter'); merges results")
     args = ap.parse_args()
     outdir = args.outdir
     os.makedirs(outdir, exist_ok=True)
 
     if args.cmd in ("agg", "vp", "native"):
-        run(args.cmd, outdir, args.repeats)
+        run(args.cmd, outdir, args.repeats, args.cases)
         return
     if args.cmd == "dump":
         dump_data(outdir)
         return
     if args.cmd == "cpp":
-        run_cpp(outdir)
+        run_cpp(outdir, args.cases)
         return
     if args.cmd == "report":
         report(outdir)
