@@ -21,7 +21,7 @@
 #ifdef VOLCANO_WEB
 // Web builds have no GpuContext/factories — WebBackend lives in
 // src/web/WebBackend.hpp. BackendDesc exists so shared headers parse.
-namespace volcano::backend { struct BackendDesc { uint32_t width = 1280, height = 720; }; }
+namespace volcano::backend { struct BackendDesc { uint32_t width = 1280, height = 720; bool maximized = false; }; }
 #else
 namespace volcano::backend {
 
@@ -29,6 +29,8 @@ struct BackendDesc {
     uint32_t width = 1280;
     uint32_t height = 720;
     std::string windowTitle = "VolcanoPlot";
+    /// Ask the window manager to create the native window maximized.
+    bool maximized = false;
     bool enableValidation = false;
     /// MSAA sample count for the color target (1, 2, 4, 8, 16).
     vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e4;

@@ -52,6 +52,7 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
     // Vulkan window — no GL context.
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    glfwWindowHint(GLFW_MAXIMIZED, desc.maximized ? GLFW_TRUE : GLFW_FALSE);
     window_ = glfwCreateWindow(int(desc.width), int(desc.height),
                                desc.windowTitle.c_str(), nullptr, nullptr);
     if (!window_) throw std::runtime_error("glfwCreateWindow failed");
@@ -64,7 +65,6 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
     glfwSetKeyCallback(window_, &ScreenBackend::cbKey);
     glfwSetCharCallback(window_, &ScreenBackend::cbChar);
     glfwSetWindowCloseCallback(window_, &ScreenBackend::cbClose);
-
     // Instance
     core::InstanceDesc idesc{};
     idesc.applicationName = desc.windowTitle;
@@ -145,6 +145,13 @@ ScreenBackend::ScreenBackend(const BackendDesc& desc) : desc_(desc) {
         renderFinishedSem_.push_back(ctx_.device.handle().createSemaphoreUnique({}));
         inFlightFences_.push_back(ctx_.device.handle().createFenceUnique(
             vk::FenceCreateInfo{}.setFlags(vk::FenceCreateFlagBits::eSignaled)));
+    }
+
+    if (desc.maximized) {
+        // Some window managers ignore GLFW_MAXIMIZED as a creation hint.  Do
+        // the explicit request only after the initial swapchain is complete;
+        // the regular event loop will then handle the resulting resize.
+        glfwMaximizeWindow(window_);
     }
 }
 
