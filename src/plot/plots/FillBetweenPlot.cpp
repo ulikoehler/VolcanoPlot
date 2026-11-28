@@ -156,6 +156,22 @@ fillPolygons(const std::vector<float>& x, const std::vector<float>& y1,
 
 } // namespace
 
+void FillBetweenPlot::setData(std::vector<float> x, std::vector<float> y1,
+                              std::vector<float> y2) {
+    const size_t n = std::min({x.size(), y1.size(), y2.size()});
+    x_ = std::move(x);
+    y1_ = std::move(y1);
+    y2_ = std::move(y2);
+    x_.resize(n);
+    y1_.resize(n);
+    y2_.resize(n);
+    where_.clear();
+    mask_.clear();
+    meshBuilt_ = false;
+    prepared_ = false;  // re-upload the GPU point buffer / rebuild the mesh
+    touch();
+}
+
 void FillBetweenPlot::prepare(render::Renderer& r) {
     if (!renderer_) renderer_ = r.gpu().createFillRenderer();
 

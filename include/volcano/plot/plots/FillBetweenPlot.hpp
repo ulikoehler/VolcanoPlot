@@ -27,6 +27,12 @@ public:
         : x_(std::move(x)), y1_(std::move(y1)), y2_(std::move(y2)),
           color_(color) {}
 
+    /// Replace the band data (matplotlib `set_data` equivalent). The three
+    /// arrays are truncated to the shortest one; `where` is cleared because
+    /// it refers to the old sample positions.
+    void setData(std::vector<float> x, std::vector<float> y1,
+                 std::vector<float> y2);
+
     void prepare(render::Renderer& r) override;
     void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
