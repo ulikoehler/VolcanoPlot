@@ -15,6 +15,10 @@ namespace volcano::plot {
 
 namespace {
 
+/// GPU envelope limit: one vkCmdUpdateBuffer call caps at 64 KiB and a
+/// record is 16 B. Larger bands keep the existing CPU paths.
+constexpr size_t kMaxGpuEnvelopePoints = 4096;
+
 /// mpl cbook.contiguous_regions: (start, end) index pairs covering the
 /// contiguous true-runs of `mask`.
 std::vector<std::pair<size_t, size_t>>
@@ -168,11 +172,47 @@ void FillBetweenPlot::setData(std::vector<float> x, std::vector<float> y1,
     where_.clear();
     mask_.clear();
     meshBuilt_ = false;
+    dataDirty_ = true;
     prepared_ = false;  // re-upload the GPU point buffer / rebuild the mesh
     touch();
 }
 
 void FillBetweenPlot::prepare(render::Renderer& r) {
+    // Plain bands (no where/interpolate, bounded size) go through the
+    // GPU envelope: upload {x, ymin, ymax} and let the vertex shader
+    // expand the quads. No CPU triangle mesh is built.
+    bool canGpuEnvelope =
+        where_.empty() && !interpolate_ && x_.size() >= 2 &&
+        x_.size() <= kMaxGpuEnvelopePoints &&
+        render::OffloadConfig::allowGpu(
+            render::OffloadConfig::global().fillbetween);
+    if (canGpuEnvelope) {
+        for (size_t i = 0; i < x_.size(); ++i) {
+            if (!std::isfinite(x_[i]) || !std::isfinite(y1_[i]) ||
+                !std::isfinite(y2_[i])) {
+                canGpuEnvelope = false;
+                break;
+            }
+        }
+    }
+    if (!envelope_) envelope_ = r.gpu().createEnvelopeRenderer();
+    gpuEnvelope_ = canGpuEnvelope && envelope_ != nullptr;
+    if (gpuEnvelope_) {
+        if (dataDirty_ || envelopeData_.size() != x_.size() * 4) {
+            envelopeData_.resize(x_.size() * 4);
+            for (size_t i = 0; i < x_.size(); ++i) {
+                envelopeData_[4 * i + 0] = x_[i];
+                envelopeData_[4 * i + 1] = y2_[i];  // lower bound
+                envelopeData_[4 * i + 2] = y1_[i];  // upper bound
+                envelopeData_[4 * i + 3] = 0.0f;
+            }
+            envelopeDirty_ = true;
+            dataDirty_ = false;
+        }
+        prepared_ = true;
+        return;
+    }
+
     if (!renderer_) renderer_ = r.gpu().createFillRenderer();
 
     // Store the unique data points for GPU autoscale (the triangle vertices
@@ -203,6 +243,13 @@ void FillBetweenPlot::prepare(render::Renderer& r) {
     prepared_ = true;
 }
 
+void FillBetweenPlot::preDraw(render::Cmd& cmd, render::Renderer&,
+                              const Axes&, Rect2D) {
+    if (gpuEnvelope_ && envelope_ && envelopeDirty_) {
+        envelope_->update(cmd, envelopeData_);
+        envelopeDirty_ = false;
+    }
+}
 
 void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
                            const Axes& axes, Rect2D rect) {
@@ -212,6 +259,15 @@ void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
     Rect2D vrect{eff.x, eff.y, eff.width, eff.height};
 
     if (!transform && pathEffects.empty()) {
+        // GPU envelope: the vertex shader expands one quad per segment
+        // straight from the uploaded {x, ymin, ymax} records.
+        if (gpuEnvelope_ && envelope_ && envelope_->pointCount() >= 2 &&
+            axes.projection().kind == ProjectionKind::Rectilinear &&
+            axes.xscale().kind == ScaleKind::Linear &&
+            axes.yscale().kind == ScaleKind::Linear) {
+            envelope_->draw(cmd, vrect, axes.transform(), color_);
+            return;
+        }
         // Huge x-monotonic band on linear scales: one vertical quad per
         // pixel column covering the band's min/max envelope — raster-
         // equivalent to the per-segment mesh at ~6 verts per column
@@ -291,6 +347,9 @@ void FillBetweenPlot::draw(render::Cmd& cmd, render::Renderer& r,
                 gpuTess_ = false;
             }
         }
+        // CPU fallback: non-linear axes, oversized bands, or a backend
+        // without the envelope renderer.
+        if (!renderer_) renderer_ = r.gpu().createFillRenderer();
         if (!meshBuilt_) {
             std::vector<Point2D> positions;
             std::vector<Color> colors;
@@ -441,6 +500,7 @@ void FillBetweenPlot::contributeToAutoscale(Viewport& v) const {
 
 void FillBetweenPlot::contributeToAutoscaleGpu(
     render::primitives::ReduceRenderer& reducer, Viewport& v) const {
+    if (!renderer_ || gpuEnvelope_) { contributeToAutoscale(v); return; }
     // Use the FillRenderer's point buffer (which contains triangle vertices,
     // but min/max over those is the same as min/max over the data points).
     auto r = reducer.reduceMinMax2D(renderer_->pointBuffer(),

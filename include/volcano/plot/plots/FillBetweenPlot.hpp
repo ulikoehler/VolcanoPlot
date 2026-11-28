@@ -2,6 +2,7 @@
 #pragma once
 #include "volcano/plot/Plot.hpp"
 #include "volcano/plot/DataSeries.hpp"
+#include "volcano/render/primitives/EnvelopeRenderer.hpp"
 #include "volcano/render/primitives/FillRenderer.hpp"
 #include <vector>
 namespace volcano::plot {
@@ -34,6 +35,8 @@ public:
                  std::vector<float> y2);
 
     void prepare(render::Renderer& r) override;
+    void preDraw(render::Cmd& cmd, render::Renderer& r,
+                 const Axes& axes, Rect2D rect) override;
     void draw(render::Cmd& cmd, render::Renderer& r,
               const Axes& axes, Rect2D rect) override;
     void contributeToAutoscale(Viewport& v) const override;
@@ -53,6 +56,7 @@ public:
         prepared_ = false;   // rebuild the triangle list
         meshBuilt_ = false;
         mask_.clear();       // device mask follows `where`
+        dataDirty_ = true;
         touch();
     }
     [[nodiscard]] bool canEmitVector() const override { return true; }
@@ -79,6 +83,15 @@ private:
     bool gpuTess_ = false;
     std::vector<uint32_t> mask_;
     render::GpuBuf gpuSoup_ = 0, gpuCount_ = 0;
+
+    // GPU min/max envelope: the vertex shader expands one quad per
+    // segment from {x, ymin, ymax} records — no CPU triangle mesh.
+    // Used for the plain (no where/interpolate) case.
+    std::unique_ptr<render::primitives::EnvelopeRenderer> envelope_;
+    std::vector<float> envelopeData_;  // 4 floats/point: x, ymin, ymax, pad
+    bool gpuEnvelope_ = false;
+    bool envelopeDirty_ = false;
+    bool dataDirty_ = true;
 };
 
 } // namespace volcano::plot

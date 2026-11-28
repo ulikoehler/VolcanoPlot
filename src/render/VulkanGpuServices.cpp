@@ -6,6 +6,7 @@
 #include <volcano/render/primitives/LineRenderer.hpp>
 #include <volcano/render/primitives/LineSegmentRenderer.hpp>
 #include <volcano/render/primitives/FillRenderer.hpp>
+#include <volcano/render/primitives/EnvelopeRenderer.hpp>
 #include <volcano/render/primitives/BarRenderer.hpp>
 #include <volcano/render/primitives/PieRenderer.hpp>
 #include <volcano/render/primitives/HeatmapRenderer.hpp>
@@ -402,6 +403,10 @@ VulkanGpuServices::createLineSegmentRenderer() {
 std::unique_ptr<primitives::FillRenderer>
 VulkanGpuServices::createFillRenderer() {
     return primitives::makeFillVk(*this);
+}
+std::unique_ptr<primitives::EnvelopeRenderer>
+VulkanGpuServices::createEnvelopeRenderer() {
+    return primitives::makeEnvelopeVk(*this);
 }
 std::unique_ptr<primitives::BarRenderer>
 VulkanGpuServices::createBarRenderer() {

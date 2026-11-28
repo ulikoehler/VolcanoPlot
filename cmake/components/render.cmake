@@ -12,6 +12,7 @@ set(VOLCANO_RENDER_SOURCES
     ${VOLCANO_ROOT}/src/render/primitives/LineRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/BarRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/FillRenderer.cpp
+    ${VOLCANO_ROOT}/src/render/primitives/EnvelopeRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/LineSegmentRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/PieRenderer.cpp
     ${VOLCANO_ROOT}/src/render/primitives/HeatmapRenderer.cpp

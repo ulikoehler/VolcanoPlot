@@ -104,6 +104,8 @@ public:
     std::unique_ptr<primitives::LineSegmentRenderer>
         createLineSegmentRenderer() override;
     std::unique_ptr<primitives::FillRenderer> createFillRenderer() override;
+    std::unique_ptr<primitives::EnvelopeRenderer>
+        createEnvelopeRenderer() override;
     std::unique_ptr<primitives::BarRenderer> createBarRenderer() override;
     std::unique_ptr<primitives::PieRenderer> createPieRenderer() override;
     std::unique_ptr<primitives::HeatmapRenderer>

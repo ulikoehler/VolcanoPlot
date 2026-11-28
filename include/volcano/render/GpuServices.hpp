@@ -18,6 +18,7 @@
 #include <volcano/plot/Transform.hpp>
 #include <volcano/plot/Types.hpp>
 #include <volcano/render/Cmd.hpp>
+#include <volcano/render/primitives/EnvelopeRenderer.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -37,6 +38,7 @@ class PointRenderer;
 class LineRenderer;
 class LineSegmentRenderer;
 class FillRenderer;
+class EnvelopeRenderer;
 class BarRenderer;
 class PieRenderer;
 class HeatmapRenderer;
@@ -97,6 +99,11 @@ public:
         createLineSegmentRenderer() = 0;
     virtual std::unique_ptr<primitives::FillRenderer>
         createFillRenderer() = 0;
+    /// GPU min/max band renderer (vertex-shader quad expansion). The
+    /// default returns nullptr; backends without the path fall back to
+    /// the CPU fill mesh.
+    virtual std::unique_ptr<primitives::EnvelopeRenderer>
+        createEnvelopeRenderer() { return nullptr; }
     virtual std::unique_ptr<primitives::BarRenderer>
         createBarRenderer() = 0;
     virtual std::unique_ptr<primitives::PieRenderer>
